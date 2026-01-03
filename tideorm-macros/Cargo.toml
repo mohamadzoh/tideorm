@@ -1,0 +1,16 @@
+[package]
+name = "tideorm-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for TideORM"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
+darling = "0.20"
+convert_case = "0.7"

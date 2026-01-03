@@ -1,0 +1,4 @@
+/target
+
+# Environment variables (contains local database credentials)
+.env
