@@ -545,6 +545,9 @@ pub mod profiling;
 /// Query caching and prepared statement caching
 pub mod cache;
 
+/// Database seeding system
+pub mod seeding;
+
 /// Re-exports for convenience
 pub mod prelude;
 

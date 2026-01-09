@@ -84,14 +84,13 @@ This document outlines the planned features and improvements for TideORM.
 - [x] Query logging and debugging
 - [x] Performance profiling
 - [x] Documentation improvements
+- [x] Database seeding system (tracked in `_seeds` table, prevents duplicate runs)
 
 ---
 
 ## Version 0.3.0 (Planned)
 
 ### Advanced Features
-- [ ] Database seeding system
-- [ ] Model factories for testing
 - [ ] Database events/observers
 - [ ] Model validation
 
@@ -113,7 +112,6 @@ This document outlines the planned features and improvements for TideORM.
 ## Version 0.4.0 (Planned)
 
 ### Enterprise Features
-- [ ] Read replicas support
 - [ ] Connection sharding
 - [ ] Multi-tenancy support
 - [ ] Audit logging
