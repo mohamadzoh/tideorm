@@ -304,11 +304,14 @@ impl ColumnSchema {
 
 /// Utility to map Rust types to SQL types
 pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
-    let base_type = rust_type
+    // Normalize by removing whitespace first (handles "Option < i64 >" from stringify!)
+    let normalized: String = rust_type.chars().filter(|c| !c.is_whitespace()).collect();
+    
+    let base_type = normalized
         .replace("Option<", "")
         .replace(">", "")
         .replace("&", "")
-        .replace("'static ", "")
+        .replace("'static", "")
         .trim()
         .to_string();
     

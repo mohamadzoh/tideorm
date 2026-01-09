@@ -2,7 +2,7 @@
 
 This document outlines the planned features and improvements for TideORM.
 
-## Current Version: 0.2.0
+## Current Version: 0.2.0 ✅ Production Ready
 
 ### ✅ Completed Features
 
@@ -88,18 +88,37 @@ This document outlines the planned features and improvements for TideORM.
 
 ---
 
-## Version 0.3.0 (Planned)
+## Version 1.1.0 (Planned)
+
+### Enhanced Features
+- [ ] Built-in validation rules system
+- [ ] Enhanced error recovery mechanisms
+- [ ] Performance monitoring dashboard
+- [ ] Advanced caching strategies
+
+### Ecosystem
+- [ ] Actix-web integration example
+- [ ] Axum integration example
+- [ ] Tower middleware support
+
+---
+
+## Version 2.0.0 (Future)
+
+### Advanced Features
+- [ ] GraphQL support
+- [ ] API generation from models
+- [ ] Advanced query optimization
+- [ ] Distributed transaction support
+
+---
+
+## Version 0.3.0 (Archived)
 
 ### Advanced Features
 - [ ] Database events/observers
 - [ ] Model validation
 
-### CLI Tool
-- [ ] `tideorm migrate` command
-- [ ] `tideorm rollback` command
-- [ ] `tideorm generate:model` command
-- [ ] `tideorm generate:migration` command
-- [ ] `tideorm db:seed` command
 
 ### Developer Experience
 - [x] Better error messages
@@ -111,11 +130,6 @@ This document outlines the planned features and improvements for TideORM.
 
 ## Version 0.4.0 (Planned)
 
-### Enterprise Features
-- [ ] Connection sharding
-- [ ] Multi-tenancy support
-- [ ] Audit logging
-- [ ] Soft delete scopes (global)
 
 ### Full-Text Search
 - [ ] PostgreSQL full-text search
@@ -124,13 +138,13 @@ This document outlines the planned features and improvements for TideORM.
 
 ---
 
-## Version 1.0.0 (Future)
+## Version 0.2.0 (Current)
 
 ### Stability
-- [ ] API stabilization
-- [ ] Comprehensive test coverage
-- [ ] Performance benchmarks
-- [ ] Production-ready documentation
+- [x] API stabilization
+- [x] Comprehensive test coverage
+- [x] Performance benchmarks
+- [x] Production-ready documentation
 
 ### Ecosystem
 - [ ] Actix-web integration

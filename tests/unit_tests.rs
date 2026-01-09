@@ -281,6 +281,16 @@ mod schema_tests {
     }
     
     #[test]
+    fn test_rust_type_to_sql_with_whitespace() {
+        // stringify! in macros adds spaces: "Option < i64 >" instead of "Option<i64>"
+        // The function should handle this
+        assert_eq!(rust_type_to_sql("Option < i64 >", DatabaseType::Postgres), "BIGINT");
+        assert_eq!(rust_type_to_sql("Option < String >", DatabaseType::Postgres), "TEXT");
+        assert_eq!(rust_type_to_sql("Option < i64 >", DatabaseType::SQLite), "INTEGER");
+        assert_eq!(rust_type_to_sql("Option < i64 >", DatabaseType::MySQL), "BIGINT");
+    }
+    
+    #[test]
     fn test_column_schema_builder() {
         let col = ColumnSchema::new("id", "BIGINT")
             .primary_key()

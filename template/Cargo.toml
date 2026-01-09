@@ -1,0 +1,38 @@
+[package]
+name = "tideorm-app"
+version = "0.1.0"
+edition = "2021"
+description = "A TideORM application template"
+license = "MIT"
+
+# Rename this package when creating your own project
+# cargo generate --name your-project-name
+
+[dependencies]
+# TideORM - The main ORM library
+tideorm = { path = "..", features = ["sqlite", "runtime-tokio"] }
+
+# Re-export sea-orm for derive macro compatibility (implementation detail)
+# This will be eliminated in a future TideORM version
+sea-orm = { version = "1.1", default-features = false }
+
+# Async runtime (required)
+tokio = { version = "1.37", features = ["full"] }
+
+# Serialization (optional but recommended)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Date/time handling (optional)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Environment variables (recommended for config)
+dotenvy = "0.15"
+
+# Logging (optional)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "tideorm-app"
+path = "src/main.rs"

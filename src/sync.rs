@@ -840,19 +840,51 @@ fn get_quote_char(backend: DbBackend) -> char {
 
 /// Get column type adjusted for the specific database backend
 fn get_column_type_for_backend(col: &ColumnDef, backend: DbBackend) -> String {
-    let base_type = col.col_type.to_uppercase();
+    let base_type = &col.col_type;
+    
+    // Check if this is a Rust type (contains lowercase letters like i64, String, Option<...>)
+    // SQL types are typically all uppercase
+    let is_rust_type = base_type.chars().any(|c| c.is_ascii_lowercase());
+    
+    if is_rust_type {
+        // Convert Rust type to database-specific SQL type
+        let sql_type = rust_type_to_db_type(base_type, backend);
+        
+        // Handle auto-increment primary keys
+        if col.auto_increment && col.primary_key {
+            return match backend {
+                DbBackend::Postgres => {
+                    if sql_type.contains("BIGINT") || sql_type.contains("INT8") {
+                        "BIGSERIAL".to_string()
+                    } else {
+                        "SERIAL".to_string()
+                    }
+                }
+                DbBackend::MySql => {
+                    let int_type = if sql_type.contains("BIGINT") { "BIGINT" } else { "INT" };
+                    format!("{} AUTO_INCREMENT", int_type)
+                }
+                DbBackend::Sqlite => "INTEGER".to_string(),
+            };
+        }
+        
+        return sql_type;
+    }
+    
+    // Legacy: Handle SQL types (for backward compatibility)
+    let base_type_upper = base_type.to_uppercase();
     
     if col.auto_increment && col.primary_key {
         return match backend {
             DbBackend::Postgres => {
-                if base_type.contains("BIGINT") || base_type.contains("INT8") {
+                if base_type_upper.contains("BIGINT") || base_type_upper.contains("INT8") {
                     "BIGSERIAL".to_string()
                 } else {
                     "SERIAL".to_string()
                 }
             }
             DbBackend::MySql => {
-                let int_type = if base_type.contains("BIGINT") { "BIGINT" } else { "INT" };
+                let int_type = if base_type_upper.contains("BIGINT") { "BIGINT" } else { "INT" };
                 format!("{} AUTO_INCREMENT", int_type)
             }
             DbBackend::Sqlite => "INTEGER".to_string(), // SQLite auto-increment uses INTEGER PRIMARY KEY
@@ -861,9 +893,9 @@ fn get_column_type_for_backend(col: &ColumnDef, backend: DbBackend) -> String {
     
     // Convert types between databases
     match backend {
-        DbBackend::Postgres => convert_to_postgres_type(&base_type),
-        DbBackend::MySql => convert_to_mysql_type(&base_type),
-        DbBackend::Sqlite => convert_to_sqlite_type(&base_type),
+        DbBackend::Postgres => convert_to_postgres_type(&base_type_upper),
+        DbBackend::MySql => convert_to_mysql_type(&base_type_upper),
+        DbBackend::Sqlite => convert_to_sqlite_type(&base_type_upper),
     }
 }
 
@@ -1505,13 +1537,182 @@ pub fn sea_orm_to_postgres_type(col_type: &crate::sea_orm::ColumnType) -> String
     }
 }
 
-/// Maps a Rust type name to PostgreSQL type
-pub fn rust_type_to_postgres(rust_type: &str) -> &'static str {
-    // Handle Option types
-    let inner_type = rust_type
+/// Normalizes a Rust type string by removing whitespace
+/// This is used to handle stringify! output like "Option < i64 >" -> "Option<i64>"
+pub fn normalize_rust_type(rust_type: &str) -> String {
+    rust_type.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Maps a Rust type name to the appropriate SQL type for the given database backend
+pub fn rust_type_to_db_type(rust_type: &str, backend: crate::internal::DbBackend) -> String {
+    use crate::internal::DbBackend;
+    
+    // Normalize the type by removing all whitespace (handles "Option < i64 >" from stringify!)
+    let normalized: String = rust_type.chars().filter(|c| !c.is_whitespace()).collect();
+    
+    // Handle Option types - extract inner type
+    let inner_type = normalized
         .strip_prefix("Option<")
         .and_then(|s| s.strip_suffix(">"))
-        .unwrap_or(rust_type);
+        .unwrap_or(&normalized);
+    
+    match backend {
+        DbBackend::Postgres => rust_type_to_postgres_internal(inner_type),
+        DbBackend::MySql => rust_type_to_mysql_internal(inner_type),
+        DbBackend::Sqlite => rust_type_to_sqlite_internal(inner_type),
+    }
+}
+
+/// Internal: Maps Rust type to PostgreSQL type
+fn rust_type_to_postgres_internal(rust_type: &str) -> String {
+    // Handle common DateTime patterns
+    if rust_type.contains("DateTime") {
+        return "TIMESTAMPTZ".to_string();
+    }
+    if rust_type.contains("NaiveDateTime") {
+        return "TIMESTAMP".to_string();
+    }
+    
+    match rust_type {
+        // Integer types
+        "i8" | "u8" => "SMALLINT".to_string(),
+        "i16" | "u16" => "SMALLINT".to_string(), 
+        "i32" => "INTEGER".to_string(),
+        "u32" => "BIGINT".to_string(),
+        "i64" => "BIGINT".to_string(),
+        "u64" | "i128" | "u128" => "NUMERIC".to_string(),
+        "isize" | "usize" => "BIGINT".to_string(),
+        
+        // Float types
+        "f32" => "REAL".to_string(),
+        "f64" => "DOUBLE PRECISION".to_string(),
+        
+        // Boolean
+        "bool" => "BOOLEAN".to_string(),
+        
+        // String types
+        "String" | "&str" => "TEXT".to_string(),
+        
+        // UUID
+        "Uuid" => "UUID".to_string(),
+        
+        // JSON
+        "Json" | "JsonValue" | "serde_json::Value" | "Value" => "JSONB".to_string(),
+        
+        // Binary
+        "Vec<u8>" | "Bytes" => "BYTEA".to_string(),
+        
+        // Decimal
+        "Decimal" | "BigDecimal" => "DECIMAL".to_string(),
+        
+        // Array types
+        "Vec<i32>" | "IntArray" => "INTEGER[]".to_string(),
+        "Vec<i64>" | "BigIntArray" => "BIGINT[]".to_string(),
+        "Vec<String>" | "TextArray" => "TEXT[]".to_string(),
+        "Vec<bool>" | "BoolArray" => "BOOLEAN[]".to_string(),
+        "Vec<f64>" | "FloatArray" => "DOUBLE PRECISION[]".to_string(),
+        
+        // Default
+        _ => "TEXT".to_string(),
+    }
+}
+
+/// Internal: Maps Rust type to MySQL type
+fn rust_type_to_mysql_internal(rust_type: &str) -> String {
+    // Handle common DateTime patterns
+    if rust_type.contains("DateTime") || rust_type.contains("NaiveDateTime") {
+        return "DATETIME".to_string();
+    }
+    
+    match rust_type {
+        // Integer types
+        "i8" | "u8" => "TINYINT".to_string(),
+        "i16" => "SMALLINT".to_string(),
+        "u16" => "SMALLINT UNSIGNED".to_string(),
+        "i32" => "INT".to_string(),
+        "u32" => "INT UNSIGNED".to_string(),
+        "i64" => "BIGINT".to_string(),
+        "u64" => "BIGINT UNSIGNED".to_string(),
+        "i128" | "u128" => "DECIMAL(65,0)".to_string(),
+        "isize" | "usize" => "BIGINT".to_string(),
+        
+        // Float types
+        "f32" => "FLOAT".to_string(),
+        "f64" => "DOUBLE".to_string(),
+        
+        // Boolean
+        "bool" => "TINYINT(1)".to_string(),
+        
+        // String types
+        "String" | "&str" => "TEXT".to_string(),
+        
+        // UUID
+        "Uuid" => "CHAR(36)".to_string(),
+        
+        // JSON
+        "Json" | "JsonValue" | "serde_json::Value" | "Value" => "JSON".to_string(),
+        
+        // Binary
+        "Vec<u8>" | "Bytes" => "LONGBLOB".to_string(),
+        
+        // Decimal
+        "Decimal" | "BigDecimal" => "DECIMAL(65,30)".to_string(),
+        
+        // Default
+        _ => "TEXT".to_string(),
+    }
+}
+
+/// Internal: Maps Rust type to SQLite type
+fn rust_type_to_sqlite_internal(rust_type: &str) -> String {
+    // Handle common DateTime patterns - SQLite stores as TEXT
+    if rust_type.contains("DateTime") || rust_type.contains("NaiveDateTime") ||
+       rust_type.contains("NaiveDate") || rust_type.contains("NaiveTime") {
+        return "TEXT".to_string();
+    }
+    
+    match rust_type {
+        // Integer types - SQLite uses INTEGER for all integer types
+        "i8" | "u8" | "i16" | "u16" | "i32" | "u32" | "i64" | "u64" |
+        "i128" | "u128" | "isize" | "usize" => "INTEGER".to_string(),
+        
+        // Float types
+        "f32" | "f64" => "REAL".to_string(),
+        
+        // Boolean - SQLite uses INTEGER (0/1)
+        "bool" => "INTEGER".to_string(),
+        
+        // String types
+        "String" | "&str" => "TEXT".to_string(),
+        
+        // UUID - stored as TEXT in SQLite
+        "Uuid" => "TEXT".to_string(),
+        
+        // JSON - stored as TEXT in SQLite
+        "Json" | "JsonValue" | "serde_json::Value" | "Value" => "TEXT".to_string(),
+        
+        // Binary
+        "Vec<u8>" | "Bytes" => "BLOB".to_string(),
+        
+        // Decimal - stored as TEXT or NUMERIC in SQLite
+        "Decimal" | "BigDecimal" => "NUMERIC".to_string(),
+        
+        // Default
+        _ => "TEXT".to_string(),
+    }
+}
+
+/// Maps a Rust type name to PostgreSQL type (for backward compatibility)
+/// Deprecated: Use rust_type_to_db_type instead for database-specific mapping
+pub fn rust_type_to_postgres(rust_type: &str) -> &'static str {
+    // Normalize the type by removing all whitespace (handles "Option < i64 >" from stringify!)
+    let normalized: String = rust_type.chars().filter(|c| !c.is_whitespace()).collect();
+    
+    // Handle Option types
+    let inner_type = normalized
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix(">"))
+        .unwrap_or(&normalized);
     
     // Handle common DateTime patterns
     if inner_type.contains("DateTime") {

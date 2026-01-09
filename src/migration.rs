@@ -1841,6 +1841,60 @@ mod tests {
     }
 
     #[test]
+    fn test_timestamps_feature() {
+        // Test PostgreSQL timestamps
+        let mut builder = TableBuilder::new("posts", DatabaseType::Postgres);
+        builder.id();
+        builder.string("title").not_null();
+        builder.timestamps();
+
+        let sql = builder.build_create();
+        // Verify timestamps have NOT NULL and DEFAULT CURRENT_TIMESTAMP
+        assert!(sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
+            "PostgreSQL should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"updated_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+
+        // Test MySQL timestamps
+        let mut builder = TableBuilder::new("posts", DatabaseType::MySQL);
+        builder.id();
+        builder.string("title").not_null();
+        builder.timestamps();
+
+        let sql = builder.build_create();
+        assert!(sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MySQL should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MySQL should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+
+        // Test SQLite timestamps
+        let mut builder = TableBuilder::new("posts", DatabaseType::SQLite);
+        builder.id();
+        builder.string("title").not_null();
+        builder.timestamps();
+
+        let sql = builder.build_create();
+        assert!(sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"updated_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_soft_deletes_feature() {
+        let mut builder = TableBuilder::new("posts", DatabaseType::Postgres);
+        builder.id();
+        builder.soft_deletes();
+
+        let sql = builder.build_create();
+        // soft_deletes should be nullable (no NOT NULL)
+        assert!(sql.contains("\"deleted_at\" TIMESTAMP"),
+            "Should have deleted_at TIMESTAMP column. Got: {}", sql);
+        assert!(!sql.contains("\"deleted_at\" TIMESTAMP NOT NULL"),
+            "deleted_at should be nullable (no NOT NULL). Got: {}", sql);
+    }
+
+    #[test]
     fn test_alter_table_builder() {
         let mut builder = AlterTableBuilder::new("users", DatabaseType::Postgres);
         builder.add_column("phone", ColumnType::String).nullable();

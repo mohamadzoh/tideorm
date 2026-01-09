@@ -398,13 +398,17 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
     let pk_auto_increment = pk_field.map(|f| f.auto_increment).unwrap_or(false);
     
-    // Detect timestamp fields
+    // Detect timestamp fields - either explicitly enabled via #[tide(timestamps)] 
+    // or auto-detected by field names
     let has_created_at = fields.iter().any(|f| {
         f.ident.as_ref().map(|i| i.to_string() == "created_at").unwrap_or(false)
     });
     let has_updated_at = fields.iter().any(|f| {
         f.ident.as_ref().map(|i| i.to_string() == "updated_at").unwrap_or(false)
     });
+    
+    // timestamps enabled if: explicitly set via #[tide(timestamps)] OR both fields exist
+    let timestamps_enabled = input.timestamps || (has_created_at && has_updated_at);
     
     // Generate sync column attribute setters (primary_key, auto_increment, not_null)
     let sync_column_attrs: Vec<_> = fields
@@ -623,7 +627,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             }
             
             fn has_timestamps() -> bool {
-                #has_created_at && #has_updated_at
+                #timestamps_enabled
             }
             
             fn indexes() -> Vec<::tideorm::model::IndexDefinition> {
@@ -865,14 +869,16 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             /// Get the model schema for database synchronization
             #[doc(hidden)]
             pub fn __get_sync_schema() -> ::tideorm::sync::ModelSchema {
-                use ::tideorm::sync::{ModelSchema, ColumnDef, rust_type_to_postgres};
+                use ::tideorm::sync::{ModelSchema, ColumnDef, normalize_rust_type};
                 
                 let mut schema = ModelSchema::new(#table_name).schema(#schema_name);
                 
                 // Add column definitions based on field types with proper attributes
+                // Store normalized Rust type - conversion to SQL type happens at sync time
                 #(
                     {
-                        let mut col = ColumnDef::new(#column_names, rust_type_to_postgres(stringify!(#field_types)));
+                        let rust_type = normalize_rust_type(stringify!(#field_types));
+                        let mut col = ColumnDef::new(#column_names, rust_type);
                         #sync_column_attrs
                         schema = schema.column(col);
                     }

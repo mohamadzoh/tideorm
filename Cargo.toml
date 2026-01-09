@@ -13,7 +13,7 @@ readme = "README.md"
 rust-version = "1.85"
 
 [workspace]
-members = [".", "tideorm-macros"]
+members = [".", "tideorm-macros", "template"]
 
 [features]
 default = ["postgres", "runtime-tokio"]
@@ -72,4 +72,8 @@ harness = false
 
 [[bench]]
 name = "cache_benchmarks"
+harness = false
+
+[[bench]]
+name = "stability_benchmarks"
 harness = false
