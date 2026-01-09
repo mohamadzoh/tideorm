@@ -11,7 +11,7 @@
 //! ## Running
 //!
 //! ```bash
-//! cargo run --example sqlite_demo --features sqlite --no-default-features
+//! cargo run --example sqlite_demo --features "sqlite runtime-tokio" --no-default-features
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,7 @@ async fn main() -> tideorm::Result<()> {
         .max_connections(5) // SQLite works best with fewer connections
         .min_connections(1)
         .sync(true) // Auto-sync schema
+        .models::<(User, Note)>()  // Register models for sync
         .connect()
         .await?;
 

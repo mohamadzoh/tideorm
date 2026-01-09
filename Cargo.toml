@@ -28,7 +28,7 @@ runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 sea-orm = { version = "1.1.19", default-features = false, features = ["macros", "with-chrono", "with-json", "with-uuid"] }
 
 # Async runtime
-tokio = { version = "1.0", features = ["full"], optional = true }
+tokio = { version = "1.49.0", features = ["full"], optional = true }
 async-trait = "0.1.89"
 
 # Serialization
@@ -47,7 +47,7 @@ thiserror = "2.0.17"
 tideorm-macros = { version = "0.2.0", path = "tideorm-macros" }
 
 # Utils
-parking_lot = "0.12"
+parking_lot = "0.12.5"
 lazy_static = "1.5"
 
 [dev-dependencies]

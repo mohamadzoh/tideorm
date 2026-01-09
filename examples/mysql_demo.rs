@@ -11,7 +11,7 @@
 //! ## Running
 //!
 //! ```bash
-//! cargo run --example mysql_demo --features mysql --no-default-features
+//! cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,7 @@ async fn main() -> tideorm::Result<()> {
         .max_connections(10)
         .min_connections(2)
         .sync(true) // Auto-sync schema (development only!)
+        .models::<(User, Product)>()  // Register models for sync
         .connect()
         .await?;
 

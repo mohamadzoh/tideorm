@@ -81,7 +81,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tideorm = "0.1"
+tideorm = "0.2"
 ```
 
 ### Feature Flags

@@ -126,7 +126,7 @@ Explore MySQL and MariaDB-specific functionality.
 - Aggregations
 
 ```bash
-cargo run --example mysql_demo --features mysql --no-default-features
+cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features
 ```
 
 > **Note**: Requires `MYSQL_DATABASE_URL` environment variable
@@ -184,13 +184,13 @@ cargo run --example postgres_complete
 export MYSQL_DATABASE_URL=mysql://root:@localhost/tideorm_demo
 
 # Run MySQL demo
-cargo run --example mysql_demo --features mysql --no-default-features
+cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features
 ```
 
 ### SQLite
 ```bash
 # Run SQLite demo (creates demo.db file)
-cargo run --example sqlite_demo --features sqlite --no-default-features
+cargo run --example sqlite_demo --features "sqlite runtime-tokio" --no-default-features
 ```
 
 ### Advanced Features
@@ -210,8 +210,8 @@ cargo run --example postgres_complete
 | `upsert_demo.rs` | Upsert | insert_or_update, on_conflict | `cargo run --example upsert_demo` |
 | `postgres_demo.rs` | PostgreSQL | Config, pool, types, relations | `cargo run --example postgres_demo` |
 | `postgres_complete.rs` | All Features | JSON, arrays, JOINs, aggregations | `cargo run --example postgres_complete` |
-| `mysql_demo.rs` | MySQL | JSON, aggregations, CRUD | `cargo run --example mysql_demo --features mysql --no-default-features` |
-| `sqlite_demo.rs` | SQLite | JSON1, CRUD, embedded DB | `cargo run --example sqlite_demo --features sqlite --no-default-features` |
+| `mysql_demo.rs` | MySQL | JSON, aggregations, CRUD | `cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features` |
+| `sqlite_demo.rs` | SQLite | JSON1, CRUD, embedded DB | `cargo run --example sqlite_demo --features "sqlite runtime-tokio" --no-default-features` |
 
 ---
 
