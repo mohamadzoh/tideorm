@@ -89,8 +89,17 @@ impl DatabaseType {
     pub fn supports_json(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,
-            DatabaseType::MySQL => true,
-            DatabaseType::SQLite => false, // SQLite stores JSON as TEXT
+            DatabaseType::MySQL => true,  // MySQL 5.7+
+            DatabaseType::SQLite => true, // SQLite JSON1 extension (3.9+)
+        }
+    }
+    
+    /// Check if this database supports native JSON operators
+    pub fn supports_native_json_operators(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,  // @>, <@, ?, @?
+            DatabaseType::MySQL => true,     // JSON_CONTAINS, JSON_EXTRACT
+            DatabaseType::SQLite => true,    // json_extract, json_each
         }
     }
     
@@ -105,6 +114,77 @@ impl DatabaseType {
             DatabaseType::Postgres => true,
             DatabaseType::MySQL => false,
             DatabaseType::SQLite => true, // SQLite 3.35+
+        }
+    }
+    
+    /// Check if this database supports UPSERT (INSERT ... ON CONFLICT/DUPLICATE)
+    pub fn supports_upsert(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,  // ON CONFLICT
+            DatabaseType::MySQL => true,     // ON DUPLICATE KEY
+            DatabaseType::SQLite => true,    // ON CONFLICT (3.24+)
+        }
+    }
+    
+    /// Check if this database supports full-text search
+    pub fn supports_fulltext_search(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,  // tsvector, tsquery
+            DatabaseType::MySQL => true,     // FULLTEXT index
+            DatabaseType::SQLite => true,    // FTS5 extension
+        }
+    }
+    
+    /// Check if this database supports window functions
+    pub fn supports_window_functions(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,
+            DatabaseType::MySQL => true,     // MySQL 8.0+
+            DatabaseType::SQLite => true,    // SQLite 3.25+
+        }
+    }
+    
+    /// Check if this database supports CTEs (Common Table Expressions)
+    pub fn supports_cte(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,
+            DatabaseType::MySQL => true,     // MySQL 8.0+
+            DatabaseType::SQLite => true,    // SQLite 3.8.3+
+        }
+    }
+    
+    /// Check if this database supports multiple schemas
+    pub fn supports_schemas(&self) -> bool {
+        match self {
+            DatabaseType::Postgres => true,
+            DatabaseType::MySQL => false,    // Uses databases instead
+            DatabaseType::SQLite => false,
+        }
+    }
+    
+    /// Get the recommended batch size for bulk inserts
+    pub fn optimal_batch_size(&self) -> usize {
+        match self {
+            DatabaseType::Postgres => 1000,
+            DatabaseType::MySQL => 500,      // Lower due to max_allowed_packet
+            DatabaseType::SQLite => 100,     // Lower for file-based DB
+        }
+    }
+    
+    /// Get the parameter placeholder style for this database
+    pub fn param_style(&self) -> &'static str {
+        match self {
+            DatabaseType::Postgres => "$",   // $1, $2, $3
+            DatabaseType::MySQL => "?",
+            DatabaseType::SQLite => "?",
+        }
+    }
+    
+    /// Get the identifier quote character for this database
+    pub fn quote_char(&self) -> char {
+        match self {
+            DatabaseType::Postgres | DatabaseType::SQLite => '"',
+            DatabaseType::MySQL => '`',
         }
     }
     
@@ -1163,5 +1243,135 @@ mod tests {
         let config = Config::global();
         assert!(config.languages.contains(&"fr".to_string()));
         assert_eq!(config.fallback_language, "fr");
+    }
+    
+    #[test]
+    fn test_database_type_from_url() {
+        assert_eq!(
+            DatabaseType::from_url("postgres://localhost/test"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_url("postgresql://localhost/test"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_url("mysql://localhost/test"),
+            Some(DatabaseType::MySQL)
+        );
+        assert_eq!(
+            DatabaseType::from_url("mariadb://localhost/test"),
+            Some(DatabaseType::MySQL)
+        );
+        assert_eq!(
+            DatabaseType::from_url("sqlite:./test.db"),
+            Some(DatabaseType::SQLite)
+        );
+        assert_eq!(
+            DatabaseType::from_url("sqlite::memory:"),
+            Some(DatabaseType::SQLite)
+        );
+        assert_eq!(
+            DatabaseType::from_url("invalid://localhost"),
+            None
+        );
+    }
+    
+    #[test]
+    fn test_database_type_supports_json() {
+        assert!(DatabaseType::Postgres.supports_json());
+        assert!(DatabaseType::MySQL.supports_json());
+        assert!(DatabaseType::SQLite.supports_json());
+    }
+    
+    #[test]
+    fn test_database_type_supports_arrays() {
+        assert!(DatabaseType::Postgres.supports_arrays());
+        assert!(!DatabaseType::MySQL.supports_arrays());
+        assert!(!DatabaseType::SQLite.supports_arrays());
+    }
+    
+    #[test]
+    fn test_database_type_supports_returning() {
+        assert!(DatabaseType::Postgres.supports_returning());
+        assert!(!DatabaseType::MySQL.supports_returning());
+        assert!(DatabaseType::SQLite.supports_returning());
+    }
+    
+    #[test]
+    fn test_database_type_supports_upsert() {
+        assert!(DatabaseType::Postgres.supports_upsert());
+        assert!(DatabaseType::MySQL.supports_upsert());
+        assert!(DatabaseType::SQLite.supports_upsert());
+    }
+    
+    #[test]
+    fn test_database_type_supports_fulltext_search() {
+        assert!(DatabaseType::Postgres.supports_fulltext_search());
+        assert!(DatabaseType::MySQL.supports_fulltext_search());
+        assert!(DatabaseType::SQLite.supports_fulltext_search());
+    }
+    
+    #[test]
+    fn test_database_type_supports_window_functions() {
+        assert!(DatabaseType::Postgres.supports_window_functions());
+        assert!(DatabaseType::MySQL.supports_window_functions());
+        assert!(DatabaseType::SQLite.supports_window_functions());
+    }
+    
+    #[test]
+    fn test_database_type_supports_cte() {
+        assert!(DatabaseType::Postgres.supports_cte());
+        assert!(DatabaseType::MySQL.supports_cte());
+        assert!(DatabaseType::SQLite.supports_cte());
+    }
+    
+    #[test]
+    fn test_database_type_supports_schemas() {
+        assert!(DatabaseType::Postgres.supports_schemas());
+        assert!(!DatabaseType::MySQL.supports_schemas());
+        assert!(!DatabaseType::SQLite.supports_schemas());
+    }
+    
+    #[test]
+    fn test_database_type_optimal_batch_size() {
+        assert_eq!(DatabaseType::Postgres.optimal_batch_size(), 1000);
+        assert_eq!(DatabaseType::MySQL.optimal_batch_size(), 500);
+        assert_eq!(DatabaseType::SQLite.optimal_batch_size(), 100);
+    }
+    
+    #[test]
+    fn test_database_type_param_style() {
+        assert_eq!(DatabaseType::Postgres.param_style(), "$");
+        assert_eq!(DatabaseType::MySQL.param_style(), "?");
+        assert_eq!(DatabaseType::SQLite.param_style(), "?");
+    }
+    
+    #[test]
+    fn test_database_type_quote_char() {
+        assert_eq!(DatabaseType::Postgres.quote_char(), '"');
+        assert_eq!(DatabaseType::MySQL.quote_char(), '`');
+        assert_eq!(DatabaseType::SQLite.quote_char(), '"');
+    }
+    
+    #[test]
+    fn test_database_type_default_port() {
+        assert_eq!(DatabaseType::Postgres.default_port(), 5432);
+        assert_eq!(DatabaseType::MySQL.default_port(), 3306);
+        assert_eq!(DatabaseType::SQLite.default_port(), 0);
+    }
+    
+    #[test]
+    fn test_database_type_url_scheme() {
+        assert_eq!(DatabaseType::Postgres.url_scheme(), "postgres");
+        assert_eq!(DatabaseType::MySQL.url_scheme(), "mysql");
+        assert_eq!(DatabaseType::SQLite.url_scheme(), "sqlite");
+    }
+    
+    #[test]
+    fn test_database_type_display() {
+        assert_eq!(format!("{}", DatabaseType::Postgres), "PostgreSQL");
+        assert_eq!(format!("{}", DatabaseType::MySQL), "MySQL");
+        assert_eq!(format!("{}", DatabaseType::SQLite), "SQLite");
     }
 }

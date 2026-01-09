@@ -114,6 +114,41 @@ cargo run --example postgres_complete
 
 ---
 
+### 🐬 MySQL/MariaDB Features
+
+Explore MySQL and MariaDB-specific functionality.
+
+**[mysql_demo.rs](mysql_demo.rs)** - MySQL database operations
+- MySQL connection setup
+- JSON column operations (MySQL 5.7+)
+- Database feature detection
+- CRUD operations
+- Aggregations
+
+```bash
+cargo run --example mysql_demo --features mysql --no-default-features
+```
+
+> **Note**: Requires `MYSQL_DATABASE_URL` environment variable
+
+---
+
+### 🪶 SQLite Features
+
+Use TideORM with SQLite for embedded databases.
+
+**[sqlite_demo.rs](sqlite_demo.rs)** - SQLite database operations
+- SQLite connection (file-based)
+- JSON1 extension support
+- Lightweight database operations
+- Development and testing use cases
+
+```bash
+cargo run --example sqlite_demo --features sqlite --no-default-features
+```
+
+---
+
 ## Running Examples by Category
 
 ### CRUD Operations
@@ -143,6 +178,21 @@ cargo run --example postgres_demo
 cargo run --example postgres_complete
 ```
 
+### MySQL/MariaDB
+```bash
+# Set MySQL connection URL
+export MYSQL_DATABASE_URL=mysql://root:@localhost/tideorm_demo
+
+# Run MySQL demo
+cargo run --example mysql_demo --features mysql --no-default-features
+```
+
+### SQLite
+```bash
+# Run SQLite demo (creates demo.db file)
+cargo run --example sqlite_demo --features sqlite --no-default-features
+```
+
 ### Advanced Features
 ```bash
 # Relations, transactions, callbacks (in postgres_complete)
@@ -160,6 +210,8 @@ cargo run --example postgres_complete
 | `upsert_demo.rs` | Upsert | insert_or_update, on_conflict | `cargo run --example upsert_demo` |
 | `postgres_demo.rs` | PostgreSQL | Config, pool, types, relations | `cargo run --example postgres_demo` |
 | `postgres_complete.rs` | All Features | JSON, arrays, JOINs, aggregations | `cargo run --example postgres_complete` |
+| `mysql_demo.rs` | MySQL | JSON, aggregations, CRUD | `cargo run --example mysql_demo --features mysql --no-default-features` |
+| `sqlite_demo.rs` | SQLite | JSON1, CRUD, embedded DB | `cargo run --example sqlite_demo --features sqlite --no-default-features` |
 
 ---
 

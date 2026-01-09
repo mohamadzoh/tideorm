@@ -14,8 +14,16 @@ pub use crate::database::{db, try_db, has_global_db};
 pub use crate::error::{Error, ValidationErrors};
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
-pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder};
-pub use crate::query::{QueryBuilder, Order, JoinType};
+pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue};
+pub use crate::query::{
+    QueryBuilder, Order, JoinType,
+    // UNION types
+    UnionType, UnionClause,
+    // Window function types
+    WindowFunction, WindowFunctionType, FrameBound, FrameType,
+    // CTE types
+    CTE,
+};
 pub use crate::soft_delete::SoftDelete;
 pub use crate::callbacks::{Callbacks, CallbackRunner};
 pub use crate::config::{TideConfig, Config, PoolConfig, DatabaseType, RegisterMigrations};
@@ -30,7 +38,23 @@ pub use crate::migration::{
 };
 
 // Relations
-pub use crate::relations::{BelongsTo, HasOne, HasMany, RelationExt, EagerLoadExt, WithRelations};
+pub use crate::relations::{
+    // Basic relations
+    BelongsTo, HasOne, HasMany, 
+    // Many-to-many relations
+    HasManyThrough, WithPivot,
+    // Polymorphic relations
+    MorphTo, MorphOne, MorphMany, MorphResult, MorphResult3, MorphResult4,
+    // Extension traits
+    RelationExt, EagerLoadExt, 
+    // Eager loading
+    WithRelations, EagerQueryBuilder, RelationTree, RelationPath,
+    // Constraints
+    RelationConstraints,
+    // Metadata
+    RelationInfo, RelationType,
+    RelationLoader,
+};
 
 // File Attachments
 pub use crate::attachments::{HasAttachments, FileAttachment, FilesData, AttachmentError};
@@ -43,6 +67,14 @@ pub use crate::logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, Query
 
 // Performance profiling
 pub use crate::profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
+
+// Query and statement caching
+pub use crate::cache::{
+    QueryCache, PreparedStatementCache, 
+    CacheConfig, CacheStrategy, CacheStats,
+    PreparedStatementStats, PreparedStatementConfig,
+    CacheKeyBuilder, CacheOptions, CachedStatementInfo, CacheWarmer,
+};
 
 // Derive macro
 pub use tideorm_macros::Model;
@@ -61,5 +93,12 @@ pub use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 pub use uuid::Uuid;
 pub use rust_decimal::Decimal;
 
-// Type aliases for convenience
-pub use crate::types::{Json, Jsonb, Text, DbEnum, Castable};
+// Type aliases and casting
+pub use crate::types::{
+    Json, Jsonb, Text, DbEnum, Castable,
+    // Casting types
+    Encrypted, Hashed, CommaSeparated, Collection, CastType, CastValue,
+    WithDefault, AttributeCaster, Accessor, Mutator,
+    // Array types
+    IntArray, BigIntArray, TextArray, BoolArray, FloatArray, JsonArray,
+};

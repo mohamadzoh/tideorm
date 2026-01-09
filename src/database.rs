@@ -54,7 +54,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::internal::InternalConnection;
+use crate::internal::{InternalConnection, ConnectionTrait};
 
 // ============================================================================
 // GLOBAL DATABASE CONNECTION
@@ -526,6 +526,37 @@ impl Database {
     #[doc(hidden)]
     pub fn __internal_connection(&self) -> &crate::internal::DatabaseConnection {
         self.inner.connection()
+    }
+    
+    /// Get the database backend type
+    ///
+    /// Returns the type of database (PostgreSQL, MySQL, or SQLite) that
+    /// this connection is using. This is useful for writing database-specific
+    /// queries or handling database-specific features.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let backend = Database::global().backend();
+    /// match backend {
+    ///     crate::config::DatabaseType::Postgres => println!("Using PostgreSQL"),
+    ///     crate::config::DatabaseType::MySQL => println!("Using MySQL"),
+    ///     crate::config::DatabaseType::SQLite => println!("Using SQLite"),
+    /// }
+    /// ```
+    pub fn backend(&self) -> crate::config::DatabaseType {
+        use crate::internal::DbBackend;
+        match self.inner.connection().get_database_backend() {
+            DbBackend::Postgres => crate::config::DatabaseType::Postgres,
+            DbBackend::MySql => crate::config::DatabaseType::MySQL,
+            DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
+        }
+    }
+    
+    /// Get the raw SeaORM database backend (for internal use only)
+    #[doc(hidden)]
+    pub fn __internal_backend(&self) -> crate::internal::DbBackend {
+        self.inner.connection().get_database_backend()
     }
 }
 

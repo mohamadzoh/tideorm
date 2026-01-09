@@ -1120,20 +1120,62 @@ impl<M: Model> OnConflictBuilder<M> {
 
 /// Builder for batch update operations
 /// 
-/// Allows updating multiple records matching conditions.
+/// Allows updating multiple records matching conditions with advanced features.
 ///
 /// # Example
 /// ```ignore
+/// // Simple batch update
 /// let affected = User::update_all()
 ///     .set("active", false)
 ///     .where_eq("status", "banned")
 ///     .execute()
 ///     .await?;
+///
+/// // Update with increment/decrement
+/// let affected = Product::update_all()
+///     .increment("view_count", 1)
+///     .where_eq("featured", true)
+///     .execute()
+///     .await?;
+///
+/// // Update with conditional logic
+/// let affected = User::update_all()
+///     .set_raw("last_login", "NOW()")
+///     .set_if("verified", true, |b| b.where_eq("email_confirmed", true))
+///     .execute()
+///     .await?;
 /// ```
 pub struct BatchUpdateBuilder<M: Model> {
     _marker: std::marker::PhantomData<M>,
-    updates: std::collections::HashMap<String, serde_json::Value>,
+    updates: std::collections::HashMap<String, UpdateValue>,
     conditions: Vec<crate::query::WhereCondition>,
+    returning: bool,
+    limit_value: Option<u64>,
+}
+
+/// Value for batch update operations
+#[derive(Debug, Clone)]
+pub enum UpdateValue {
+    /// Direct value assignment
+    Value(serde_json::Value),
+    /// Raw SQL expression (e.g., "NOW()", "column + 1")
+    Raw(String),
+    /// Increment by value
+    Increment(i64),
+    /// Decrement by value
+    Decrement(i64),
+    /// Multiply by value
+    Multiply(f64),
+    /// Divide by value
+    Divide(f64),
+    /// Append to array (PostgreSQL)
+    ArrayAppend(serde_json::Value),
+    /// Remove from array (PostgreSQL)
+    ArrayRemove(serde_json::Value),
+    /// JSON set path (for JSON columns)
+    JsonSet(String, serde_json::Value),
+    /// Coalesce with default (set only if NULL)
+    Coalesce(serde_json::Value),
 }
 
 impl<M: Model> BatchUpdateBuilder<M> {
@@ -1143,12 +1185,170 @@ impl<M: Model> BatchUpdateBuilder<M> {
             _marker: std::marker::PhantomData,
             updates: std::collections::HashMap::new(),
             conditions: Vec::new(),
+            returning: false,
+            limit_value: None,
         }
     }
     
     /// Set a field to a new value
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .set("active", false)
+    ///     .where_eq("banned", true)
+    ///     .execute()
+    ///     .await?;
+    /// ```
     pub fn set(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), value.into());
+        self.updates.insert(field.to_string(), UpdateValue::Value(value.into()));
+        self
+    }
+    
+    /// Set a field to a raw SQL expression
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .set_raw("updated_at", "NOW()")
+    ///     .set_raw("login_count", "login_count + 1")
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn set_raw(mut self, field: &str, expression: &str) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Raw(expression.to_string()));
+        self
+    }
+    
+    /// Conditionally set a field based on a closure
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .set_if("verified", true, |b| b.where_eq("email_confirmed", true))
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn set_if<F>(mut self, field: &str, value: impl Into<serde_json::Value>, condition: F) -> Self
+    where
+        F: FnOnce(Self) -> Self,
+    {
+        self.updates.insert(field.to_string(), UpdateValue::Value(value.into()));
+        condition(self)
+    }
+    
+    /// Increment a numeric field by value
+    ///
+    /// # Example
+    /// ```ignore
+    /// Product::update_all()
+    ///     .increment("view_count", 1)
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn increment(mut self, field: &str, by: i64) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Increment(by));
+        self
+    }
+    
+    /// Decrement a numeric field by value
+    ///
+    /// # Example
+    /// ```ignore
+    /// Product::update_all()
+    ///     .decrement("stock", 1)
+    ///     .where_eq("id", product_id)
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn decrement(mut self, field: &str, by: i64) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Decrement(by));
+        self
+    }
+    
+    /// Multiply a numeric field by value
+    ///
+    /// # Example
+    /// ```ignore
+    /// Product::update_all()
+    ///     .multiply("price", 1.1) // 10% increase
+    ///     .where_eq("category", "electronics")
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn multiply(mut self, field: &str, by: f64) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Multiply(by));
+        self
+    }
+    
+    /// Divide a numeric field by value
+    pub fn divide(mut self, field: &str, by: f64) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Divide(by));
+        self
+    }
+    
+    /// Append value to an array column (PostgreSQL)
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .array_append("tags", "premium")
+    ///     .where_eq("subscription", "paid")
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn array_append(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::ArrayAppend(value.into()));
+        self
+    }
+    
+    /// Remove value from an array column (PostgreSQL)
+    pub fn array_remove(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::ArrayRemove(value.into()));
+        self
+    }
+    
+    /// Set a value at a JSON path
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .json_set("settings", "$.theme", "dark")
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn json_set(mut self, field: &str, path: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::JsonSet(path.to_string(), value.into()));
+        self
+    }
+    
+    /// Set value only if current value is NULL
+    ///
+    /// # Example
+    /// ```ignore
+    /// User::update_all()
+    ///     .coalesce("nickname", "Anonymous")
+    ///     .execute()
+    ///     .await?;
+    /// ```
+    pub fn coalesce(mut self, field: &str, default: impl Into<serde_json::Value>) -> Self {
+        self.updates.insert(field.to_string(), UpdateValue::Coalesce(default.into()));
+        self
+    }
+    
+    /// Limit the number of rows to update (MySQL/MariaDB)
+    ///
+    /// Note: PostgreSQL requires a subquery for limited updates
+    pub fn limit(mut self, n: u64) -> Self {
+        self.limit_value = Some(n);
+        self
+    }
+    
+    /// Return updated rows (PostgreSQL, SQLite 3.35+)
+    ///
+    /// Note: Not all databases support RETURNING
+    pub fn returning(mut self) -> Self {
+        self.returning = true;
         self
     }
     
@@ -1182,11 +1382,31 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
     
+    /// Add a where greater than or equal condition
+    pub fn where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::Gte,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
     /// Add a where less than condition
     pub fn where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: column.to_string(),
             operator: crate::query::Operator::Lt,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where less than or equal condition
+    pub fn where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::Lte,
             value: crate::query::ConditionValue::Single(value.into()),
         });
         self
@@ -1202,59 +1422,218 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
     
+    /// Add a where NOT IN condition
+    pub fn where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::NotIn,
+            value: crate::query::ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a where IS NULL condition
+    pub fn where_null(mut self, column: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::IsNull,
+            value: crate::query::ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where IS NOT NULL condition
+    pub fn where_not_null(mut self, column: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::IsNotNull,
+            value: crate::query::ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where BETWEEN condition
+    pub fn where_between(mut self, column: &str, min: impl Into<serde_json::Value>, max: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::Between,
+            value: crate::query::ConditionValue::Range(min.into(), max.into()),
+        });
+        self
+    }
+    
+    /// Add a where LIKE condition
+    pub fn where_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.to_string(),
+            operator: crate::query::Operator::Like,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
+    /// Format a value for SQL
+    fn format_value(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::Null => "NULL".to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            _ => format!("'{}'", v.to_string().replace('\'', "''")),
+        }
+    }
+    
     /// Execute the batch update and return rows affected
     pub async fn execute(self) -> Result<u64> {
         if self.updates.is_empty() {
             return Ok(0);
         }
         
-        // Build SET clause
+        let db_type = crate::Database::global().backend();
+        let quote = match db_type {
+            crate::config::DatabaseType::MySQL => '`',
+            _ => '"',
+        };
+        
+        // Build SET clause with different update types
         let set_parts: Vec<String> = self.updates.iter()
             .map(|(k, v)| {
-                let value_str = match v {
-                    serde_json::Value::Null => "NULL".to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                    _ => format!("'{}'", v.to_string().replace('\'', "''")),
-                };
-                format!("\"{}\" = {}", k, value_str)
+                let col = format!("{0}{1}{0}", quote, k);
+                match v {
+                    UpdateValue::Value(val) => {
+                        format!("{} = {}", col, Self::format_value(val))
+                    }
+                    UpdateValue::Raw(expr) => {
+                        format!("{} = {}", col, expr)
+                    }
+                    UpdateValue::Increment(by) => {
+                        format!("{} = {} + {}", col, col, by)
+                    }
+                    UpdateValue::Decrement(by) => {
+                        format!("{} = {} - {}", col, col, by)
+                    }
+                    UpdateValue::Multiply(by) => {
+                        format!("{} = {} * {}", col, col, by)
+                    }
+                    UpdateValue::Divide(by) => {
+                        format!("{} = {} / {}", col, col, by)
+                    }
+                    UpdateValue::ArrayAppend(val) => {
+                        match db_type {
+                            crate::config::DatabaseType::Postgres => {
+                                format!("{} = array_append({}, {})", col, col, Self::format_value(val))
+                            }
+                            crate::config::DatabaseType::MySQL => {
+                                format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, Self::format_value(val))
+                            }
+                            crate::config::DatabaseType::SQLite => {
+                                format!("{} = json_insert({}, '$[#]', {})", col, col, Self::format_value(val))
+                            }
+                        }
+                    }
+                    UpdateValue::ArrayRemove(val) => {
+                        match db_type {
+                            crate::config::DatabaseType::Postgres => {
+                                format!("{} = array_remove({}, {})", col, col, Self::format_value(val))
+                            }
+                            crate::config::DatabaseType::MySQL => {
+                                format!("{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))", col, col, col, Self::format_value(val))
+                            }
+                            crate::config::DatabaseType::SQLite => {
+                                // SQLite requires more complex logic
+                                format!("{} = (SELECT json_group_array(value) FROM json_each({}) WHERE value != {})", col, col, Self::format_value(val))
+                            }
+                        }
+                    }
+                    UpdateValue::JsonSet(path, val) => {
+                        match db_type {
+                            crate::config::DatabaseType::Postgres => {
+                                format!("{} = jsonb_set({}, '{{{}}}', '{}')", col, col, path.trim_start_matches("$."), Self::format_value(val).trim_matches('\''))
+                            }
+                            crate::config::DatabaseType::MySQL => {
+                                format!("{} = JSON_SET({}, '{}', {})", col, col, path, Self::format_value(val))
+                            }
+                            crate::config::DatabaseType::SQLite => {
+                                format!("{} = json_set({}, '{}', {})", col, col, path, Self::format_value(val))
+                            }
+                        }
+                    }
+                    UpdateValue::Coalesce(default) => {
+                        format!("{} = COALESCE({}, {})", col, col, Self::format_value(default))
+                    }
+                }
             })
             .collect();
         
         // Build WHERE clause
         let where_parts: Vec<String> = self.conditions.iter()
             .filter_map(|cond| {
-                let op = match &cond.operator {
-                    crate::query::Operator::Eq => "=",
-                    crate::query::Operator::NotEq => "!=",
-                    crate::query::Operator::Gt => ">",
-                    crate::query::Operator::Lt => "<",
-                    crate::query::Operator::Gte => ">=",
-                    crate::query::Operator::Lte => "<=",
-                    _ => return None,
-                };
+                let col = format!("{0}{1}{0}", quote, cond.column);
                 
-                let value = match &cond.value {
-                    crate::query::ConditionValue::Single(v) => {
-                        match v {
-                            serde_json::Value::Null => "NULL".to_string(),
-                            serde_json::Value::Bool(b) => b.to_string(),
-                            serde_json::Value::Number(n) => n.to_string(),
-                            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-                            _ => format!("'{}'", v.to_string().replace('\'', "''")),
-                        }
-                    },
-                    _ => return None,
-                };
-                
-                Some(format!("\"{}\" {} {}", cond.column, op, value))
+                match &cond.operator {
+                    crate::query::Operator::Eq => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} = {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::NotEq => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} != {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::Gt => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} > {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::Gte => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} >= {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::Lt => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} < {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::Lte => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} <= {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::In => {
+                        if let crate::query::ConditionValue::List(vals) = &cond.value {
+                            let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                            Some(format!("{} IN ({})", col, list))
+                        } else { None }
+                    }
+                    crate::query::Operator::NotIn => {
+                        if let crate::query::ConditionValue::List(vals) = &cond.value {
+                            let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                            Some(format!("{} NOT IN ({})", col, list))
+                        } else { None }
+                    }
+                    crate::query::Operator::IsNull => Some(format!("{} IS NULL", col)),
+                    crate::query::Operator::IsNotNull => Some(format!("{} IS NOT NULL", col)),
+                    crate::query::Operator::Between => {
+                        if let crate::query::ConditionValue::Range(min, max) = &cond.value {
+                            Some(format!("{} BETWEEN {} AND {}", col, Self::format_value(min), Self::format_value(max)))
+                        } else { None }
+                    }
+                    crate::query::Operator::Like => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} LIKE {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    _ => None,
+                }
             })
             .collect();
         
+        let table = format!("{0}{1}{0}", quote, M::table_name());
         let mut sql = format!(
-            "UPDATE \"{}\" SET {}",
-            M::table_name(),
+            "UPDATE {} SET {}",
+            table,
             set_parts.join(", ")
         );
         
@@ -1263,7 +1642,82 @@ impl<M: Model> BatchUpdateBuilder<M> {
             sql.push_str(&where_parts.join(" AND "));
         }
         
+        // Add LIMIT for MySQL
+        if let Some(limit) = self.limit_value {
+            if db_type == crate::config::DatabaseType::MySQL {
+                sql.push_str(&format!(" LIMIT {}", limit));
+            }
+        }
+        
         crate::Database::execute(&sql).await
+    }
+    
+    /// Execute and return the updated rows (requires RETURNING support)
+    ///
+    /// Works with PostgreSQL and SQLite 3.35+
+    pub async fn execute_returning(self) -> Result<Vec<M>> {
+        if self.updates.is_empty() {
+            return Ok(vec![]);
+        }
+        
+        let db_type = crate::Database::global().backend();
+        
+        if db_type == crate::config::DatabaseType::MySQL {
+            return Err(Error::query("MySQL does not support RETURNING clause".to_string()));
+        }
+        
+        let quote = match db_type {
+            crate::config::DatabaseType::MySQL => '`',
+            _ => '"',
+        };
+        
+        // Build SET clause
+        let set_parts: Vec<String> = self.updates.iter()
+            .map(|(k, v)| {
+                let col = format!("{0}{1}{0}", quote, k);
+                match v {
+                    UpdateValue::Value(val) => format!("{} = {}", col, Self::format_value(val)),
+                    UpdateValue::Raw(expr) => format!("{} = {}", col, expr),
+                    UpdateValue::Increment(by) => format!("{} = {} + {}", col, col, by),
+                    UpdateValue::Decrement(by) => format!("{} = {} - {}", col, col, by),
+                    UpdateValue::Multiply(by) => format!("{} = {} * {}", col, col, by),
+                    UpdateValue::Divide(by) => format!("{} = {} / {}", col, col, by),
+                    _ => format!("{} = {}", col, col), // Fallback for complex types
+                }
+            })
+            .collect();
+        
+        // Build WHERE clause
+        let where_parts: Vec<String> = self.conditions.iter()
+            .filter_map(|cond| {
+                let col = format!("{0}{1}{0}", quote, cond.column);
+                match &cond.operator {
+                    crate::query::Operator::Eq => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} = {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    crate::query::Operator::NotEq => {
+                        if let crate::query::ConditionValue::Single(v) = &cond.value {
+                            Some(format!("{} != {}", col, Self::format_value(v)))
+                        } else { None }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        
+        let table = format!("{0}{1}{0}", quote, M::table_name());
+        let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
+        
+        if !where_parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_parts.join(" AND "));
+        }
+        
+        sql.push_str(" RETURNING *");
+        
+        crate::Database::raw::<M>(&sql).await
     }
 }
 

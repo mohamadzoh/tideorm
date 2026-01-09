@@ -192,7 +192,8 @@ mod config_tests {
     fn test_database_type_supports_json() {
         assert!(DatabaseType::Postgres.supports_json());
         assert!(DatabaseType::MySQL.supports_json());
-        assert!(!DatabaseType::SQLite.supports_json());
+        // SQLite supports JSON via json1 extension (included by default since 3.9.0)
+        assert!(DatabaseType::SQLite.supports_json());
     }
     
     #[test]
@@ -621,13 +622,7 @@ mod relations_tests {
     
     #[test]
     fn test_relation_info_creation() {
-        let info = RelationInfo {
-            name: "author".to_string(),
-            relation_type: RelationType::BelongsTo,
-            related_table: "users".to_string(),
-            foreign_key: "user_id".to_string(),
-            local_key: "id".to_string(),
-        };
+        let info = RelationInfo::belongs_to("author", "users", "user_id", "id");
         
         assert_eq!(info.name, "author");
         assert_eq!(info.relation_type, RelationType::BelongsTo);
@@ -638,26 +633,14 @@ mod relations_tests {
     
     #[test]
     fn test_relation_info_has_one() {
-        let info = RelationInfo {
-            name: "profile".to_string(),
-            relation_type: RelationType::HasOne,
-            related_table: "profiles".to_string(),
-            foreign_key: "user_id".to_string(),
-            local_key: "id".to_string(),
-        };
+        let info = RelationInfo::has_one("profile", "profiles", "user_id", "id");
         
         assert_eq!(info.relation_type, RelationType::HasOne);
     }
     
     #[test]
     fn test_relation_info_has_many() {
-        let info = RelationInfo {
-            name: "posts".to_string(),
-            relation_type: RelationType::HasMany,
-            related_table: "posts".to_string(),
-            foreign_key: "user_id".to_string(),
-            local_key: "id".to_string(),
-        };
+        let info = RelationInfo::has_many("posts", "posts", "user_id", "id");
         
         assert_eq!(info.relation_type, RelationType::HasMany);
     }
@@ -1415,13 +1398,7 @@ mod relation_edge_cases {
     
     #[test]
     fn test_relation_info_empty_strings() {
-        let info = RelationInfo {
-            name: "".to_string(),
-            relation_type: RelationType::BelongsTo,
-            related_table: "".to_string(),
-            foreign_key: "".to_string(),
-            local_key: "".to_string(),
-        };
+        let info = RelationInfo::belongs_to("", "", "", "");
         
         assert!(info.name.is_empty());
         assert!(info.related_table.is_empty());
@@ -1429,13 +1406,7 @@ mod relation_edge_cases {
     
     #[test]
     fn test_relation_info_unicode_names() {
-        let info = RelationInfo {
-            name: "作者".to_string(),
-            relation_type: RelationType::BelongsTo,
-            related_table: "用户".to_string(),
-            foreign_key: "用户_id".to_string(),
-            local_key: "id".to_string(),
-        };
+        let info = RelationInfo::belongs_to("作者", "用户", "用户_id", "id");
         
         assert_eq!(info.name, "作者");
         assert_eq!(info.related_table, "用户");
@@ -1443,13 +1414,7 @@ mod relation_edge_cases {
     
     #[test]
     fn test_relation_info_clone() {
-        let info = RelationInfo {
-            name: "author".to_string(),
-            relation_type: RelationType::HasMany,
-            related_table: "posts".to_string(),
-            foreign_key: "author_id".to_string(),
-            local_key: "id".to_string(),
-        };
+        let info = RelationInfo::has_many("posts", "posts", "author_id", "id");
         
         let cloned = info.clone();
         assert_eq!(info.name, cloned.name);
@@ -1462,12 +1427,18 @@ mod relation_edge_cases {
             RelationType::BelongsTo,
             RelationType::HasOne,
             RelationType::HasMany,
+            RelationType::HasManyThrough,
+            RelationType::MorphTo,
+            RelationType::MorphOne,
+            RelationType::MorphMany,
         ];
         
         // All should be different
-        assert_ne!(types[0], types[1]);
-        assert_ne!(types[1], types[2]);
-        assert_ne!(types[0], types[2]);
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(types[i], types[j]);
+            }
+        }
     }
 }
 
@@ -1638,8 +1609,8 @@ mod config_edge_cases {
         assert!(DatabaseType::MySQL.supports_json());
         assert!(!DatabaseType::MySQL.supports_arrays());
         
-        // SQLite supports neither
-        assert!(!DatabaseType::SQLite.supports_json());
+        // SQLite supports JSON (via json1 extension) but not native arrays
+        assert!(DatabaseType::SQLite.supports_json());
         assert!(!DatabaseType::SQLite.supports_arrays());
     }
     
@@ -3323,5 +3294,1633 @@ mod translations_extended_tests {
         
         let desc = product.get_translated("description", "en").unwrap();
         assert_eq!(desc, serde_json::json!(long_text));
+    }
+}
+
+// =============================================================================
+// BATCH UPDATE VALUE TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod batch_update_value_tests {
+    use tideorm::model::UpdateValue;
+    use serde_json::json;
+    
+    #[test]
+    fn test_update_value_variants() {
+        // Test all UpdateValue variants can be created
+        let _value = UpdateValue::Value(json!("hello"));
+        let _raw = UpdateValue::Raw("NOW()".to_string());
+        let _inc = UpdateValue::Increment(5);
+        let _dec = UpdateValue::Decrement(3);
+        let _mul = UpdateValue::Multiply(2.5);
+        let _div = UpdateValue::Divide(4.0);
+        let _append = UpdateValue::ArrayAppend(json!("item"));
+        let _remove = UpdateValue::ArrayRemove(json!("item"));
+        let _json_set = UpdateValue::JsonSet("$.path".to_string(), json!("value"));
+        let _coalesce = UpdateValue::Coalesce(json!("default"));
+    }
+    
+    #[test]
+    fn test_update_value_value() {
+        let value = UpdateValue::Value(json!("hello"));
+        match value {
+            UpdateValue::Value(v) => assert_eq!(v, json!("hello")),
+            _ => panic!("Expected UpdateValue::Value"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_increment() {
+        let value = UpdateValue::Increment(5);
+        match value {
+            UpdateValue::Increment(n) => assert_eq!(n, 5),
+            _ => panic!("Expected UpdateValue::Increment"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_decrement() {
+        let value = UpdateValue::Decrement(3);
+        match value {
+            UpdateValue::Decrement(n) => assert_eq!(n, 3),
+            _ => panic!("Expected UpdateValue::Decrement"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_multiply() {
+        let value = UpdateValue::Multiply(2.5);
+        match value {
+            UpdateValue::Multiply(n) => assert!((n - 2.5).abs() < f64::EPSILON),
+            _ => panic!("Expected UpdateValue::Multiply"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_divide() {
+        let value = UpdateValue::Divide(4.0);
+        match value {
+            UpdateValue::Divide(n) => assert!((n - 4.0).abs() < f64::EPSILON),
+            _ => panic!("Expected UpdateValue::Divide"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_raw() {
+        let value = UpdateValue::Raw("NOW()".to_string());
+        match value {
+            UpdateValue::Raw(s) => assert_eq!(s, "NOW()"),
+            _ => panic!("Expected UpdateValue::Raw"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_array_append() {
+        let value = UpdateValue::ArrayAppend(json!("new_item"));
+        match value {
+            UpdateValue::ArrayAppend(v) => assert_eq!(v, json!("new_item")),
+            _ => panic!("Expected UpdateValue::ArrayAppend"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_array_remove() {
+        let value = UpdateValue::ArrayRemove(json!("old_item"));
+        match value {
+            UpdateValue::ArrayRemove(v) => assert_eq!(v, json!("old_item")),
+            _ => panic!("Expected UpdateValue::ArrayRemove"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_json_set() {
+        let value = UpdateValue::JsonSet("$.path".to_string(), json!("value"));
+        match value {
+            UpdateValue::JsonSet(path, val) => {
+                assert_eq!(path, "$.path");
+                assert_eq!(val, json!("value"));
+            }
+            _ => panic!("Expected UpdateValue::JsonSet"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_coalesce() {
+        let value = UpdateValue::Coalesce(json!("default"));
+        match value {
+            UpdateValue::Coalesce(v) => assert_eq!(v, json!("default")),
+            _ => panic!("Expected UpdateValue::Coalesce"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_clone() {
+        let original = UpdateValue::Increment(10);
+        let cloned = original.clone();
+        match cloned {
+            UpdateValue::Increment(n) => assert_eq!(n, 10),
+            _ => panic!("Expected UpdateValue::Increment"),
+        }
+    }
+    
+    #[test]
+    fn test_update_value_debug() {
+        let value = UpdateValue::Raw("test_expr".to_string());
+        let debug_str = format!("{:?}", value);
+        assert!(debug_str.contains("Raw"));
+        assert!(debug_str.contains("test_expr"));
+    }
+}
+
+// =============================================================================
+// RELATION CONSTRAINTS TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod relation_constraints_tests {
+    use tideorm::relations::RelationConstraints;
+    use tideorm::query::Order;
+    
+    #[test]
+    fn test_relation_constraints_new() {
+        let constraints = RelationConstraints::new();
+        assert!(constraints.conditions.is_empty());
+        assert!(constraints.order_by.is_none());
+        assert!(constraints.limit.is_none());
+        assert!(constraints.offset.is_none());
+        assert!(!constraints.with_trashed);
+    }
+    
+    #[test]
+    fn test_relation_constraints_where_eq() {
+        let constraints = RelationConstraints::new()
+            .where_eq("status", "active");
+        
+        assert_eq!(constraints.conditions.len(), 1);
+        assert_eq!(constraints.conditions[0].0, "status");
+        assert_eq!(constraints.conditions[0].1, serde_json::json!("active"));
+    }
+    
+    #[test]
+    fn test_relation_constraints_multiple_where() {
+        let constraints = RelationConstraints::new()
+            .where_eq("status", "active")
+            .where_eq("verified", true);
+        
+        assert_eq!(constraints.conditions.len(), 2);
+    }
+    
+    #[test]
+    fn test_relation_constraints_order_by_asc() {
+        let constraints = RelationConstraints::new()
+            .order_by("created_at", Order::Asc);
+        
+        let (col, order) = constraints.order_by.unwrap();
+        assert_eq!(col, "created_at");
+        match order {
+            Order::Asc => {}
+            _ => panic!("Expected Order::Asc"),
+        }
+    }
+    
+    #[test]
+    fn test_relation_constraints_order_by_desc() {
+        let constraints = RelationConstraints::new()
+            .order_by("created_at", Order::Desc);
+        
+        let (col, order) = constraints.order_by.unwrap();
+        assert_eq!(col, "created_at");
+        match order {
+            Order::Desc => {}
+            _ => panic!("Expected Order::Desc"),
+        }
+    }
+    
+    #[test]
+    fn test_relation_constraints_limit() {
+        let constraints = RelationConstraints::new()
+            .limit(10);
+        
+        assert_eq!(constraints.limit, Some(10));
+    }
+    
+    #[test]
+    fn test_relation_constraints_offset() {
+        let constraints = RelationConstraints::new()
+            .offset(20);
+        
+        assert_eq!(constraints.offset, Some(20));
+    }
+    
+    #[test]
+    fn test_relation_constraints_with_trashed() {
+        let constraints = RelationConstraints::new()
+            .with_trashed();
+        
+        assert!(constraints.with_trashed);
+    }
+    
+    #[test]
+    fn test_relation_constraints_chained() {
+        let constraints = RelationConstraints::new()
+            .where_eq("status", "published")
+            .where_eq("visible", true)
+            .order_by("created_at", Order::Desc)
+            .limit(10)
+            .offset(0)
+            .with_trashed();
+        
+        assert_eq!(constraints.conditions.len(), 2);
+        assert!(constraints.order_by.is_some());
+        assert_eq!(constraints.limit, Some(10));
+        assert_eq!(constraints.offset, Some(0));
+        assert!(constraints.with_trashed);
+    }
+}
+
+// =============================================================================
+// ATTRIBUTE CASTING TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod attribute_casting_tests {
+    use tideorm::types::{
+        Encrypted, Hashed, CommaSeparated, Collection,
+        CastType, CastValue, WithDefault,
+    };
+    use serde_json::json;
+    
+    // Encrypted type tests
+    #[test]
+    fn test_encrypted_new() {
+        let encrypted = Encrypted::new("secret".to_string());
+        assert_eq!(encrypted.get(), "secret");
+    }
+    
+    #[test]
+    fn test_encrypted_into_inner() {
+        let encrypted = Encrypted::new("secret".to_string());
+        let inner: String = encrypted.into_inner();
+        assert_eq!(inner, "secret");
+    }
+    
+    #[test]
+    fn test_encrypted_clone() {
+        let encrypted = Encrypted::new("secret".to_string());
+        let cloned = encrypted.clone();
+        assert_eq!(cloned.get(), "secret");
+    }
+    
+    #[test]
+    fn test_encrypted_inner() {
+        let encrypted = Encrypted::new("secret".to_string());
+        assert_eq!(encrypted.inner(), "secret");
+    }
+    
+    #[test]
+    fn test_encrypted_from() {
+        let encrypted: Encrypted<String> = "secret".to_string().into();
+        assert_eq!(encrypted.get(), "secret");
+    }
+    
+    // Hashed type tests
+    #[test]
+    fn test_hashed_new() {
+        let hashed = Hashed::new("password123");
+        // Hashed value is stored as hash, not plain text
+        assert!(!hashed.hash().is_empty());
+    }
+    
+    #[test]
+    fn test_hashed_verify() {
+        let hashed = Hashed::new("password123");
+        assert!(hashed.verify("password123"));
+        assert!(!hashed.verify("wrongpassword"));
+    }
+    
+    #[test]
+    fn test_hashed_from_str() {
+        let hashed: Hashed = "password123".into();
+        assert!(hashed.verify("password123"));
+    }
+    
+    #[test]
+    fn test_hashed_from_string() {
+        let hashed: Hashed = "password123".to_string().into();
+        assert!(hashed.verify("password123"));
+    }
+    
+    // CommaSeparated type tests
+    #[test]
+    fn test_comma_separated_new() {
+        let values = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let cs = CommaSeparated::new(values);
+        assert_eq!(cs.to_string(), "a,b,c");
+    }
+    
+    #[test]
+    fn test_comma_separated_from_string() {
+        let cs = CommaSeparated::<String>::from_string("a,b,c");
+        let values = cs.values();
+        assert_eq!(values, &["a", "b", "c"]);
+    }
+    
+    #[test]
+    fn test_comma_separated_empty() {
+        let cs = CommaSeparated::<String>::new(vec![]);
+        assert_eq!(cs.to_string(), "");
+        assert!(cs.is_empty());
+    }
+    
+    #[test]
+    fn test_comma_separated_single_item() {
+        let cs = CommaSeparated::new(vec!["single".to_string()]);
+        assert_eq!(cs.to_string(), "single");
+    }
+    
+    #[test]
+    fn test_comma_separated_integers() {
+        let cs = CommaSeparated::new(vec![1i32, 2, 3, 4, 5]);
+        assert_eq!(cs.to_string(), "1,2,3,4,5");
+    }
+    
+    #[test]
+    fn test_comma_separated_push() {
+        let mut cs = CommaSeparated::new(vec!["a".to_string(), "b".to_string()]);
+        cs.push("c".to_string());
+        assert_eq!(cs.values(), &["a", "b", "c"]);
+    }
+    
+    #[test]
+    fn test_comma_separated_contains() {
+        let cs = CommaSeparated::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert!(cs.contains(&"b".to_string()));
+        assert!(!cs.contains(&"d".to_string()));
+    }
+    
+    #[test]
+    fn test_comma_separated_len() {
+        let cs = CommaSeparated::new(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(cs.len(), 2);
+    }
+    
+    #[test]
+    fn test_comma_separated_is_empty() {
+        let empty = CommaSeparated::<String>::new(vec![]);
+        let non_empty = CommaSeparated::new(vec!["a".to_string()]);
+        assert!(empty.is_empty());
+        assert!(!non_empty.is_empty());
+    }
+    
+    #[test]
+    fn test_comma_separated_from_vec() {
+        let cs: CommaSeparated<String> = vec!["x".to_string(), "y".to_string()].into();
+        assert_eq!(cs.len(), 2);
+    }
+    
+    // Collection type tests
+    #[test]
+    fn test_collection_new() {
+        let collection = Collection::<i32>::new();
+        assert!(collection.is_empty());
+    }
+    
+    #[test]
+    fn test_collection_from_vec() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        assert_eq!(collection.count(), 3);
+    }
+    
+    #[test]
+    fn test_collection_add() {
+        let mut collection = Collection::new();
+        collection.add(1);
+        collection.add(2);
+        assert_eq!(collection.count(), 2);
+    }
+    
+    #[test]
+    fn test_collection_to_vec() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        let vec = collection.to_vec();
+        assert_eq!(vec, vec![1, 2, 3]);
+    }
+    
+    #[test]
+    fn test_collection_all() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        assert_eq!(collection.all(), &[1, 2, 3]);
+    }
+    
+    #[test]
+    fn test_collection_first() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        assert_eq!(collection.first(), Some(&1));
+        
+        let empty = Collection::<i32>::new();
+        assert_eq!(empty.first(), None);
+    }
+    
+    #[test]
+    fn test_collection_last() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        assert_eq!(collection.last(), Some(&3));
+    }
+    
+    #[test]
+    fn test_collection_filter() {
+        let collection = Collection::from_vec(vec![1, 2, 3, 4, 5]);
+        let even = collection.filter(|x| *x % 2 == 0);
+        assert_eq!(even.to_vec(), vec![2, 4]);
+    }
+    
+    #[test]
+    fn test_collection_map() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        let doubled: Collection<i32> = collection.map(|x| x * 2);
+        assert_eq!(doubled.to_vec(), vec![2, 4, 6]);
+    }
+    
+    #[test]
+    fn test_collection_find() {
+        let collection = Collection::from_vec(vec![1, 2, 3, 4, 5]);
+        let found = collection.find(|x| *x == 3);
+        assert_eq!(found, Some(&3));
+        
+        let not_found = collection.find(|x| *x == 10);
+        assert_eq!(not_found, None);
+    }
+    
+    #[test]
+    fn test_collection_any() {
+        let collection = Collection::from_vec(vec![1, 2, 3]);
+        assert!(collection.any(|x| *x == 2));
+        assert!(!collection.any(|x| *x == 5));
+    }
+    
+    #[test]
+    fn test_collection_every() {
+        let collection = Collection::from_vec(vec![2, 4, 6]);
+        assert!(collection.every(|x| *x % 2 == 0));
+        assert!(!collection.every(|x| *x > 3));
+    }
+    
+    #[test]
+    fn test_collection_take() {
+        let collection = Collection::from_vec(vec![1, 2, 3, 4, 5]);
+        let taken = collection.take(3);
+        assert_eq!(taken.to_vec(), vec![1, 2, 3]);
+    }
+    
+    #[test]
+    fn test_collection_skip() {
+        let collection = Collection::from_vec(vec![1, 2, 3, 4, 5]);
+        let skipped = collection.skip(2);
+        assert_eq!(skipped.to_vec(), vec![3, 4, 5]);
+    }
+    
+    // CastType tests
+    #[test]
+    fn test_cast_type_from_str() {
+        assert_eq!(CastType::from_str("string"), Some(CastType::String));
+        assert_eq!(CastType::from_str("integer"), Some(CastType::Integer));
+        assert_eq!(CastType::from_str("float"), Some(CastType::Float));
+        assert_eq!(CastType::from_str("boolean"), Some(CastType::Boolean));
+        assert_eq!(CastType::from_str("json"), Some(CastType::Json));
+        assert_eq!(CastType::from_str("array"), Some(CastType::Array));
+        assert_eq!(CastType::from_str("datetime"), Some(CastType::DateTime));
+        assert_eq!(CastType::from_str("date"), Some(CastType::Date));
+        assert_eq!(CastType::from_str("time"), Some(CastType::Time));
+        assert_eq!(CastType::from_str("uuid"), Some(CastType::Uuid));
+        assert_eq!(CastType::from_str("decimal"), Some(CastType::Decimal));
+        assert_eq!(CastType::from_str("encrypted"), Some(CastType::Encrypted));
+        assert_eq!(CastType::from_str("hashed"), Some(CastType::Hashed));
+        assert_eq!(CastType::from_str("comma_separated"), Some(CastType::CommaSeparated));
+        assert_eq!(CastType::from_str("collection"), Some(CastType::Collection));
+        assert_eq!(CastType::from_str("unknown"), None);
+    }
+    
+    #[test]
+    fn test_cast_type_display() {
+        assert_eq!(CastType::String.to_string(), "string");
+        assert_eq!(CastType::Integer.to_string(), "integer");
+        assert_eq!(CastType::Boolean.to_string(), "boolean");
+    }
+    
+    // CastValue tests
+    #[test]
+    fn test_cast_value_to_string() {
+        let result = CastValue::cast(&json!(123), CastType::String);
+        assert_eq!(result.unwrap(), json!("123"));
+    }
+    
+    #[test]
+    fn test_cast_value_to_integer() {
+        let result = CastValue::cast(&json!("42"), CastType::Integer);
+        assert_eq!(result.unwrap(), json!(42));
+        
+        let result2 = CastValue::cast(&json!(3.14), CastType::Integer);
+        assert_eq!(result2.unwrap(), json!(3));
+    }
+    
+    #[test]
+    fn test_cast_value_to_float() {
+        let result = CastValue::cast(&json!("3.14"), CastType::Float);
+        assert_eq!(result.unwrap(), json!(3.14));
+        
+        let result2 = CastValue::cast(&json!(42), CastType::Float);
+        assert_eq!(result2.unwrap(), json!(42.0));
+    }
+    
+    #[test]
+    fn test_cast_value_to_boolean() {
+        assert_eq!(CastValue::cast(&json!("true"), CastType::Boolean).unwrap(), json!(true));
+        assert_eq!(CastValue::cast(&json!("false"), CastType::Boolean).unwrap(), json!(false));
+        assert_eq!(CastValue::cast(&json!(1), CastType::Boolean).unwrap(), json!(true));
+        assert_eq!(CastValue::cast(&json!(0), CastType::Boolean).unwrap(), json!(false));
+        assert_eq!(CastValue::cast(&json!("1"), CastType::Boolean).unwrap(), json!(true));
+        assert_eq!(CastValue::cast(&json!("0"), CastType::Boolean).unwrap(), json!(false));
+    }
+    
+    #[test]
+    fn test_cast_value_to_array_from_array() {
+        let result = CastValue::cast(&json!([1, 2, 3]), CastType::Array);
+        assert_eq!(result.unwrap(), json!([1, 2, 3]));
+    }
+    
+    #[test]
+    fn test_cast_value_json_passthrough() {
+        let value = json!({"key": "value"});
+        let result = CastValue::cast(&value, CastType::Json);
+        assert_eq!(result.unwrap(), value);
+    }
+    
+    #[test]
+    fn test_cast_value_decimal_passthrough() {
+        let result = CastValue::cast(&json!(3.14159), CastType::Decimal);
+        assert_eq!(result.unwrap(), json!(3.14159));
+    }
+    
+    #[test]
+    fn test_cast_value_parse_comma_separated() {
+        let result = CastValue::parse_comma_separated("a,b,c");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+    
+    #[test]
+    fn test_cast_value_format_comma_separated() {
+        let result = CastValue::format_comma_separated(&["a", "b", "c"]);
+        assert_eq!(result, "a,b,c");
+    }
+    
+    // WithDefault tests
+    #[test]
+    fn test_with_default_none() {
+        let wd: WithDefault<i32> = WithDefault::none();
+        assert!(wd.is_none());
+        assert!(!wd.is_some());
+    }
+    
+    #[test]
+    fn test_with_default_some() {
+        let wd = WithDefault::some(42);
+        assert!(wd.is_some());
+        assert!(!wd.is_none());
+    }
+    
+    #[test]
+    fn test_with_default_unwrap_or() {
+        let wd_none: WithDefault<i32> = WithDefault::none();
+        assert_eq!(wd_none.unwrap_or(0), 0);
+        
+        let wd_some = WithDefault::some(42);
+        assert_eq!(wd_some.unwrap_or(0), 42);
+    }
+    
+    #[test]
+    fn test_with_default_unwrap_or_else() {
+        let wd: WithDefault<i32> = WithDefault::none();
+        assert_eq!(wd.unwrap_or_else(|| 100), 100);
+        
+        let wd_some = WithDefault::some(42);
+        assert_eq!(wd_some.unwrap_or_else(|| 100), 42);
+    }
+    
+    #[test]
+    fn test_with_default_into_option() {
+        let wd = WithDefault::some("hello".to_string());
+        assert_eq!(wd.into_option(), Some("hello".to_string()));
+        
+        let wd_none: WithDefault<String> = WithDefault::none();
+        assert_eq!(wd_none.into_option(), None);
+    }
+}
+
+// =============================================================================
+// ADVANCED RELATIONS TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod advanced_relations_tests {
+    use tideorm::relations::{
+        RelationType, RelationInfo, RelationPath, RelationTree,
+        MorphResult, MorphResult3, MorphResult4, WithPivot,
+    };
+    
+    // =========================================================================
+    // RELATION TYPE TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_relation_type_display_has_many_through() {
+        assert_eq!(format!("{}", RelationType::HasManyThrough), "has_many_through");
+    }
+    
+    #[test]
+    fn test_relation_type_display_morph_to() {
+        assert_eq!(format!("{}", RelationType::MorphTo), "morph_to");
+    }
+    
+    #[test]
+    fn test_relation_type_display_morph_one() {
+        assert_eq!(format!("{}", RelationType::MorphOne), "morph_one");
+    }
+    
+    #[test]
+    fn test_relation_type_display_morph_many() {
+        assert_eq!(format!("{}", RelationType::MorphMany), "morph_many");
+    }
+    
+    #[test]
+    fn test_relation_type_equality() {
+        assert_eq!(RelationType::HasManyThrough, RelationType::HasManyThrough);
+        assert_ne!(RelationType::HasManyThrough, RelationType::HasMany);
+        assert_ne!(RelationType::MorphOne, RelationType::MorphMany);
+    }
+    
+    // =========================================================================
+    // RELATION INFO BUILDER TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_relation_info_belongs_to_builder() {
+        let info = RelationInfo::belongs_to("author", "users", "user_id", "id");
+        
+        assert_eq!(info.name, "author");
+        assert_eq!(info.relation_type, RelationType::BelongsTo);
+        assert_eq!(info.related_table, "users");
+        assert_eq!(info.foreign_key, "user_id");
+        assert_eq!(info.local_key, "id");
+        assert!(info.pivot_table.is_none());
+    }
+    
+    #[test]
+    fn test_relation_info_has_one_builder() {
+        let info = RelationInfo::has_one("profile", "profiles", "user_id", "id");
+        
+        assert_eq!(info.name, "profile");
+        assert_eq!(info.relation_type, RelationType::HasOne);
+    }
+    
+    #[test]
+    fn test_relation_info_has_many_builder() {
+        let info = RelationInfo::has_many("posts", "posts", "user_id", "id");
+        
+        assert_eq!(info.name, "posts");
+        assert_eq!(info.relation_type, RelationType::HasMany);
+    }
+    
+    #[test]
+    fn test_relation_info_has_many_through_builder() {
+        let info = RelationInfo::has_many_through(
+            "roles",
+            "roles",
+            "user_roles",
+            "user_id",
+            "role_id",
+            "id",
+        );
+        
+        assert_eq!(info.name, "roles");
+        assert_eq!(info.relation_type, RelationType::HasManyThrough);
+        assert_eq!(info.pivot_table, Some("user_roles".to_string()));
+    }
+    
+    #[test]
+    fn test_relation_info_morph_one_builder() {
+        let info = RelationInfo::morph_one(
+            "image",
+            "images",
+            "imageable_type",
+            "imageable_id",
+            "id",
+        );
+        
+        assert_eq!(info.name, "image");
+        assert_eq!(info.relation_type, RelationType::MorphOne);
+        assert_eq!(info.morph_type_column, Some("imageable_type".to_string()));
+        assert_eq!(info.morph_id_column, Some("imageable_id".to_string()));
+    }
+    
+    #[test]
+    fn test_relation_info_morph_many_builder() {
+        let info = RelationInfo::morph_many(
+            "comments",
+            "comments",
+            "commentable_type",
+            "commentable_id",
+            "id",
+        );
+        
+        assert_eq!(info.name, "comments");
+        assert_eq!(info.relation_type, RelationType::MorphMany);
+    }
+    
+    // =========================================================================
+    // RELATION PATH TESTS (for nested eager loading)
+    // =========================================================================
+    
+    #[test]
+    fn test_relation_path_simple() {
+        let path = RelationPath::parse("posts");
+        
+        assert_eq!(path.full_path, "posts");
+        assert_eq!(path.segments.len(), 1);
+        assert_eq!(path.root(), "posts");
+        assert!(!path.is_nested());
+        assert_eq!(path.depth(), 1);
+        assert!(path.nested().is_none());
+    }
+    
+    #[test]
+    fn test_relation_path_nested() {
+        let path = RelationPath::parse("posts.comments");
+        
+        assert_eq!(path.full_path, "posts.comments");
+        assert_eq!(path.segments.len(), 2);
+        assert_eq!(path.root(), "posts");
+        assert!(path.is_nested());
+        assert_eq!(path.depth(), 2);
+        
+        let nested = path.nested().unwrap();
+        assert_eq!(nested.full_path, "comments");
+        assert_eq!(nested.root(), "comments");
+        assert!(!nested.is_nested());
+    }
+    
+    #[test]
+    fn test_relation_path_deeply_nested() {
+        let path = RelationPath::parse("posts.comments.author");
+        
+        assert_eq!(path.depth(), 3);
+        assert!(path.is_nested());
+        
+        let nested1 = path.nested().unwrap();
+        assert_eq!(nested1.root(), "comments");
+        assert!(nested1.is_nested());
+        
+        let nested2 = nested1.nested().unwrap();
+        assert_eq!(nested2.root(), "author");
+        assert!(!nested2.is_nested());
+    }
+    
+    #[test]
+    fn test_relation_path_empty() {
+        let path = RelationPath::parse("");
+        
+        assert_eq!(path.depth(), 1);
+        assert_eq!(path.root(), "");
+    }
+    
+    // =========================================================================
+    // RELATION TREE TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_relation_tree_new() {
+        let tree = RelationTree::new();
+        
+        assert!(tree.is_empty());
+        assert!(tree.roots().is_empty());
+    }
+    
+    #[test]
+    fn test_relation_tree_add_simple_path() {
+        let mut tree = RelationTree::new();
+        tree.add_path(&RelationPath::parse("posts"));
+        
+        assert!(!tree.is_empty());
+        let roots = tree.roots();
+        assert_eq!(roots.len(), 1);
+        assert!(roots.contains(&"posts".to_string()));
+        assert!(!tree.has_nested("posts"));
+    }
+    
+    #[test]
+    fn test_relation_tree_add_nested_path() {
+        let mut tree = RelationTree::new();
+        tree.add_path(&RelationPath::parse("posts.comments"));
+        
+        let roots = tree.roots();
+        assert_eq!(roots.len(), 1);
+        assert!(tree.has_nested("posts"));
+        
+        let nested = tree.get_nested("posts").unwrap();
+        assert!(nested.roots().contains(&"comments".to_string()));
+    }
+    
+    #[test]
+    fn test_relation_tree_multiple_paths() {
+        let mut tree = RelationTree::new();
+        tree.add_path(&RelationPath::parse("posts"));
+        tree.add_path(&RelationPath::parse("profile"));
+        tree.add_path(&RelationPath::parse("posts.comments"));
+        tree.add_path(&RelationPath::parse("posts.comments.author"));
+        
+        let roots = tree.roots();
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&"posts".to_string()));
+        assert!(roots.contains(&"profile".to_string()));
+        
+        // Profile has no nested
+        assert!(!tree.has_nested("profile"));
+        
+        // Posts has nested comments
+        assert!(tree.has_nested("posts"));
+        let posts_nested = tree.get_nested("posts").unwrap();
+        assert!(posts_nested.roots().contains(&"comments".to_string()));
+        
+        // Comments has nested author
+        assert!(posts_nested.has_nested("comments"));
+    }
+    
+    // =========================================================================
+    // MORPH RESULT TESTS
+    // =========================================================================
+    
+    #[derive(Debug, Clone, PartialEq)]
+    struct Post { id: i32, title: String }
+    
+    #[derive(Debug, Clone, PartialEq)]
+    struct Video { id: i32, url: String }
+    
+    #[derive(Debug, Clone, PartialEq)]
+    struct Image { id: i32, path: String }
+    
+    #[derive(Debug, Clone, PartialEq)]
+    struct Audio { id: i32, file: String }
+    
+    #[test]
+    fn test_morph_result_type_a() {
+        let post = Post { id: 1, title: "Hello".to_string() };
+        let result: MorphResult<Post, Video> = MorphResult::TypeA(post.clone());
+        
+        assert!(result.is_type_a());
+        assert!(!result.is_type_b());
+        assert!(!result.is_unknown());
+        assert_eq!(result.as_type_a(), Some(&post));
+        assert_eq!(result.as_type_b(), None);
+    }
+    
+    #[test]
+    fn test_morph_result_type_b() {
+        let video = Video { id: 1, url: "http://example.com".to_string() };
+        let result: MorphResult<Post, Video> = MorphResult::TypeB(video.clone());
+        
+        assert!(!result.is_type_a());
+        assert!(result.is_type_b());
+        assert_eq!(result.as_type_b(), Some(&video));
+    }
+    
+    #[test]
+    fn test_morph_result_unknown() {
+        let result: MorphResult<Post, Video> = MorphResult::Unknown(serde_json::json!({"type": "document"}));
+        
+        assert!(!result.is_type_a());
+        assert!(!result.is_type_b());
+        assert!(result.is_unknown());
+    }
+    
+    #[test]
+    fn test_morph_result_into_type_a() {
+        let post = Post { id: 1, title: "Hello".to_string() };
+        let result: MorphResult<Post, Video> = MorphResult::TypeA(post.clone());
+        
+        assert_eq!(result.into_type_a(), Some(post));
+    }
+    
+    #[test]
+    fn test_morph_result_into_type_b() {
+        let video = Video { id: 1, url: "http://example.com".to_string() };
+        let result: MorphResult<Post, Video> = MorphResult::TypeB(video.clone());
+        
+        assert_eq!(result.into_type_b(), Some(video));
+    }
+    
+    #[test]
+    fn test_morph_result3() {
+        let _result: MorphResult3<Post, Video, Image> = MorphResult3::TypeA(Post { id: 1, title: "Test".to_string() });
+        let _result: MorphResult3<Post, Video, Image> = MorphResult3::TypeB(Video { id: 1, url: "url".to_string() });
+        let _result: MorphResult3<Post, Video, Image> = MorphResult3::TypeC(Image { id: 1, path: "path".to_string() });
+        let _result: MorphResult3<Post, Video, Image> = MorphResult3::Unknown(serde_json::json!({}));
+    }
+    
+    #[test]
+    fn test_morph_result4() {
+        let _result: MorphResult4<Post, Video, Image, Audio> = MorphResult4::TypeA(Post { id: 1, title: "Test".to_string() });
+        let _result: MorphResult4<Post, Video, Image, Audio> = MorphResult4::TypeB(Video { id: 1, url: "url".to_string() });
+        let _result: MorphResult4<Post, Video, Image, Audio> = MorphResult4::TypeC(Image { id: 1, path: "path".to_string() });
+        let _result: MorphResult4<Post, Video, Image, Audio> = MorphResult4::TypeD(Audio { id: 1, file: "file".to_string() });
+        let _result: MorphResult4<Post, Video, Image, Audio> = MorphResult4::Unknown(serde_json::json!({}));
+    }
+    
+    // =========================================================================
+    // WITH PIVOT TESTS
+    // =========================================================================
+    
+    #[derive(Debug, Clone)]
+    struct Role { id: i32, name: String }
+    
+    #[derive(Debug, Clone)]
+    struct UserRolePivot { assigned_at: String, role_level: i32 }
+    
+    #[test]
+    fn test_with_pivot_creation() {
+        let role = Role { id: 1, name: "Admin".to_string() };
+        let pivot = UserRolePivot { assigned_at: "2024-01-01".to_string(), role_level: 10 };
+        
+        let with_pivot = WithPivot::new(role.clone(), pivot.clone());
+        
+        assert_eq!(with_pivot.model.id, 1);
+        assert_eq!(with_pivot.model.name, "Admin");
+        assert_eq!(with_pivot.pivot.assigned_at, "2024-01-01");
+        assert_eq!(with_pivot.pivot.role_level, 10);
+    }
+    
+    #[test]
+    fn test_with_pivot_deref() {
+        let role = Role { id: 1, name: "Admin".to_string() };
+        let pivot = UserRolePivot { assigned_at: "2024-01-01".to_string(), role_level: 10 };
+        
+        let with_pivot = WithPivot::new(role, pivot);
+        
+        // Test Deref - can access model fields directly
+        assert_eq!(with_pivot.id, 1);
+        assert_eq!(with_pivot.name, "Admin");
+    }
+    
+    #[test]
+    fn test_with_pivot_into_parts() {
+        let role = Role { id: 1, name: "Admin".to_string() };
+        let pivot = UserRolePivot { assigned_at: "2024-01-01".to_string(), role_level: 10 };
+        
+        let with_pivot = WithPivot::new(role, pivot);
+        let (model, pivot) = with_pivot.into_parts();
+        
+        assert_eq!(model.id, 1);
+        assert_eq!(pivot.role_level, 10);
+    }
+}
+
+// =============================================================================
+// CACHE MODULE TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod cache_tests {
+    use tideorm::cache::{
+        QueryCache, PreparedStatementCache, CacheConfig, CacheStrategy,
+        CacheKeyBuilder, CacheOptions, CacheStats, PreparedStatementStats,
+    };
+    use std::time::Duration;
+    
+    // =========================================================================
+    // QUERY CACHE TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_query_cache_basic_operations() {
+        let cache = QueryCache::new();
+        cache.enable();
+        
+        // Set a value
+        cache.set("test_key", &"test_value", None, "test_model").unwrap();
+        
+        // Get the value
+        let result: Option<String> = cache.get("test_key");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "test_value");
+        
+        // Check stats
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.hits, 1);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_miss() {
+        let cache = QueryCache::new();
+        cache.enable();
+        
+        let result: Option<String> = cache.get("nonexistent_key");
+        assert!(result.is_none());
+        
+        let stats = cache.stats();
+        assert_eq!(stats.misses, 1);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_invalidation() {
+        let cache = QueryCache::new();
+        cache.enable();
+        
+        // Set multiple values
+        cache.set("key1", &"value1", None, "model_a").unwrap();
+        cache.set("key2", &"value2", None, "model_a").unwrap();
+        cache.set("key3", &"value3", None, "model_b").unwrap();
+        
+        assert_eq!(cache.len(), 3);
+        
+        // Invalidate specific key
+        cache.invalidate("key1");
+        assert_eq!(cache.len(), 2);
+        
+        // Invalidate by model
+        cache.invalidate_model("model_a");
+        assert_eq!(cache.len(), 1);
+        
+        // Clear all
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+    }
+    
+    #[test]
+    fn test_query_cache_enabled_disabled() {
+        let cache = QueryCache::new();
+        
+        // Disabled by default
+        cache.disable();
+        cache.set("key", &"value", None, "model").ok();
+        let result: Option<String> = cache.get("key");
+        
+        // Should return None when disabled
+        assert!(result.is_none());
+        
+        // Enable and try again
+        cache.enable();
+        cache.set("key", &"value", None, "model").unwrap();
+        let result: Option<String> = cache.get("key");
+        assert!(result.is_some());
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_ttl() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set_default_ttl(Duration::from_millis(50));
+        cache.set_strategy(CacheStrategy::TTL);
+        
+        // Set value with short TTL
+        cache.set("ttl_key", &"ttl_value", Some(Duration::from_millis(10)), "model").unwrap();
+        
+        // Should be present immediately
+        let result: Option<String> = cache.get("ttl_key");
+        assert!(result.is_some());
+        
+        // Wait for TTL to expire
+        std::thread::sleep(Duration::from_millis(20));
+        
+        // Should be expired now
+        let result: Option<String> = cache.get("ttl_key");
+        assert!(result.is_none());
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_max_entries_lru() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set_max_entries(3);
+        cache.set_strategy(CacheStrategy::LRU);
+        
+        // Fill cache
+        cache.set("key1", &1, None, "model").unwrap();
+        cache.set("key2", &2, None, "model").unwrap();
+        cache.set("key3", &3, None, "model").unwrap();
+        
+        assert_eq!(cache.len(), 3);
+        
+        // Access key1 to make it recently used
+        let _: Option<i32> = cache.get("key1");
+        
+        // Add one more, should evict least recently used (key2)
+        cache.set("key4", &4, None, "model").unwrap();
+        
+        // key2 should be evicted, key1 should still exist
+        let result: Option<i32> = cache.get("key2");
+        assert!(result.is_none());
+        
+        let result: Option<i32> = cache.get("key1");
+        assert!(result.is_some());
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_max_entries_fifo() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set_max_entries(3);
+        cache.set_strategy(CacheStrategy::FIFO);
+        
+        // Fill cache
+        cache.set("key1", &1, None, "model").unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        cache.set("key2", &2, None, "model").unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+        cache.set("key3", &3, None, "model").unwrap();
+        
+        assert_eq!(cache.len(), 3);
+        
+        // Add one more, should evict first in (key1)
+        cache.set("key4", &4, None, "model").unwrap();
+        
+        // key1 should be evicted (FIFO)
+        let result: Option<i32> = cache.get("key1");
+        assert!(result.is_none());
+        
+        // key2 should still exist
+        let result: Option<i32> = cache.get("key2");
+        assert!(result.is_some());
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_complex_types() {
+        let cache = QueryCache::new();
+        cache.enable();
+        
+        // Test with Vec
+        let vec_data = vec![1, 2, 3, 4, 5];
+        cache.set("vec_key", &vec_data, None, "model").unwrap();
+        let result: Option<Vec<i32>> = cache.get("vec_key");
+        assert_eq!(result, Some(vec_data));
+        
+        // Test with struct
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct TestStruct {
+            name: String,
+            value: i32,
+        }
+        
+        let struct_data = TestStruct { name: "test".to_string(), value: 42 };
+        cache.set("struct_key", &struct_data, None, "model").unwrap();
+        let result: Option<TestStruct> = cache.get("struct_key");
+        assert_eq!(result, Some(TestStruct { name: "test".to_string(), value: 42 }));
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_stats() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.reset_stats();
+        
+        // Generate hits and misses
+        cache.set("key", &"value", None, "model").unwrap();
+        let _: Option<String> = cache.get("key"); // hit
+        let _: Option<String> = cache.get("key"); // hit
+        let _: Option<String> = cache.get("missing"); // miss
+        
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 1);
+        assert!((stats.hit_ratio() - 0.666).abs() < 0.01);
+        
+        // Reset stats
+        cache.reset_stats();
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_query_cache_evict_expired() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set_default_ttl(Duration::from_millis(10));
+        cache.set_strategy(CacheStrategy::TTL);
+        
+        // Add entries with short TTL
+        cache.set("key1", &1, Some(Duration::from_millis(5)), "model").unwrap();
+        cache.set("key2", &2, Some(Duration::from_millis(5)), "model").unwrap();
+        cache.set("key3", &3, Some(Duration::from_secs(60)), "model").unwrap();
+        
+        assert_eq!(cache.len(), 3);
+        
+        // Wait for short TTL to expire
+        std::thread::sleep(Duration::from_millis(10));
+        
+        // Evict expired entries
+        cache.evict_expired();
+        assert_eq!(cache.len(), 1);
+        
+        cache.clear();
+    }
+    
+    // =========================================================================
+    // PREPARED STATEMENT CACHE TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_prepared_statement_cache_basic() {
+        let cache = PreparedStatementCache::new();
+        cache.enable();
+        cache.clear();
+        
+        let sql = "SELECT * FROM users WHERE id = $1";
+        
+        // First call - miss
+        let (sql1, cached1) = cache.get_or_prepare(sql);
+        assert!(!cached1);
+        
+        // Second call - hit
+        let (sql2, cached2) = cache.get_or_prepare(sql);
+        assert!(cached2);
+        assert_eq!(sql1, sql2);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_prepared_statement_cache_different_queries() {
+        let cache = PreparedStatementCache::new();
+        cache.enable();
+        cache.clear();
+        
+        let sql1 = "SELECT * FROM users WHERE id = $1";
+        let sql2 = "SELECT * FROM posts WHERE user_id = $1";
+        
+        cache.get_or_prepare(sql1);
+        cache.get_or_prepare(sql2);
+        
+        assert_eq!(cache.len(), 2);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_prepared_statement_cache_stats() {
+        let cache = PreparedStatementCache::new();
+        cache.enable();
+        cache.clear();
+        cache.reset_stats();
+        
+        let sql = "SELECT * FROM users";
+        
+        // Generate hits and misses
+        cache.get_or_prepare(sql); // miss
+        cache.get_or_prepare(sql); // hit
+        cache.get_or_prepare(sql); // hit
+        cache.get_or_prepare("SELECT * FROM posts"); // miss
+        
+        let stats = cache.stats();
+        assert_eq!(stats.cached_count, 2);
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 2);
+        assert!((stats.hit_ratio() - 0.5).abs() < 0.01);
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_prepared_statement_record_execution() {
+        let cache = PreparedStatementCache::new();
+        cache.enable();
+        cache.clear();
+        
+        let sql = "SELECT * FROM users WHERE id = $1";
+        cache.get_or_prepare(sql);
+        
+        // Record some executions
+        cache.record_execution(sql, 100); // 100µs
+        cache.record_execution(sql, 200); // 200µs
+        cache.record_execution(sql, 300); // 300µs
+        
+        let stats = cache.stats();
+        assert_eq!(stats.total_executions, 3);
+        
+        // Check statement info
+        let statements = cache.cached_statements_info();
+        assert!(!statements.is_empty());
+        let stmt = &statements[0];
+        assert_eq!(stmt.execution_count, 3);
+        assert_eq!(stmt.avg_execution_time_us, 200); // (100+200+300)/3
+        
+        cache.clear();
+    }
+    
+    #[test]
+    fn test_prepared_statement_enabled_disabled() {
+        let cache = PreparedStatementCache::new();
+        cache.clear();
+        
+        // Disable cache
+        cache.disable();
+        let (_, cached) = cache.get_or_prepare("SELECT 1");
+        assert!(!cached);
+        assert_eq!(cache.len(), 0);
+        
+        // Enable cache
+        cache.enable();
+        cache.get_or_prepare("SELECT 1");
+        let (_, cached) = cache.get_or_prepare("SELECT 1");
+        assert!(cached);
+        
+        cache.clear();
+    }
+    
+    // =========================================================================
+    // CACHE KEY BUILDER TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_cache_key_builder_basic() {
+        let key = CacheKeyBuilder::new()
+            .table("users")
+            .build();
+        
+        assert!(key.contains("users"));
+    }
+    
+    #[test]
+    fn test_cache_key_builder_with_conditions() {
+        let key = CacheKeyBuilder::new()
+            .table("users")
+            .condition("active", true)
+            .condition("role", "admin")
+            .build();
+        
+        assert!(key.contains("users"));
+        assert!(key.contains("active"));
+        assert!(key.contains("role"));
+    }
+    
+    #[test]
+    fn test_cache_key_builder_with_order_and_limit() {
+        let key = CacheKeyBuilder::new()
+            .table("posts")
+            .order("created_at", "desc")
+            .limit(10)
+            .offset(20)
+            .build();
+        
+        assert!(key.contains("posts"));
+        assert!(key.contains("created_at"));
+        assert!(key.contains("desc"));
+        assert!(key.contains("10"));
+        assert!(key.contains("20"));
+    }
+    
+    #[test]
+    fn test_cache_key_builder_hash() {
+        let hash1 = CacheKeyBuilder::new()
+            .table("users")
+            .condition("id", 1)
+            .build_hash();
+        
+        let hash2 = CacheKeyBuilder::new()
+            .table("users")
+            .condition("id", 1)
+            .build_hash();
+        
+        // Same inputs should produce same hash
+        assert_eq!(hash1, hash2);
+        
+        let hash3 = CacheKeyBuilder::new()
+            .table("users")
+            .condition("id", 2)
+            .build_hash();
+        
+        // Different inputs should produce different hash
+        assert_ne!(hash1, hash3);
+    }
+    
+    #[test]
+    fn test_cache_key_builder_deterministic() {
+        // Same conditions in same order should produce same key
+        let key1 = CacheKeyBuilder::new()
+            .table("users")
+            .condition("a", 1)
+            .condition("b", 2)
+            .build();
+        
+        let key2 = CacheKeyBuilder::new()
+            .table("users")
+            .condition("a", 1)
+            .condition("b", 2)
+            .build();
+        
+        assert_eq!(key1, key2);
+    }
+    
+    // =========================================================================
+    // CACHE OPTIONS TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_cache_options_creation() {
+        let options = CacheOptions::new(Duration::from_secs(300));
+        assert_eq!(options.ttl, Duration::from_secs(300));
+        assert!(options.key.is_none());
+        assert!(options.tags.is_empty());
+    }
+    
+    #[test]
+    fn test_cache_options_with_key() {
+        let options = CacheOptions::new(Duration::from_secs(300))
+            .with_key("my_custom_key");
+        
+        assert_eq!(options.key, Some("my_custom_key".to_string()));
+    }
+    
+    #[test]
+    fn test_cache_options_with_tags() {
+        let options = CacheOptions::new(Duration::from_secs(300))
+            .with_tags(&["users", "active", "premium"]);
+        
+        assert_eq!(options.tags.len(), 3);
+        assert!(options.tags.contains(&"users".to_string()));
+        assert!(options.tags.contains(&"active".to_string()));
+        assert!(options.tags.contains(&"premium".to_string()));
+    }
+    
+    #[test]
+    fn test_cache_options_chaining() {
+        let options = CacheOptions::new(Duration::from_secs(600))
+            .with_key("featured_products")
+            .with_tags(&["products", "featured"]);
+        
+        assert_eq!(options.ttl, Duration::from_secs(600));
+        assert_eq!(options.key, Some("featured_products".to_string()));
+        assert_eq!(options.tags.len(), 2);
+    }
+    
+    // =========================================================================
+    // CACHE CONFIG TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_cache_config_default() {
+        let config = CacheConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_entries, 1000);
+        assert_eq!(config.default_ttl, Duration::from_secs(60));
+    }
+    
+    // =========================================================================
+    // CACHE STATS TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_cache_stats_hit_ratio() {
+        let stats = CacheStats {
+            entries: 100,
+            size_bytes: 1000,
+            hits: 80,
+            misses: 20,
+            evictions: 5,
+            invalidations: 2,
+        };
+        
+        assert!((stats.hit_ratio() - 0.8).abs() < 0.001);
+    }
+    
+    #[test]
+    fn test_cache_stats_hit_ratio_zero_requests() {
+        let stats = CacheStats {
+            entries: 0,
+            size_bytes: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            invalidations: 0,
+        };
+        
+        assert_eq!(stats.hit_ratio(), 0.0);
+    }
+    
+    #[test]
+    fn test_prepared_statement_stats_hit_ratio() {
+        let stats = PreparedStatementStats {
+            cached_count: 50,
+            hits: 100,
+            misses: 50,
+            total_executions: 200,
+            evictions: 0,
+        };
+        
+        assert!((stats.hit_ratio() - 0.666).abs() < 0.01);
+    }
+    
+    // =========================================================================
+    // GLOBAL CACHE TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_global_query_cache() {
+        // Test global cache singleton
+        let cache1 = QueryCache::global();
+        let cache2 = QueryCache::global();
+        
+        cache1.enable();
+        cache1.set("global_test", &42, None, "test").unwrap();
+        
+        // Both should refer to the same cache
+        let result: Option<i32> = cache2.get("global_test");
+        assert_eq!(result, Some(42));
+        
+        cache1.clear();
+    }
+    
+    #[test]
+    fn test_global_prepared_statement_cache() {
+        // Test global prepared statement cache singleton
+        let cache1 = PreparedStatementCache::global();
+        let cache2 = PreparedStatementCache::global();
+        
+        cache1.enable();
+        cache1.clear();
+        
+        let (sql1, _) = cache1.get_or_prepare("SELECT * FROM global_test");
+        let (sql2, cached) = cache2.get_or_prepare("SELECT * FROM global_test");
+        
+        assert_eq!(sql1, sql2);
+        assert!(cached);
+        
+        cache1.clear();
+    }
+    
+    // =========================================================================
+    // THREAD SAFETY TESTS
+    // =========================================================================
+    
+    #[test]
+    fn test_query_cache_thread_safety() {
+        use std::thread;
+        
+        let cache = QueryCache::new();
+        cache.enable();
+        
+        let handles: Vec<_> = (0..10).map(|i| {
+            let cache_ref = QueryCache::global();
+            thread::spawn(move || {
+                let key = format!("thread_key_{}", i);
+                cache_ref.set(&key, &i, None, "test").ok();
+                let _: Option<i32> = cache_ref.get(&key);
+            })
+        }).collect();
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        QueryCache::global().clear();
+    }
+    
+    #[test]
+    fn test_prepared_statement_cache_thread_safety() {
+        use std::thread;
+        
+        let cache = PreparedStatementCache::global();
+        cache.enable();
+        cache.clear();
+        
+        let handles: Vec<_> = (0..10).map(|i| {
+            let cache_ref = PreparedStatementCache::global();
+            thread::spawn(move || {
+                let sql = format!("SELECT * FROM table_{}", i);
+                cache_ref.get_or_prepare(&sql);
+            })
+        }).collect();
+        
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        
+        cache.clear();
     }
 }

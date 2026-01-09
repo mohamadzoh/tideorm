@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "convert_case",
  "darling",

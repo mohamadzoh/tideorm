@@ -286,6 +286,152 @@ let deleted = User::query()
     .await?;  // u64 (rows affected)
 ```
 
+### UNION Queries
+
+Combine results from multiple queries:
+
+```rust
+// UNION - combines results and removes duplicates
+let users = User::query()
+    .where_eq("active", true)
+    .union(User::query().where_eq("role", "admin"))
+    .get()
+    .await?;
+
+// UNION ALL - includes all results (faster, keeps duplicates)
+let orders = Order::query()
+    .where_eq("status", "pending")
+    .union_all(Order::query().where_eq("status", "processing"))
+    .union_all(Order::query().where_eq("status", "shipped"))
+    .order_by("created_at", Order::Desc)
+    .get()
+    .await?;
+
+// Raw UNION for complex queries
+let results = User::query()
+    .union_raw("SELECT * FROM archived_users WHERE year = 2023")
+    .get()
+    .await?;
+```
+
+### Window Functions
+
+Perform calculations across sets of rows:
+
+```rust
+use tideorm::prelude::*;
+
+// ROW_NUMBER - assign sequential numbers
+let products = Product::query()
+    .row_number("row_num", Some("category"), "price", Order::Desc)
+    .get_raw()
+    .await?;
+// SQL: ROW_NUMBER() OVER (PARTITION BY "category" ORDER BY "price" DESC) AS "row_num"
+
+// RANK - rank with gaps for ties
+let employees = Employee::query()
+    .rank("salary_rank", Some("department_id"), "salary", Order::Desc)
+    .get_raw()
+    .await?;
+
+// DENSE_RANK - rank without gaps
+let students = Student::query()
+    .dense_rank("score_rank", None, "score", Order::Desc)
+    .get_raw()
+    .await?;
+
+// Running totals with SUM window
+let sales = Sale::query()
+    .running_sum("running_total", "amount", "date", Order::Asc)
+    .get_raw()
+    .await?;
+
+// LAG - access previous row value
+let orders = Order::query()
+    .lag("prev_total", "total", 1, Some("0"), "user_id", "created_at", Order::Asc)
+    .get_raw()
+    .await?;
+
+// LEAD - access next row value
+let appointments = Appointment::query()
+    .lead("next_date", "date", 1, None, "patient_id", "date", Order::Asc)
+    .get_raw()
+    .await?;
+
+// NTILE - distribute into buckets
+let products = Product::query()
+    .ntile("price_quartile", 4, "price", Order::Asc)
+    .get_raw()
+    .await?;
+
+// Custom window function with full control
+let results = Order::query()
+    .window(
+        WindowFunction::new(WindowFunctionType::Sum("amount".to_string()), "total_sales")
+            .partition_by("region")
+            .order_by("month", Order::Asc)
+            .frame(FrameType::Rows, FrameBound::UnboundedPreceding, FrameBound::CurrentRow)
+    )
+    .get_raw()
+    .await?;
+```
+
+### Common Table Expressions (CTEs)
+
+Define temporary named result sets:
+
+```rust
+use tideorm::prelude::*;
+
+// Simple CTE
+let orders = Order::query()
+    .with_cte(CTE::new(
+        "high_value_orders",
+        "SELECT * FROM orders WHERE total > 1000".to_string()
+    ))
+    .where_raw("id IN (SELECT id FROM high_value_orders)")
+    .get()
+    .await?;
+
+// CTE from another query builder
+let active_users = User::query()
+    .where_eq("active", true)
+    .select(vec!["id", "name", "email"]);
+
+let posts = Post::query()
+    .with_query("active_users", active_users)
+    .inner_join("active_users", "posts.user_id", "active_users.id")
+    .get()
+    .await?;
+
+// CTE with column aliases
+let stats = Sale::query()
+    .with_cte_columns(
+        "daily_stats",
+        vec!["sale_date", "total_sales", "order_count"],
+        "SELECT DATE(created_at), SUM(amount), COUNT(*) FROM sales GROUP BY DATE(created_at)"
+    )
+    .where_raw("date IN (SELECT sale_date FROM daily_stats WHERE total_sales > 10000)")
+    .get()
+    .await?;
+
+// Recursive CTE for hierarchical data
+let employees = Employee::query()
+    .with_recursive_cte(
+        "org_tree",
+        vec!["id", "name", "manager_id", "level"],
+        // Base case: top-level managers
+        "SELECT id, name, manager_id, 0 FROM employees WHERE manager_id IS NULL",
+        // Recursive: employees under managers
+        "SELECT e.id, e.name, e.manager_id, t.level + 1 
+         FROM employees e 
+         INNER JOIN org_tree t ON e.manager_id = t.id"
+    )
+    .where_raw("id IN (SELECT id FROM org_tree)")
+    .get()
+    .await?;
+```
+
 ## CRUD Operations
 
 ### Create
@@ -966,6 +1112,144 @@ product.attach("thumbnail", "uploads/thumb.jpg")?;
 product.attach_many("images", vec!["img1.jpg", "img2.jpg"])?;
 product.update().await?;
 ```
+
+## Multi-Database Support
+
+TideORM automatically detects your database type and generates appropriate SQL syntax. The same code works seamlessly across PostgreSQL, MySQL, and SQLite.
+
+### Connecting to Different Databases
+
+```rust
+// PostgreSQL
+TideConfig::init()
+    .database("postgres://user:pass@localhost/mydb")
+    .connect()
+    .await?;
+
+// MySQL / MariaDB
+TideConfig::init()
+    .database("mysql://user:pass@localhost/mydb")
+    .connect()
+    .await?;
+
+// SQLite
+TideConfig::init()
+    .database("sqlite://./data.db?mode=rwc")
+    .connect()
+    .await?;
+```
+
+### Explicit Database Type
+
+```rust
+TideConfig::init()
+    .database_type(DatabaseType::MySQL)
+    .database("mysql://localhost/mydb")
+    .connect()
+    .await?;
+```
+
+### Database Feature Detection
+
+Check which features are supported by the current database:
+
+```rust
+let db_type = Database::global().backend();
+
+// Feature checks
+if db_type.supports_json() {
+    // JSON/JSONB operations available
+}
+
+if db_type.supports_arrays() {
+    // Native array operations (PostgreSQL only)
+}
+
+if db_type.supports_returning() {
+    // RETURNING clause for INSERT/UPDATE
+}
+
+if db_type.supports_upsert() {
+    // ON CONFLICT / ON DUPLICATE KEY support
+}
+
+if db_type.supports_window_functions() {
+    // OVER(), ROW_NUMBER(), etc.
+}
+
+if db_type.supports_cte() {
+    // WITH ... AS (Common Table Expressions)
+}
+
+if db_type.supports_fulltext_search() {
+    // Full-text search capabilities
+}
+```
+
+### Database-Specific JSON Operations
+
+TideORM automatically translates JSON queries to the appropriate syntax:
+
+```rust
+// This query works on all databases with JSON support
+Product::query()
+    .where_json_contains("metadata", serde_json::json!({"featured": true}))
+    .get()
+    .await?;
+```
+
+**Generated SQL by database:**
+
+| Operation | PostgreSQL | MySQL | SQLite |
+|-----------|------------|-------|--------|
+| JSON Contains | `col @> '{"key":1}'` | `JSON_CONTAINS(col, '{"key":1}')` | `json_each(col)` + subquery |
+| Key Exists | `col ? 'key'` | `JSON_CONTAINS_PATH(col, 'one', '$.key')` | `json_extract(col, '$.key') IS NOT NULL` |
+| Path Exists | `col @? '$.path'` | `JSON_CONTAINS_PATH(col, 'one', '$.path')` | `json_extract(col, '$.path') IS NOT NULL` |
+
+### Database-Specific Array Operations
+
+Array operations are fully supported on PostgreSQL. On MySQL/SQLite, arrays are stored as JSON:
+
+```rust
+// PostgreSQL native arrays
+Product::query()
+    .where_array_contains("tags", vec!["sale", "featured"])
+    .get()
+    .await?;
+```
+
+**Generated SQL:**
+
+| Operation | PostgreSQL | MySQL/SQLite |
+|-----------|------------|--------------|
+| Contains | `col @> ARRAY['a','b']` | `JSON_CONTAINS(col, '["a","b"]')` |
+| Contained By | `col <@ ARRAY['a','b']` | `JSON_CONTAINS('["a","b"]', col)` |
+| Overlaps | `col && ARRAY['a','b']` | `JSON_OVERLAPS(col, '["a","b"]')` (MySQL 8+) |
+
+### Database-Specific Optimizations
+
+TideORM applies optimizations based on your database:
+
+| Feature | PostgreSQL | MySQL | SQLite |
+|---------|------------|-------|--------|
+| Optimal Batch Size | 1000 | 1000 | 500 |
+| Parameter Style | `$1, $2, ...` | `?, ?, ...` | `?, ?, ...` |
+| Identifier Quoting | `"column"` | `` `column` `` | `"column"` |
+| Float Casting | `FLOAT8` | `DOUBLE` | `REAL` |
+
+### Feature Compatibility Matrix
+
+| Feature | PostgreSQL | MySQL | SQLite |
+|---------|:----------:|:-----:|:------:|
+| JSON/JSONB | ✅ | ✅ | ✅ (JSON1) |
+| Native JSON Operators | ✅ | ✅ | ❌ |
+| Native Arrays | ✅ | ❌ | ❌ |
+| RETURNING Clause | ✅ | ❌ | ✅ (3.35+) |
+| Upsert | ✅ | ✅ | ✅ |
+| Window Functions | ✅ | ✅ (8.0+) | ✅ (3.25+) |
+| CTEs | ✅ | ✅ (8.0+) | ✅ (3.8+) |
+| Full-Text Search | ✅ | ✅ | ✅ (FTS5) |
+| Schemas | ✅ | ✅ | ❌ |
 
 ## Raw SQL Queries
 

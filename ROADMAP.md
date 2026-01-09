@@ -2,7 +2,7 @@
 
 This document outlines the planned features and improvements for TideORM.
 
-## Current Version: 0.1.0
+## Current Version: 0.2.0
 
 ### ✅ Completed Features
 
@@ -20,6 +20,10 @@ This document outlines the planned features and improvements for TideORM.
 - [x] `#[has_one]` macro
 - [x] `#[has_many]` macro
 - [x] Eager loading relations
+- [x] Many-to-many relationships (`#[has_many_through]`)
+- [x] Polymorphic relations
+- [x] Nested eager loading
+- [x] Relation constraints
 
 #### Query Builder
 - [x] WHERE conditions (eq, not, like, in, null, gt, lt, gte, lte)
@@ -30,12 +34,23 @@ This document outlines the planned features and improvements for TideORM.
 - [x] GROUP BY and HAVING
 - [x] Scopes for reusable query conditions
 - [x] Conditional query building (`when`, `when_some`)
+- [x] Subqueries
+- [x] UNION queries
+- [x] Window functions
+- [x] CTEs (Common Table Expressions)
+- [x] Raw expressions in queries
 
 #### PostgreSQL Features
 - [x] JSON/JSONB column support
 - [x] Array column support
 - [x] JSON queries (`where_json_contains`, `where_json_key_exists`)
 - [x] Array queries (`where_array_contains`, `where_array_overlaps`)
+
+#### Database Support
+- [x] PostgreSQL full support
+- [x] MySQL/MariaDB full support
+- [x] SQLite full support
+- [x] Database-specific optimizations
 
 #### Migrations
 - [x] Migration trait and system
@@ -51,6 +66,12 @@ This document outlines the planned features and improvements for TideORM.
 - [x] Index definitions (`#[index]`, `#[unique_index]`)
 - [x] Database introspection
 
+#### Performance
+- [x] Query caching (LRU, FIFO, TTL strategies)
+- [x] Prepared statement caching
+- [x] Batch update operations
+- [x] Bulk delete with conditions
+
 #### Other Features
 - [x] Transactions
 - [x] Callbacks (before/after save, create, update, delete)
@@ -58,34 +79,11 @@ This document outlines the planned features and improvements for TideORM.
 - [x] Raw SQL queries
 - [x] JSON serialization with hidden attributes
 - [x] Upsert (insert_or_update, on_conflict)
-
----
-
-## Version 0.2.0 (Planned)
-
-### Database Support
-- [ ] MySQL/MariaDB full support
-- [ ] SQLite full support
-- [ ] Database-specific optimizations
-
-### Query Builder Enhancements
-- [x] Subqueries
-- [ ] UNION queries
-- [ ] Window functions
-- [ ] CTEs (Common Table Expressions)
-- [x] Raw expressions in queries
-
-### Relations
-- [ ] Many-to-many relationships (`#[has_many_through]`)
-- [ ] Polymorphic relations
-- [ ] Nested eager loading
-- [ ] Relation constraints
-
-### Performance
-- [ ] Query caching
-- [ ] Prepared statement caching
-- [ ] Batch update operations
-- [x] Bulk delete with conditions
+- [x] Attribute casting
+- [x] Better error messages
+- [x] Query logging and debugging
+- [x] Performance profiling
+- [x] Documentation improvements
 
 ---
 
@@ -95,7 +93,6 @@ This document outlines the planned features and improvements for TideORM.
 - [ ] Database seeding system
 - [ ] Model factories for testing
 - [ ] Database events/observers
-- [ ] Attribute casting
 - [ ] Model validation
 
 ### CLI Tool

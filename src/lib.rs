@@ -542,6 +542,9 @@ pub mod logging;
 /// Performance profiling
 pub mod profiling;
 
+/// Query caching and prepared statement caching
+pub mod cache;
+
 /// Re-exports for convenience
 pub mod prelude;
 
@@ -569,6 +572,9 @@ pub use logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, QueryStats, 
 
 // Performance profiling
 pub use profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
+
+// Query and statement caching
+pub use cache::{QueryCache, PreparedStatementCache, CacheConfig, CacheStrategy, CacheStats, PreparedStatementStats, PreparedStatementConfig, CacheKeyBuilder, CacheOptions, CachedStatementInfo, CacheWarmer};
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;
