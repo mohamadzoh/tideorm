@@ -74,6 +74,30 @@ mod query_builder_unit_tests {
             _ => panic!("Expected None variant"),
         }
     }
+    
+    #[test]
+    fn test_condition_value_subquery() {
+        let val = ConditionValue::Subquery("SELECT id FROM users WHERE active = true".to_string());
+        match val {
+            ConditionValue::Subquery(sql) => {
+                assert!(sql.contains("SELECT"));
+                assert!(sql.contains("users"));
+            },
+            _ => panic!("Expected Subquery variant"),
+        }
+    }
+    
+    #[test]
+    fn test_condition_value_raw_expr() {
+        let val = ConditionValue::RawExpr("created_at > NOW() - INTERVAL '30 days'".to_string());
+        match val {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("created_at"));
+                assert!(sql.contains("INTERVAL"));
+            },
+            _ => panic!("Expected RawExpr variant"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +120,10 @@ mod operator_tests {
         let _ = Operator::IsNull;
         let _ = Operator::IsNotNull;
         let _ = Operator::Between;
+        // New subquery and raw operators
+        let _ = Operator::SubqueryIn;
+        let _ = Operator::SubqueryNotIn;
+        let _ = Operator::Raw;
     }
 }
 
@@ -270,5 +298,262 @@ mod where_clause_tests {
         };
         
         assert_eq!(condition.column, "email");
+    }
+    
+    #[test]
+    fn test_subquery_where_condition() {
+        let condition = WhereCondition {
+            column: "user_id".to_string(),
+            operator: tideorm::query::Operator::SubqueryIn,
+            value: tideorm::query::ConditionValue::Subquery(
+                "SELECT id FROM active_users".to_string()
+            ),
+        };
+        
+        assert_eq!(condition.column, "user_id");
+        match condition.operator {
+            tideorm::query::Operator::SubqueryIn => {},
+            _ => panic!("Expected SubqueryIn operator"),
+        }
+    }
+    
+    #[test]
+    fn test_raw_where_condition() {
+        let condition = WhereCondition {
+            column: String::new(), // Empty for pure raw conditions
+            operator: tideorm::query::Operator::Raw,
+            value: tideorm::query::ConditionValue::RawExpr(
+                "EXISTS (SELECT 1 FROM posts WHERE posts.user_id = users.id)".to_string()
+            ),
+        };
+        
+        assert!(condition.column.is_empty());
+        match condition.operator {
+            tideorm::query::Operator::Raw => {},
+            _ => panic!("Expected Raw operator"),
+        }
+    }
+}
+
+// ============================================================================
+// Subquery and Raw Expression Tests
+// ============================================================================
+
+#[cfg(test)]
+mod subquery_tests {
+    use tideorm::query::{ConditionValue, Operator, WhereCondition};
+    
+    #[test]
+    fn test_subquery_in_condition_value() {
+        let subquery_sql = "SELECT user_id FROM orders WHERE total > 100".to_string();
+        let val = ConditionValue::Subquery(subquery_sql.clone());
+        
+        match val {
+            ConditionValue::Subquery(sql) => {
+                assert_eq!(sql, subquery_sql);
+            },
+            _ => panic!("Expected Subquery variant"),
+        }
+    }
+    
+    #[test]
+    fn test_subquery_not_in_operator() {
+        let condition = WhereCondition {
+            column: "id".to_string(),
+            operator: Operator::SubqueryNotIn,
+            value: ConditionValue::Subquery("SELECT blocked_id FROM blocked_users".to_string()),
+        };
+        
+        match condition.operator {
+            Operator::SubqueryNotIn => {},
+            _ => panic!("Expected SubqueryNotIn operator"),
+        }
+    }
+    
+    #[test]
+    fn test_exists_as_raw_condition() {
+        let exists_sql = "EXISTS (SELECT 1 FROM comments WHERE comments.post_id = posts.id)";
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(exists_sql.to_string()),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("EXISTS"));
+                assert!(sql.contains("comments"));
+            },
+            _ => panic!("Expected RawExpr variant"),
+        }
+    }
+    
+    #[test]
+    fn test_not_exists_as_raw_condition() {
+        let not_exists_sql = "NOT EXISTS (SELECT 1 FROM deletions WHERE deletions.item_id = items.id)";
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(not_exists_sql.to_string()),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("NOT EXISTS"));
+            },
+            _ => panic!("Expected RawExpr variant"),
+        }
+    }
+}
+
+// ============================================================================
+// Raw Expression Tests
+// ============================================================================
+
+#[cfg(test)]
+mod raw_expression_tests {
+    use tideorm::query::{ConditionValue, Operator, WhereCondition};
+    
+    #[test]
+    fn test_raw_date_expression() {
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(
+                "created_at > NOW() - INTERVAL '30 days'".to_string()
+            ),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("NOW()"));
+                assert!(sql.contains("INTERVAL"));
+            },
+            _ => panic!("Expected RawExpr"),
+        }
+    }
+    
+    #[test]
+    fn test_raw_column_comparison() {
+        let condition = WhereCondition {
+            column: "updated_at".to_string(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr("> created_at".to_string()),
+        };
+        
+        assert_eq!(condition.column, "updated_at");
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("created_at"));
+            },
+            _ => panic!("Expected RawExpr"),
+        }
+    }
+    
+    #[test]
+    fn test_raw_function_expression() {
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(
+                "LOWER(email) = LOWER('Test@Example.COM')".to_string()
+            ),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("LOWER"));
+            },
+            _ => panic!("Expected RawExpr"),
+        }
+    }
+    
+    #[test]
+    fn test_raw_json_expression() {
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(
+                "metadata->>'status' = 'active'".to_string()
+            ),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("->>"));
+                assert!(sql.contains("metadata"));
+            },
+            _ => panic!("Expected RawExpr"),
+        }
+    }
+}
+
+// ============================================================================
+// Bulk Delete Tests
+// ============================================================================
+
+#[cfg(test)]
+mod bulk_delete_tests {
+    use tideorm::query::{ConditionValue, Operator, WhereCondition};
+    
+    #[test]
+    fn test_delete_conditions_can_be_built() {
+        // Test that we can build conditions suitable for bulk delete
+        let conditions = vec![
+            WhereCondition {
+                column: "status".to_string(),
+                operator: Operator::Eq,
+                value: ConditionValue::Single(serde_json::json!("inactive")),
+            },
+            WhereCondition {
+                column: "last_login".to_string(),
+                operator: Operator::Lt,
+                value: ConditionValue::Single(serde_json::json!("2024-01-01")),
+            },
+        ];
+        
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[0].column, "status");
+        assert_eq!(conditions[1].column, "last_login");
+    }
+    
+    #[test]
+    fn test_delete_with_subquery_condition() {
+        // Test building a delete condition that uses a subquery
+        let condition = WhereCondition {
+            column: "post_id".to_string(),
+            operator: Operator::SubqueryIn,
+            value: ConditionValue::Subquery(
+                "SELECT id FROM posts WHERE deleted = true".to_string()
+            ),
+        };
+        
+        assert_eq!(condition.column, "post_id");
+        match &condition.value {
+            ConditionValue::Subquery(sql) => {
+                assert!(sql.contains("deleted = true"));
+            },
+            _ => panic!("Expected Subquery"),
+        }
+    }
+    
+    #[test]
+    fn test_delete_with_raw_condition() {
+        // Test building a delete condition with raw SQL
+        let condition = WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(
+                "expires_at < NOW() AND NOT is_permanent".to_string()
+            ),
+        };
+        
+        match &condition.value {
+            ConditionValue::RawExpr(sql) => {
+                assert!(sql.contains("expires_at"));
+                assert!(sql.contains("is_permanent"));
+            },
+            _ => panic!("Expected RawExpr"),
+        }
     }
 }

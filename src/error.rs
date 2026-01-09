@@ -2,6 +2,37 @@
 //!
 //! This module provides user-friendly error types that NEVER expose SeaORM internals.
 //! All database errors are translated into these types before reaching user code.
+//!
+//! ## Error Handling
+//!
+//! TideORM provides detailed, actionable error messages to help you debug issues quickly:
+//!
+//! ```rust,ignore
+//! use tideorm::prelude::*;
+//!
+//! // Errors include helpful context
+//! match User::find(999).await {
+//!     Ok(user) => println!("Found: {}", user.name),
+//!     Err(e) => {
+//!         eprintln!("Error: {}", e);
+//!         eprintln!("Suggestion: {}", e.suggestion());
+//!         if let Some(ctx) = e.context() {
+//!             eprintln!("Table: {:?}", ctx.table);
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## Error Types
+//!
+//! | Error Type | Description | Common Causes |
+//! |------------|-------------|---------------|
+//! | `NotFound` | Record doesn't exist | Wrong ID, deleted record |
+//! | `Connection` | Can't connect to database | Wrong URL, DB down |
+//! | `Query` | SQL execution failed | Syntax error, constraint violation |
+//! | `Validation` | Data validation failed | Invalid input |
+//! | `Transaction` | Transaction failed | Deadlock, timeout |
+//! | `Configuration` | Config issue | Missing settings |
 
 use std::fmt;
 use thiserror::Error;
@@ -223,6 +254,17 @@ impl Error {
         }
     }
     
+    /// Create an invalid query error (semantic query issues, not DB errors)
+    /// 
+    /// Use this for errors like using soft_delete() on a non-soft-delete model,
+    /// or other query builder usage errors.
+    pub fn invalid_query(message: impl Into<String>) -> Self {
+        Self::Query {
+            message: message.into(),
+            context: None,
+        }
+    }
+    
     /// Get the error context if available
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
@@ -259,6 +301,252 @@ impl Error {
     /// Check if this is a Query error
     pub fn is_query_error(&self) -> bool {
         matches!(self, Self::Query { .. })
+    }
+    
+    /// Check if this is a Transaction error
+    pub fn is_transaction_error(&self) -> bool {
+        matches!(self, Self::Transaction { .. })
+    }
+    
+    /// Check if this is a Configuration error
+    pub fn is_configuration_error(&self) -> bool {
+        matches!(self, Self::Configuration { .. })
+    }
+    
+    /// Get a helpful suggestion for fixing this error
+    ///
+    /// Returns actionable advice based on the error type and message.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// match User::find(999).await {
+    ///     Err(e) => {
+    ///         eprintln!("Error: {}", e);
+    ///         eprintln!("Suggestion: {}", e.suggestion());
+    ///     }
+    ///     Ok(user) => println!("Found user"),
+    /// }
+    /// ```
+    pub fn suggestion(&self) -> String {
+        match self {
+            Self::NotFound { message, .. } => {
+                if message.contains("find") || message.contains("Find") {
+                    "Check that the ID exists. Use `Model::exists(id).await?` to verify before find.".to_string()
+                } else {
+                    "Verify the record exists and hasn't been soft-deleted. Use `.with_trashed()` to include deleted records.".to_string()
+                }
+            }
+            Self::Connection { message } => {
+                if message.contains("refused") || message.contains("Refused") {
+                    "Database server is not running or not accepting connections. Check that:\n\
+                     1. The database server is running\n\
+                     2. The host and port are correct\n\
+                     3. Firewall allows the connection".to_string()
+                } else if message.contains("password") || message.contains("authentication") {
+                    "Check your database credentials in the connection URL.".to_string()
+                } else if message.contains("does not exist") || message.contains("unknown database") {
+                    "The database doesn't exist. Create it first: CREATE DATABASE dbname;".to_string()
+                } else if message.contains("timeout") || message.contains("Timeout") {
+                    "Connection timed out. Check network connectivity and increase `connect_timeout` if needed.".to_string()
+                } else if message.contains("pool") || message.contains("Pool") {
+                    "Connection pool exhausted. Consider:\n\
+                     1. Increasing `max_connections` in TideConfig\n\
+                     2. Reducing connection hold time\n\
+                     3. Using `acquire_timeout` to wait for connections".to_string()
+                } else {
+                    "Verify your database URL format: postgres://user:pass@host:5432/database".to_string()
+                }
+            }
+            Self::Query { message, context } => {
+                let base_suggestion = if message.contains("syntax") || message.contains("Syntax") {
+                    "SQL syntax error. Check column names and query structure."
+                } else if message.contains("duplicate") || message.contains("unique") {
+                    "Duplicate key violation. The value already exists in a unique column."
+                } else if message.contains("foreign key") || message.contains("violates foreign key") {
+                    "Foreign key constraint violation. The referenced record doesn't exist or can't be deleted."
+                } else if message.contains("null") || message.contains("NOT NULL") {
+                    "NULL value not allowed. Ensure all required fields are provided."
+                } else if message.contains("column") && message.contains("does not exist") {
+                    "Column doesn't exist. Check spelling and run migrations if needed."
+                } else if message.contains("table") && message.contains("does not exist") {
+                    "Table doesn't exist. Run migrations: `TideConfig::init().run_migrations(true).connect().await?`"
+                } else if message.contains("permission") || message.contains("denied") {
+                    "Permission denied. Check database user privileges."
+                } else if message.contains("deadlock") {
+                    "Deadlock detected. Retry the transaction or review query ordering."
+                } else {
+                    "Check the SQL query and ensure all referenced columns/tables exist."
+                };
+                
+                if let Some(ctx) = context {
+                    if let Some(ref query) = ctx.query {
+                        format!("{}\n\nQuery: {}", base_suggestion, query)
+                    } else {
+                        base_suggestion.to_string()
+                    }
+                } else {
+                    base_suggestion.to_string()
+                }
+            }
+            Self::Validation { field, message: _ } => {
+                format!("Validate the '{}' field before saving. Use Model::validate() for custom validation.", field)
+            }
+            Self::Conversion { message } => {
+                if message.contains("type") {
+                    "Type mismatch. Check that Rust types match database column types.".to_string()
+                } else {
+                    "Data conversion failed. Verify the data format matches expected type.".to_string()
+                }
+            }
+            Self::Transaction { message } => {
+                if message.contains("timeout") {
+                    "Transaction timed out. Split into smaller transactions or increase timeout.".to_string()
+                } else if message.contains("rollback") || message.contains("aborted") {
+                    "Transaction was rolled back. Check for errors in transaction body.".to_string()
+                } else {
+                    "Transaction failed. Ensure all operations in the transaction are valid.".to_string()
+                }
+            }
+            Self::Configuration { message } => {
+                if message.contains("initialized") || message.contains("not set") {
+                    "Database not initialized. Call `TideConfig::init().database(url).connect().await?` first.".to_string()
+                } else if message.contains("already") {
+                    "Configuration already set. TideConfig::init() should only be called once.".to_string()
+                } else {
+                    format!("Check your TideConfig settings: {}", message)
+                }
+            }
+            Self::Internal { .. } => {
+                "Internal error. Please report this issue at https://github.com/mohamadzoh/tideorm/issues".to_string()
+            }
+        }
+    }
+    
+    /// Get the error code for programmatic handling
+    ///
+    /// Returns a unique code for each error type that can be used
+    /// for error handling, logging, or API responses.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let error_response = json!({
+    ///     "error": {
+    ///         "code": e.code(),
+    ///         "message": e.to_string(),
+    ///         "suggestion": e.suggestion(),
+    ///     }
+    /// });
+    /// ```
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotFound { .. } => "TIDE_NOT_FOUND",
+            Self::Connection { .. } => "TIDE_CONNECTION",
+            Self::Query { .. } => "TIDE_QUERY",
+            Self::Validation { .. } => "TIDE_VALIDATION",
+            Self::Conversion { .. } => "TIDE_CONVERSION",
+            Self::Transaction { .. } => "TIDE_TRANSACTION",
+            Self::Configuration { .. } => "TIDE_CONFIG",
+            Self::Internal { .. } => "TIDE_INTERNAL",
+        }
+    }
+    
+    /// Get the HTTP status code appropriate for this error
+    ///
+    /// Useful when building REST APIs.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // In an Actix-web handler
+    /// match result {
+    ///     Ok(data) => HttpResponse::Ok().json(data),
+    ///     Err(e) => HttpResponse::build(
+    ///         actix_web::http::StatusCode::from_u16(e.http_status()).unwrap()
+    ///     ).json(json!({"error": e.to_string()})),
+    /// }
+    /// ```
+    pub fn http_status(&self) -> u16 {
+        match self {
+            Self::NotFound { .. } => 404,
+            Self::Connection { .. } => 503,  // Service Unavailable
+            Self::Query { .. } => 400,       // Bad Request
+            Self::Validation { .. } => 422,  // Unprocessable Entity
+            Self::Conversion { .. } => 400,
+            Self::Transaction { .. } => 409, // Conflict
+            Self::Configuration { .. } => 500,
+            Self::Internal { .. } => 500,
+        }
+    }
+    
+    /// Check if this error is retryable
+    ///
+    /// Some errors (like connection timeouts or deadlocks) may succeed on retry.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut retries = 3;
+    /// loop {
+    ///     match operation().await {
+    ///         Ok(result) => return Ok(result),
+    ///         Err(e) if e.is_retryable() && retries > 0 => {
+    ///             retries -= 1;
+    ///             tokio::time::sleep(Duration::from_millis(100)).await;
+    ///             continue;
+    ///         }
+    ///         Err(e) => return Err(e),
+    ///     }
+    /// }
+    /// ```
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Connection { message } => {
+                message.contains("timeout") || 
+                message.contains("pool") ||
+                message.contains("refused")
+            }
+            Self::Query { message, .. } => {
+                message.contains("deadlock") ||
+                message.contains("lock") ||
+                message.contains("timeout")
+            }
+            Self::Transaction { message } => {
+                message.contains("deadlock") ||
+                message.contains("timeout") ||
+                message.contains("serialization")
+            }
+            _ => false,
+        }
+    }
+    
+    /// Format error for logging with full details
+    ///
+    /// Includes error type, message, context, and suggestion.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// tracing::error!("{}", e.log_format());
+    /// ```
+    pub fn log_format(&self) -> String {
+        let mut output = format!("[{}] {}", self.code(), self);
+        
+        if let Some(ctx) = self.context() {
+            if let Some(ref table) = ctx.table {
+                output.push_str(&format!("\n  Table: {}", table));
+            }
+            if let Some(ref column) = ctx.column {
+                output.push_str(&format!("\n  Column: {}", column));
+            }
+            if let Some(ref query) = ctx.query {
+                output.push_str(&format!("\n  Query: {}", query));
+            }
+        }
+        
+        output.push_str(&format!("\n  Suggestion: {}", self.suggestion()));
+        output
     }
 }
 
@@ -307,5 +595,137 @@ impl fmt::Display for ValidationErrors {
             write!(f, "{}: {}", field, message)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_error_suggestions() {
+        // Test NotFound suggestion
+        let err = Error::not_found("User with ID 123 not found");
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains("verify") || suggestion.contains("exists") || suggestion.contains("ID") || suggestion.contains("record"));
+        
+        // Test Connection suggestion for refused
+        let err = Error::connection("Connection refused");
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains("running") || suggestion.contains("server"));
+        
+        // Test Query suggestion for duplicate
+        let err = Error::query("duplicate key value violates unique constraint");
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains("Duplicate") || suggestion.contains("unique"));
+        
+        // Test Query suggestion for foreign key
+        let err = Error::query("violates foreign key constraint");
+        let suggestion = err.suggestion();
+        assert!(suggestion.contains("Foreign key") || suggestion.contains("foreign"));
+    }
+    
+    #[test]
+    fn test_error_codes() {
+        assert_eq!(Error::not_found("User not found").code(), "TIDE_NOT_FOUND");
+        assert_eq!(Error::connection("test").code(), "TIDE_CONNECTION");
+        assert_eq!(Error::query("test").code(), "TIDE_QUERY");
+        assert_eq!(Error::validation("field", "message").code(), "TIDE_VALIDATION");
+        assert_eq!(Error::conversion("test").code(), "TIDE_CONVERSION");
+        assert_eq!(Error::transaction("test").code(), "TIDE_TRANSACTION");
+        assert_eq!(Error::configuration("test").code(), "TIDE_CONFIG");
+        assert_eq!(Error::internal("test").code(), "TIDE_INTERNAL");
+    }
+    
+    #[test]
+    fn test_http_status() {
+        assert_eq!(Error::not_found("User not found").http_status(), 404);
+        assert_eq!(Error::connection("test").http_status(), 503);
+        assert_eq!(Error::query("test").http_status(), 400);
+        assert_eq!(Error::validation("field", "message").http_status(), 422);
+        assert_eq!(Error::conversion("test").http_status(), 400);
+        assert_eq!(Error::transaction("test").http_status(), 409);
+        assert_eq!(Error::configuration("test").http_status(), 500);
+        assert_eq!(Error::internal("test").http_status(), 500);
+    }
+    
+    #[test]
+    fn test_is_retryable() {
+        // Connection errors with timeout should be retryable
+        let err = Error::connection("Connection timeout");
+        assert!(err.is_retryable());
+        
+        // Connection errors with pool should be retryable
+        let err = Error::connection("connection pool exhausted");
+        assert!(err.is_retryable());
+        
+        // Query errors with deadlock should be retryable
+        let err = Error::query("deadlock detected");
+        assert!(err.is_retryable());
+        
+        // Regular query errors should not be retryable
+        let err = Error::query("syntax error");
+        assert!(!err.is_retryable());
+        
+        // Not found is not retryable
+        let err = Error::not_found("User not found");
+        assert!(!err.is_retryable());
+    }
+    
+    #[test]
+    fn test_log_format() {
+        let err = Error::query_with_context(
+            "syntax error at position 10",
+            ErrorContext::new().table("users").query("SELECT * FROM users WHERE")
+        );
+        
+        let log = err.log_format();
+        assert!(log.contains("TIDE_QUERY"));
+        assert!(log.contains("syntax error"));
+        assert!(log.contains("Table: users"));
+        assert!(log.contains("Suggestion:"));
+    }
+    
+    #[test]
+    fn test_error_context() {
+        let ctx = ErrorContext::new()
+            .table("users")
+            .column("email")
+            .query("SELECT * FROM users");
+        
+        assert_eq!(ctx.table, Some("users".to_string()));
+        assert_eq!(ctx.column, Some("email".to_string()));
+        assert_eq!(ctx.query, Some("SELECT * FROM users".to_string()));
+    }
+    
+    #[test]
+    fn test_validation_errors() {
+        let mut errors = ValidationErrors::new();
+        assert!(errors.is_empty());
+        
+        errors.add("email", "Invalid email format");
+        errors.add("name", "Name is required");
+        
+        assert!(!errors.is_empty());
+        assert_eq!(errors.errors().len(), 2);
+        
+        let display = format!("{}", errors);
+        assert!(display.contains("email"));
+        assert!(display.contains("name"));
+    }
+    
+    #[test]
+    fn test_error_checks() {
+        let err = Error::not_found("User not found");
+        assert!(err.is_not_found());
+        assert!(!err.is_connection_error());
+        
+        let err = Error::connection("test");
+        assert!(err.is_connection_error());
+        assert!(!err.is_not_found());
+        
+        let err = Error::query("test");
+        assert!(err.is_query_error());
+        assert!(!err.is_not_found());
     }
 }

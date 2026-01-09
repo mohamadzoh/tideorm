@@ -18,7 +18,7 @@ default = ["postgres", "runtime-tokio"]
 postgres = ["sea-orm/sqlx-postgres"]
 mysql = ["sea-orm/sqlx-mysql"]
 sqlite = ["sea-orm/sqlx-sqlite"]
-runtime-tokio = ["sea-orm/runtime-tokio-rustls", "tokio/rt-multi-thread"]
+runtime-tokio = ["sea-orm/runtime-tokio-rustls", "dep:tokio"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 
 [dependencies]
@@ -46,6 +46,7 @@ tideorm-macros = { version = "0.1.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12"
+lazy_static = "1.5"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util", "macros"] }

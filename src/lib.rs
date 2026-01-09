@@ -67,6 +67,51 @@
 //! - **Async First** - Built for async/await from the ground up
 //! - **Database Agnostic** - PostgreSQL, MySQL, SQLite support
 //! - **Zero SeaORM Exposure** - SeaORM is an internal implementation detail
+//! - **Query Logging & Debugging** - Built-in query logging with timing and slow query detection
+//! - **Performance Profiling** - Query analysis and optimization suggestions
+//! - **Helpful Error Messages** - Clear errors with suggestions for fixes
+//!
+//! ## Query Logging
+//!
+//! Enable query logging for debugging:
+//!
+//! ```rust,ignore
+//! use tideorm::prelude::*;
+//!
+//! // Enable via environment variable
+//! // TIDE_LOG_QUERIES=true cargo run
+//!
+//! // Or enable programmatically
+//! QueryLogger::global()
+//!     .set_level(LogLevel::Debug)
+//!     .set_slow_query_threshold_ms(100)
+//!     .enable();
+//!
+//! // Debug a specific query
+//! let debug_info = User::query()
+//!     .where_eq("active", true)
+//!     .where_gt("age", 18)
+//!     .debug();
+//! println!("{}", debug_info);
+//! ```
+//!
+//! ## Performance Profiling
+//!
+//! Profile query performance:
+//!
+//! ```rust,ignore
+//! use tideorm::prelude::*;
+//!
+//! // Start profiling
+//! let profiler = Profiler::start();
+//!
+//! // Execute queries
+//! let users = User::all().await?;
+//!
+//! // Get report
+//! let report = profiler.stop();
+//! println!("{}", report);
+//! ```
 //!
 //! ## Model Definition
 //!
@@ -491,6 +536,12 @@ pub mod config;
 /// Database migrations
 pub mod migration;
 
+/// Query logging and debugging
+pub mod logging;
+
+/// Performance profiling
+pub mod profiling;
+
 /// Re-exports for convenience
 pub mod prelude;
 
@@ -512,6 +563,12 @@ pub use attachments::{HasAttachments, FileAttachment, FilesData, AttachmentError
 pub use translations::{HasTranslations, TranslationsData, FieldTranslations, TranslationInput, TranslationError, ApplyTranslations};
 pub use schema::SchemaWriter;
 pub use migration::{Migration, Migrator, Schema, ColumnType};
+
+// Query logging and debugging
+pub use logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, QueryStats, QueryDebugInfo, QueryOperation};
+
+// Performance profiling
+pub use profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;

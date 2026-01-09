@@ -38,6 +38,12 @@ pub use crate::attachments::{HasAttachments, FileAttachment, FilesData, Attachme
 // Translations
 pub use crate::translations::{HasTranslations, TranslationsData, FieldTranslations, TranslationInput, TranslationError, ApplyTranslations};
 
+// Query logging and debugging
+pub use crate::logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, QueryStats, QueryDebugInfo, QueryOperation};
+
+// Performance profiling
+pub use crate::profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
+
 // Derive macro
 pub use tideorm_macros::Model;
 

@@ -47,11 +47,11 @@
 
 use std::marker::PhantomData;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::internal::{
     EntityTrait, QueryFilter, QueryOrder, QuerySelect, Condition, 
-    Expr, translate_error, FromQueryResult, Asterisk,
+    Expr, translate_error, FromQueryResult, Asterisk, ConnectionTrait, Statement, DbBackend,
 };
 
 /// Sort order for queries
@@ -124,6 +124,12 @@ pub enum Operator {
     ArrayContainsAny,
     /// Array contains all elements (&< with ALL)
     ArrayContainsAll,
+    /// Subquery IN
+    SubqueryIn,
+    /// Subquery NOT IN
+    SubqueryNotIn,
+    /// Raw expression
+    Raw,
 }
 
 /// A single where condition
@@ -149,6 +155,10 @@ pub enum ConditionValue {
     Range(serde_json::Value, serde_json::Value),
     /// No value (for IS NULL, IS NOT NULL)
     None,
+    /// Subquery SQL string
+    Subquery(String),
+    /// Raw SQL expression
+    RawExpr(String),
 }
 
 /// Type of JOIN operation
@@ -228,6 +238,7 @@ pub struct QueryBuilder<M: Model> {
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_columns: Option<Vec<String>>,
+    raw_select_expressions: Vec<String>,
     include_trashed: bool,
     only_trashed: bool,
     joins: Vec<JoinClause>,
@@ -245,6 +256,7 @@ impl<M: Model> QueryBuilder<M> {
             limit_value: None,
             offset_value: None,
             select_columns: None,
+            raw_select_expressions: Vec::new(),
             include_trashed: false,
             only_trashed: false,
             joins: Vec::new(),
@@ -378,6 +390,225 @@ impl<M: Model> QueryBuilder<M> {
             operator: Operator::NotIn,
             value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
         });
+        self
+    }
+    
+    // =========================================================================
+    // SUBQUERIES
+    // =========================================================================
+    
+    /// Add a WHERE IN (subquery) condition
+    ///
+    /// Use another query builder as a subquery for the IN clause.
+    /// The subquery should select a single column that matches the type of the column.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find all users who have posted in the last 30 days
+    /// let active_users = User::query()
+    ///     .where_in_subquery("id", 
+    ///         Post::query()
+    ///             .select(vec!["user_id"])
+    ///             .where_gte("created_at", thirty_days_ago)
+    ///     )
+    ///     .get()
+    ///     .await?;
+    ///
+    /// // Find users not in any team
+    /// let solo_users = User::query()
+    ///     .where_not_in_subquery("id",
+    ///         TeamMember::query()
+    ///             .select(vec!["user_id"])
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_in_subquery<N: Model>(mut self, column: &str, subquery: QueryBuilder<N>) -> Self {
+        let subquery_sql = subquery.to_subquery_sql();
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::SubqueryIn,
+            value: ConditionValue::Subquery(subquery_sql),
+        });
+        self
+    }
+    
+    /// Add a WHERE NOT IN (subquery) condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users who haven't ordered anything
+    /// let inactive_users = User::query()
+    ///     .where_not_in_subquery("id",
+    ///         Order::query().select(vec!["user_id"])
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_not_in_subquery<N: Model>(mut self, column: &str, subquery: QueryBuilder<N>) -> Self {
+        let subquery_sql = subquery.to_subquery_sql();
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::SubqueryNotIn,
+            value: ConditionValue::Subquery(subquery_sql),
+        });
+        self
+    }
+    
+    /// Add a WHERE EXISTS (subquery) condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users who have at least one post
+    /// let users_with_posts = User::query()
+    ///     .where_exists(
+    ///         Post::query().where_raw("posts.user_id = users.id")
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
+        let subquery_sql = subquery.to_subquery_sql();
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(format!("EXISTS ({})", subquery_sql)),
+        });
+        self
+    }
+    
+    /// Add a WHERE NOT EXISTS (subquery) condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users without any posts
+    /// let users_without_posts = User::query()
+    ///     .where_not_exists(
+    ///         Post::query().where_raw("posts.user_id = users.id")
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_not_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
+        let subquery_sql = subquery.to_subquery_sql();
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(format!("NOT EXISTS ({})", subquery_sql)),
+        });
+        self
+    }
+    
+    /// Convert this query builder to a subquery SQL string
+    ///
+    /// Used internally for subquery conditions.
+    pub fn to_subquery_sql(&self) -> String {
+        self.build_select_sql()
+    }
+    
+    // =========================================================================
+    // RAW EXPRESSIONS
+    // =========================================================================
+    
+    /// Add a raw WHERE condition
+    ///
+    /// Use this when you need complex SQL conditions that can't be expressed
+    /// with the standard query builder methods.
+    ///
+    /// ⚠️ **Warning**: Raw SQL is not escaped. Only use with trusted input.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Complex date calculation
+    /// let users = User::query()
+    ///     .where_raw("created_at > NOW() - INTERVAL '30 days'")
+    ///     .get()
+    ///     .await?;
+    ///
+    /// // Subquery in raw form
+    /// let users = User::query()
+    ///     .where_raw("id IN (SELECT user_id FROM posts WHERE published = true)")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_raw(mut self, raw_sql: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(raw_sql.to_string()),
+        });
+        self
+    }
+    
+    /// Add a raw WHERE condition with a column comparison
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Custom comparison
+    /// let users = User::query()
+    ///     .where_column_raw("email", "LIKE '%' || name || '%'")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_column_raw(mut self, column: &str, raw_expr: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(raw_expr.to_string()),
+        });
+        self
+    }
+    
+    /// Add a raw SELECT expression
+    ///
+    /// Use this to add calculated columns or complex expressions to the select.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Add a calculated column
+    /// let results = User::query()
+    ///     .select_raw("id, name, (SELECT COUNT(*) FROM posts WHERE posts.user_id = users.id) AS post_count")
+    ///     .get_raw()
+    ///     .await?;
+    ///
+    /// // Add aggregate with alias
+    /// let results = Order::query()
+    ///     .group_by("user_id")
+    ///     .select_raw("user_id, SUM(total) as total_spent, COUNT(*) as order_count")
+    ///     .get_raw()
+    ///     .await?;
+    /// ```
+    pub fn select_raw(mut self, raw_select: &str) -> Self {
+        self.raw_select_expressions.push(raw_select.to_string());
+        self
+    }
+    
+    /// Add a scalar subquery as a SELECT expression
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Add post count as a column
+    /// let users = User::query()
+    ///     .select_subquery(
+    ///         Post::query()
+    ///             .select_raw("COUNT(*)")
+    ///             .where_raw("posts.user_id = users.id"),
+    ///         "post_count"
+    ///     )
+    ///     .get_raw()
+    ///     .await?;
+    /// ```
+    pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
+        let subquery_sql = subquery.to_subquery_sql();
+        self.raw_select_expressions.push(format!("({}) AS \"{}\"", subquery_sql, alias));
         self
     }
     
@@ -1479,6 +1710,35 @@ impl<M: Model> QueryBuilder<M> {
                         continue;
                     }
                 }
+                Operator::SubqueryIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &where_cond.value {
+                        // Use column IN (subquery)
+                        Expr::cust(format!("\"{}\" IN ({})", &where_cond.column, subquery_sql))
+                    } else {
+                        continue;
+                    }
+                }
+                Operator::SubqueryNotIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &where_cond.value {
+                        // Use column NOT IN (subquery)
+                        Expr::cust(format!("\"{}\" NOT IN ({})", &where_cond.column, subquery_sql))
+                    } else {
+                        continue;
+                    }
+                }
+                Operator::Raw => {
+                    if let ConditionValue::RawExpr(raw_sql) = &where_cond.value {
+                        if where_cond.column.is_empty() {
+                            // Pure raw condition (like EXISTS, raw WHERE)
+                            Expr::cust(raw_sql.clone())
+                        } else {
+                            // Column with raw expression
+                            Expr::cust(format!("\"{}\" {}", &where_cond.column, raw_sql))
+                        }
+                    } else {
+                        continue;
+                    }
+                }
             };
             
             condition = condition.add(expr);
@@ -1512,8 +1772,206 @@ impl<M: Model> QueryBuilder<M> {
         {
             eprintln!("[TideORM Query] {}", sql);
         }
+        
+        // Also log via QueryLogger if enabled
+        if crate::logging::QueryLogger::is_enabled() {
+            let entry = crate::logging::QueryLogEntry::new(sql)
+                .with_table(M::table_name());
+            crate::logging::QueryLogger::log(entry);
+        }
     }
     
+    /// Get debug information for this query without executing it
+    ///
+    /// Returns detailed information about the query including table, conditions,
+    /// ordering, and the generated SQL.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let debug = User::query()
+    ///     .where_eq("active", true)
+    ///     .where_gt("age", 18)
+    ///     .order_by("created_at", Order::Desc)
+    ///     .debug();
+    ///
+    /// println!("{}", debug);
+    /// // Output shows table, conditions, SQL preview, etc.
+    /// ```
+    pub fn debug(&self) -> crate::logging::QueryDebugInfo {
+        use crate::logging::QueryDebugInfo;
+        
+        let mut info = QueryDebugInfo::new(M::table_name());
+        
+        // Add conditions
+        for condition in &self.conditions {
+            let op_str = match &condition.operator {
+                Operator::Eq => "=",
+                Operator::NotEq => "!=",
+                Operator::Gt => ">",
+                Operator::Gte => ">=",
+                Operator::Lt => "<",
+                Operator::Lte => "<=",
+                Operator::Like => "LIKE",
+                Operator::NotLike => "NOT LIKE",
+                Operator::In => "IN",
+                Operator::NotIn => "NOT IN",
+                Operator::IsNull => "IS NULL",
+                Operator::IsNotNull => "IS NOT NULL",
+                Operator::Between => "BETWEEN",
+                Operator::JsonContains => "@>",
+                Operator::JsonContainedBy => "<@",
+                Operator::JsonKeyExists => "?",
+                Operator::JsonKeyNotExists => "?!",
+                Operator::JsonPathExists => "@?",
+                Operator::JsonPathNotExists => "NOT @?",
+                Operator::ArrayContains => "@>",
+                Operator::ArrayContainedBy => "<@",
+                Operator::ArrayOverlaps => "&&",
+                Operator::ArrayContainsAny => "&& ANY",
+                Operator::ArrayContainsAll => "&& ALL",
+                Operator::SubqueryIn => "IN (subquery)",
+                Operator::SubqueryNotIn => "NOT IN (subquery)",
+                Operator::Raw => "RAW",
+            };
+            
+            let value_str = match &condition.value {
+                ConditionValue::Single(v) => format!("{:?}", v),
+                ConditionValue::List(list) => format!("{:?}", list),
+                ConditionValue::Range(start, end) => format!("{:?}..{:?}", start, end),
+                ConditionValue::None => "NULL".to_string(),
+                ConditionValue::Subquery(sub) => format!("({})", sub),
+                ConditionValue::RawExpr(expr) => expr.clone(),
+            };
+            
+            info.add_condition(format!("{} {} {}", condition.column, op_str, value_str));
+        }
+        
+        // Add order by
+        for (column, order) in &self.order_by {
+            info.add_order_by(format!("{} {}", column, order.as_str()));
+        }
+        
+        // Add group by
+        info.group_by = self.group_by.clone();
+        
+        // Add limit/offset
+        info.limit = self.limit_value;
+        info.offset = self.offset_value;
+        
+        // Add select columns
+        if let Some(ref cols) = self.select_columns {
+            info.select = cols.clone();
+        }
+        
+        // Add joins
+        for join in &self.joins {
+            info.joins.push(format!(
+                "{:?} JOIN {} ON {} = {}",
+                join.join_type,
+                join.table,
+                join.left_column,
+                join.right_column
+            ));
+        }
+        
+        // Build SQL preview
+        info.sql = self.build_sql_preview();
+        
+        info
+    }
+    
+    /// Build a SQL preview string for debugging
+    fn build_sql_preview(&self) -> String {
+        let mut sql = String::new();
+        
+        // SELECT clause
+        match &self.select_columns {
+            Some(cols) if !cols.is_empty() => {
+                sql.push_str("SELECT ");
+                sql.push_str(&cols.join(", "));
+                sql.push_str(" FROM ");
+            }
+            _ => {
+                sql.push_str("SELECT * FROM ");
+            }
+        }
+        
+        sql.push_str(M::table_name());
+        
+        // JOINs
+        for join in &self.joins {
+            sql.push_str(&format!(
+                " {:?} JOIN {} ON {} = {}",
+                join.join_type,
+                join.table,
+                join.left_column,
+                join.right_column
+            ));
+        }
+        
+        // WHERE
+        if !self.conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            let conditions: Vec<String> = self.conditions.iter()
+                .map(|cond| {
+                    let op_str = match &cond.operator {
+                        Operator::Eq => "= ?",
+                        Operator::NotEq => "!= ?",
+                        Operator::Gt => "> ?",
+                        Operator::Gte => ">= ?",
+                        Operator::Lt => "< ?",
+                        Operator::Lte => "<= ?",
+                        Operator::Like | Operator::NotLike => "LIKE ?",
+                        Operator::In | Operator::NotIn => "IN (?)",
+                        Operator::IsNull => "IS NULL",
+                        Operator::IsNotNull => "IS NOT NULL",
+                        Operator::Between => "BETWEEN ? AND ?",
+                        Operator::JsonContains | Operator::ArrayContains => "@> ?",
+                        Operator::JsonContainedBy | Operator::ArrayContainedBy => "<@ ?",
+                        Operator::JsonKeyExists => "? ?",
+                        Operator::JsonKeyNotExists => "?! ?",
+                        Operator::JsonPathExists => "@? ?",
+                        Operator::JsonPathNotExists => "NOT @? ?",
+                        Operator::ArrayOverlaps => "&& ?",
+                        Operator::ArrayContainsAny => "&& ANY(?)",
+                        Operator::ArrayContainsAll => "&& ALL(?)",
+                        Operator::SubqueryIn => "IN (SELECT ...)",
+                        Operator::SubqueryNotIn => "NOT IN (SELECT ...)",
+                        Operator::Raw => "...",
+                    };
+                    format!("{} {}", cond.column, op_str)
+                })
+                .collect();
+            sql.push_str(&conditions.join(" AND "));
+        }
+        
+        // GROUP BY
+        if !self.group_by.is_empty() {
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&self.group_by.join(", "));
+        }
+        
+        // ORDER BY
+        if !self.order_by.is_empty() {
+            sql.push_str(" ORDER BY ");
+            let orders: Vec<String> = self.order_by.iter()
+                .map(|(col, ord)| format!("{} {}", col, ord.as_str()))
+                .collect();
+            sql.push_str(&orders.join(", "));
+        }
+        
+        // LIMIT/OFFSET
+        if let Some(limit) = self.limit_value {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        if let Some(offset) = self.offset_value {
+            sql.push_str(&format!(" OFFSET {}", offset));
+        }
+        
+        sql
+    }
+
     // =========================================================================
     // EXECUTION
     // =========================================================================
@@ -1591,7 +2049,10 @@ impl<M: Model> QueryBuilder<M> {
         let mut sql = String::new();
         
         // SELECT clause
-        if let Some(ref columns) = self.select_columns {
+        if !self.raw_select_expressions.is_empty() {
+            // Use raw select expressions
+            sql.push_str(&format!("SELECT {} ", self.raw_select_expressions.join(", ")));
+        } else if let Some(ref columns) = self.select_columns {
             let cols: Vec<String> = columns.iter()
                 .map(|c| {
                     if c.contains('.') || c.contains('(') || c.contains('*') {
@@ -1800,6 +2261,27 @@ impl<M: Model> QueryBuilder<M> {
                         format!("{} && {}", col, array_lit)
                     } else { continue; }
                 }
+                Operator::SubqueryIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &cond.value {
+                        format!("{} IN ({})", col, subquery_sql)
+                    } else { continue; }
+                }
+                Operator::SubqueryNotIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &cond.value {
+                        format!("{} NOT IN ({})", col, subquery_sql)
+                    } else { continue; }
+                }
+                Operator::Raw => {
+                    if let ConditionValue::RawExpr(raw_sql) = &cond.value {
+                        if cond.column.is_empty() {
+                            // Pure raw condition (like EXISTS, raw WHERE)
+                            raw_sql.clone()
+                        } else {
+                            // Column with raw expression
+                            format!("{} {}", col, raw_sql)
+                        }
+                    } else { continue; }
+                }
             };
             
             conditions.push(expr);
@@ -1959,14 +2441,34 @@ impl<M: Model> QueryBuilder<M> {
     
     /// Delete all matching records using efficient bulk delete
     ///
+    /// Returns the number of deleted records.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
+    /// // Delete all inactive users
     /// let deleted = User::query()
     ///     .where_eq("status", "inactive")
     ///     .delete()
     ///     .await?;
     /// println!("Deleted {} records", deleted);
+    ///
+    /// // Delete with multiple conditions
+    /// let deleted = User::query()
+    ///     .where_eq("role", "guest")
+    ///     .where_lt("last_login", thirty_days_ago)
+    ///     .delete()
+    ///     .await?;
+    ///
+    /// // Delete using subquery
+    /// let deleted = Comment::query()
+    ///     .where_in_subquery("post_id",
+    ///         Post::query()
+    ///             .select(vec!["id"])
+    ///             .where_eq("deleted", true)
+    ///     )
+    ///     .delete()
+    ///     .await?;
     /// ```
     pub async fn delete(self) -> Result<u64> {
         let conn = crate::database::db().__internal_connection();
@@ -1987,6 +2489,170 @@ impl<M: Model> QueryBuilder<M> {
             .map_err(translate_error)?;
         
         Ok(result.rows_affected)
+    }
+    
+    /// Soft delete all matching records (set deleted_at timestamp)
+    ///
+    /// Only works on models with soft delete enabled.
+    /// Returns the number of soft-deleted records.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Soft delete all expired sessions
+    /// let deleted = Session::query()
+    ///     .where_lt("expires_at", now)
+    ///     .soft_delete()
+    ///     .await?;
+    ///
+    /// // Later restore them with:
+    /// // Session::query().only_trashed().where_eq("id", session_id).restore().await?;
+    /// ```
+    pub async fn soft_delete(self) -> Result<u64> {
+        if !M::soft_delete_enabled() {
+            return Err(Error::invalid_query(
+                "soft_delete() can only be used on models with soft delete enabled".to_string()
+            ));
+        }
+        
+        // Build a raw UPDATE query to set deleted_at
+        let table = M::table_name();
+        let where_sql = self.build_where_sql();
+        
+        let sql = if where_sql.is_empty() {
+            format!(
+                "UPDATE \"{}\" SET \"deleted_at\" = NOW()",
+                table
+            )
+        } else {
+            format!(
+                "UPDATE \"{}\" SET \"deleted_at\" = NOW() WHERE {}",
+                table, where_sql
+            )
+        };
+        
+        // Execute raw SQL
+        let conn = crate::database::db().__internal_connection();
+        let result = conn
+            .execute(Statement::from_string(
+                DbBackend::Postgres,
+                sql,
+            ))
+            .await
+            .map_err(translate_error)?;
+        
+        Ok(result.rows_affected())
+    }
+    
+    /// Restore soft-deleted records (set deleted_at to NULL)
+    ///
+    /// Use with `.only_trashed()` to target soft-deleted records.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Restore all soft-deleted posts by a specific user
+    /// let restored = Post::query()
+    ///     .only_trashed()
+    ///     .where_eq("user_id", user_id)
+    ///     .restore()
+    ///     .await?;
+    /// ```
+    pub async fn restore(self) -> Result<u64> {
+        if !M::soft_delete_enabled() {
+            return Err(Error::invalid_query(
+                "restore() can only be used on models with soft delete enabled".to_string()
+            ));
+        }
+        
+        // Build a raw UPDATE query to clear deleted_at
+        let table = M::table_name();
+        let where_sql = self.build_where_sql();
+        
+        let sql = if where_sql.is_empty() {
+            format!(
+                "UPDATE \"{}\" SET \"deleted_at\" = NULL WHERE \"deleted_at\" IS NOT NULL",
+                table
+            )
+        } else {
+            format!(
+                "UPDATE \"{}\" SET \"deleted_at\" = NULL WHERE {} AND \"deleted_at\" IS NOT NULL",
+                table, where_sql
+            )
+        };
+        
+        // Execute raw SQL
+        let conn = crate::database::db().__internal_connection();
+        let result = conn
+            .execute(Statement::from_string(
+                DbBackend::Postgres,
+                sql,
+            ))
+            .await
+            .map_err(translate_error)?;
+        
+        Ok(result.rows_affected())
+    }
+    
+    /// Force delete records (bypass soft delete)
+    ///
+    /// Permanently deletes records even if soft delete is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Permanently delete very old soft-deleted records
+    /// let deleted = User::query()
+    ///     .only_trashed()
+    ///     .where_lt("deleted_at", one_year_ago)
+    ///     .force_delete()
+    ///     .await?;
+    /// ```
+    pub async fn force_delete(self) -> Result<u64> {
+        let table = M::table_name();
+        let where_sql = self.build_where_sql();
+        
+        let sql = if where_sql.is_empty() {
+            format!("DELETE FROM \"{}\"", table)
+        } else {
+            format!("DELETE FROM \"{}\" WHERE {}", table, where_sql)
+        };
+        
+        // Execute raw SQL
+        let conn = crate::database::db().__internal_connection();
+        let result = conn
+            .execute(Statement::from_string(
+                DbBackend::Postgres,
+                sql,
+            ))
+            .await
+            .map_err(translate_error)?;
+        
+        Ok(result.rows_affected())
+    }
+    
+    /// Execute query with raw select expressions and return as JSON
+    ///
+    /// Use this when you have `select_raw()` expressions that don't map
+    /// directly to the model structure.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Get aggregated data
+    /// let results = Order::query()
+    ///     .group_by("user_id")
+    ///     .select_raw("user_id, SUM(total) as total_spent, COUNT(*) as order_count")
+    ///     .get_json()
+    ///     .await?;
+    ///
+    /// for row in results {
+    ///     println!("User {}: ${}", row["user_id"], row["total_spent"]);
+    /// }
+    /// ```
+    pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {
+        let sql = self.build_select_sql();
+        crate::database::Database::raw_json(&sql).await
     }
 }
 

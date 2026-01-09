@@ -69,11 +69,11 @@ This document outlines the planned features and improvements for TideORM.
 - [ ] Database-specific optimizations
 
 ### Query Builder Enhancements
-- [ ] Subqueries
+- [x] Subqueries
 - [ ] UNION queries
 - [ ] Window functions
 - [ ] CTEs (Common Table Expressions)
-- [ ] Raw expressions in queries
+- [x] Raw expressions in queries
 
 ### Relations
 - [ ] Many-to-many relationships (`#[has_many_through]`)
@@ -85,7 +85,7 @@ This document outlines the planned features and improvements for TideORM.
 - [ ] Query caching
 - [ ] Prepared statement caching
 - [ ] Batch update operations
-- [ ] Bulk delete with conditions
+- [x] Bulk delete with conditions
 
 ---
 
@@ -106,10 +106,10 @@ This document outlines the planned features and improvements for TideORM.
 - [ ] `tideorm db:seed` command
 
 ### Developer Experience
-- [ ] Better error messages
-- [ ] Query logging and debugging
-- [ ] Performance profiling
-- [ ] Documentation improvements
+- [x] Better error messages
+- [x] Query logging and debugging
+- [x] Performance profiling
+- [x] Documentation improvements
 
 ---
 

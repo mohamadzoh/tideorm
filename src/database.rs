@@ -451,6 +451,76 @@ impl Database {
         
         Ok(result.rows_affected())
     }
+    
+    /// Execute a raw SQL query and return results as JSON
+    ///
+    /// This is useful when executing queries with raw select expressions
+    /// that don't map directly to a model structure.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Aggregation query
+    /// let results = Database::raw_json(
+    ///     "SELECT user_id, SUM(total) as total_spent FROM orders GROUP BY user_id"
+    /// ).await?;
+    ///
+    /// for row in results {
+    ///     println!("User {}: ${}", row["user_id"], row["total_spent"]);
+    /// }
+    ///
+    /// // Query with calculated columns
+    /// let results = Database::raw_json(
+    ///     "SELECT *, (price * quantity) as total FROM order_items"
+    /// ).await?;
+    /// ```
+    pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
+        use crate::internal::{ConnectionTrait, Statement};
+        
+        let db = crate::database::db();
+        let backend = db.inner.connection().get_database_backend();
+        let stmt = Statement::from_string(backend, sql.to_string());
+        
+        let results = db.inner.connection()
+            .query_all(stmt)
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+        
+        let mut json_results = Vec::new();
+        for row in results {
+            let mut obj = serde_json::Map::new();
+            
+            // Get column names from the result
+            let columns = row.column_names();
+            for col_name in columns {
+                // Try different types and convert to JSON
+                if let Ok(val) = row.try_get::<i64>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<i32>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<f64>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<String>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<bool>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<Option<String>>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<Option<i64>>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else if let Ok(val) = row.try_get::<Option<f64>>("", &col_name) {
+                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                } else {
+                    // Default to null for unsupported types
+                    obj.insert(col_name.to_string(), serde_json::Value::Null);
+                }
+            }
+            
+            json_results.push(serde_json::Value::Object(obj));
+        }
+        
+        Ok(json_results)
+    }
 
     /// Get the raw internal connection (for internal use only)
     #[doc(hidden)]
