@@ -4,12 +4,601 @@
 //! Run with: `cargo test --test unit_tests`
 
 // =============================================================================
+// VALIDATION MODULE TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod validation_tests {
+    use tideorm::validation::{
+        ValidationErrors, ValidationRule, Validator, ValidationBuilder,
+        ValidatableValue,
+    };
+    
+    #[test]
+    fn test_validation_rule_required() {
+        let rule = ValidationRule::Required;
+        assert!(rule.validate(&"hello".to_string()).is_ok());
+        assert!(rule.validate(&"".to_string()).is_err());
+        assert!(rule.validate(&"   ".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_email() {
+        let rule = ValidationRule::Email;
+        assert!(rule.validate(&"test@example.com".to_string()).is_ok());
+        assert!(rule.validate(&"user.name+tag@domain.co.uk".to_string()).is_ok());
+        assert!(rule.validate(&"invalid".to_string()).is_err());
+        assert!(rule.validate(&"@nodomain.com".to_string()).is_err());
+        assert!(rule.validate(&"noat.com".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_url() {
+        let rule = ValidationRule::Url;
+        assert!(rule.validate(&"https://example.com".to_string()).is_ok());
+        assert!(rule.validate(&"http://localhost:8080/path".to_string()).is_ok());
+        assert!(rule.validate(&"not-a-url".to_string()).is_err());
+        assert!(rule.validate(&"example.com".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_min_length() {
+        let rule = ValidationRule::MinLength(5);
+        assert!(rule.validate(&"hello".to_string()).is_ok());
+        assert!(rule.validate(&"hello world".to_string()).is_ok());
+        assert!(rule.validate(&"hi".to_string()).is_err());
+        assert!(rule.validate(&"".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_max_length() {
+        let rule = ValidationRule::MaxLength(10);
+        assert!(rule.validate(&"hello".to_string()).is_ok());
+        assert!(rule.validate(&"".to_string()).is_ok());
+        assert!(rule.validate(&"hello world!".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_min() {
+        let rule = ValidationRule::Min(18.0);
+        assert!(rule.validate(&"18".to_string()).is_ok());
+        assert!(rule.validate(&"25".to_string()).is_ok());
+        assert!(rule.validate(&"17".to_string()).is_err());
+        assert!(rule.validate(&"0".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_max() {
+        let rule = ValidationRule::Max(100.0);
+        assert!(rule.validate(&"50".to_string()).is_ok());
+        assert!(rule.validate(&"100".to_string()).is_ok());
+        assert!(rule.validate(&"101".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_range() {
+        let rule = ValidationRule::Range(1.0, 100.0);
+        assert!(rule.validate(&"1".to_string()).is_ok());
+        assert!(rule.validate(&"50".to_string()).is_ok());
+        assert!(rule.validate(&"100".to_string()).is_ok());
+        assert!(rule.validate(&"0".to_string()).is_err());
+        assert!(rule.validate(&"101".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_regex() {
+        let rule = ValidationRule::Regex(r"^\d{3}-\d{4}$".to_string());
+        assert!(rule.validate(&"123-4567".to_string()).is_ok());
+        assert!(rule.validate(&"1234567".to_string()).is_err());
+        assert!(rule.validate(&"abc-defg".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_alpha() {
+        let rule = ValidationRule::Alpha;
+        assert!(rule.validate(&"hello".to_string()).is_ok());
+        assert!(rule.validate(&"HelloWorld".to_string()).is_ok());
+        assert!(rule.validate(&"hello123".to_string()).is_err());
+        assert!(rule.validate(&"hello world".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_alphanumeric() {
+        let rule = ValidationRule::Alphanumeric;
+        assert!(rule.validate(&"hello123".to_string()).is_ok());
+        assert!(rule.validate(&"ABC123".to_string()).is_ok());
+        assert!(rule.validate(&"hello world".to_string()).is_err());
+        assert!(rule.validate(&"hello-world".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_numeric() {
+        let rule = ValidationRule::Numeric;
+        assert!(rule.validate(&"12345".to_string()).is_ok());
+        assert!(rule.validate(&"0".to_string()).is_ok());
+        assert!(rule.validate(&"12.34".to_string()).is_ok()); // Decimals are valid numbers
+        assert!(rule.validate(&"-123".to_string()).is_ok());  // Negative numbers are valid
+        assert!(rule.validate(&"abc".to_string()).is_err());
+        assert!(rule.validate(&"12abc".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_uuid() {
+        let rule = ValidationRule::Uuid;
+        assert!(rule.validate(&"550e8400-e29b-41d4-a716-446655440000".to_string()).is_ok());
+        assert!(rule.validate(&"550E8400-E29B-41D4-A716-446655440000".to_string()).is_ok());
+        assert!(rule.validate(&"not-a-uuid".to_string()).is_err());
+        assert!(rule.validate(&"550e8400-e29b-41d4-a716".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_in() {
+        let rule = ValidationRule::In(vec!["red".to_string(), "green".to_string(), "blue".to_string()]);
+        assert!(rule.validate(&"red".to_string()).is_ok());
+        assert!(rule.validate(&"green".to_string()).is_ok());
+        assert!(rule.validate(&"yellow".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_rule_not_in() {
+        let rule = ValidationRule::NotIn(vec!["admin".to_string(), "root".to_string()]);
+        assert!(rule.validate(&"user".to_string()).is_ok());
+        assert!(rule.validate(&"guest".to_string()).is_ok());
+        assert!(rule.validate(&"admin".to_string()).is_err());
+        assert!(rule.validate(&"root".to_string()).is_err());
+    }
+    
+    #[test]
+    fn test_validation_errors_collection() {
+        let mut errors = ValidationErrors::new();
+        assert!(errors.is_empty());
+        
+        errors.add("email", "Invalid email format");
+        assert!(!errors.is_empty());
+        assert!(errors.has_errors());
+        
+        errors.add("email", "Email already taken");
+        errors.add("password", "Too short");
+        
+        let all_errors = errors.errors();
+        assert_eq!(all_errors.len(), 3);
+    }
+    
+    #[test]
+    fn test_validation_errors_field_errors() {
+        let mut errors = ValidationErrors::new();
+        errors.add("email", "Invalid format");
+        errors.add("email", "Already taken");
+        errors.add("name", "Required");
+        
+        let email_errors = errors.field_errors("email");
+        assert_eq!(email_errors.len(), 2);
+        
+        let name_errors = errors.field_errors("name");
+        assert_eq!(name_errors.len(), 1);
+        
+        let missing_errors = errors.field_errors("missing");
+        assert_eq!(missing_errors.len(), 0);
+    }
+    
+    #[test]
+    fn test_validation_errors_display() {
+        let mut errors = ValidationErrors::new();
+        errors.add("email", "Invalid email");
+        errors.add("password", "Too short");
+        
+        let display = format!("{}", errors);
+        assert!(display.contains("email") || display.contains("Invalid email") || 
+                display.contains("password") || display.contains("Too short"));
+    }
+    
+    #[test]
+    fn test_validator_validate_rule() {
+        // Test using Validator::validate_rule static method
+        let rule = ValidationRule::Email;
+        let result = Validator::validate_rule(&"test@example.com".to_string(), &rule, "email");
+        assert!(result.is_none()); // None means no error
+        
+        let result = Validator::validate_rule(&"invalid".to_string(), &rule, "email");
+        assert!(result.is_some()); // Some means there is an error
+    }
+    
+    #[test]
+    fn test_validation_builder_basic() {
+        // Test basic ValidationBuilder usage
+        let (field, rules) = ValidationBuilder::new("username")
+            .required()
+            .min_length(3)
+            .max_length(20)
+            .alphanumeric()
+            .build();
+        
+        assert_eq!(field, "username");
+        assert_eq!(rules.len(), 4);
+    }
+    
+    #[test]
+    fn test_validatable_value_string() {
+        let value = "hello".to_string();
+        assert!(!value.is_empty_value());
+        assert_eq!(value.as_str_value(), Some("hello"));
+        
+        let empty = "".to_string();
+        assert!(empty.is_empty_value());
+    }
+    
+    #[test]
+    fn test_validatable_value_option() {
+        let some_value: Option<String> = Some("test".to_string());
+        assert!(!some_value.is_empty_value());
+        
+        let none_value: Option<String> = None;
+        assert!(none_value.is_empty_value());
+    }
+    
+    #[test]
+    fn test_validatable_value_numbers() {
+        let int_val: i32 = 42;
+        assert!(!int_val.is_empty_value());
+        assert_eq!(int_val.as_f64_value(), Some(42.0));
+        
+        let float_val: f64 = 3.14;
+        assert_eq!(float_val.as_f64_value(), Some(3.14));
+    }
+    
+    #[test]
+    fn test_validation_error_messages() {
+        let rule = ValidationRule::MinLength(5);
+        let result = rule.validate(&"hi".to_string());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("5"));  // Should mention the minimum length
+    }
+    
+    #[test]
+    fn test_validation_errors_into_error() {
+        let mut errors = ValidationErrors::new();
+        errors.add("field1", "error1");
+        errors.add("field2", "error2");
+        
+        let error: tideorm::error::Error = errors.into();
+        assert!(error.is_validation_error());
+    }
+    
+    #[test]
+    fn test_is_valid_email() {
+        assert!(Validator::is_valid_email("test@example.com"));
+        assert!(Validator::is_valid_email("user.name+tag@domain.co.uk"));
+        assert!(!Validator::is_valid_email("invalid"));
+        assert!(!Validator::is_valid_email("@example.com"));
+        assert!(!Validator::is_valid_email("test@"));
+    }
+    
+    #[test]
+    fn test_is_valid_url() {
+        assert!(Validator::is_valid_url("https://example.com"));
+        assert!(Validator::is_valid_url("http://localhost:8080"));
+        assert!(!Validator::is_valid_url("not-a-url"));
+        assert!(!Validator::is_valid_url("example.com"));
+    }
+}
+
+// =============================================================================
+// FULL-TEXT SEARCH MODULE TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod fulltext_tests {
+    use tideorm::fulltext::{
+        SearchMode, SearchWeights, FullTextConfig, FullTextIndex,
+        PgFullTextIndexType, HighlightConfig, SearchResult, HighlightedField,
+        highlight_text, generate_snippet, pg_headline_sql,
+    };
+    use tideorm::config::DatabaseType;
+    
+    #[test]
+    fn test_search_mode_variants() {
+        assert_eq!(SearchMode::Natural.to_string(), "natural");
+        assert_eq!(SearchMode::Boolean.to_string(), "boolean");
+        assert_eq!(SearchMode::Phrase.to_string(), "phrase");
+        assert_eq!(SearchMode::Prefix.to_string(), "prefix");
+        assert_eq!(SearchMode::Fuzzy.to_string(), "fuzzy");
+        assert_eq!(SearchMode::Proximity(5).to_string(), "proximity(5)");
+    }
+    
+    #[test]
+    fn test_search_weights_default() {
+        let weights = SearchWeights::default();
+        assert_eq!(weights.a, 1.0);
+        assert_eq!(weights.b, 0.4);
+        assert_eq!(weights.c, 0.2);
+        assert_eq!(weights.d, 0.1);
+    }
+    
+    #[test]
+    fn test_search_weights_custom() {
+        let weights = SearchWeights::new(2.0, 1.5, 1.0, 0.5);
+        assert_eq!(weights.a, 2.0);
+        assert_eq!(weights.b, 1.5);
+        assert_eq!(weights.c, 1.0);
+        assert_eq!(weights.d, 0.5);
+    }
+    
+    #[test]
+    fn test_search_weights_to_pg_array() {
+        let weights = SearchWeights::new(1.0, 0.5, 0.25, 0.1);
+        let pg_array = weights.to_pg_array();
+        assert!(pg_array.contains("0.1"));
+        assert!(pg_array.contains("0.25"));
+        assert!(pg_array.contains("0.5"));
+        assert!(pg_array.contains("1"));
+    }
+    
+    #[test]
+    fn test_fulltext_config_builder() {
+        let config = FullTextConfig::new()
+            .language("german")
+            .mode(SearchMode::Boolean)
+            .min_word_length(3)
+            .max_word_length(50)
+            .stop_words(vec!["der".to_string(), "die".to_string(), "das".to_string()]);
+        
+        assert_eq!(config.language, Some("german".to_string()));
+        assert_eq!(config.mode, SearchMode::Boolean);
+        assert_eq!(config.min_word_length, Some(3));
+        assert_eq!(config.max_word_length, Some(50));
+        assert_eq!(config.stop_words.len(), 3);
+    }
+    
+    #[test]
+    fn test_fulltext_config_with_weights() {
+        let weights = SearchWeights::new(1.0, 0.8, 0.6, 0.4);
+        let config = FullTextConfig::new()
+            .language("english")
+            .weights(weights);
+        
+        assert!(config.weights.is_some());
+        let w = config.weights.unwrap();
+        assert_eq!(w.a, 1.0);
+        assert_eq!(w.d, 0.4);
+    }
+    
+    #[test]
+    fn test_fulltext_index_postgres_single_column() {
+        let index = FullTextIndex::new(
+            "idx_articles_title",
+            "articles",
+            vec!["title".to_string()]
+        ).language("english").pg_index_type(PgFullTextIndexType::GIN);
+        
+        let sql = index.to_postgres_sql();
+        assert!(sql.contains("CREATE INDEX"));
+        assert!(sql.contains("idx_articles_title"));
+        assert!(sql.contains("articles"));
+        assert!(sql.contains("USING GIN"));
+        assert!(sql.contains("to_tsvector"));
+        assert!(sql.contains("english"));
+        assert!(sql.contains("title"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_postgres_multiple_columns() {
+        let index = FullTextIndex::new(
+            "idx_articles_search",
+            "articles",
+            vec!["title".to_string(), "content".to_string(), "tags".to_string()]
+        ).language("english");
+        
+        let sql = index.to_postgres_sql();
+        assert!(sql.contains("title"));
+        assert!(sql.contains("content"));
+        assert!(sql.contains("tags"));
+        assert!(sql.contains("||"));  // Column concatenation
+    }
+    
+    #[test]
+    fn test_fulltext_index_postgres_gist() {
+        let index = FullTextIndex::new(
+            "idx_search",
+            "documents",
+            vec!["body".to_string()]
+        ).pg_index_type(PgFullTextIndexType::GiST);
+        
+        let sql = index.to_postgres_sql();
+        assert!(sql.contains("USING GiST"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_mysql() {
+        let index = FullTextIndex::new(
+            "idx_articles_search",
+            "articles",
+            vec!["title".to_string(), "content".to_string()]
+        );
+        
+        let sql = index.to_mysql_sql();
+        assert!(sql.contains("CREATE FULLTEXT INDEX"));
+        assert!(sql.contains("`idx_articles_search`"));
+        assert!(sql.contains("`articles`"));
+        assert!(sql.contains("`title`, `content`"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_sqlite_fts5() {
+        let index = FullTextIndex::new(
+            "idx_articles_search",
+            "articles",
+            vec!["title".to_string(), "content".to_string()]
+        );
+        
+        let sqls = index.to_sqlite_sql();
+        assert_eq!(sqls.len(), 4);  // Virtual table + 3 triggers
+        
+        // Virtual table creation
+        assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
+        assert!(sqls[0].contains("articles_fts"));
+        assert!(sqls[0].contains("fts5"));
+        assert!(sqls[0].contains("title, content"));
+        
+        // Insert trigger
+        assert!(sqls[1].contains("AFTER INSERT"));
+        
+        // Delete trigger
+        assert!(sqls[2].contains("AFTER DELETE"));
+        
+        // Update trigger
+        assert!(sqls[3].contains("AFTER UPDATE"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_to_sql_postgres() {
+        let index = FullTextIndex::new("idx", "table", vec!["col".to_string()]);
+        let sqls = index.to_sql(DatabaseType::Postgres);
+        assert_eq!(sqls.len(), 1);
+        assert!(sqls[0].contains("CREATE INDEX"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_to_sql_mysql() {
+        let index = FullTextIndex::new("idx", "table", vec!["col".to_string()]);
+        let sqls = index.to_sql(DatabaseType::MySQL);
+        assert_eq!(sqls.len(), 1);
+        assert!(sqls[0].contains("FULLTEXT"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_to_sql_sqlite() {
+        let index = FullTextIndex::new("idx", "table", vec!["col".to_string()]);
+        let sqls = index.to_sql(DatabaseType::SQLite);
+        assert_eq!(sqls.len(), 4);
+    }
+    
+    #[test]
+    fn test_highlight_text_single_word() {
+        let text = "The quick brown fox jumps over the lazy dog";
+        let highlighted = highlight_text(text, "fox", "<b>", "</b>");
+        assert!(highlighted.contains("<b>fox</b>"));
+        assert!(!highlighted.contains("<b>dog</b>"));
+    }
+    
+    #[test]
+    fn test_highlight_text_multiple_words() {
+        let text = "The quick brown fox jumps over the lazy dog";
+        let highlighted = highlight_text(text, "quick lazy", "<mark>", "</mark>");
+        assert!(highlighted.contains("<mark>quick</mark>"));
+        assert!(highlighted.contains("<mark>lazy</mark>"));
+    }
+    
+    #[test]
+    fn test_highlight_text_case_insensitive() {
+        let text = "The QUICK Brown FOX";
+        let highlighted = highlight_text(text, "quick fox", "<em>", "</em>");
+        assert!(highlighted.contains("<em>QUICK</em>"));
+        assert!(highlighted.contains("<em>FOX</em>"));
+    }
+    
+    #[test]
+    fn test_highlight_text_no_match() {
+        let text = "Hello world";
+        let highlighted = highlight_text(text, "xyz", "<b>", "</b>");
+        assert_eq!(highlighted, text);
+    }
+    
+    #[test]
+    fn test_generate_snippet_with_match() {
+        let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
+                   The quick brown fox jumps over the lazy dog. \
+                   Sed do eiusmod tempor incididunt ut labore.";
+        let snippet = generate_snippet(text, "fox", 5, "<b>", "</b>");
+        
+        assert!(snippet.contains("<b>fox</b>"));
+        assert!(snippet.contains("..."));  // Should have ellipsis
+    }
+    
+    #[test]
+    fn test_generate_snippet_no_match() {
+        let text = "Hello world, this is a test document with some content.";
+        let snippet = generate_snippet(text, "xyz", 5, "<b>", "</b>");
+        
+        // Should return beginning of text
+        assert!(snippet.contains("Hello"));
+        assert!(!snippet.contains("<b>"));  // No highlighting
+    }
+    
+    #[test]
+    fn test_generate_snippet_at_beginning() {
+        let text = "Fox is a quick animal that lives in the forest.";
+        let snippet = generate_snippet(text, "fox", 3, "<b>", "</b>");
+        
+        assert!(snippet.contains("<b>Fox</b>"));
+        assert!(!snippet.starts_with("..."));  // No ellipsis at start
+    }
+    
+    #[test]
+    fn test_pg_headline_sql() {
+        let sql = pg_headline_sql("content", "search term", "english", "<b>", "</b>");
+        
+        assert!(sql.contains("ts_headline"));
+        assert!(sql.contains("english"));
+        assert!(sql.contains("content"));
+        assert!(sql.contains("plainto_tsquery"));
+        assert!(sql.contains("StartSel=<b>"));
+        assert!(sql.contains("StopSel=</b>"));
+    }
+    
+    #[test]
+    fn test_search_result_new() {
+        let result: SearchResult<String> = SearchResult::new("test record".to_string(), 0.95);
+        assert_eq!(result.record, "test record");
+        assert_eq!(result.rank, 0.95);
+        assert!(result.highlights.is_empty());
+    }
+    
+    #[test]
+    fn test_search_result_with_highlights() {
+        let highlights = vec![
+            HighlightedField::new("title", "<b>Test</b> Title", "Test Title"),
+            HighlightedField::new("content", "Some <b>test</b> content", "Some test content"),
+        ];
+        
+        let result = SearchResult::new("record".to_string(), 0.8)
+            .with_highlights(highlights);
+        
+        assert_eq!(result.highlights.len(), 2);
+        assert_eq!(result.highlights[0].field, "title");
+        assert_eq!(result.highlights[1].field, "content");
+    }
+    
+    #[test]
+    fn test_highlighted_field_match_count() {
+        let field = HighlightedField::new(
+            "content",
+            "The <mark>quick</mark> brown <mark>fox</mark> <mark>jumps</mark>",
+            "The quick brown fox jumps"
+        );
+        
+        assert_eq!(field.match_count, 3);
+        assert_eq!(field.field, "content");
+    }
+    
+    #[test]
+    fn test_highlight_config_default() {
+        let config = HighlightConfig::default();
+        assert_eq!(config.start_tag, "<mark>");
+        assert_eq!(config.end_tag, "</mark>");
+        assert!(config.max_length.is_none());
+        assert_eq!(config.fragment_words, Some(10));
+    }
+}
+
+// =============================================================================
 // ERROR MODULE TESTS
 // =============================================================================
 
 #[cfg(test)]
 mod error_tests {
-    use tideorm::error::{Error, ErrorContext, ValidationErrors};
+    use tideorm::error::{Error, ErrorContext};
+    use tideorm::validation::ValidationErrors;
     
     #[test]
     fn test_error_not_found_creation() {
@@ -150,8 +739,9 @@ mod error_tests {
         
         let err = errors.into_error().unwrap();
         assert!(err.is_validation_error());
-        // Takes the first error
-        assert!(err.to_string().contains("email"));
+        // Takes one of the errors (HashMap iteration order is not guaranteed)
+        let err_str = err.to_string();
+        assert!(err_str.contains("email") || err_str.contains("name"));
     }
     
     #[test]
@@ -981,7 +1571,8 @@ mod join_aggregation_tests {
 
 #[cfg(test)]
 mod error_edge_cases {
-    use tideorm::error::{Error, ErrorContext, ValidationErrors};
+    use tideorm::error::{Error, ErrorContext};
+    use tideorm::validation::ValidationErrors;
     
     #[test]
     fn test_error_empty_message() {
@@ -1049,7 +1640,8 @@ mod error_edge_cases {
         errors.add("email", "Already taken");
         
         // Should have 2 entries for email
-        let email_errors: Vec<_> = errors.errors()
+        let all_errors = errors.errors();
+        let email_errors: Vec<_> = all_errors
             .iter()
             .filter(|(field, _)| *field == "email")
             .collect();

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### 🎉 Initial Release
 
-This is the first public release of TideORM, a developer-friendly ORM for Rust inspired by Laravel Eloquent, Rails ActiveRecord, and Sequelize.
+This is the first public release of TideORM, a developer-friendly ORM for Rust with clean, expressive syntax.
 
 ### Added
 

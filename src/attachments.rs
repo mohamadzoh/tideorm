@@ -1,7 +1,6 @@
 //! File Attachments System
 //!
-//! This module provides file attachment functionality for TideORM models,
-//! inspired by Laravel's HasAttachments and Rails Active Storage patterns.
+//! This module provides file attachment functionality for TideORM models.
 //!
 //! ## Overview
 //!

@@ -1,7 +1,6 @@
 //! Translations System
 //!
-//! This module provides translation functionality for TideORM models,
-//! inspired by Laravel Translatable and Rails Globalize patterns.
+//! This module provides translation functionality for TideORM models.
 //!
 //! ## Overview
 //!

@@ -1,6 +1,6 @@
 //! # TideORM
 //!
-//! A developer-friendly ORM for Rust, inspired by Laravel Eloquent, Rails ActiveRecord, and Sequelize.
+//! A developer-friendly ORM for Rust with clean, expressive syntax.
 //!
 //! ## Quick Start
 //!
@@ -548,6 +548,12 @@ pub mod cache;
 /// Database seeding system
 pub mod seeding;
 
+/// Model validation system
+pub mod validation;
+
+/// Full-text search support
+pub mod fulltext;
+
 /// Re-exports for convenience
 pub mod prelude;
 
@@ -578,6 +584,9 @@ pub use profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, Glob
 
 // Query and statement caching
 pub use cache::{QueryCache, PreparedStatementCache, CacheConfig, CacheStrategy, CacheStats, PreparedStatementStats, PreparedStatementConfig, CacheKeyBuilder, CacheOptions, CachedStatementInfo, CacheWarmer};
+
+// Validation
+pub use validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;

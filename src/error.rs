@@ -34,7 +34,7 @@
 //! | `Transaction` | Transaction failed | Deadlock, timeout |
 //! | `Configuration` | Config issue | Missing settings |
 
-use std::fmt;
+
 use thiserror::Error;
 
 /// A specialized Result type for TideORM operations
@@ -550,54 +550,6 @@ impl Error {
     }
 }
 
-/// Validation error builder for collecting multiple validation errors
-#[derive(Debug, Default)]
-pub struct ValidationErrors {
-    errors: Vec<(String, String)>,
-}
-
-impl ValidationErrors {
-    /// Create a new empty ValidationErrors
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
-    /// Add a validation error
-    pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
-        self.errors.push((field.into(), message.into()));
-    }
-    
-    /// Check if there are any errors
-    pub fn is_empty(&self) -> bool {
-        self.errors.is_empty()
-    }
-    
-    /// Get all errors
-    pub fn errors(&self) -> &[(String, String)] {
-        &self.errors
-    }
-    
-    /// Convert to a single Error (takes the first error)
-    pub fn into_error(self) -> Option<Error> {
-        self.errors
-            .into_iter()
-            .next()
-            .map(|(field, message)| Error::validation(field, message))
-    }
-}
-
-impl fmt::Display for ValidationErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, (field, message)) in self.errors.iter().enumerate() {
-            if i > 0 {
-                write!(f, "; ")?;
-            }
-            write!(f, "{}: {}", field, message)?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -700,6 +652,8 @@ mod tests {
     
     #[test]
     fn test_validation_errors() {
+        use crate::validation::ValidationErrors;
+        
         let mut errors = ValidationErrors::new();
         assert!(errors.is_empty());
         
@@ -707,7 +661,7 @@ mod tests {
         errors.add("name", "Name is required");
         
         assert!(!errors.is_empty());
-        assert_eq!(errors.errors().len(), 2);
+        assert_eq!(errors.len(), 2);
         
         let display = format!("{}", errors);
         assert!(display.contains("email"));

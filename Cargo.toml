@@ -1,19 +1,19 @@
 [package]
 name = "tideorm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-authors = ["TideORM Contributors"]
-description = "A developer-friendly ORM for Rust - Laravel Eloquent / Rails ActiveRecord inspired"
+authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
+description = "A developer-friendly ORM for Rust with clean, expressive syntax"
 license = "MIT"
 repository = "https://github.com/mohamadzoh/tideorm"
 homepage = "https://tideorm.com"
-keywords = ["orm", "database", "postgres", "activerecord", "eloquent"]
+keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
 rust-version = "1.85"
 
 [workspace]
-members = [".", "tideorm-macros", "template"]
+members = [".", "tideorm-macros"]
 
 [features]
 default = ["postgres", "runtime-tokio"]
@@ -44,11 +44,12 @@ rust_decimal = { version = "1.39.0", features = ["serde"] }
 thiserror = "2.0.17"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.2.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.3.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
 lazy_static = "1.5"
+regex = "1.11"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util", "macros"] }
@@ -76,4 +77,12 @@ harness = false
 
 [[bench]]
 name = "stability_benchmarks"
+harness = false
+
+[[bench]]
+name = "validation_benchmarks"
+harness = false
+
+[[bench]]
+name = "fulltext_benchmarks"
 harness = false

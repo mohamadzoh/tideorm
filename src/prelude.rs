@@ -11,7 +11,7 @@
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
 // Global database access functions
 pub use crate::database::{db, try_db, has_global_db};
-pub use crate::error::{Error, ValidationErrors};
+pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
 pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue};
@@ -79,6 +79,17 @@ pub use crate::cache::{
 // Database seeding
 pub use crate::seeding::{
     Seed, Seeder, SeedResult, SeedInfo, SeedStatus,
+};
+
+// Validation
+pub use crate::validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
+
+// Full-text search
+pub use crate::fulltext::{
+    FullTextSearch, FullTextSearchBuilder, FullTextConfig, FullTextIndex,
+    SearchMode, SearchResult, HighlightedField, SearchWeights,
+    FullTextIndexConfig, PgFullTextIndexType, HighlightConfig,
+    highlight_text, generate_snippet, pg_headline_sql,
 };
 
 // Derive macro

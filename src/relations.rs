@@ -1,6 +1,6 @@
 //! Model Relations System
 //!
-//! This module provides ActiveRecord/Eloquent-style model relations.
+//! This module provides model relations for defining relationships between models.
 //!
 //! ## Supported Relations
 //!

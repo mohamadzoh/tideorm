@@ -1,8 +1,7 @@
 //! Database seeding system
 //!
-//! This module provides a database seeding system for TideORM, similar to
-//! Laravel seeders or Rails seeds. Seeds are tracked in the database to
-//! prevent duplicate runs.
+//! This module provides a database seeding system for TideORM.
+//! Seeds are tracked in the database to prevent duplicate runs.
 //!
 //! ## Features
 //!

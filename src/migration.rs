@@ -1,7 +1,6 @@
 //! Database migration system
 //!
-//! This module provides a schema migration system for TideORM, similar to
-//! Rails migrations, Laravel migrations, or Sequelize migrations.
+//! This module provides a schema migration system for TideORM.
 //!
 //! ## Features
 //!

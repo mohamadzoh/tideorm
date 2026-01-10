@@ -1,7 +1,6 @@
 //! Callbacks and Hooks for Model Lifecycle Events
 //!
-//! This module provides a trait-based callback system for model lifecycle events,
-//! inspired by Rails ActiveRecord callbacks.
+//! This module provides a trait-based callback system for model lifecycle events.
 //!
 //! ## Available Callbacks
 //!

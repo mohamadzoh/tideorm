@@ -114,6 +114,41 @@ cargo run --example postgres_complete
 
 ---
 
+### � Schema Generation
+
+Generate SQL schema files from your models or database.
+
+**[schema_file_demo.rs](schema_file_demo.rs)** - Schema file generation
+- Auto-generate schema on connect
+- Programmatic schema generation
+- Database introspection
+- Multi-database support (PostgreSQL, MySQL, SQLite)
+- Using SchemaGenerator and TableSchemaBuilder
+
+```bash
+cargo run --example schema_file_demo
+```
+
+---
+
+### 🔄 Database Migrations
+
+Manage database schema changes with versioned migrations.
+
+**[migrations.rs](migrations.rs)** - Schema migrations
+- Creating tables with columns
+- Adding indexes and constraints
+- Altering tables (add/drop/rename columns)
+- Migration rollback
+- Migration status tracking
+- Auto-run via TideConfig or manual Migrator
+
+```bash
+cargo run --example migrations
+```
+
+---
+
 ### 🐬 MySQL/MariaDB Features
 
 Explore MySQL and MariaDB-specific functionality.
@@ -210,6 +245,8 @@ cargo run --example postgres_complete
 | `upsert_demo.rs` | Upsert | insert_or_update, on_conflict | `cargo run --example upsert_demo` |
 | `postgres_demo.rs` | PostgreSQL | Config, pool, types, relations | `cargo run --example postgres_demo` |
 | `postgres_complete.rs` | All Features | JSON, arrays, JOINs, aggregations | `cargo run --example postgres_complete` |
+| `schema_file_demo.rs` | Schema | Auto-generate SQL schema files | `cargo run --example schema_file_demo` |
+| `migrations.rs` | Migrations | Schema migrations, rollback | `cargo run --example migrations` |
 | `mysql_demo.rs` | MySQL | JSON, aggregations, CRUD | `cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features` |
 | `sqlite_demo.rs` | SQLite | JSON1, CRUD, embedded DB | `cargo run --example sqlite_demo --features "sqlite runtime-tokio" --no-default-features` |
 

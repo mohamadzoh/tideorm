@@ -3,7 +3,6 @@
 //! **Category:** PostgreSQL Features
 //!
 //! This example demonstrates TideORM's features with a real PostgreSQL database.
-//! It shows how to use the ORM similar to Laravel Eloquent / Rails ActiveRecord.
 //!
 //! ## Run this example
 //!
@@ -14,7 +13,7 @@
 //! ## Features Demonstrated
 //!
 //! - Global configuration (languages, fallback_language)
-//! - DB_SYNC mode (like Sequelize) - automatic table creation
+//! - DB_SYNC mode - automatic table creation
 //! - CRUD operations (Create, Read, Update, Delete)
 //! - Soft deletes
 //! - JSON serialization with hidden attributes
@@ -605,7 +604,7 @@ async fn main() -> tideorm::Result<()> {
     println!();
     println!("🌊 TideORM Features Demonstrated:");
     println!("   ✅ Global config (TideConfig) - languages, fallback set ONCE");
-    println!("   ✅ DB_SYNC mode (like Sequelize)");
+    println!("   ✅ DB_SYNC mode");
     println!("   ✅ CRUD operations (Create, Read, Update, Delete)");
     println!("   ✅ find, find_or_fail, exists, first, last");
     println!("   ✅ Pagination (paginate)");

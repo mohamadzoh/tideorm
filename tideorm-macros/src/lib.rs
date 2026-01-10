@@ -11,11 +11,12 @@ use convert_case::{Case, Casing};
 
 /// Field-level attributes for model fields
 #[derive(Debug, FromField)]
-#[darling(attributes(tide))]
+#[darling(attributes(tide), forward_attrs(validate))]
 #[allow(dead_code)] // Some fields reserved for future use
 struct ModelField {
     ident: Option<Ident>,
     ty: Type,
+    attrs: Vec<syn::Attribute>,
     
     /// Mark as primary key
     #[darling(default)]
@@ -156,6 +157,123 @@ fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>)
     (indexes, unique_indexes)
 }
 
+/// Parse #[validate(...)] attributes from field attributes
+fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<proc_macro2::TokenStream> {
+    let mut rules = Vec::new();
+    
+    for attr in attrs {
+        if !attr.path().is_ident("validate") {
+            continue;
+        }
+        
+        match &attr.meta {
+            Meta::List(list) => {
+                let tokens = list.tokens.to_string();
+                
+                // Parse validation rules
+                // Examples: #[validate(email)], #[validate(min_length = 3, max_length = 100)]
+                for part in tokens.split(',') {
+                    let part = part.trim();
+                    
+                    if part == "required" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Required });
+                    } else if part == "email" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Email });
+                    } else if part == "url" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Url });
+                    } else if part == "alpha" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Alpha });
+                    } else if part == "alphanumeric" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Alphanumeric });
+                    } else if part == "numeric" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Numeric });
+                    } else if part == "uuid" {
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Uuid });
+                    } else if part.starts_with("min_length") {
+                        if let Some(val) = extract_value(part, "min_length") {
+                            if let Ok(n) = val.parse::<usize>() {
+                                rules.push(quote! { ::tideorm::validation::ValidationRule::MinLength(#n) });
+                            }
+                        }
+                    } else if part.starts_with("max_length") {
+                        if let Some(val) = extract_value(part, "max_length") {
+                            if let Ok(n) = val.parse::<usize>() {
+                                rules.push(quote! { ::tideorm::validation::ValidationRule::MaxLength(#n) });
+                            }
+                        }
+                    } else if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") {
+                        if let Some(val) = extract_value(part, "length") {
+                            if let Ok(n) = val.parse::<usize>() {
+                                rules.push(quote! { ::tideorm::validation::ValidationRule::Length(#n) });
+                            }
+                        }
+                    } else if part.starts_with("min") && !part.contains("length") {
+                        if let Some(val) = extract_value(part, "min") {
+                            if let Ok(n) = val.parse::<f64>() {
+                                rules.push(quote! { ::tideorm::validation::ValidationRule::Min(#n) });
+                            }
+                        }
+                    } else if part.starts_with("max") && !part.contains("length") {
+                        if let Some(val) = extract_value(part, "max") {
+                            if let Ok(n) = val.parse::<f64>() {
+                                rules.push(quote! { ::tideorm::validation::ValidationRule::Max(#n) });
+                            }
+                        }
+                    } else if part.starts_with("range") {
+                        // range = "1..100" or range(1, 100)
+                        if let Some(val) = extract_value(part, "range") {
+                            let val = val.trim_matches('"');
+                            if val.contains("..") {
+                                let parts: Vec<&str> = val.split("..").collect();
+                                if parts.len() == 2 {
+                                    if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                        rules.push(quote! { ::tideorm::validation::ValidationRule::Range(#min, #max) });
+                                    }
+                                }
+                            }
+                        }
+                    } else if part.starts_with("regex") {
+                        if let Some(val) = extract_value(part, "regex") {
+                            let pattern = val.trim_matches('"');
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::Regex(#pattern.to_string()) });
+                        }
+                    } else if part.starts_with("custom") {
+                        if let Some(val) = extract_value(part, "custom") {
+                            let msg = val.trim_matches('"');
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::Custom(#msg.to_string()) });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    rules
+}
+
+/// Extract value from "key = value" or "key(value)" format
+fn extract_value(input: &str, key: &str) -> Option<String> {
+    let input = input.trim();
+    
+    // Try "key = value" format
+    if let Some(pos) = input.find('=') {
+        let k = input[..pos].trim();
+        if k == key {
+            return Some(input[pos + 1..].trim().to_string());
+        }
+    }
+    
+    // Try "key(value)" format
+    if input.starts_with(key) && input.contains('(') && input.ends_with(')') {
+        let start = input.find('(').unwrap() + 1;
+        let end = input.len() - 1;
+        return Some(input[start..end].trim().to_string());
+    }
+    
+    None
+}
+
 /// Struct-level attributes for the model
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(tide), supports(struct_named))]
@@ -224,13 +342,18 @@ struct ModelInput {
 /// pub struct User {
 ///     #[tide(primary_key, auto_increment)]
 ///     pub id: i64,
+///     
+///     #[validate(email)]
 ///     pub email: String,
+///     
+///     #[validate(min_length = 2, max_length = 100)]
 ///     pub name: String,
+///     
 ///     #[tide(nullable)]
 ///     pub bio: Option<String>,
 /// }
 /// ```
-#[proc_macro_derive(Model, attributes(tide, index, unique_index))]
+#[proc_macro_derive(Model, attributes(tide, index, unique_index, validate))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     
@@ -324,6 +447,21 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         Data::Struct(fields) => fields,
         _ => panic!("Model can only be derived for structs"),
     };
+    
+    // Parse validation rules from #[validate(...)] attributes on fields
+    let validation_rules: Vec<_> = fields
+        .iter()
+        .filter(|f| !f.skip)
+        .filter_map(|f| {
+            let field_name = f.ident.as_ref()?.to_string();
+            let rules = parse_validation_attributes(&field_name, &f.attrs);
+            if rules.is_empty() {
+                None
+            } else {
+                Some((field_name, rules))
+            }
+        })
+        .collect();
     
     // Find primary key field
     let pk_field = fields.iter().find(|f| f.primary_key);
@@ -669,6 +807,59 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         quote! {}
     };
     
+    // Generate validation implementation
+    let validation_impl = if !validation_rules.is_empty() {
+        let validation_checks: Vec<_> = validation_rules.iter().map(|(field_name, rules)| {
+            let field_ident = format_ident!("{}", field_name);
+            quote! {
+                {
+                    let rules: Vec<::tideorm::validation::ValidationRule> = vec![#(#rules),*];
+                    for rule in &rules {
+                        if let Some(msg) = ::tideorm::validation::Validator::validate_rule(&self.#field_ident, rule, #field_name) {
+                            errors.add(#field_name, msg);
+                        }
+                    }
+                }
+            }
+        }).collect();
+        
+        let rules_list: Vec<_> = validation_rules.iter().map(|(field_name, rules)| {
+            quote! {
+                (#field_name, vec![#(#rules),*])
+            }
+        }).collect();
+        
+        quote! {
+            impl ::tideorm::validation::Validate for #struct_name {
+                fn validation_rules() -> Vec<(&'static str, Vec<::tideorm::validation::ValidationRule>)> {
+                    vec![#(#rules_list),*]
+                }
+                
+                fn validate(&self) -> Result<(), ::tideorm::validation::ValidationErrors> {
+                    let mut errors = ::tideorm::validation::ValidationErrors::new();
+                    
+                    #(#validation_checks)*
+                    
+                    // Run custom validations
+                    if let Err(custom_errors) = self.custom_validations() {
+                        errors.merge(custom_errors);
+                    }
+                    
+                    errors.to_result()
+                }
+            }
+        }
+    } else {
+        // Default empty validation implementation
+        quote! {
+            impl ::tideorm::validation::Validate for #struct_name {
+                fn validate(&self) -> Result<(), ::tideorm::validation::ValidationErrors> {
+                    self.custom_validations()
+                }
+            }
+        }
+    };
+    
     quote! {
         #base_impl
         
@@ -901,6 +1092,8 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 Self::__get_sync_schema()
             }
         }
+        
+        #validation_impl
     }
 }
 

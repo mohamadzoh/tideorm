@@ -1,7 +1,6 @@
 //! Model trait and utilities
 //!
-//! This module provides the core `Model` trait that all TideORM models implement,
-//! inspired by Rails ActiveRecord, Laravel Eloquent, and Sequelize.
+//! This module provides the core `Model` trait that all TideORM models implement.
 //!
 //! ## Features
 //!
@@ -9,7 +8,7 @@
 //! - Instance methods for record manipulation (save, update, delete, reload)
 //! - Configuration methods for hidden attributes, translations, searchable fields
 //! - Support for soft deletes, translations, and file attachments
-//! - Index definitions for schema generation (like Sequelize TypeScript)
+//! - Index definitions for schema generation
 
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -205,7 +204,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     }
     
     // =========================================================================
-    // INDEX DEFINITIONS (Sequelize-style)
+    // INDEX DEFINITIONS
     // =========================================================================
     
     /// Returns regular index definitions for this model
@@ -243,8 +242,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
 /// Core trait for TideORM models
 ///
-/// This trait provides all the CRUD operations and query capabilities,
-/// inspired by Rails ActiveRecord and Laravel Eloquent.
+/// This trait provides all the CRUD operations and query capabilities.
 /// It is automatically implemented by the `#[derive(Model)]` macro.
 ///
 /// ## Global Database Connection

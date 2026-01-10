@@ -532,8 +532,7 @@ impl TideConfig {
     /// Enable or disable automatic database schema synchronization
     ///
     /// When enabled, TideORM will automatically create/update database tables
-    /// based on your model definitions after connecting. This is similar to
-    /// Sequelize's `sync()` feature.
+    /// based on your model definitions after connecting.
     ///
     /// # ⚠️ Warning
     ///
@@ -1635,5 +1634,81 @@ mod tests {
         assert_eq!(format!("{}", DatabaseType::Postgres), "PostgreSQL");
         assert_eq!(format!("{}", DatabaseType::MySQL), "MySQL");
         assert_eq!(format!("{}", DatabaseType::SQLite), "SQLite");
+    }
+    
+    #[test]
+    fn test_tide_config_schema_file() {
+        // Test that schema_file can be set on the builder
+        let config = TideConfig::init()
+            .database_type(DatabaseType::Postgres)
+            .database("postgres://localhost/test")
+            .schema_file("test_schema.sql");
+        
+        // Verify the schema_file was set
+        assert_eq!(config.schema_file, Some("test_schema.sql".to_string()));
+    }
+    
+    #[test]
+    fn test_tide_config_schema_file_with_path() {
+        // Test with a full path
+        let config = TideConfig::init()
+            .database("postgres://localhost/test")
+            .schema_file("./database/schema.sql");
+        
+        assert_eq!(config.schema_file, Some("./database/schema.sql".to_string()));
+    }
+    
+    #[test]
+    fn test_tide_config_no_schema_file() {
+        // Test that schema_file is None by default
+        let config = TideConfig::init()
+            .database("postgres://localhost/test");
+        
+        assert!(config.schema_file.is_none());
+    }
+    
+    #[test]
+    fn test_pool_config_defaults() {
+        let pool = PoolConfig::default();
+        
+        assert_eq!(pool.max_connections, 10);
+        assert_eq!(pool.min_connections, 1);
+        assert_eq!(pool.connect_timeout, Duration::from_secs(8));
+        assert_eq!(pool.idle_timeout, Duration::from_secs(600));
+        assert_eq!(pool.max_lifetime, Duration::from_secs(1800));
+        assert_eq!(pool.acquire_timeout, Duration::from_secs(8));
+    }
+    
+    #[test]
+    fn test_tide_config_full_chain() {
+        // Test that all config options can be chained together
+        let config = TideConfig::init()
+            .database_type(DatabaseType::Postgres)
+            .database("postgres://localhost/test")
+            .max_connections(20)
+            .min_connections(5)
+            .connect_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .max_lifetime(Duration::from_secs(3600))
+            .acquire_timeout(Duration::from_secs(5))
+            .schema_file("schema.sql")
+            .sync(false)
+            .languages(&["en", "fr", "ar"])
+            .fallback_language("en")
+            .hidden_attributes(&["password", "secret"]);
+        
+        assert_eq!(config.database_type, Some(DatabaseType::Postgres));
+        assert_eq!(config.database_url, Some("postgres://localhost/test".to_string()));
+        assert_eq!(config.pool.max_connections, 20);
+        assert_eq!(config.pool.min_connections, 5);
+        assert_eq!(config.pool.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.pool.idle_timeout, Duration::from_secs(300));
+        assert_eq!(config.pool.max_lifetime, Duration::from_secs(3600));
+        assert_eq!(config.pool.acquire_timeout, Duration::from_secs(5));
+        assert_eq!(config.schema_file, Some("schema.sql".to_string()));
+        assert!(!config.sync_enabled);
+        assert_eq!(config.config.languages, vec!["en", "fr", "ar"]);
+        assert_eq!(config.config.fallback_language, "en");
+        assert_eq!(config.config.hidden_attributes, vec!["password", "secret"]);
     }
 }
