@@ -1,97 +1,86 @@
 //! Model Relations System
 //!
-//! This module provides model relations for defining relationships between models.
+//! This module provides model relations using SeaORM-style field declarations.
+//! Relations are defined as struct fields with attributes, following SeaORM's pattern.
 //!
 //! ## Supported Relations
 //!
-//! - `BelongsTo`: Foreign key on this model (e.g., Post belongs_to User)
-//! - `HasOne`: Foreign key on related model, single result (e.g., User has_one Profile)
-//! - `HasMany`: Foreign key on related model, multiple results (e.g., User has_many Posts)
-//! - `HasManyThrough`: Many-to-many via pivot table (e.g., User has_many Roles through UserRoles)
-//! - `MorphTo`/`MorphMany`: Polymorphic relations (e.g., Comment morphMany on Post or Video)
+//! - `HasOne<E>`: One-to-one relation (e.g., User has_one Profile)
+//! - `HasMany<E>`: One-to-many relation (e.g., User has_many Posts)
+//! - `BelongsTo<E>`: Inverse of HasOne/HasMany (e.g., Post belongs_to User)
 //!
-//! ## Using Relation Macros (Recommended)
+//! ## Defining Relations Inside Models (SeaORM Style)
 //!
-//! The easiest way to define relations is with attribute macros:
+//! Relations are declared as fields in your model struct using the `#[tide(relation)]` attribute:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
 //! #[tide(table = "users")]
-//! #[has_many(Post, foreign_key = "user_id")]
-//! #[has_one(Profile, foreign_key = "user_id")]
-//! #[has_many_through(Role, through = "user_roles", foreign_key = "user_id", related_key = "role_id")]
 //! pub struct User {
 //!     #[tide(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub name: String,
 //!     pub email: String,
+//!     
+//!     // Relations defined as fields
+//!     #[tide(has_one = "Profile", foreign_key = "user_id")]
+//!     pub profile: HasOne<Profile>,
+//!     
+//!     #[tide(has_many = "Post", foreign_key = "user_id")]
+//!     pub posts: HasMany<Post>,
 //! }
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "posts")]
-//! #[belongs_to(User, foreign_key = "user_id")]
 //! pub struct Post {
 //!     #[tide(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub user_id: i64,
 //!     pub title: String,
+//!     
+//!     #[tide(belongs_to = "User", foreign_key = "user_id")]
+//!     pub author: BelongsTo<User>,
 //! }
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "profiles")]
-//! #[belongs_to(User, foreign_key = "user_id")]
 //! pub struct Profile {
 //!     #[tide(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub user_id: i64,
 //!     pub bio: String,
+//!     
+//!     #[tide(belongs_to = "User", foreign_key = "user_id")]
+//!     pub user: BelongsTo<User>,
 //! }
 //!
-//! // Now you can load relations:
+//! // Loading relations:
 //! let user = User::find(1).await?;
-//! let posts = user.load_has_many::<Post>().await?;
-//! let profile = user.load_has_one::<Profile>().await?;
+//! let posts = user.posts.load().await?;
+//! let profile = user.profile.load().await?;
 //!
 //! let post = Post::find(1).await?;
-//! let author = post.load_belongs_to::<User>().await?;
+//! let author = post.author.load().await?;
 //! ```
 //!
-//! ## Many-to-Many Relations (HasManyThrough)
+//! ## Many-to-Many Relations
 //!
 //! ```rust,ignore
-//! // User has many Roles through user_roles pivot table
-//! let roles = user.load_has_many_through::<Role, UserRole>().await?;
-//!
-//! // With pivot data
-//! let roles_with_pivot = user.load_has_many_through_with_pivot::<Role, UserRole>().await?;
-//! ```
-//!
-//! ## Polymorphic Relations
-//!
-//! ```rust,ignore
-//! // Comments can belong to Posts or Videos
 //! #[derive(Model)]
-//! #[morph_to(Commentable, type_column = "commentable_type", id_column = "commentable_id")]
-//! pub struct Comment {
+//! #[tide(table = "users")]
+//! pub struct User {
+//!     #[tide(primary_key, auto_increment)]
 //!     pub id: i64,
-//!     pub commentable_type: String,  // "posts" or "videos"
-//!     pub commentable_id: i64,
-//!     pub body: String,
+//!     pub name: String,
+//!     
+//!     #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+//!     pub roles: HasManyThrough<Role, UserRole>,
 //! }
 //!
-//! // Load the parent (either Post or Video)
-//! let parent = comment.load_morph_to::<Commentable>().await?;
-//! ```
-//!
-//! ## Nested Eager Loading
-//!
-//! ```rust,ignore
-//! // Load users with their posts and each post's comments
-//! let users = User::with(&["posts", "posts.comments", "profile"])
-//!     .get()
-//!     .await?;
+//! // Load roles for a user
+//! let roles = user.roles.load().await?;
 //! ```
 //!
 //! ## Relation Constraints
@@ -100,40 +89,1013 @@
 //!
 //! ```rust,ignore
 //! // Load only published posts
-//! let published_posts = user.load_has_many_with::<Post>(|query| {
+//! let published_posts = user.posts.load_with(|query| {
 //!     query
 //!         .where_eq("published", true)
 //!         .order_by("created_at", Order::Desc)
 //!         .limit(10)
 //! }).await?;
-//!
-//! // Load active profile
-//! let profile = user.load_has_one_with::<Profile>(|query| {
-//!     query.where_eq("active", true)
-//! }).await?;
-//! ```
-//!
-//! ## Manual Trait Implementation
-//!
-//! You can also implement the traits manually:
-//!
-//! ```rust,ignore
-//! impl HasMany<Post> for User {
-//!     fn foreign_key() -> &'static str { "user_id" }
-//! }
-//!
-//! impl BelongsTo<User> for Post {
-//!     fn foreign_key() -> &'static str { "user_id" }
-//! }
 //! ```
 
 use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::{QueryBuilder, Order};
+
+// =============================================================================
+// RELATION TYPE WRAPPERS (SeaORM-style)
+// =============================================================================
+
+/// HasOne relation type - represents a one-to-one relationship
+///
+/// Use this as a field type in your model to define a has_one relation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// pub struct User {
+///     pub id: i64,
+///     pub name: String,
+///     
+///     #[tide(has_one = "Profile", foreign_key = "user_id")]
+///     pub profile: HasOne<Profile>,
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct HasOne<E: Model> {
+    /// Foreign key column on the related model
+    pub foreign_key: &'static str,
+    /// Local key on this model (usually the primary key)
+    pub local_key: &'static str,
+    /// Cached related model (loaded via `.load()`)
+    cached: Option<Box<E>>,
+    /// Parent model's primary key value for loading
+    parent_pk: Option<serde_json::Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E: Model> HasOne<E> {
+    /// Create a new HasOne relation
+    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
+        Self {
+            foreign_key,
+            local_key,
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent primary key for lazy loading
+    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
+        self.parent_pk = Some(pk);
+        self
+    }
+    
+    /// Load the related model
+    pub async fn load(&self) -> Result<Option<E>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .first()
+            .await
+    }
+    
+    /// Load the related model with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
+    where
+        F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
+    {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        let query = E::query().where_eq(self.foreign_key, pk.clone());
+        constraint_fn(query).first().await
+    }
+    
+    /// Check if the relation exists
+    pub async fn exists(&self) -> Result<bool> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .exists()
+            .await
+    }
+    
+    /// Get the cached value if already loaded
+    pub fn get_cached(&self) -> Option<&E> {
+        self.cached.as_deref()
+    }
+}
+
+impl<E: Model> Default for HasOne<E> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "id",
+            local_key: "id",
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: Model + Serialize> Serialize for HasOne<E> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize only the cached value if present
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, E: Model> Deserialize<'de> for HasOne<E> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Relations are not deserialized from JSON - they're set up by the model
+        Ok(Self::default())
+    }
+}
+
+/// HasMany relation type - represents a one-to-many relationship
+///
+/// Use this as a field type in your model to define a has_many relation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// pub struct User {
+///     pub id: i64,
+///     pub name: String,
+///     
+///     #[tide(has_many = "Post", foreign_key = "user_id")]
+///     pub posts: HasMany<Post>,
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct HasMany<E: Model> {
+    /// Foreign key column on the related model
+    pub foreign_key: &'static str,
+    /// Local key on this model (usually the primary key)
+    pub local_key: &'static str,
+    /// Cached related models (loaded via `.load()`)
+    cached: Option<Vec<E>>,
+    /// Parent model's primary key value for loading
+    parent_pk: Option<serde_json::Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E: Model> HasMany<E> {
+    /// Create a new HasMany relation
+    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
+        Self {
+            foreign_key,
+            local_key,
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent primary key for lazy loading
+    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
+        self.parent_pk = Some(pk);
+        self
+    }
+    
+    /// Load all related models
+    pub async fn load(&self) -> Result<Vec<E>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .get()
+            .await
+    }
+    
+    /// Load related models with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<E>>
+    where
+        F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
+    {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        let query = E::query().where_eq(self.foreign_key, pk.clone());
+        constraint_fn(query).get().await
+    }
+    
+    /// Count related models
+    pub async fn count(&self) -> Result<u64> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .count()
+            .await
+    }
+    
+    /// Check if any related models exist
+    pub async fn exists(&self) -> Result<bool> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .exists()
+            .await
+    }
+    
+    /// Get the cached values if already loaded
+    pub fn get_cached(&self) -> Option<&[E]> {
+        self.cached.as_deref()
+    }
+}
+
+impl<E: Model> Default for HasMany<E> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "id",
+            local_key: "id",
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: Model + Serialize> Serialize for HasMany<E> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, E: Model> Deserialize<'de> for HasMany<E> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// BelongsTo relation type - represents the inverse of HasOne/HasMany
+///
+/// Use this as a field type in your model to define a belongs_to relation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// pub struct Post {
+///     pub id: i64,
+///     pub user_id: i64,
+///     pub title: String,
+///     
+///     #[tide(belongs_to = "User", foreign_key = "user_id")]
+///     pub author: BelongsTo<User>,
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct BelongsTo<E: Model> {
+    /// Foreign key column on THIS model
+    pub foreign_key: &'static str,
+    /// Owner key on the related model (usually the primary key)
+    pub owner_key: &'static str,
+    /// Cached related model (loaded via `.load()`)
+    cached: Option<Box<E>>,
+    /// Foreign key value for loading
+    fk_value: Option<serde_json::Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E: Model> BelongsTo<E> {
+    /// Create a new BelongsTo relation
+    pub fn new(foreign_key: &'static str, owner_key: &'static str) -> Self {
+        Self {
+            foreign_key,
+            owner_key,
+            cached: None,
+            fk_value: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the foreign key value for lazy loading
+    pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
+        self.fk_value = Some(fk);
+        self
+    }
+    
+    /// Load the related model
+    pub async fn load(&self) -> Result<Option<E>> {
+        let fk = self.fk_value.as_ref()
+            .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.owner_key, fk.clone())
+            .first()
+            .await
+    }
+    
+    /// Load the related model with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
+    where
+        F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
+    {
+        let fk = self.fk_value.as_ref()
+            .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        
+        let query = E::query().where_eq(self.owner_key, fk.clone());
+        constraint_fn(query).first().await
+    }
+    
+    /// Check if the relation exists
+    pub async fn exists(&self) -> Result<bool> {
+        let fk = self.fk_value.as_ref()
+            .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        
+        E::query()
+            .where_eq(self.owner_key, fk.clone())
+            .exists()
+            .await
+    }
+    
+    /// Get the cached value if already loaded
+    pub fn get_cached(&self) -> Option<&E> {
+        self.cached.as_deref()
+    }
+}
+
+impl<E: Model> Default for BelongsTo<E> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "id",
+            owner_key: "id",
+            cached: None,
+            fk_value: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: Model + Serialize> Serialize for BelongsTo<E> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, E: Model> Deserialize<'de> for BelongsTo<E> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+// =============================================================================
+// MANY-TO-MANY RELATIONS
+// =============================================================================
+
+/// HasManyThrough relation - many-to-many through a pivot table
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// pub struct User {
+///     pub id: i64,
+///     pub name: String,
+///     
+///     #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+///     pub roles: HasManyThrough<Role, UserRole>,
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct HasManyThrough<Related: Model, Pivot: Model> {
+    /// Foreign key on pivot table pointing to this model
+    pub foreign_key: &'static str,
+    /// Related key on pivot table pointing to related model
+    pub related_key: &'static str,
+    /// Local key on this model (usually primary key)
+    pub local_key: &'static str,
+    /// Related model's local key (usually primary key)
+    pub related_local_key: &'static str,
+    /// Pivot table name
+    pub pivot_table: &'static str,
+    /// Cached related models
+    cached: Option<Vec<Related>>,
+    /// Parent model's primary key value
+    parent_pk: Option<serde_json::Value>,
+    _marker: PhantomData<(Related, Pivot)>,
+}
+
+impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
+    /// Create a new HasManyThrough relation
+    pub fn new(
+        foreign_key: &'static str,
+        related_key: &'static str,
+        local_key: &'static str,
+        related_local_key: &'static str,
+        pivot_table: &'static str,
+    ) -> Self {
+        Self {
+            foreign_key,
+            related_key,
+            local_key,
+            related_local_key,
+            pivot_table,
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent primary key for lazy loading
+    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
+        self.parent_pk = Some(pk);
+        self
+    }
+    
+    /// Load all related models
+    pub async fn load(&self) -> Result<Vec<Related>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        // Build a query that joins through the pivot table
+        Related::query()
+            .inner_join(
+                self.pivot_table,
+                &format!("{}.{}", self.pivot_table, self.related_key),
+                &format!("{}.{}", Related::table_name(), self.related_local_key),
+            )
+            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk))
+            .get()
+            .await
+    }
+    
+    /// Load related models with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<Related>>
+    where
+        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
+    {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        let query = Related::query()
+            .inner_join(
+                self.pivot_table,
+                &format!("{}.{}", self.pivot_table, self.related_key),
+                &format!("{}.{}", Related::table_name(), self.related_local_key),
+            )
+            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk));
+        
+        constraint_fn(query).get().await
+    }
+    
+    /// Count related models
+    pub async fn count(&self) -> Result<u64> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        Pivot::query()
+            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk))
+            .count()
+            .await
+    }
+    
+    /// Attach a related model (create pivot entry)
+    pub async fn attach(&self, related_id: impl Into<serde_json::Value>) -> Result<()> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        let mut data = HashMap::new();
+        data.insert(self.foreign_key.to_string(), pk.clone());
+        data.insert(self.related_key.to_string(), related_id.into());
+        
+        // Build INSERT SQL
+        let columns: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
+        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.pivot_table,
+            columns.join(", "),
+            placeholders.join(", ")
+        );
+        
+        let params: Vec<crate::internal::Value> = columns.iter()
+            .filter_map(|col| data.get(*col))
+            .map(|v| crate::internal::Value::from(v.clone()))
+            .collect();
+        
+        crate::database::Database::execute_with_params(&sql, params).await?;
+        Ok(())
+    }
+    
+    /// Detach a related model (remove pivot entry)
+    pub async fn detach(&self, related_id: impl Into<serde_json::Value>) -> Result<u64> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        Pivot::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .where_eq(self.related_key, related_id.into())
+            .delete()
+            .await
+    }
+    
+    /// Sync related models (replace all with new set)
+    pub async fn sync(&self, related_ids: Vec<serde_json::Value>) -> Result<()> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        
+        // Delete all existing pivot entries
+        Pivot::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .delete()
+            .await?;
+        
+        // Insert new pivot entries
+        for id in related_ids {
+            self.attach(id).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get the cached values if already loaded
+    pub fn get_cached(&self) -> Option<&[Related]> {
+        self.cached.as_deref()
+    }
+}
+
+impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "id",
+            related_key: "id",
+            local_key: "id",
+            related_local_key: "id",
+            pivot_table: "",
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Related: Model + Serialize, Pivot: Model> Serialize for HasManyThrough<Related, Pivot> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, Related: Model, Pivot: Model> Deserialize<'de> for HasManyThrough<Related, Pivot> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// Pivot data wrapper for many-to-many relations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithPivot<M, P> {
+    /// The related model
+    #[serde(flatten)]
+    pub model: M,
+    /// Pivot table data
+    pub pivot: P,
+}
+
+impl<M, P> WithPivot<M, P> {
+    /// Create a new WithPivot wrapper
+    pub fn new(model: M, pivot: P) -> Self {
+        Self { model, pivot }
+    }
+    
+    /// Get the inner model
+    pub fn into_model(self) -> M {
+        self.model
+    }
+    
+    /// Get the pivot data
+    pub fn pivot(&self) -> &P {
+        &self.pivot
+    }
+    
+    /// Decompose into model and pivot parts
+    pub fn into_parts(self) -> (M, P) {
+        (self.model, self.pivot)
+    }
+}
+
+impl<M, P> std::ops::Deref for WithPivot<M, P> {
+    type Target = M;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.model
+    }
+}
+
+// =============================================================================
+// POLYMORPHIC RELATIONS
+// =============================================================================
+
+/// MorphTo relation - polymorphic belongs-to (single parent of multiple types)
+#[derive(Debug, Clone)]
+pub struct MorphTo<Morphable> {
+    /// Column storing the type (e.g., "commentable_type")
+    pub type_column: &'static str,
+    /// Column storing the foreign id (e.g., "commentable_id")
+    pub id_column: &'static str,
+    /// Type value (e.g., "posts")
+    type_value: Option<String>,
+    /// ID value
+    id_value: Option<serde_json::Value>,
+    _marker: PhantomData<Morphable>,
+}
+
+impl<Morphable> MorphTo<Morphable> {
+    /// Create a new MorphTo relation
+    pub fn new(type_column: &'static str, id_column: &'static str) -> Self {
+        Self {
+            type_column,
+            id_column,
+            type_value: None,
+            id_value: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the type and id values for loading
+    pub fn with_values(mut self, type_value: String, id_value: serde_json::Value) -> Self {
+        self.type_value = Some(type_value);
+        self.id_value = Some(id_value);
+        self
+    }
+}
+
+impl<Morphable> Default for MorphTo<Morphable> {
+    fn default() -> Self {
+        Self {
+            type_column: "",
+            id_column: "",
+            type_value: None,
+            id_value: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Morphable: Serialize> Serialize for MorphTo<Morphable> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_none()
+    }
+}
+
+impl<'de, Morphable> Deserialize<'de> for MorphTo<Morphable> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// MorphOne relation - polymorphic has-one
+#[derive(Debug, Clone)]
+pub struct MorphOne<Related: Model> {
+    /// The morph name (e.g., "imageable")
+    pub morph_name: &'static str,
+    /// Local key on this model
+    pub local_key: &'static str,
+    /// Cached related model
+    cached: Option<Box<Related>>,
+    /// Parent model's primary key value
+    parent_pk: Option<serde_json::Value>,
+    /// Parent model's table name (for type value)
+    parent_table: Option<String>,
+    _marker: PhantomData<Related>,
+}
+
+impl<Related: Model> MorphOne<Related> {
+    /// Create a new MorphOne relation
+    pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
+        Self {
+            morph_name,
+            local_key,
+            cached: None,
+            parent_pk: None,
+            parent_table: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent values for loading
+    pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
+        self.parent_pk = Some(pk);
+        self.parent_table = Some(table);
+        self
+    }
+    
+    /// Load the related model
+    pub async fn load(&self) -> Result<Option<Related>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let table = self.parent_table.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
+        
+        let type_column = format!("{}_type", self.morph_name);
+        let id_column = format!("{}_id", self.morph_name);
+        
+        Related::query()
+            .where_eq(&type_column, table.clone())
+            .where_eq(&id_column, pk.clone())
+            .first()
+            .await
+    }
+    
+    /// Get the cached value if already loaded
+    pub fn get_cached(&self) -> Option<&Related> {
+        self.cached.as_deref()
+    }
+}
+
+impl<Related: Model> Default for MorphOne<Related> {
+    fn default() -> Self {
+        Self {
+            morph_name: "",
+            local_key: "id",
+            cached: None,
+            parent_pk: None,
+            parent_table: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Related: Model + Serialize> Serialize for MorphOne<Related> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, Related: Model> Deserialize<'de> for MorphOne<Related> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// MorphMany relation - polymorphic has-many
+#[derive(Debug, Clone)]
+pub struct MorphMany<Related: Model> {
+    /// The morph name (e.g., "commentable")
+    pub morph_name: &'static str,
+    /// Local key on this model
+    pub local_key: &'static str,
+    /// Cached related models
+    cached: Option<Vec<Related>>,
+    /// Parent model's primary key value
+    parent_pk: Option<serde_json::Value>,
+    /// Parent model's table name (for type value)
+    parent_table: Option<String>,
+    _marker: PhantomData<Related>,
+}
+
+impl<Related: Model> MorphMany<Related> {
+    /// Create a new MorphMany relation
+    pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
+        Self {
+            morph_name,
+            local_key,
+            cached: None,
+            parent_pk: None,
+            parent_table: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent values for loading
+    pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
+        self.parent_pk = Some(pk);
+        self.parent_table = Some(table);
+        self
+    }
+    
+    /// Load all related models
+    pub async fn load(&self) -> Result<Vec<Related>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let table = self.parent_table.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
+        
+        let type_column = format!("{}_type", self.morph_name);
+        let id_column = format!("{}_id", self.morph_name);
+        
+        Related::query()
+            .where_eq(&type_column, table.clone())
+            .where_eq(&id_column, pk.clone())
+            .get()
+            .await
+    }
+    
+    /// Load related models with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<Related>>
+    where
+        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
+    {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let table = self.parent_table.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
+        
+        let type_column = format!("{}_type", self.morph_name);
+        let id_column = format!("{}_id", self.morph_name);
+        
+        let query = Related::query()
+            .where_eq(&type_column, table.clone())
+            .where_eq(&id_column, pk.clone());
+        
+        constraint_fn(query).get().await
+    }
+    
+    /// Count related models
+    pub async fn count(&self) -> Result<u64> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let table = self.parent_table.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
+        
+        let type_column = format!("{}_type", self.morph_name);
+        let id_column = format!("{}_id", self.morph_name);
+        
+        Related::query()
+            .where_eq(&type_column, table.clone())
+            .where_eq(&id_column, pk.clone())
+            .count()
+            .await
+    }
+    
+    /// Get the cached values if already loaded
+    pub fn get_cached(&self) -> Option<&[Related]> {
+        self.cached.as_deref()
+    }
+}
+
+impl<Related: Model> Default for MorphMany<Related> {
+    fn default() -> Self {
+        Self {
+            morph_name: "",
+            local_key: "id",
+            cached: None,
+            parent_pk: None,
+            parent_table: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Related: Model + Serialize> Serialize for MorphMany<Related> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, Related: Model> Deserialize<'de> for MorphMany<Related> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// Polymorphic result that can hold different model types
+#[derive(Debug, Clone)]
+pub enum MorphResult<A, B> {
+    /// First variant
+    TypeA(A),
+    /// Second variant
+    TypeB(B),
+    /// Unknown type (stored as JSON)
+    Unknown(serde_json::Value),
+}
+
+impl<A, B> MorphResult<A, B> {
+    /// Check if this is TypeA
+    pub fn is_type_a(&self) -> bool {
+        matches!(self, MorphResult::TypeA(_))
+    }
+    
+    /// Check if this is TypeB
+    pub fn is_type_b(&self) -> bool {
+        matches!(self, MorphResult::TypeB(_))
+    }
+    
+    /// Check if this is Unknown
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, MorphResult::Unknown(_))
+    }
+    
+    /// Get TypeA if present
+    pub fn as_type_a(&self) -> Option<&A> {
+        match self {
+            MorphResult::TypeA(a) => Some(a),
+            _ => None,
+        }
+    }
+    
+    /// Get TypeB if present
+    pub fn as_type_b(&self) -> Option<&B> {
+        match self {
+            MorphResult::TypeB(b) => Some(b),
+            _ => None,
+        }
+    }
+    
+    /// Convert to TypeA, consuming self
+    pub fn into_type_a(self) -> Option<A> {
+        match self {
+            MorphResult::TypeA(a) => Some(a),
+            _ => None,
+        }
+    }
+    
+    /// Convert to TypeB, consuming self
+    pub fn into_type_b(self) -> Option<B> {
+        match self {
+            MorphResult::TypeB(b) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+/// Three-variant polymorphic result
+#[derive(Debug, Clone)]
+pub enum MorphResult3<A, B, C> {
+    /// First variant
+    TypeA(A),
+    /// Second variant
+    TypeB(B),
+    /// Third variant
+    TypeC(C),
+    /// Unknown type (stored as JSON)
+    Unknown(serde_json::Value),
+}
+
+/// Four-variant polymorphic result
+#[derive(Debug, Clone)]
+pub enum MorphResult4<A, B, C, D> {
+    /// First variant
+    TypeA(A),
+    /// Second variant
+    TypeB(B),
+    /// Third variant
+    TypeC(C),
+    /// Fourth variant
+    TypeD(D),
+    /// Unknown type (stored as JSON)
+    Unknown(serde_json::Value),
+}
 
 // =============================================================================
 // RELATION CONSTRAINT TYPES
@@ -229,947 +1191,6 @@ impl RelationConstraints {
 }
 
 // =============================================================================
-// RELATION TRAITS
-// =============================================================================
-
-/// BelongsTo relation: Foreign key on this model
-///
-/// Example: Post belongs_to User (posts.user_id -> users.id)
-pub trait BelongsTo<Related: Model>: Model {
-    /// The foreign key column on this model
-    fn foreign_key() -> &'static str;
-    
-    /// The local key on the related model (defaults to primary key)
-    fn owner_key() -> &'static str {
-        Related::primary_key_name()
-    }
-    
-    /// Default constraints for this relation
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-}
-
-/// HasOne relation: Foreign key on related model, single result
-///
-/// Example: User has_one Profile (profiles.user_id -> users.id)
-pub trait HasOne<Related: Model>: Model {
-    /// The foreign key column on the related model
-    fn foreign_key() -> &'static str;
-    
-    /// The local key on this model (defaults to primary key)
-    fn local_key() -> &'static str {
-        Self::primary_key_name()
-    }
-    
-    /// Default constraints for this relation
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-}
-
-/// HasMany relation: Foreign key on related model, multiple results
-///
-/// Example: User has_many Posts (posts.user_id -> users.id)
-pub trait HasMany<Related: Model>: Model {
-    /// The foreign key column on the related model
-    fn foreign_key() -> &'static str;
-    
-    /// The local key on this model (defaults to primary key)
-    fn local_key() -> &'static str {
-        Self::primary_key_name()
-    }
-    
-    /// Default constraints for this relation (ordering, filtering, etc.)
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-    
-    /// Default order for this relation
-    fn default_order() -> Option<(String, Order)> {
-        None
-    }
-    
-    /// Default limit for this relation (None = no limit)
-    fn default_limit() -> Option<u64> {
-        None
-    }
-}
-
-// =============================================================================
-// MANY-TO-MANY RELATIONS (HasManyThrough)
-// =============================================================================
-
-/// HasManyThrough relation: Many-to-many through a pivot/junction table
-///
-/// Example: User has_many Roles through user_roles
-/// - users table: id, name
-/// - roles table: id, name
-/// - user_roles pivot: user_id, role_id
-///
-/// ```rust,ignore
-/// impl HasManyThrough<Role, UserRole> for User {
-///     fn foreign_key() -> &'static str { "user_id" }      // on pivot
-///     fn related_key() -> &'static str { "role_id" }      // on pivot
-/// }
-/// ```
-pub trait HasManyThrough<Related: Model, Pivot: Model>: Model {
-    /// Foreign key on the pivot table pointing to this model
-    fn foreign_key() -> &'static str;
-    
-    /// Related key on the pivot table pointing to the related model
-    fn related_key() -> &'static str;
-    
-    /// Local key on this model (defaults to primary key)
-    fn local_key() -> &'static str {
-        Self::primary_key_name()
-    }
-    
-    /// Related model's local key (defaults to primary key)
-    fn related_local_key() -> &'static str {
-        Related::primary_key_name()
-    }
-    
-    /// Get the pivot table name (defaults to Pivot model's table)
-    fn pivot_table() -> &'static str {
-        Pivot::table_name()
-    }
-    
-    /// Pivot columns to include in results (empty = none)
-    fn pivot_columns() -> Vec<&'static str> {
-        vec![]
-    }
-    
-    /// Default constraints for this relation
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-}
-
-/// Pivot data wrapper for many-to-many relations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WithPivot<M, P> {
-    /// The related model
-    #[serde(flatten)]
-    pub model: M,
-    /// Pivot table data
-    pub pivot: P,
-}
-
-impl<M, P> WithPivot<M, P> {
-    /// Create a new WithPivot wrapper
-    pub fn new(model: M, pivot: P) -> Self {
-        Self { model, pivot }
-    }
-    
-    /// Get the inner model
-    pub fn into_model(self) -> M {
-        self.model
-    }
-    
-    /// Get the pivot data
-    pub fn pivot(&self) -> &P {
-        &self.pivot
-    }
-    
-    /// Decompose into model and pivot parts
-    pub fn into_parts(self) -> (M, P) {
-        (self.model, self.pivot)
-    }
-}
-
-impl<M, P> std::ops::Deref for WithPivot<M, P> {
-    type Target = M;
-    
-    fn deref(&self) -> &Self::Target {
-        &self.model
-    }
-}
-
-// =============================================================================
-// POLYMORPHIC RELATIONS
-// =============================================================================
-
-/// MorphTo relation: Polymorphic belongs-to (single parent of multiple types)
-///
-/// Example: Comment morphs to either Post or Video
-/// - comments table: id, commentable_type, commentable_id, body
-///
-/// ```rust,ignore
-/// impl MorphTo<Commentable> for Comment {
-///     fn morph_type_column() -> &'static str { "commentable_type" }
-///     fn morph_id_column() -> &'static str { "commentable_id" }
-/// }
-/// ```
-pub trait MorphTo<Morphable>: Model {
-    /// Column storing the type (e.g., "commentable_type")
-    fn morph_type_column() -> &'static str;
-    
-    /// Column storing the foreign id (e.g., "commentable_id")
-    fn morph_id_column() -> &'static str;
-    
-    /// Map morph type string to table name (override for custom mappings)
-    fn type_to_table(type_value: &str) -> String {
-        // Default: type value is the table name
-        type_value.to_string()
-    }
-}
-
-/// MorphOne relation: Polymorphic has-one (this model can have one of another type)
-///
-/// Example: Post has one Image (polymorphic)
-/// - images table: id, imageable_type, imageable_id, url
-///
-/// ```rust,ignore
-/// impl MorphOne<Image> for Post {
-///     fn morph_name() -> &'static str { "imageable" }
-/// }
-/// ```
-pub trait MorphOne<Related: Model>: Model {
-    /// The morph name (used to derive type and id columns)
-    fn morph_name() -> &'static str;
-    
-    /// The type column on the related model (defaults to {morph_name}_type)
-    fn morph_type_column() -> String {
-        format!("{}_type", Self::morph_name())
-    }
-    
-    /// The id column on the related model (defaults to {morph_name}_id)
-    fn morph_id_column() -> String {
-        format!("{}_id", Self::morph_name())
-    }
-    
-    /// The type value to use (defaults to this model's table name)
-    fn morph_type_value() -> String {
-        Self::table_name().to_string()
-    }
-    
-    /// Local key on this model (defaults to primary key)
-    fn local_key() -> &'static str {
-        Self::primary_key_name()
-    }
-    
-    /// Default constraints for this relation
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-}
-
-/// MorphMany relation: Polymorphic has-many (this model can have many of another type)
-///
-/// Example: Post has many Comments (polymorphic)
-/// - comments table: id, commentable_type, commentable_id, body
-///
-/// ```rust,ignore
-/// impl MorphMany<Comment> for Post {
-///     fn morph_name() -> &'static str { "commentable" }
-/// }
-/// ```
-pub trait MorphMany<Related: Model>: Model {
-    /// The morph name (used to derive type and id columns)
-    fn morph_name() -> &'static str;
-    
-    /// The type column on the related model (defaults to {morph_name}_type)
-    fn morph_type_column() -> String {
-        format!("{}_type", Self::morph_name())
-    }
-    
-    /// The id column on the related model (defaults to {morph_name}_id)
-    fn morph_id_column() -> String {
-        format!("{}_id", Self::morph_name())
-    }
-    
-    /// The type value to use (defaults to this model's table name)
-    fn morph_type_value() -> String {
-        Self::table_name().to_string()
-    }
-    
-    /// Local key on this model (defaults to primary key)
-    fn local_key() -> &'static str {
-        Self::primary_key_name()
-    }
-    
-    /// Default constraints for this relation
-    fn default_constraints() -> RelationConstraints {
-        RelationConstraints::new()
-    }
-    
-    /// Default order for this relation
-    fn default_order() -> Option<(String, Order)> {
-        None
-    }
-}
-
-/// Polymorphic result that can hold different model types
-#[derive(Debug, Clone)]
-pub enum MorphResult<A, B> {
-    /// First variant
-    TypeA(A),
-    /// Second variant
-    TypeB(B),
-    /// Unknown type (stored as JSON)
-    Unknown(serde_json::Value),
-}
-
-impl<A, B> MorphResult<A, B> {
-    /// Check if this is TypeA
-    pub fn is_type_a(&self) -> bool {
-        matches!(self, MorphResult::TypeA(_))
-    }
-    
-    /// Check if this is TypeB
-    pub fn is_type_b(&self) -> bool {
-        matches!(self, MorphResult::TypeB(_))
-    }
-    
-    /// Check if this is Unknown
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, MorphResult::Unknown(_))
-    }
-    
-    /// Get TypeA if present
-    pub fn as_type_a(&self) -> Option<&A> {
-        match self {
-            MorphResult::TypeA(a) => Some(a),
-            _ => None,
-        }
-    }
-    
-    /// Get TypeB if present
-    pub fn as_type_b(&self) -> Option<&B> {
-        match self {
-            MorphResult::TypeB(b) => Some(b),
-            _ => None,
-        }
-    }
-    
-    /// Get Unknown JSON if present
-    pub fn as_unknown(&self) -> Option<&serde_json::Value> {
-        match self {
-            MorphResult::Unknown(v) => Some(v),
-            _ => None,
-        }
-    }
-    
-    /// Convert to TypeA, consuming self
-    pub fn into_type_a(self) -> Option<A> {
-        match self {
-            MorphResult::TypeA(a) => Some(a),
-            _ => None,
-        }
-    }
-    
-    /// Convert to TypeB, consuming self
-    pub fn into_type_b(self) -> Option<B> {
-        match self {
-            MorphResult::TypeB(b) => Some(b),
-            _ => None,
-        }
-    }
-}
-
-/// Three-variant polymorphic result
-#[derive(Debug, Clone)]
-pub enum MorphResult3<A, B, C> {
-    /// First polymorphic type
-    TypeA(A),
-    /// Second polymorphic type
-    TypeB(B),
-    /// Third polymorphic type
-    TypeC(C),
-    /// Unknown type with raw JSON data
-    Unknown(serde_json::Value),
-}
-
-/// Four-variant polymorphic result
-#[derive(Debug, Clone)]
-pub enum MorphResult4<A, B, C, D> {
-    /// First polymorphic type
-    TypeA(A),
-    /// Second polymorphic type
-    TypeB(B),
-    /// Third polymorphic type
-    TypeC(C),
-    /// Fourth polymorphic type
-    TypeD(D),
-    /// Unknown type with raw JSON data
-    Unknown(serde_json::Value),
-}
-
-// =============================================================================
-// RELATION EXTENSION METHODS
-// =============================================================================
-
-/// Extension trait providing relation query methods on models
-#[async_trait]
-pub trait RelationExt: Model {
-    /// Load a BelongsTo relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let post = Post::find(1).await?;
-    /// let author = post.load_belongs_to::<User>().await?;
-    /// ```
-    async fn load_belongs_to<Related>(&self) -> Result<Option<Related>>
-    where
-        Self: BelongsTo<Related>,
-        Related: Model,
-    {
-        // Get the foreign key value from self
-        let fk_column = <Self as BelongsTo<Related>>::foreign_key();
-        let fk_value = self.get_field_value(fk_column)?;
-        let constraints = <Self as BelongsTo<Related>>::default_constraints();
-        
-        // Query the related model by its primary key
-        let query = Related::query()
-            .where_eq(Related::primary_key_name(), fk_value);
-        
-        constraints.apply(query).first().await
-    }
-    
-    /// Load a BelongsTo relation with custom constraints
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let post = Post::find(1).await?;
-    /// let author = post.load_belongs_to_with::<User>(|query| {
-    ///     query.where_eq("active", true)
-    /// }).await?;
-    /// ```
-    async fn load_belongs_to_with<Related, F>(&self, constraint_fn: F) -> Result<Option<Related>>
-    where
-        Self: BelongsTo<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let fk_column = <Self as BelongsTo<Related>>::foreign_key();
-        let fk_value = self.get_field_value(fk_column)?;
-        
-        let query = Related::query()
-            .where_eq(Related::primary_key_name(), fk_value);
-        
-        constraint_fn(query).first().await
-    }
-    
-    /// Load a HasOne relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let profile = user.load_has_one::<Profile>().await?;
-    /// ```
-    async fn load_has_one<Related>(&self) -> Result<Option<Related>>
-    where
-        Self: HasOne<Related>,
-        Related: Model,
-    {
-        let fk_column = <Self as HasOne<Related>>::foreign_key();
-        let local_key = <Self as HasOne<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let constraints = <Self as HasOne<Related>>::default_constraints();
-        
-        let query = Related::query()
-            .where_eq(fk_column, pk_value);
-        
-        constraints.apply(query).first().await
-    }
-    
-    /// Load a HasOne relation with custom constraints
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let profile = user.load_has_one_with::<Profile>(|query| {
-    ///     query.where_eq("active", true)
-    /// }).await?;
-    /// ```
-    async fn load_has_one_with<Related, F>(&self, constraint_fn: F) -> Result<Option<Related>>
-    where
-        Self: HasOne<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let fk_column = <Self as HasOne<Related>>::foreign_key();
-        let local_key = <Self as HasOne<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        let query = Related::query()
-            .where_eq(fk_column, pk_value);
-        
-        constraint_fn(query).first().await
-    }
-    
-    /// Load a HasMany relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let posts = user.load_has_many::<Post>().await?;
-    /// ```
-    async fn load_has_many<Related>(&self) -> Result<Vec<Related>>
-    where
-        Self: HasMany<Related>,
-        Related: Model,
-    {
-        let fk_column = <Self as HasMany<Related>>::foreign_key();
-        let local_key = <Self as HasMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let constraints = <Self as HasMany<Related>>::default_constraints();
-        
-        let mut query = Related::query()
-            .where_eq(fk_column, pk_value);
-        
-        // Apply default order if specified
-        if let Some((col, order)) = <Self as HasMany<Related>>::default_order() {
-            query = query.order_by(&col, order);
-        }
-        
-        // Apply default limit if specified
-        if let Some(limit) = <Self as HasMany<Related>>::default_limit() {
-            query = query.limit(limit);
-        }
-        
-        constraints.apply(query).get().await
-    }
-    
-    /// Load a HasMany relation with custom constraints
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let posts = user.load_has_many_with::<Post>(|query| {
-    ///     query
-    ///         .where_eq("published", true)
-    ///         .order_by("created_at", Order::Desc)
-    ///         .limit(10)
-    /// }).await?;
-    /// ```
-    async fn load_has_many_with<Related, F>(&self, constraint_fn: F) -> Result<Vec<Related>>
-    where
-        Self: HasMany<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let fk_column = <Self as HasMany<Related>>::foreign_key();
-        let local_key = <Self as HasMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        let query = Related::query()
-            .where_eq(fk_column, pk_value);
-        
-        constraint_fn(query).get().await
-    }
-    
-    /// Count HasMany related records
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let post_count = user.count_has_many::<Post>().await?;
-    /// ```
-    async fn count_has_many<Related>(&self) -> Result<u64>
-    where
-        Self: HasMany<Related>,
-        Related: Model,
-    {
-        let fk_column = <Self as HasMany<Related>>::foreign_key();
-        let local_key = <Self as HasMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        Related::query()
-            .where_eq(fk_column, pk_value)
-            .count()
-            .await
-    }
-    
-    /// Count HasMany related records with constraints
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let published_count = user.count_has_many_with::<Post>(|query| {
-    ///     query.where_eq("published", true)
-    /// }).await?;
-    /// ```
-    async fn count_has_many_with<Related, F>(&self, constraint_fn: F) -> Result<u64>
-    where
-        Self: HasMany<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let fk_column = <Self as HasMany<Related>>::foreign_key();
-        let local_key = <Self as HasMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        let query = Related::query()
-            .where_eq(fk_column, pk_value);
-        
-        constraint_fn(query).count().await
-    }
-    
-    /// Check if any HasMany related records exist
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// if user.has_any::<Post>().await? {
-    ///     println!("User has posts!");
-    /// }
-    /// ```
-    async fn has_any<Related>(&self) -> Result<bool>
-    where
-        Self: HasMany<Related>,
-        Related: Model,
-    {
-        let fk_column = <Self as HasMany<Related>>::foreign_key();
-        let local_key = <Self as HasMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        Related::query()
-            .where_eq(fk_column, pk_value)
-            .exists()
-            .await
-    }
-    
-    /// Check if HasOne relation exists
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// if user.has_one_exists::<Profile>().await? {
-    ///     println!("User has a profile!");
-    /// }
-    /// ```
-    async fn has_one_exists<Related>(&self) -> Result<bool>
-    where
-        Self: HasOne<Related>,
-        Related: Model,
-    {
-        let fk_column = <Self as HasOne<Related>>::foreign_key();
-        let local_key = <Self as HasOne<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        
-        Related::query()
-            .where_eq(fk_column, pk_value)
-            .exists()
-            .await
-    }
-    
-    /// Get a field value by name (helper for relations)
-    fn get_field_value(&self, field: &str) -> Result<serde_json::Value> {
-        let json = serde_json::to_value(self)
-            .map_err(|e| Error::query(format!("Failed to serialize model: {}", e)))?;
-        
-        json.get(field)
-            .cloned()
-            .ok_or_else(|| Error::query(format!("Field '{}' not found on model", field)))
-    }
-    
-    // =========================================================================
-    // MANY-TO-MANY (HasManyThrough) LOADING
-    // =========================================================================
-    
-    /// Load a HasManyThrough (many-to-many) relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// let roles = user.load_has_many_through::<Role, UserRole>().await?;
-    /// ```
-    async fn load_has_many_through<Related, Pivot>(&self) -> Result<Vec<Related>>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        let related_key = <Self as HasManyThrough<Related, Pivot>>::related_key();
-        let related_local_key = <Self as HasManyThrough<Related, Pivot>>::related_local_key();
-        let pivot_table = <Self as HasManyThrough<Related, Pivot>>::pivot_table();
-        let constraints = <Self as HasManyThrough<Related, Pivot>>::default_constraints();
-        
-        // Build a query that joins through the pivot table
-        // SELECT related.* FROM related
-        // INNER JOIN pivot ON pivot.related_key = related.id
-        // WHERE pivot.foreign_key = ?
-        let query = Related::query()
-            .inner_join(
-                pivot_table,
-                &format!("{}.{}", pivot_table, related_key),
-                &format!("{}.{}", Related::table_name(), related_local_key),
-            )
-            .where_raw(&format!("{}.{} = {}", pivot_table, foreign_key, pk_value));
-        
-        constraints.apply(query).get().await
-    }
-    
-    /// Load a HasManyThrough relation with custom constraints
-    async fn load_has_many_through_with<Related, Pivot, F>(&self, constraint_fn: F) -> Result<Vec<Related>>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        let related_key = <Self as HasManyThrough<Related, Pivot>>::related_key();
-        let related_local_key = <Self as HasManyThrough<Related, Pivot>>::related_local_key();
-        let pivot_table = <Self as HasManyThrough<Related, Pivot>>::pivot_table();
-        
-        let query = Related::query()
-            .inner_join(
-                pivot_table,
-                &format!("{}.{}", pivot_table, related_key),
-                &format!("{}.{}", Related::table_name(), related_local_key),
-            )
-            .where_raw(&format!("{}.{} = {}", pivot_table, foreign_key, pk_value));
-        
-        constraint_fn(query).get().await
-    }
-    
-    /// Count HasManyThrough related records
-    async fn count_has_many_through<Related, Pivot>(&self) -> Result<u64>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        let pivot_table = <Self as HasManyThrough<Related, Pivot>>::pivot_table();
-        
-        // Count through pivot table
-        Pivot::query()
-            .where_raw(&format!("{}.{} = {}", pivot_table, foreign_key, pk_value))
-            .count()
-            .await
-    }
-    
-    /// Attach a related model through pivot (many-to-many)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let user = User::find(1).await?;
-    /// user.attach::<Role, UserRole>(role_id, None).await?;
-    /// ```
-    async fn attach<Related, Pivot>(&self, related_id: impl Into<serde_json::Value> + Send, pivot_data: Option<HashMap<String, serde_json::Value>>) -> Result<()>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        let related_key = <Self as HasManyThrough<Related, Pivot>>::related_key();
-        let pivot_table = <Self as HasManyThrough<Related, Pivot>>::pivot_table();
-        
-        let mut data = pivot_data.unwrap_or_default();
-        data.insert(foreign_key.to_string(), pk_value);
-        data.insert(related_key.to_string(), related_id.into());
-        
-        // Build INSERT SQL directly
-        let columns: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            pivot_table,
-            columns.join(", "),
-            placeholders.join(", ")
-        );
-        
-        let params: Vec<crate::internal::Value> = columns.iter()
-            .filter_map(|col| data.get(*col))
-            .map(|v| crate::internal::Value::from(v.clone()))
-            .collect();
-        
-        crate::database::Database::execute_with_params(&sql, params).await?;
-        Ok(())
-    }
-    
-    /// Detach a related model (remove from pivot table)
-    async fn detach<Related, Pivot>(&self, related_id: impl Into<serde_json::Value> + Send) -> Result<u64>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        let related_key = <Self as HasManyThrough<Related, Pivot>>::related_key();
-        
-        Pivot::query()
-            .where_eq(foreign_key, pk_value)
-            .where_eq(related_key, related_id.into())
-            .delete()
-            .await
-    }
-    
-    /// Detach all related models (clear pivot table entries)
-    async fn detach_all<Related, Pivot>(&self) -> Result<u64>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        let local_key = <Self as HasManyThrough<Related, Pivot>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let foreign_key = <Self as HasManyThrough<Related, Pivot>>::foreign_key();
-        
-        Pivot::query()
-            .where_eq(foreign_key, pk_value)
-            .delete()
-            .await
-    }
-    
-    /// Sync related models (replace all with new set)
-    async fn sync<Related, Pivot>(&self, related_ids: Vec<serde_json::Value>) -> Result<()>
-    where
-        Self: HasManyThrough<Related, Pivot>,
-        Related: Model,
-        Pivot: Model,
-    {
-        // First detach all
-        self.detach_all::<Related, Pivot>().await?;
-        
-        // Then attach new ones
-        for id in related_ids {
-            self.attach::<Related, Pivot>(id, None).await?;
-        }
-        
-        Ok(())
-    }
-    
-    // =========================================================================
-    // POLYMORPHIC RELATIONS LOADING
-    // =========================================================================
-    
-    /// Load a MorphOne (polymorphic has-one) relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let post = Post::find(1).await?;
-    /// let image = post.load_morph_one::<Image>().await?;
-    /// ```
-    async fn load_morph_one<Related>(&self) -> Result<Option<Related>>
-    where
-        Self: MorphOne<Related>,
-        Related: Model,
-    {
-        let local_key = <Self as MorphOne<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let type_column = <Self as MorphOne<Related>>::morph_type_column();
-        let id_column = <Self as MorphOne<Related>>::morph_id_column();
-        let type_value = <Self as MorphOne<Related>>::morph_type_value();
-        let constraints = <Self as MorphOne<Related>>::default_constraints();
-        
-        let query = Related::query()
-            .where_eq(&type_column, type_value)
-            .where_eq(&id_column, pk_value);
-        
-        constraints.apply(query).first().await
-    }
-    
-    /// Load a MorphOne relation with custom constraints
-    async fn load_morph_one_with<Related, F>(&self, constraint_fn: F) -> Result<Option<Related>>
-    where
-        Self: MorphOne<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let local_key = <Self as MorphOne<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let type_column = <Self as MorphOne<Related>>::morph_type_column();
-        let id_column = <Self as MorphOne<Related>>::morph_id_column();
-        let type_value = <Self as MorphOne<Related>>::morph_type_value();
-        
-        let query = Related::query()
-            .where_eq(&type_column, type_value)
-            .where_eq(&id_column, pk_value);
-        
-        constraint_fn(query).first().await
-    }
-    
-    /// Load a MorphMany (polymorphic has-many) relation
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let post = Post::find(1).await?;
-    /// let comments = post.load_morph_many::<Comment>().await?;
-    /// ```
-    async fn load_morph_many<Related>(&self) -> Result<Vec<Related>>
-    where
-        Self: MorphMany<Related>,
-        Related: Model,
-    {
-        let local_key = <Self as MorphMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let type_column = <Self as MorphMany<Related>>::morph_type_column();
-        let id_column = <Self as MorphMany<Related>>::morph_id_column();
-        let type_value = <Self as MorphMany<Related>>::morph_type_value();
-        let constraints = <Self as MorphMany<Related>>::default_constraints();
-        
-        let mut query = Related::query()
-            .where_eq(&type_column, type_value)
-            .where_eq(&id_column, pk_value);
-        
-        if let Some((col, order)) = <Self as MorphMany<Related>>::default_order() {
-            query = query.order_by(&col, order);
-        }
-        
-        constraints.apply(query).get().await
-    }
-    
-    /// Load a MorphMany relation with custom constraints
-    async fn load_morph_many_with<Related, F>(&self, constraint_fn: F) -> Result<Vec<Related>>
-    where
-        Self: MorphMany<Related>,
-        Related: Model,
-        F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
-    {
-        let local_key = <Self as MorphMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let type_column = <Self as MorphMany<Related>>::morph_type_column();
-        let id_column = <Self as MorphMany<Related>>::morph_id_column();
-        let type_value = <Self as MorphMany<Related>>::morph_type_value();
-        
-        let query = Related::query()
-            .where_eq(&type_column, type_value)
-            .where_eq(&id_column, pk_value);
-        
-        constraint_fn(query).get().await
-    }
-    
-    /// Count MorphMany related records
-    async fn count_morph_many<Related>(&self) -> Result<u64>
-    where
-        Self: MorphMany<Related>,
-        Related: Model,
-    {
-        let local_key = <Self as MorphMany<Related>>::local_key();
-        let pk_value = self.get_field_value(local_key)?;
-        let type_column = <Self as MorphMany<Related>>::morph_type_column();
-        let id_column = <Self as MorphMany<Related>>::morph_id_column();
-        let type_value = <Self as MorphMany<Related>>::morph_type_value();
-        
-        Related::query()
-            .where_eq(&type_column, type_value)
-            .where_eq(&id_column, pk_value)
-            .count()
-            .await
-    }
-}
-
-// Implement RelationExt for all Models
-impl<T: Model> RelationExt for T {}
-
-// =============================================================================
 // EAGER LOADING
 // =============================================================================
 
@@ -1246,7 +1267,6 @@ pub struct RelationPath {
 
 impl RelationPath {
     /// Parse a relation path from a string
-    /// Supports dot notation for nested relations: "posts.comments.author"
     pub fn parse(path: &str) -> Self {
         let segments: Vec<String> = path.split('.').map(|s| s.to_string()).collect();
         Self {
@@ -1277,28 +1297,10 @@ impl RelationPath {
         self.segments.len() > 1
     }
     
-    /// Get depth of nesting (1 for simple, 2+ for nested)
+    /// Get depth of nesting
     pub fn depth(&self) -> usize {
         self.segments.len()
     }
-}
-
-/// Query builder with eager loading support
-/// 
-/// Supports nested eager loading using dot notation:
-/// ```rust,ignore
-/// // Load users with posts and nested comments
-/// let users = User::eager()
-///     .with("posts")
-///     .with("posts.comments")         // Nested: load comments for each post
-///     .with("posts.comments.author")  // Deep nesting: author of each comment
-///     .get()
-///     .await?;
-/// ```
-pub struct EagerQueryBuilder<M: Model> {
-    query: QueryBuilder<M>,
-    /// Relations to load, organized as a tree structure
-    relation_tree: RelationTree,
 }
 
 /// Tree structure for organizing nested relations
@@ -1353,12 +1355,10 @@ impl RelationTree {
     }
 }
 
-/// Relation loader configuration
-pub struct RelationLoader<M> {
-    /// Name of the relation to load
-    pub name: String,
-    /// Function that loads related models for a batch of parent models
-    pub loader: Box<dyn Fn(&[M]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>> + Send>> + Send + Sync>,
+/// Query builder with eager loading support
+pub struct EagerQueryBuilder<M: Model> {
+    query: QueryBuilder<M>,
+    relation_tree: RelationTree,
 }
 
 impl<M: Model> EagerQueryBuilder<M> {
@@ -1371,18 +1371,6 @@ impl<M: Model> EagerQueryBuilder<M> {
     }
     
     /// Add a relation to eager load
-    /// 
-    /// Supports dot notation for nested relations:
-    /// ```rust,ignore
-    /// // Simple relation
-    /// builder.with("posts")
-    /// 
-    /// // Nested relation (loads posts, then comments for each post)
-    /// builder.with("posts.comments")
-    /// 
-    /// // Multiple levels of nesting
-    /// builder.with("posts.comments.author")
-    /// ```
     pub fn with(mut self, relation: &str) -> Self {
         let path = RelationPath::parse(relation);
         self.relation_tree.add_path(&path);
@@ -1390,14 +1378,6 @@ impl<M: Model> EagerQueryBuilder<M> {
     }
     
     /// Add multiple relations at once
-    /// 
-    /// # Example
-    /// ```rust,ignore
-    /// User::eager()
-    ///     .with_many(&["posts", "posts.comments", "profile"])
-    ///     .get()
-    ///     .await?;
-    /// ```
     pub fn with_many(mut self, relations: &[&str]) -> Self {
         for relation in relations {
             self = self.with(relation);
@@ -1424,7 +1404,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     }
     
     /// Set ordering
-    pub fn order_by(mut self, column: &str, order: crate::query::Order) -> Self {
+    pub fn order_by(mut self, column: &str, order: Order) -> Self {
         self.query = self.query.order_by(column, order);
         self
     }
@@ -1441,14 +1421,12 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
     
-    /// Get the relation tree (for introspection)
+    /// Get the relation tree
     pub fn get_relation_tree(&self) -> &RelationTree {
         &self.relation_tree
     }
     
     /// Execute and get all results with loaded relations
-    /// 
-    /// Relations are loaded efficiently using batch queries to avoid N+1 problems
     pub async fn get(self) -> Result<Vec<WithRelations<M>>> {
         let models = self.query.get().await?;
         
@@ -1456,22 +1434,6 @@ impl<M: Model> EagerQueryBuilder<M> {
             .into_iter()
             .map(WithRelations::new)
             .collect();
-        
-        // Note: Full implementation would use the relation_tree to:
-        // 1. Batch load root relations for all models
-        // 2. For each root relation with nested, recursively load nested relations
-        // 3. Match loaded data back to parent models
-        //
-        // Example pseudo-code:
-        // for root in self.relation_tree.roots() {
-        //     let related_data = batch_load_relation(&results, &root).await?;
-        //     for (idx, result) in results.iter_mut().enumerate() {
-        //         result.relations.insert(root.clone(), related_data[idx].clone());
-        //     }
-        //     if let Some(nested_tree) = self.relation_tree.get_nested(&root) {
-        //         // Recursively load nested relations
-        //     }
-        // }
         
         Ok(results)
     }
@@ -1496,73 +1458,16 @@ impl<M: Model> Default for EagerQueryBuilder<M> {
     }
 }
 
-// =============================================================================
-// MODEL EXTENSION FOR EAGER LOADING
-// =============================================================================
-
-/// Extension trait for models to support eager loading syntax
-pub trait EagerLoadExt: Model {
-    /// Start an eager loading query builder
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Simple eager loading
-    /// let users = User::eager()
-    ///     .with("posts")
-    ///     .get()
-    ///     .await?;
-    ///
-    /// // Nested eager loading
-    /// let users = User::eager()
-    ///     .with("posts")
-    ///     .with("posts.comments")         // Load comments for each post
-    ///     .with("posts.comments.author")  // Load author for each comment
-    ///     .get()
-    ///     .await?;
-    ///
-    /// for user in &users {
-    ///     let posts: Vec<Post> = user.get_relation("posts").unwrap_or_default();
-    ///     for post in &posts {
-    ///         // Access nested comments if needed
-    ///     }
-    /// }
-    /// ```
-    fn eager() -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new()
-    }
-    
-    /// Start an eager loading query builder with a specific relation
-    fn with_relation(relation_name: &str) -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new().with(relation_name)
-    }
-    
-    /// Start an eager loading query builder with multiple relations
-    /// 
-    /// # Example
-    /// ```rust,ignore
-    /// let users = User::with_relations(&["posts", "posts.comments", "profile"])
-    ///     .get()
-    ///     .await?;
-    /// ```
-    fn with_relations(relations: &[&str]) -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new().with_many(relations)
-    }
+/// Relation loader configuration
+pub struct RelationLoader<M> {
+    /// Name of the relation to load
+    pub name: String,
+    /// Loader function
+    pub loader: Box<dyn Fn(&[M]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>> + Send>> + Send + Sync>,
 }
 
-// Implement for all Models
-impl<T: Model> EagerLoadExt for T {}
-
 // =============================================================================
-// RELATION INFO (for schema generation and introspection)
+// RELATION INFO (for schema and introspection)
 // =============================================================================
 
 /// Information about a model relation
@@ -1629,7 +1534,7 @@ impl RelationInfo {
         }
     }
     
-    /// Create a HasManyThrough (many-to-many) relation info
+    /// Create a HasManyThrough relation info
     pub fn has_many_through(
         name: &str,
         related_table: &str,
@@ -1645,7 +1550,7 @@ impl RelationInfo {
             foreign_key: foreign_key.to_string(),
             local_key: local_key.to_string(),
             pivot_table: Some(pivot_table.to_string()),
-            morph_type_column: Some(related_key.to_string()), // Reuse for related_key
+            morph_type_column: Some(related_key.to_string()),
             morph_id_column: None,
         }
     }
@@ -1694,19 +1599,19 @@ impl RelationInfo {
 /// Type of relation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationType {
-    /// Many-to-one relation (e.g., Post belongs to User)
+    /// Many-to-one relation
     BelongsTo,
-    /// One-to-one relation (e.g., User has one Profile)
+    /// One-to-one relation
     HasOne,
-    /// One-to-many relation (e.g., User has many Posts)
+    /// One-to-many relation
     HasMany,
-    /// Many-to-many through pivot table (e.g., User has many Roles through UserRole)
+    /// Many-to-many through pivot table
     HasManyThrough,
-    /// Polymorphic many-to-one (e.g., Comment belongs to commentable)
+    /// Polymorphic many-to-one
     MorphTo,
-    /// Polymorphic one-to-one (e.g., Post has one Image as imageable)
+    /// Polymorphic one-to-one
     MorphOne,
-    /// Polymorphic one-to-many (e.g., Post has many Comments as commentable)
+    /// Polymorphic one-to-many
     MorphMany,
 }
 
@@ -1723,3 +1628,54 @@ impl std::fmt::Display for RelationType {
         }
     }
 }
+
+// =============================================================================
+// EXTENSION TRAITS FOR MODELS
+// =============================================================================
+
+/// Extension trait for models to support eager loading syntax
+pub trait EagerLoadExt: Model {
+    /// Start an eager loading query builder
+    fn eager() -> EagerQueryBuilder<Self>
+    where
+        Self: Sized,
+    {
+        EagerQueryBuilder::new()
+    }
+    
+    /// Start with a specific relation
+    fn with_relation(relation_name: &str) -> EagerQueryBuilder<Self>
+    where
+        Self: Sized,
+    {
+        EagerQueryBuilder::new().with(relation_name)
+    }
+    
+    /// Start with multiple relations
+    fn with_relations(relations: &[&str]) -> EagerQueryBuilder<Self>
+    where
+        Self: Sized,
+    {
+        EagerQueryBuilder::new().with_many(relations)
+    }
+}
+
+// Implement for all Models
+impl<T: Model> EagerLoadExt for T {}
+
+/// Extension trait providing relation query methods on models (for backward compatibility)
+#[async_trait]
+pub trait RelationExt: Model {
+    /// Get a field value by name (helper for relations)
+    fn get_field_value(&self, field: &str) -> Result<serde_json::Value> {
+        let json = serde_json::to_value(self)
+            .map_err(|e| Error::query(format!("Failed to serialize model: {}", e)))?;
+        
+        json.get(field)
+            .cloned()
+            .ok_or_else(|| Error::query(format!("Field '{}' not found on model", field)))
+    }
+}
+
+// Implement RelationExt for all Models
+impl<T: Model> RelationExt for T {}

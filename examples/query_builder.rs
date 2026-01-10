@@ -22,7 +22,7 @@ use tideorm::prelude::*;
 // =============================================================================
 
 /// Product model for e-commerce examples
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[index("category")]
 #[index("active")]
@@ -40,7 +40,7 @@ pub struct Product {
 }
 
 /// CustomerOrder model with various statuses
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "customer_orders")]
 #[index("user_id")]
 #[index("status")]
@@ -65,13 +65,15 @@ async fn main() -> tideorm::Result<()> {
     let db_url = std::env::var("POSTGRESQL_DATABASE_URL")
         .unwrap();
     
-    // Try to connect to database, otherwise show API examples
+    // Connect with force_sync to recreate tables (in case schema changed)
+    // WARNING: force_sync drops and recreates tables - only use in development!
     match TideConfig::init()
         .database_type(DatabaseType::Postgres)
         .database(&db_url)
         .max_connections(10)
         .sync(true)
-        .models::<(Product, CustomerOrder)>()  // Register models in config
+        .force_sync(true)  // Drop and recreate tables to handle schema changes
+        .models::<(Product, CustomerOrder)>()
         .connect()
         .await
     {

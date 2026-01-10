@@ -21,7 +21,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::callbacks::Callbacks;
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "audit_logs")]
 //! pub struct AuditLog {
 //!     #[tide(primary_key, auto_increment)]
@@ -32,7 +32,7 @@
 //!     pub created_at: DateTime<Utc>,
 //! }
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "users")]
 //! pub struct User {
 //!     #[tide(primary_key, auto_increment)]

@@ -20,7 +20,7 @@
 //! Add a `translations` JSONB column to your table and use the `#[tide(translatable)]` attribute:
 //!
 //! ```rust,ignore
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "products")]
 //! #[tide(translatable = "name,description")]
 //! pub struct Product {

@@ -14,14 +14,13 @@
 //! ```
 
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 use tideorm::prelude::*;
 
 // =============================================================================
 // MODEL DEFINITIONS
 // =============================================================================
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -32,7 +31,7 @@ pub struct User {
     pub active: bool,
 }
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 pub struct Product {
     #[tide(primary_key, auto_increment)]
@@ -52,8 +51,8 @@ async fn main() -> tideorm::Result<()> {
     println!("🚀 TideORM Caching Demo\n");
     
     // Check for database URL
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/tideorm_test".to_string());
+    let db_url = std::env::var("POSTGRESQL_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string());
     
     // Initialize database
     println!("📦 Connecting to database...");

@@ -10,6 +10,12 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
   - [Database Types](#database-types)
 - [Model Definition](#model-definition)
   - [Model Attributes](#model-attributes)
+- [Model Relations](#model-relations)
+  - [Defining Relations](#defining-relations)
+  - [Relation Types](#relation-types)
+  - [Loading Relations](#loading-relations)
+  - [Many-to-Many Relations](#many-to-many-relations)
+  - [Polymorphic Relations](#polymorphic-relations)
 - [Query Builder](#query-builder)
   - [WHERE Conditions](#where-conditions)
   - [Ordering](#ordering)
@@ -82,9 +88,35 @@ TideConfig::init()
 
 ## Model Definition
 
+### Default Behavior (Recommended)
+
+The simplest way to define a model - just `#[derive(Model)]`:
+
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
+pub struct Product {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub price: f64,
+}
+```
+
+The Model macro automatically implements:
+- `Debug` - for printing/logging
+- `Clone` - for cloning instances  
+- `Default` - for creating default instances
+- `Serialize` - for JSON serialization
+- `Deserialize` - for JSON deserialization
+
+### Custom Implementations (When Needed)
+
+If you need custom implementations, use `skip_derives` and provide your own:
+
+```rust
+#[derive(Model)]
+#[tide(table = "products", skip_derives)]
 #[index("category")]
 #[index("active")]
 #[index(name = "idx_price_category", columns = "price,category")]
@@ -103,19 +135,241 @@ pub struct Product {
     
     pub active: bool,
 }
+
+// Provide your own implementations
+impl Debug for Product { /* custom impl */ }
+impl Clone for Product { /* custom impl */ }
 ```
 
 ### Model Attributes
 
+#### Struct-Level Attributes
+
 | Attribute | Description |
 |-----------|-------------|
 | `#[tide(table = "name")]` | Custom table name |
-| `#[tide(primary_key)]` | Mark as primary key |
-| `#[tide(auto_increment)]` | Auto-increment field |
-| `#[tide(nullable)]` | Optional/nullable field |
+| `#[tide(skip_derives)]` | Skip auto-generated Debug, Clone, Serialize, Deserialize |
+| `#[tide(skip_debug)]` | Skip auto-generated Debug impl only |
+| `#[tide(skip_clone)]` | Skip auto-generated Clone impl only |
+| `#[tide(skip_serialize)]` | Skip auto-generated Serialize impl only |
+| `#[tide(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
+
+#### Field-Level Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[tide(primary_key)]` | Mark as primary key |
+| `#[tide(auto_increment)]` | Auto-increment field |
+| `#[tide(nullable)]` | Optional/nullable field |
+| `#[tide(column = "name")]` | Custom column name |
+| `#[tide(default = "value")]` | Default value |
+| `#[tide(skip)]` | Skip field in queries |
+
+---
+
+## Model Relations
+
+TideORM supports SeaORM-style relations defined as struct fields. Relations are lazy-loaded on demand.
+
+### Defining Relations
+
+```rust
+use tideorm::prelude::*;
+
+#[derive(Model)]
+#[tide(table = "users")]
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub email: String,
+    
+    // One-to-one: User has one Profile
+    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    pub profile: HasOne<Profile>,
+    
+    // One-to-many: User has many Posts
+    #[tide(has_many = "Post", foreign_key = "user_id")]
+    pub posts: HasMany<Post>,
+}
+
+#[derive(Model)]
+#[tide(table = "profiles")]
+pub struct Profile {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub bio: String,
+    
+    // Inverse: Profile belongs to User
+    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    pub user: BelongsTo<User>,
+}
+
+#[derive(Model)]
+#[tide(table = "posts")]
+pub struct Post {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub title: String,
+    pub content: String,
+    
+    // Inverse: Post belongs to User
+    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    pub author: BelongsTo<User>,
+    
+    // One-to-many: Post has many Comments
+    #[tide(has_many = "Comment", foreign_key = "post_id")]
+    pub comments: HasMany<Comment>,
+}
+```
+
+### Relation Types
+
+| Type | Attribute | Description |
+|------|-----------|-------------|
+| `HasOne<T>` | `has_one` | One-to-one relationship (e.g., User has one Profile) |
+| `HasMany<T>` | `has_many` | One-to-many relationship (e.g., User has many Posts) |
+| `BelongsTo<T>` | `belongs_to` | Inverse relationship (e.g., Post belongs to User) |
+| `HasManyThrough<T, P>` | `has_many_through` | Many-to-many via pivot table |
+| `MorphOne<T>` | - | Polymorphic one-to-one |
+| `MorphMany<T>` | - | Polymorphic one-to-many |
+
+### Relation Attributes
+
+| Attribute | Description | Required |
+|-----------|-------------|----------|
+| `foreign_key` | Foreign key column on related table | Yes |
+| `local_key` | Local key (defaults to primary key) | No |
+| `owner_key` | Owner key for BelongsTo | No |
+| `pivot` | Pivot table name for HasManyThrough | For through relations |
+| `related_key` | Related key on pivot table | For through relations |
+
+### Loading Relations
+
+```rust
+// Load a HasOne relation
+let user = User::find(1).await?.unwrap();
+let profile: Option<Profile> = user.profile.load().await?;
+
+// Load a HasMany relation
+let posts: Vec<Post> = user.posts.load().await?;
+
+// Load a BelongsTo relation
+let post = Post::find(1).await?.unwrap();
+let author: Option<User> = post.author.load().await?;
+
+// Check if relation exists
+let has_profile = user.profile.exists().await?;  // bool
+let has_posts = user.posts.exists().await?;      // bool
+
+// Count related records
+let post_count = user.posts.count().await?;      // u64
+```
+
+### Loading with Constraints
+
+```rust
+// Load posts with custom conditions
+let recent_posts = user.posts.load_with(|query| {
+    query
+        .where_eq("published", true)
+        .where_gt("views", 100)
+        .order_desc("created_at")
+        .limit(10)
+}).await?;
+
+// Load profile with constraints
+let profile = user.profile.load_with(|query| {
+    query.where_not_null("avatar")
+}).await?;
+```
+
+### Many-to-Many Relations
+
+```rust
+#[derive(Model)]
+#[tide(table = "users")]
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    
+    // Many-to-many: User has many Roles through user_roles pivot table
+    #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+    pub roles: HasManyThrough<Role, UserRole>,
+}
+
+#[derive(Model)]
+#[tide(table = "roles")]
+pub struct Role {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Model)]
+#[tide(table = "user_roles")]
+pub struct UserRole {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub role_id: i64,
+}
+
+// Usage
+let user = User::find(1).await?.unwrap();
+
+// Load all roles
+let roles = user.roles.load().await?;
+
+// Attach a role
+user.roles.attach(role_id).await?;
+
+// Detach a role
+user.roles.detach(role_id).await?;
+
+// Sync roles (replace all with new set)
+user.roles.sync(vec![
+    serde_json::json!(1),
+    serde_json::json!(2),
+    serde_json::json!(3),
+]).await?;
+```
+
+### Polymorphic Relations
+
+```rust
+use tideorm::prelude::*;
+
+// Images can belong to Posts or Videos (polymorphic)
+#[derive(Model)]
+#[tide(table = "images")]
+pub struct Image {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub path: String,
+    pub imageable_type: String,  // "posts" or "videos"
+    pub imageable_id: i64,
+}
+
+#[derive(Model)]
+#[tide(table = "posts")]
+pub struct Post {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub title: String,
+    
+    // Polymorphic: Post has many Images
+    pub images: MorphMany<Image>,
+}
+
+// Note: MorphMany/MorphOne require manual setup with .with_parent()
+```
 
 ---
 
@@ -471,7 +725,7 @@ TideConfig::init()
 TideORM supports soft deletes for models that have a `deleted_at` column:
 
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "posts", soft_delete)]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -591,7 +845,7 @@ If it returns `Err` or panics, the transaction is rolled back.
 TideORM automatically manages `created_at` and `updated_at` fields:
 
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -627,7 +881,7 @@ Implement lifecycle callbacks for your models:
 ```rust
 use tideorm::callbacks::Callbacks;
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -707,7 +961,7 @@ TideORM provides a file attachment system for managing file relationships. Attac
 ### Model Setup
 
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[tide(has_one_file = "thumbnail")]
 #[tide(has_many_files = "images,documents")]
@@ -881,7 +1135,7 @@ TideORM provides a translation system for multilingual content. Translations are
 ### Model Setup
 
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[tide(translatable = "name,description")]
 pub struct Product {
@@ -1062,7 +1316,7 @@ Translations are stored in JSONB with this structure:
 Models can use both features together:
 
 ```rust
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[tide(translatable = "name,description")]
 #[tide(has_one_file = "thumbnail")]

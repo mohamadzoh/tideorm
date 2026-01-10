@@ -15,7 +15,7 @@
 //! `#[tide(has_many_files)]` attributes:
 //!
 //! ```rust,ignore
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "products")]
 //! #[tide(has_one_file = "thumbnail")]
 //! #[tide(has_many_files = "images,documents")]

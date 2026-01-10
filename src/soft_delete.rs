@@ -10,7 +10,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::SoftDelete;
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "posts", soft_delete)]
 //! pub struct Post {
 //!     #[tide(primary_key, auto_increment)]

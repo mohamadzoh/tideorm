@@ -182,7 +182,7 @@ impl Migration for AddProfileFieldsToUsers {
                 t.add_column("bio", ColumnType::Text).nullable();
                 t.add_column("website", ColumnType::String).nullable();
                 t.add_column("location", ColumnType::String).nullable();
-                t.add_column("settings", ColumnType::Jsonb).default("'{}'");
+                t.add_column("settings", ColumnType::Jsonb).default(DefaultValue::Raw("'{}'::jsonb".to_string()));
             })
             .await
     }
@@ -306,7 +306,7 @@ impl Migration for AddFullTextSearchToPosts {
 async fn main() -> tideorm::Result<()> {
     // Get database URL from environment or use default
     let database_url =
-        std::env::var("POSTGRESQL_DATABASE_URL").unwrap_or_else(|_| "postgres://localhost/migration_demo".to_string());
+        std::env::var("POSTGRESQL_DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string());
 
     println!("🚀 TideORM Migration Example");
     println!("===========================\n");
@@ -344,6 +344,16 @@ async fn main() -> tideorm::Result<()> {
         .database(&database_url)
         .connect()
         .await?;
+
+    // Clean up existing tables for demo purposes
+    println!("🧹 Cleaning up existing tables...\n");
+    let _ = Database::execute("DROP TABLE IF EXISTS post_categories CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS comments CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS posts CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS users CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS categories CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS _migrations CASCADE").await;
+
 
     // Create the migrator with all migrations
     let migrator = Migrator::new()

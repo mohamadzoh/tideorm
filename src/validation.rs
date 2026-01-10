@@ -25,7 +25,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::validation::{Validate, ValidationRule};
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "users")]
 //! pub struct User {
 //!     #[tide(primary_key, auto_increment)]

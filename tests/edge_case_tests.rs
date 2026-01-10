@@ -481,3 +481,153 @@ mod transaction_behavior_tests {
         assert_eq!(data.len(), 4);
     }
 }
+
+// =============================================================================
+// AUTO-DERIVES MODEL TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod auto_derives_tests {
+    use tideorm::prelude::*;
+    
+    // Test model with just #[derive(Model)] - all traits auto-generated
+    #[derive(Model)]
+    #[tide(table = "auto_derive_products")]
+    pub struct AutoDeriveProduct {
+        #[tide(primary_key, auto_increment)]
+        pub id: i64,
+        pub name: String,
+        pub price: f64,
+        pub in_stock: bool,
+    }
+    
+    // Test that skip_derives works when user wants to provide custom implementations
+    #[derive(Model)]
+    #[tide(table = "skip_derive_items", skip_derives)]
+    pub struct SkipDeriveItem {
+        #[tide(primary_key, auto_increment)]
+        pub id: i64,
+        pub value: String,
+    }
+    
+    // Manually implement traits for SkipDeriveItem
+    impl std::fmt::Debug for SkipDeriveItem {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "SkipDeriveItem {{ id: {}, value: {} }}", self.id, self.value)
+        }
+    }
+    
+    impl Clone for SkipDeriveItem {
+        fn clone(&self) -> Self {
+            Self { id: self.id, value: self.value.clone() }
+        }
+    }
+    
+    impl serde::Serialize for SkipDeriveItem {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where S: serde::Serializer {
+            use serde::ser::SerializeStruct;
+            let mut state = serializer.serialize_struct("SkipDeriveItem", 2)?;
+            state.serialize_field("id", &self.id)?;
+            state.serialize_field("value", &self.value)?;
+            state.end()
+        }
+    }
+    
+    impl<'de> serde::Deserialize<'de> for SkipDeriveItem {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where D: serde::Deserializer<'de> {
+            #[derive(serde::Deserialize)]
+            struct Helper { id: i64, value: String }
+            let helper = Helper::deserialize(deserializer)?;
+            Ok(Self { id: helper.id, value: helper.value })
+        }
+    }
+    
+    #[test]
+    fn test_auto_derives_debug() {
+        let product = AutoDeriveProduct {
+            id: 1,
+            name: "Test".to_string(),
+            price: 9.99,
+            in_stock: true,
+        };
+        // Debug should be auto-implemented
+        let debug_str = format!("{:?}", product);
+        assert!(debug_str.contains("AutoDeriveProduct"));
+        assert!(debug_str.contains("name"));
+    }
+    
+    #[test]
+    fn test_auto_derives_clone() {
+        let product = AutoDeriveProduct {
+            id: 1,
+            name: "Test".to_string(),
+            price: 9.99,
+            in_stock: true,
+        };
+        // Clone should be auto-implemented
+        let cloned = product.clone();
+        assert_eq!(cloned.id, 1);
+        assert_eq!(cloned.name, "Test");
+    }
+    
+    #[test]
+    fn test_auto_derives_default() {
+        // Default is always auto-implemented
+        let product = AutoDeriveProduct::default();
+        assert_eq!(product.id, 0);
+        assert_eq!(product.name, "");
+        assert_eq!(product.price, 0.0);
+        assert!(!product.in_stock);
+    }
+    
+    #[test]
+    fn test_auto_derives_serialize() {
+        let product = AutoDeriveProduct {
+            id: 1,
+            name: "Test".to_string(),
+            price: 9.99,
+            in_stock: true,
+        };
+        // Serialize should be auto-implemented
+        let json = serde_json::to_string(&product).unwrap();
+        assert!(json.contains("\"id\":1"));
+        assert!(json.contains("\"name\":\"Test\""));
+    }
+    
+    #[test]
+    fn test_auto_derives_deserialize() {
+        let json = r#"{"id":1,"name":"Test","price":9.99,"in_stock":true}"#;
+        // Deserialize should be auto-implemented
+        let product: AutoDeriveProduct = serde_json::from_str(json).unwrap();
+        assert_eq!(product.id, 1);
+        assert_eq!(product.name, "Test");
+        assert_eq!(product.price, 9.99);
+        assert!(product.in_stock);
+    }
+    
+    #[test]
+    fn test_skip_derives_works() {
+        let item = SkipDeriveItem {
+            id: 1,
+            value: "Test".to_string(),
+        };
+        // Custom implementations should work
+        let debug_str = format!("{:?}", item);
+        assert!(debug_str.contains("SkipDeriveItem"));
+        
+        let cloned = item.clone();
+        assert_eq!(cloned.id, 1);
+        
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"id\":1"));
+    }
+    
+    #[test]
+    fn test_auto_derives_model_meta() {
+        // Verify ModelMeta is properly implemented
+        assert_eq!(AutoDeriveProduct::table_name(), "auto_derive_products");
+        assert_eq!(AutoDeriveProduct::primary_key_name(), "id");
+    }
+}

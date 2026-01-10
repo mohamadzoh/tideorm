@@ -23,7 +23,7 @@
 
 use tideorm::prelude::*;
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -35,7 +35,7 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "settings")]
 pub struct Setting {
     #[tide(primary_key, auto_increment)]
@@ -74,8 +74,8 @@ async fn main() -> tideorm::Result<()> {
             email VARCHAR(255) NOT NULL UNIQUE,
             name VARCHAR(255) NOT NULL,
             login_count INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP NOT NULL,
-            updated_at TIMESTAMP NOT NULL
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
         )
     "#).await?;
     

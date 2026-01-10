@@ -86,3 +86,7 @@ harness = false
 [[bench]]
 name = "fulltext_benchmarks"
 harness = false
+
+[[bench]]
+name = "relations_benchmarks"
+harness = false

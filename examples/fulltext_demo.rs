@@ -25,7 +25,7 @@ use tideorm::config::DatabaseType;
 // =============================================================================
 
 /// Article model for full-text search demonstration
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "articles")]
 pub struct Article {
     #[tide(primary_key, auto_increment)]

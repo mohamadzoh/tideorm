@@ -14,10 +14,9 @@
 //! cargo run --example sqlite_demo --features "sqlite runtime-tokio" --no-default-features
 //! ```
 
-use serde::{Deserialize, Serialize};
 use tideorm::prelude::*;
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users")]
 #[index("email")]
 #[unique_index("email")]
@@ -30,7 +29,7 @@ pub struct User {
     pub age: Option<i32>,
 }
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "notes")]
 pub struct Note {
     #[tide(primary_key, auto_increment)]

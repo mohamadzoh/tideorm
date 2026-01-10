@@ -11,7 +11,6 @@
 //! Run with: cargo bench --bench query_benchmarks
 
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use serde::{Deserialize, Serialize};
 use tideorm::prelude::*;
 use tideorm::{TideConfig, Database};
 use tokio::runtime::Runtime;
@@ -38,7 +37,7 @@ fn get_runtime() -> &'static Runtime {
 // BENCHMARK MODEL
 // =============================================================================
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize, PartialEq)]
+#[derive(Model, PartialEq)]
 #[tide(table = "bench_products")]
 pub struct BenchProduct {
     #[tide(primary_key, auto_increment)]

@@ -14,11 +14,10 @@
 //! cargo run --example mysql_demo --features "mysql runtime-tokio" --no-default-features
 //! ```
 
-use serde::{Deserialize, Serialize};
 use std::env;
 use tideorm::prelude::*;
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users")]
 #[index("email")]
 #[unique_index("email")]
@@ -31,7 +30,7 @@ pub struct User {
     pub age: Option<i32>,
 }
 
-#[derive(Model, Clone, Debug, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[index("category")]
 pub struct Product {
@@ -51,7 +50,7 @@ async fn main() -> tideorm::Result<()> {
 
     // Get database URL from environment
     let database_url = env::var("MYSQL_DATABASE_URL")
-        .unwrap_or_else(|_| "mysql://root:@localhost/tideorm_demo".to_string());
+        .unwrap_or_else(|_| "mysql://root:root@localhost/tideorm_test".to_string());
 
     println!("Connecting to MySQL...");
 

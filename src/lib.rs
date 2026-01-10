@@ -7,7 +7,7 @@
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "users")]
 //! pub struct User {
 //!     #[tide(primary_key, auto_increment)]
@@ -118,7 +118,7 @@
 //! Models are defined using the `#[derive(Model)]` macro with field-level attributes:
 //!
 //! ```rust,ignore
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
+//! #[derive(Model)]
 //! #[tide(table = "posts", soft_delete)]
 //! #[index("user_id")]
 //! #[unique_index("slug")]

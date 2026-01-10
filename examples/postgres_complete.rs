@@ -53,16 +53,15 @@
 
 use tideorm::prelude::*;
 use std::collections::HashMap;
+use tideorm::relations::{HasOne, HasMany, BelongsTo};
 
 // ============================================================================
 // MODEL DEFINITIONS WITH RELATIONS
 // ============================================================================
 
 /// User model - demonstrates has_many and has_one relations
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users", hidden = "password_hash,deleted_at", searchable = "name,email")]
-#[has_many(Post, foreign_key = "user_id")]
-#[has_one(Profile, foreign_key = "user_id")]
 #[index("email")]
 #[unique_index("email")]
 pub struct User {
@@ -74,6 +73,13 @@ pub struct User {
     pub password_hash: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    
+    // Relations defined as fields
+    #[tide(has_many = "Post", foreign_key = "user_id")]
+    pub posts: HasMany<Post>,
+    
+    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    pub profile: HasOne<Profile>,
 }
 
 impl User {
@@ -87,14 +93,14 @@ impl User {
             password_hash: None,
             created_at: now,
             updated_at: now,
+            ..Default::default()
         }
     }
 }
 
 /// Profile model - demonstrates belongs_to relation and JSON column
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "profiles")]
-#[belongs_to(User, foreign_key = "user_id")]
 pub struct Profile {
     #[tide(primary_key, auto_increment)]
     pub id: i64,
@@ -105,6 +111,10 @@ pub struct Profile {
     pub settings: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    
+    // BelongsTo relation
+    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    pub user: BelongsTo<User>,
 }
 
 impl Profile {
@@ -118,15 +128,14 @@ impl Profile {
             settings: serde_json::json!({"theme": "light", "notifications": true}),
             created_at: now,
             updated_at: now,
+            ..Default::default()
         }
     }
 }
 
 /// Post model - demonstrates belongs_to, soft delete, and array columns
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "posts", soft_delete, hidden = "deleted_at")]
-#[belongs_to(User, foreign_key = "user_id")]
-#[has_many(Comment, foreign_key = "post_id")]
 #[index("user_id")]
 #[index("status")]
 pub struct Post {
@@ -145,6 +154,13 @@ pub struct Post {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    
+    // Relations
+    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    pub author: BelongsTo<User>,
+    
+    #[tide(has_many = "Comment", foreign_key = "post_id")]
+    pub comments: HasMany<Comment>,
 }
 
 impl Post {
@@ -163,6 +179,7 @@ impl Post {
             created_at: now,
             updated_at: now,
             deleted_at: None,
+            ..Default::default()
         }
     }
     
@@ -184,10 +201,8 @@ impl Post {
 }
 
 /// Comment model - demonstrates belongs_to with multiple relations
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "comments")]
-#[belongs_to(User, foreign_key = "user_id")]
-#[belongs_to(Post, foreign_key = "post_id")]
 #[index("post_id")]
 #[index("user_id")]
 pub struct Comment {
@@ -197,6 +212,13 @@ pub struct Comment {
     pub user_id: i64,
     pub content: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    
+    // Relations
+    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    pub commenter: BelongsTo<User>,
+    
+    #[tide(belongs_to = "Post", foreign_key = "post_id")]
+    pub post: BelongsTo<Post>,
 }
 
 impl Comment {
@@ -207,12 +229,13 @@ impl Comment {
             user_id,
             content: content.into(),
             created_at: chrono::Utc::now(),
+            ..Default::default()
         }
     }
 }
 
 /// Product model - demonstrates callbacks and JSON queries
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "products")]
 #[index("category")]
 #[index("active")]
@@ -480,30 +503,35 @@ async fn main() -> tideorm::Result<()> {
     let comment2 = Comment::new(post1.id, charlie.id, "Very helpful, thanks!");
     Comment::create(comment2).await?;
     
-    // Load relations
+    // Load relations using field-based syntax
     println!("\n🔗 Loading relations...");
     
     // has_one: User -> Profile
-    let alice = User::find_or_fail(alice.id).await?;
-    let profile = alice.load_has_one::<Profile>().await?;
+    let mut alice = User::find_or_fail(alice.id).await?;
+    alice.profile = HasOne::new("user_id", "id").with_parent_pk(serde_json::json!(alice.id));
+    let profile = alice.profile.load().await?;
     println!("   Alice's profile: {:?}", profile.map(|p| p.id));
     
     // has_many: User -> Posts
-    let posts = alice.load_has_many::<Post>().await?;
+    alice.posts = HasMany::new("user_id", "id").with_parent_pk(serde_json::json!(alice.id));
+    let posts = alice.posts.load().await?;
     println!("   Alice's posts: {} posts", posts.len());
     
     // belongs_to: Post -> User
-    let post = Post::find_or_fail(post1.id).await?;
-    let author = post.load_belongs_to::<User>().await?;
+    let mut post = Post::find_or_fail(post1.id).await?;
+    post.author = BelongsTo::new("user_id", "id").with_fk_value(serde_json::json!(post.user_id));
+    let author = post.author.load().await?;
     println!("   Post '{}' author: {:?}", post.title, author.map(|u| u.name));
     
     // has_many: Post -> Comments
-    let comments = post.load_has_many::<Comment>().await?;
+    post.comments = HasMany::new("post_id", "id").with_parent_pk(serde_json::json!(post.id));
+    let comments = post.comments.load().await?;
     println!("   Post '{}' has {} comments", post.title, comments.len());
     
     // belongs_to: Comment -> User
-    let comment = Comment::find_or_fail(comment1.id).await?;
-    let commenter = comment.load_belongs_to::<User>().await?;
+    let mut comment = Comment::find_or_fail(comment1.id).await?;
+    comment.commenter = BelongsTo::new("user_id", "id").with_fk_value(serde_json::json!(comment.user_id));
+    let commenter = comment.commenter.load().await?;
     println!("   Comment by: {:?}", commenter.map(|u| u.name));
 
     // ========================================================================

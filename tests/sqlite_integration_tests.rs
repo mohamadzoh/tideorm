@@ -7,7 +7,6 @@
 
 use tideorm::prelude::*;
 use tideorm::{TideConfig, Database};
-use serde::{Deserialize, Serialize};
 
 mod test_config;
 use test_config::{sqlite_database_url, should_run_sqlite_tests};
@@ -16,7 +15,7 @@ use test_config::{sqlite_database_url, should_run_sqlite_tests};
 // TEST MODELS
 // =============================================================================
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize, PartialEq)]
+#[derive(Model, PartialEq)]
 #[tide(table = "test_users")]
 pub struct TestUser {
     #[tide(primary_key, auto_increment)]
@@ -27,7 +26,7 @@ pub struct TestUser {
     pub active: bool,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_posts")]
 pub struct TestPost {
     #[tide(primary_key, auto_increment)]
@@ -38,7 +37,7 @@ pub struct TestPost {
     pub published: bool,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_products")]
 pub struct TestProduct {
     #[tide(primary_key, auto_increment)]
@@ -50,7 +49,7 @@ pub struct TestProduct {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_soft_deletes", soft_delete)]
 pub struct TestSoftDelete {
     #[tide(primary_key, auto_increment)]

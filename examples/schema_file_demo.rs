@@ -30,7 +30,7 @@ use tideorm::model::IndexDefinition;
 // ============================================================================
 
 /// User model with various field types
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "users", hidden = "password_hash")]
 #[index("email")]
 #[index("status")]
@@ -47,7 +47,7 @@ pub struct User {
 }
 
 /// Post model with soft delete
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "posts", soft_delete)]
 #[index("author_id")]
 #[index(name = "idx_posts_status_published", columns = "status,published_at")]
@@ -67,7 +67,7 @@ pub struct Post {
 }
 
 /// Category model
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "categories")]
 #[index("parent_id")]
 #[unique_index("slug")]

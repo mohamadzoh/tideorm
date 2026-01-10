@@ -12,8 +12,8 @@
 //! Run with: cargo test --test postgres_advanced_tests
 
 use tideorm::prelude::*;
+use tideorm::relations::{HasOne, HasMany, BelongsTo};
 use tideorm::{TideConfig, Database};
-use serde::{Deserialize, Serialize};
 
 mod test_config;
 use test_config::test_database_url;
@@ -22,7 +22,7 @@ use test_config::test_database_url;
 // TEST MODELS WITH JSON AND ARRAY COLUMNS
 // =============================================================================
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_documents")]
 pub struct TestDocument {
     #[tide(primary_key, auto_increment)]
@@ -33,37 +33,49 @@ pub struct TestDocument {
     pub ratings: Vec<i32>,            // Array of integers
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_authors")]
-#[has_many(TestBook, foreign_key = "author_id")]
 pub struct TestAuthor {
     #[tide(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub country: String,
+    
+    // HasMany relation - author has many books
+    #[tide(has_many = "TestBook", foreign_key = "author_id")]
+    pub books: HasMany<TestBook>,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_books")]
-#[belongs_to(TestAuthor, foreign_key = "author_id")]
-#[has_one(TestBookDetail, foreign_key = "book_id")]
 pub struct TestBook {
     #[tide(primary_key, auto_increment)]
     pub id: i64,
     pub author_id: i64,
     pub title: String,
     pub year: i32,
+    
+    // BelongsTo relation - book belongs to an author
+    #[tide(belongs_to = "TestAuthor", foreign_key = "author_id")]
+    pub author: BelongsTo<TestAuthor>,
+    
+    // HasOne relation - book has one detail record
+    #[tide(has_one = "TestBookDetail", foreign_key = "book_id")]
+    pub detail: HasOne<TestBookDetail>,
 }
 
-#[derive(Debug, Clone, Model, Serialize, Deserialize)]
+#[derive(Model)]
 #[tide(table = "test_book_details")]
-#[belongs_to(TestBook, foreign_key = "book_id")]
 pub struct TestBookDetail {
     #[tide(primary_key, auto_increment)]
     pub id: i64,
     pub book_id: i64,
     pub isbn: String,
     pub pages: i32,
+    
+    // BelongsTo relation - detail belongs to a book
+    #[tide(belongs_to = "TestBook", foreign_key = "book_id")]
+    pub book: BelongsTo<TestBook>,
 }
 
 // =============================================================================
@@ -373,12 +385,14 @@ async fn test_relations() {
         id: 0,
         name: "J.K. Rowling".into(),
         country: "UK".into(),
+        ..Default::default()
     }.save().await.expect("Failed to save author 1");
     
     let author2 = TestAuthor {
         id: 0,
         name: "George R.R. Martin".into(),
         country: "USA".into(),
+        ..Default::default()
     }.save().await.expect("Failed to save author 2");
     
     // Create books
@@ -387,6 +401,7 @@ async fn test_relations() {
         author_id: author1.id,
         title: "Harry Potter and the Philosopher's Stone".into(),
         year: 1997,
+        ..Default::default()
     }.save().await.expect("Failed to save book 1");
     
     let book2 = TestBook {
@@ -394,6 +409,7 @@ async fn test_relations() {
         author_id: author1.id,
         title: "Harry Potter and the Chamber of Secrets".into(),
         year: 1998,
+        ..Default::default()
     }.save().await.expect("Failed to save book 2");
     
     let book3 = TestBook {
@@ -401,6 +417,7 @@ async fn test_relations() {
         author_id: author2.id,
         title: "A Game of Thrones".into(),
         year: 1996,
+        ..Default::default()
     }.save().await.expect("Failed to save book 3");
     
     // Create book details
@@ -409,6 +426,7 @@ async fn test_relations() {
         book_id: book1.id,
         isbn: "978-0747532699".into(),
         pages: 223,
+        ..Default::default()
     }.save().await.expect("Failed to save detail 1");
     
     let _detail2 = TestBookDetail {
@@ -416,6 +434,7 @@ async fn test_relations() {
         book_id: book2.id,
         isbn: "978-0747538493".into(),
         pages: 251,
+        ..Default::default()
     }.save().await.expect("Failed to save detail 2");
     
     let _detail3 = TestBookDetail {
@@ -423,6 +442,7 @@ async fn test_relations() {
         book_id: book3.id,
         isbn: "978-0553103540".into(),
         pages: 694,
+        ..Default::default()
     }.save().await.expect("Failed to save detail 3");
     
     // Test BelongsTo relation
@@ -490,34 +510,40 @@ async fn test_relations() {
         println!("   ✓ JOIN with conditions on related table");
     }
     
-    // Test RelationExt helpers
+    // Test field-based relation loading
     {
-        let rowling = TestAuthor::query()
+        let mut rowling = TestAuthor::query()
             .where_eq("name", "J.K. Rowling")
             .first()
             .await
             .expect("Query failed")
             .expect("Author should exist");
         
-        let rowling_books = rowling.load_has_many::<TestBook>().await.expect("Failed to load has_many");
-        assert_eq!(rowling_books.len(), 2, "Rowling should have 2 books via load_has_many");
+        // Set the parent PK on the relation field before loading
+        rowling.books = HasMany::new("author_id", "id").with_parent_pk(serde_json::json!(rowling.id));
+        let rowling_books = rowling.books.load().await.expect("Failed to load has_many");
+        assert_eq!(rowling_books.len(), 2, "Rowling should have 2 books via load()");
         
-        let got_book = TestBook::query()
+        let mut got_book = TestBook::query()
             .where_eq("title", "A Game of Thrones")
             .first()
             .await
             .expect("Query failed")
             .expect("Book should exist");
         
-        let got_author = got_book.load_belongs_to::<TestAuthor>().await.expect("Failed to load belongs_to");
+        // Set up belongs_to relation with FK value
+        got_book.author = BelongsTo::new("author_id", "id").with_fk_value(serde_json::json!(got_book.author_id));
+        let got_author = got_book.author.load().await.expect("Failed to load belongs_to");
         assert_eq!(got_author.unwrap().name, "George R.R. Martin", "BelongsTo should fetch correct author");
         
-        let got_detail = got_book.load_has_one::<TestBookDetail>().await.expect("Failed to load has_one");
+        // Set up has_one relation with parent PK
+        got_book.detail = HasOne::new("book_id", "id").with_parent_pk(serde_json::json!(got_book.id));
+        let got_detail = got_book.detail.load().await.expect("Failed to load has_one");
         assert!(got_detail.is_some(), "HasOne should return a detail");
         let got_detail = got_detail.unwrap();
         assert_eq!(got_detail.isbn, "978-0553103540");
         assert_eq!(got_detail.pages, 694);
-        println!("   ✓ RelationExt helpers (belongs_to / has_one / has_many)");
+        println!("   ✓ Field-based relation loading (belongs_to / has_one / has_many)");
     }
     
     println!();
