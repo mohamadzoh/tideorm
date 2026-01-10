@@ -34,6 +34,8 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
 - [Raw SQL Queries](#raw-sql-queries)
 - [Query Logging](#query-logging)
 - [Error Handling](#error-handling)
+- [Examples](#examples)
+- [Testing](#testing)
 
 ---
 
@@ -1547,3 +1549,43 @@ let ctx = ErrorContext::new()
 
 return Err(Error::not_found("User not found").with_context(ctx));
 ```
+
+---
+
+## Examples
+
+See the [examples](examples/) directory for complete working examples:
+
+| Example | Description |
+|---------|-------------|
+| [basic.rs](examples/basic.rs) | Basic CRUD operations |
+| [query_builder.rs](examples/query_builder.rs) | Advanced query building |
+| [validation_demo.rs](examples/validation_demo.rs) | Model validation |
+| [caching_demo.rs](examples/caching_demo.rs) | Query caching |
+| [fulltext_demo.rs](examples/fulltext_demo.rs) | Full-text search |
+| [attachments_translations_demo.rs](examples/attachments_translations_demo.rs) | Files & i18n |
+| [schema_file_demo.rs](examples/schema_file_demo.rs) | Schema generation |
+| [migrations.rs](examples/migrations.rs) | Database migrations |
+
+Run an example:
+
+```bash
+cargo run --example basic --features postgres
+```
+
+---
+
+## Testing
+
+```bash
+# Run all tests
+cargo test --features postgres
+
+# Run specific test
+cargo test query_builder --features postgres
+
+# Run with all features
+cargo test --all-features
+```
+
+See [tests/TEST_GUIDE.md](tests/TEST_GUIDE.md) for detailed testing information.

@@ -119,20 +119,7 @@ Key sections:
 - [Full-Text Search](DOCUMENTATION.md#full-text-search) - Search with highlighting
 - [Multi-Database](DOCUMENTATION.md#multi-database-support) - Cross-database compatibility
 
-## 📚 Examples
-
-See the [examples](examples/) directory for complete working examples:
-
-| Example | Description |
-|---------|-------------|
-| [basic.rs](examples/basic.rs) | Basic CRUD operations |
-| [query_builder.rs](examples/query_builder.rs) | Advanced query building |
-| [validation_demo.rs](examples/validation_demo.rs) | Model validation |
-| [caching_demo.rs](examples/caching_demo.rs) | Query caching |
-| [fulltext_demo.rs](examples/fulltext_demo.rs) | Full-text search |
-| [attachments_translations_demo.rs](examples/attachments_translations_demo.rs) | Files & i18n |
-| [schema_file_demo.rs](examples/schema_file_demo.rs) | Schema generation |
-| [migrations.rs](examples/migrations.rs) | Database migrations |
+## 📚 Examples & Testing
 
 Run an example:
 
@@ -140,29 +127,21 @@ Run an example:
 cargo run --example basic --features postgres
 ```
 
-## 🧪 Testing
+Run tests:
 
 ```bash
-# Run all tests
 cargo test --features postgres
-
-# Run specific test
-cargo test query_builder --features postgres
-
-# Run with all features
-cargo test --all-features
 ```
 
-## � Rusty Rails Project
+See the [examples](examples/) directory and [DOCUMENTATION.md](DOCUMENTATION.md#examples) for more.
+
+## Rusty Rails Project
 
 TideORM is part of the larger **Rusty Rails** project, which aims to bridge the gap between Rust and Ruby/Ruby on Rails ecosystems. We're actively working on recreating Ruby libraries in Rust to make working with Rust more easy and fun for new developers.
 
 ### Related Projects
 
 - 🔗 More Rust libraries coming soon!
-- 🚀 Performance-focused Ruby alternatives
-- 📦 Easy-to-use APIs familiar to Ruby developers
-
 ---
 
 ## 🤝 Contributing
