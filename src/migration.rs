@@ -1592,7 +1592,7 @@ impl Migrator {
 
         let results = db
             .__internal_connection()
-            .query_all(stmt)
+            .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -1750,6 +1750,7 @@ fn detect_database_type(db: &Database) -> DatabaseType {
         DbBackend::Postgres => DatabaseType::Postgres,
         DbBackend::MySql => DatabaseType::MySQL,
         DbBackend::Sqlite => DatabaseType::SQLite,
+        _ => DatabaseType::Postgres, // Default to Postgres for unknown backends
     }
 }
 

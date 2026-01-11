@@ -54,7 +54,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::internal::{InternalConnection, ConnectionTrait};
+use crate::internal::InternalConnection;
 
 // ============================================================================
 // GLOBAL DATABASE CONNECTION
@@ -353,7 +353,7 @@ impl Database {
         let stmt = Statement::from_string(backend, sql.to_string());
         
         let results = db.inner.connection()
-            .query_all(stmt)
+            .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -392,7 +392,7 @@ impl Database {
         let stmt = Statement::from_sql_and_values(backend, sql, params);
         
         let results = db.inner.connection()
-            .query_all(stmt)
+            .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -445,7 +445,7 @@ impl Database {
         let stmt = Statement::from_sql_and_values(backend, sql, params);
         
         let result = db.inner.connection()
-            .execute(stmt)
+            .execute_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -482,7 +482,7 @@ impl Database {
         let stmt = Statement::from_string(backend, sql.to_string());
         
         let results = db.inner.connection()
-            .query_all(stmt)
+            .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -550,6 +550,7 @@ impl Database {
             DbBackend::Postgres => crate::config::DatabaseType::Postgres,
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
+            _ => crate::config::DatabaseType::Postgres, // Default to Postgres for unknown backends
         }
     }
     

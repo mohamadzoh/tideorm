@@ -505,9 +505,11 @@ async fn sync_model_schema(
             DbBackend::Postgres => format!("DROP TABLE IF EXISTS \"{}\".\"{}\" CASCADE", model.schema_name, table_name),
             DbBackend::MySql => format!("DROP TABLE IF EXISTS `{}`", table_name),
             DbBackend::Sqlite => format!("DROP TABLE IF EXISTS \"{}\"", table_name),
+            _ => format!("DROP TABLE IF EXISTS \"{}\"", table_name),
         };
         
-        conn.execute(Statement::from_string(backend, drop_sql))
+        let drop_stmt = Statement::from_string(backend, drop_sql);
+        conn.execute_raw(drop_stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -545,10 +547,15 @@ async fn check_table_exists(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
             table
         ),
+        _ => format!(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+            table
+        ),
     };
     
+    let stmt = Statement::from_string(backend, sql);
     let result = conn
-        .query_one(Statement::from_string(backend, sql))
+        .query_one_raw(stmt)
         .await
         .map_err(|e| Error::query(e.to_string()))?;
     
@@ -557,6 +564,10 @@ async fn check_table_exists(
             let exists: bool = match backend {
                 DbBackend::Postgres => row.try_get_by_index(0).unwrap_or(false),
                 DbBackend::MySql | DbBackend::Sqlite => {
+                    let val: i32 = row.try_get_by_index(0).unwrap_or(0);
+                    val > 0
+                }
+                _ => {
                     let val: i32 = row.try_get_by_index(0).unwrap_or(0);
                     val > 0
                 }
@@ -581,6 +592,7 @@ async fn create_table_from_schema(
         DbBackend::Postgres => model.table_name.clone(),
         DbBackend::MySql => model.table_name.clone(),
         DbBackend::Sqlite => model.table_name.clone(),
+        _ => model.table_name.clone(),
     };
     
     table.table(Alias::new(&table_name));
@@ -605,7 +617,9 @@ async fn create_table_from_schema(
         }
         
         if let Some(ref default) = col.default {
-            column.default(Expr::cust(default));
+            // Clone to owned String to satisfy 'static lifetime
+            let default_owned = default.clone();
+            column.default(Expr::cust(default_owned));
         }
         
         table.col(&mut column);
@@ -616,7 +630,8 @@ async fn create_table_from_schema(
     // Build the SQL using backend-specific query builder
     let sql = build_table_sql(&table, backend);
     
-    conn.execute(Statement::from_string(backend, sql))
+    let create_stmt = Statement::from_string(backend, sql);
+    conn.execute_raw(create_stmt)
         .await
         .map_err(|e| Error::query(e.to_string()))?;
     
@@ -631,6 +646,7 @@ fn build_table_sql(table: &TableCreateStatement, backend: DbBackend) -> String {
         DbBackend::Postgres => table.to_string(PostgresQueryBuilder),
         DbBackend::MySql => table.to_string(MysqlQueryBuilder),
         DbBackend::Sqlite => table.to_string(SqliteQueryBuilder),
+        _ => table.to_string(PostgresQueryBuilder), // Default to Postgres for unknown backends
     }
 }
 

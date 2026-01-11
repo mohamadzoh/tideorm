@@ -24,7 +24,7 @@ pub use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     Statement, TransactionTrait, Value, ExecResult, TryGetable,
     DeriveEntityModel, EnumIter, DeriveRelation, DeleteMany,
-    sea_query::{Expr, Asterisk, Alias},
+    sea_query::{Expr, Asterisk, Alias, ExprTrait},
     ConnectOptions,
 };
 

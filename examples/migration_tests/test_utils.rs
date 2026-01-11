@@ -24,7 +24,7 @@ pub async fn table_exists(table_name: &str) -> bool {
     let backend = database.__internal_connection().get_database_backend();
     let stmt = Statement::from_string(backend, sql);
     
-    match database.__internal_connection().query_one(stmt).await {
+    match database.__internal_connection().query_one_raw(stmt).await {
         Ok(Some(row)) => {
             row.try_get::<bool>("", "exists").unwrap_or(false)
         }
@@ -52,7 +52,7 @@ pub async fn column_exists(table_name: &str, column_name: &str) -> bool {
     let backend = database.__internal_connection().get_database_backend();
     let stmt = Statement::from_string(backend, sql);
     
-    match database.__internal_connection().query_one(stmt).await {
+    match database.__internal_connection().query_one_raw(stmt).await {
         Ok(Some(row)) => {
             row.try_get::<bool>("", "exists").unwrap_or(false)
         }
@@ -80,7 +80,7 @@ pub async fn index_exists(index_name: &str) -> bool {
     let backend = database.__internal_connection().get_database_backend();
     let stmt = Statement::from_string(backend, sql);
     
-    match database.__internal_connection().query_one(stmt).await {
+    match database.__internal_connection().query_one_raw(stmt).await {
         Ok(Some(row)) => {
             row.try_get::<bool>("", "exists").unwrap_or(false)
         }
@@ -98,7 +98,7 @@ pub async fn get_migration_count() -> i64 {
     let backend = database.__internal_connection().get_database_backend();
     let stmt = Statement::from_string(backend, sql.to_string());
     
-    match database.__internal_connection().query_one(stmt).await {
+    match database.__internal_connection().query_one_raw(stmt).await {
         Ok(Some(row)) => {
             row.try_get::<i64>("", "cnt").unwrap_or(0)
         }
@@ -116,7 +116,7 @@ pub async fn get_applied_versions() -> Vec<String> {
     let backend = database.__internal_connection().get_database_backend();
     let stmt = Statement::from_string(backend, sql.to_string());
     
-    match database.__internal_connection().query_all(stmt).await {
+    match database.__internal_connection().query_all_raw(stmt).await {
         Ok(rows) => {
             rows.iter()
                 .filter_map(|row| row.try_get::<String>("", "version").ok())

@@ -62,6 +62,7 @@ use crate::model::Model;
 use crate::internal::{
     EntityTrait, QueryFilter, QueryOrder, QuerySelect, Condition, 
     Expr, translate_error, FromQueryResult, Asterisk, ConnectionTrait, Statement, DbBackend,
+    ExprTrait,
 };
 
 // =============================================================================
@@ -2589,13 +2590,13 @@ impl<M: Model> QueryBuilder<M> {
                 } else if let Some(f) = n.as_f64() {
                     Value::Double(Some(f))
                 } else {
-                    Value::String(Some(Box::new(n.to_string())))
+                    Value::String(Some(n.to_string()))
                 }
             }
-            serde_json::Value::String(s) => Value::String(Some(Box::new(s.clone()))),
+            serde_json::Value::String(s) => Value::String(Some(s.clone())),
             // For arrays and objects, serialize to string
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                Value::String(Some(Box::new(value.to_string())))
+                Value::String(Some(value.to_string()))
             }
         }
     }
@@ -3868,11 +3869,12 @@ impl<M: Model> QueryBuilder<M> {
         
         // Execute raw SQL
         let conn = crate::database::db().__internal_connection();
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            sql,
+        );
         let result = conn
-            .execute(Statement::from_string(
-                DbBackend::Postgres,
-                sql,
-            ))
+            .execute_raw(stmt)
             .await
             .map_err(translate_error)?;
         
@@ -3918,11 +3920,12 @@ impl<M: Model> QueryBuilder<M> {
         
         // Execute raw SQL
         let conn = crate::database::db().__internal_connection();
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            sql,
+        );
         let result = conn
-            .execute(Statement::from_string(
-                DbBackend::Postgres,
-                sql,
-            ))
+            .execute_raw(stmt)
             .await
             .map_err(translate_error)?;
         
@@ -3955,11 +3958,12 @@ impl<M: Model> QueryBuilder<M> {
         
         // Execute raw SQL
         let conn = crate::database::db().__internal_connection();
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            sql,
+        );
         let result = conn
-            .execute(Statement::from_string(
-                DbBackend::Postgres,
-                sql,
-            ))
+            .execute_raw(stmt)
             .await
             .map_err(translate_error)?;
         

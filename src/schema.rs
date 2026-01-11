@@ -691,7 +691,7 @@ impl SchemaWriter {
         let conn = crate::db().__internal_connection();
         
         // Get all tables
-        let table_rows = conn.query_all(Statement::from_string(
+        let table_rows = conn.query_all_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT table_name FROM information_schema.tables 
              WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -705,7 +705,7 @@ impl SchemaWriter {
                 .map_err(|e| Error::query(e.to_string()))?;
             
             // Get columns
-            let col_rows = conn.query_all(Statement::from_sql_and_values(
+            let col_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT column_name, data_type, is_nullable, column_default
                  FROM information_schema.columns
@@ -715,7 +715,7 @@ impl SchemaWriter {
             )).await.map_err(|e| Error::query(e.to_string()))?;
             
             // Get primary key
-            let pk_rows = conn.query_all(Statement::from_sql_and_values(
+            let pk_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT c.column_name
                  FROM information_schema.table_constraints tc
@@ -734,7 +734,7 @@ impl SchemaWriter {
                 .unwrap_or_default();
             
             // Get indexes
-            let index_rows = conn.query_all(Statement::from_sql_and_values(
+            let index_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
                  FROM pg_class t
@@ -810,7 +810,7 @@ impl SchemaWriter {
         let conn = crate::db().__internal_connection();
         
         // Get database name from connection (we'll use information_schema)
-        let db_name_row = conn.query_one(Statement::from_string(
+        let db_name_row = conn.query_one_raw(Statement::from_string(
             DbBackend::MySql,
             "SELECT DATABASE() as db_name"
         )).await.map_err(|e| Error::query(e.to_string()))?;
@@ -824,7 +824,7 @@ impl SchemaWriter {
         }
         
         // Get all tables
-        let table_rows = conn.query_all(Statement::from_sql_and_values(
+        let table_rows = conn.query_all_raw(Statement::from_sql_and_values(
             DbBackend::MySql,
             "SELECT table_name FROM information_schema.tables 
              WHERE table_schema = ? AND table_type = 'BASE TABLE'
@@ -840,7 +840,7 @@ impl SchemaWriter {
                 .map_err(|e| Error::query(e.to_string()))?;
             
             // Get columns
-            let col_rows = conn.query_all(Statement::from_sql_and_values(
+            let col_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::MySql,
                 "SELECT column_name, column_type, is_nullable, column_default, column_key, extra
                  FROM information_schema.columns
@@ -850,7 +850,7 @@ impl SchemaWriter {
             )).await.map_err(|e| Error::query(e.to_string()))?;
             
             // Get indexes
-            let index_rows = conn.query_all(Statement::from_sql_and_values(
+            let index_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::MySql,
                 "SELECT index_name, non_unique, column_name
                  FROM information_schema.statistics
@@ -944,7 +944,7 @@ impl SchemaWriter {
         let conn = crate::db().__internal_connection();
         
         // Get all tables
-        let table_rows = conn.query_all(Statement::from_string(
+        let table_rows = conn.query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT name FROM sqlite_master 
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -958,13 +958,13 @@ impl SchemaWriter {
                 .map_err(|e| Error::query(e.to_string()))?;
             
             // Get table info (columns)
-            let col_rows = conn.query_all(Statement::from_string(
+            let col_rows = conn.query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 format!("PRAGMA table_info(\"{}\")", table_name)
             )).await.map_err(|e| Error::query(e.to_string()))?;
             
             // Get indexes
-            let index_list = conn.query_all(Statement::from_string(
+            let index_list = conn.query_all_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 format!("PRAGMA index_list(\"{}\")", table_name)
             )).await.map_err(|e| Error::query(e.to_string()))?;
@@ -981,7 +981,7 @@ impl SchemaWriter {
                 }
                 
                 // Get columns for this index
-                let idx_info = conn.query_all(Statement::from_string(
+                let idx_info = conn.query_all_raw(Statement::from_string(
                     DbBackend::Sqlite,
                     format!("PRAGMA index_info(\"{}\")", idx_name)
                 )).await.map_err(|e| Error::query(e.to_string()))?;

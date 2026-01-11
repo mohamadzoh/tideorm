@@ -929,7 +929,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             pub struct Entity;
             
             impl EntityName for Entity {
-                fn table_name(&self) -> &str {
+                fn table_name(&self) -> &'static str {
                     #table_name
                 }
             }

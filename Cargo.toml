@@ -25,7 +25,7 @@ runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 
 [dependencies]
 # Internal ORM engine (NEVER exposed publicly)
-sea-orm = { version = "1.1.19", default-features = false, features = ["macros", "with-chrono", "with-json", "with-uuid"] }
+sea-orm = { version = "2.0.0-rc.27", default-features = false, features = ["macros", "with-chrono", "with-json", "with-uuid"] }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"], optional = true }

@@ -425,7 +425,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
         
         let results = db.__internal_connection()
-            .query_all(statement)
+            .query_all_raw(statement)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -455,7 +455,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
         
         let results = db.__internal_connection()
-            .query_all(statement)
+            .query_all_raw(statement)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
@@ -495,7 +495,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
         
         let result = db.__internal_connection()
-            .query_one(statement)
+            .query_one_raw(statement)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
         
