@@ -9,7 +9,7 @@
 //! - `HasMany<E>`: One-to-many relation (e.g., User has_many Posts)
 //! - `BelongsTo<E>`: Inverse of HasOne/HasMany (e.g., Post belongs_to User)
 //!
-//! ## Defining Relations Inside Models (SeaORM Style)
+//! ## Defining Relations Inside Models
 //!
 //! Relations are declared as fields in your model struct using the `#[tide(relation)]` attribute:
 //!
@@ -107,10 +107,10 @@ use crate::model::Model;
 use crate::query::{QueryBuilder, Order};
 
 // =============================================================================
-// SELF-REFERENCING RELATIONS (SeaORM 2.0 feature)
+// SELF-REFERENCING RELATIONS 
 // =============================================================================
 
-/// SelfRef relation type - represents a self-referencing relationship (SeaORM 2.0 feature)
+/// SelfRef relation type - represents a self-referencing relationship 
 ///
 /// Use this for hierarchical data like org charts, categories, or tree structures
 /// where a model references itself.

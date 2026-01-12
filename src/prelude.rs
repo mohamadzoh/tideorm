@@ -23,9 +23,9 @@ pub use crate::query::{
     WindowFunction, WindowFunctionType, FrameBound, FrameType,
     // CTE types
     CTE,
-    // Query fragment for consolidate() (SeaORM 2.0)
+    // Query fragment for consolidate()
     QueryFragment,
-    // Join result consolidation (SeaORM 2.0)
+    // Join result consolidation
     JoinResultConsolidator,
 };
 pub use crate::soft_delete::SoftDelete;
@@ -39,7 +39,7 @@ pub use crate::migration::{
     Migration, Migrator, Schema, ColumnType, DefaultValue,
     MigrationResult, MigrationInfo, MigrationStatus,
     async_trait,
-    // Multi-column constraint types (SeaORM 2.0)
+    // Multi-column constraint types
     UniqueConstraint, CompositePrimaryKey,
 };
 
@@ -49,7 +49,7 @@ pub use crate::relations::{
     BelongsTo, HasOne, HasMany, 
     // Many-to-many relations
     HasManyThrough, WithPivot,
-    // Self-referencing relations (SeaORM 2.0)
+    // Self-referencing relations
     SelfRef, SelfRefMany,
     // Polymorphic relations
     MorphTo, MorphOne, MorphMany, MorphResult, MorphResult3, MorphResult4,
@@ -100,7 +100,7 @@ pub use crate::fulltext::{
     highlight_text, generate_snippet, pg_headline_sql,
 };
 
-// Strongly-typed columns (SeaORM 2.0)
+// Strongly-typed columns
 pub use crate::columns::{
     Column, ColumnCondition, ColumnOperator,
     ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn,
@@ -109,7 +109,7 @@ pub use crate::columns::{
 // Derive macro
 pub use tideorm_macros::Model;
 
-// Attribute macro (SeaORM 2.0 style)
+// Attribute macro
 pub use tideorm_macros::model;
 
 // Relation attribute macros
@@ -134,6 +134,6 @@ pub use crate::types::{
     WithDefault, AttributeCaster, Accessor, Mutator,
     // Array types
     IntArray, BigIntArray, TextArray, BoolArray, FloatArray, JsonArray,
-    // Unix timestamp types (SeaORM 2.0)
+    // Unix timestamp types
     UnixTimestamp, UnixTimestampMillis,
 };

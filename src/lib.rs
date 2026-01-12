@@ -594,7 +594,7 @@ pub use validation::{Validate, ValidationErrors, ValidationRule, ValidationBuild
 // Re-export the derive macro
 pub use tideorm_macros::Model;
 
-// Re-export the attribute macro (SeaORM 2.0 style)
+// Re-export the attribute macro
 pub use tideorm_macros::model;
 
 // Re-export relation attribute macros

@@ -381,7 +381,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         Ok(results)
     }
     
-    /// Insert multiple records and return the inserted models with their IDs (SeaORM 2.0)
+    /// Insert multiple records and return the inserted models with their IDs
     ///
     /// Uses INSERT ... RETURNING on PostgreSQL and SQLite 3.35+.
     /// For databases that don't support RETURNING, falls back to `insert_all`.
@@ -416,7 +416,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         Self::insert_all(models).await
     }
     
-    /// Insert multiple records efficiently (SeaORM 2.0 improved API)
+    /// Insert multiple records efficiently
     ///
     /// This is an alias for `insert_all` with improved empty-array handling.
     /// Returns an empty Vec if given an empty input (no error).
@@ -1786,14 +1786,14 @@ impl<M: Model> Default for BatchUpdateBuilder<M> {
 }
 
 // =============================================================================
-// NESTED ACTIVE MODEL (SeaORM 2.0 feature)
+// NESTED ACTIVE MODEL 
 // =============================================================================
 // Provides cascade save operations for related models
 //
 // This feature allows saving a model along with its related models in a single
 // operation, maintaining referential integrity.
 
-/// Extension trait for cascade save operations (SeaORM 2.0 feature)
+/// Extension trait for cascade save operations 
 ///
 /// This trait provides methods to save a model along with its related models
 /// in a single transaction-like operation.
@@ -2003,7 +2003,7 @@ pub trait NestedSave: Model {
 // Blanket implementation for all Models
 impl<M: Model> NestedSave for M {}
 
-/// Builder for nested/cascade saves (SeaORM 2.0 feature)
+/// Builder for nested/cascade saves 
 ///
 /// Provides a fluent API for building complex nested save operations.
 ///

@@ -379,7 +379,7 @@ pub struct TableBuilder {
     columns: Vec<ColumnDefinition>,
     indexes: Vec<IndexBuilder>,
     primary_key: Option<String>,
-    /// Multi-column unique constraints (SeaORM 2.0 feature)
+    /// Multi-column unique constraints
     unique_constraints: Vec<UniqueConstraint>,
     /// Composite primary key support
     composite_primary_key: Option<CompositePrimaryKey>,
@@ -627,7 +627,7 @@ impl TableBuilder {
         self
     }
 
-    /// Add a multi-column unique constraint (SeaORM 2.0 feature)
+    /// Add a multi-column unique constraint
     ///
     /// Unlike `unique_index`, this creates an inline UNIQUE constraint in the
     /// CREATE TABLE statement rather than a separate CREATE UNIQUE INDEX.
@@ -646,7 +646,7 @@ impl TableBuilder {
         self
     }
 
-    /// Add a named multi-column unique constraint (SeaORM 2.0 feature)
+    /// Add a named multi-column unique constraint 
     ///
     /// # Example
     ///
@@ -662,7 +662,7 @@ impl TableBuilder {
         self
     }
 
-    /// Set a composite primary key on multiple columns (SeaORM 2.0 feature)
+    /// Set a composite primary key on multiple columns 
     ///
     /// This is useful for junction tables or tables with natural composite keys.
     ///
@@ -725,7 +725,7 @@ impl TableBuilder {
             ));
         }
 
-        // Add composite primary key if specified (SeaORM 2.0 feature)
+        // Add composite primary key if specified 
         if let Some(ref cpk) = self.composite_primary_key {
             sql.push_str(",\n");
             let cols: Vec<String> = cpk
@@ -736,7 +736,7 @@ impl TableBuilder {
             sql.push_str(&format!("    PRIMARY KEY ({})", cols.join(", ")));
         }
 
-        // Add unique constraints (SeaORM 2.0 multi-column unique keys)
+        // Add unique constraints
         for uc in &self.unique_constraints {
             sql.push_str(",\n");
             let cols: Vec<String> = uc
@@ -807,12 +807,12 @@ impl TableBuilder {
             def.push_str(" UNIQUE");
         }
         
-        // CHECK constraint (SeaORM 2.0)
+        // CHECK constraint
         if let Some(ref check_expr) = col.check {
             def.push_str(&format!(" CHECK ({})", check_expr));
         }
         
-        // Extra SQL (SeaORM 2.0)
+        // Extra SQL
         if let Some(ref extra_sql) = col.extra {
             def.push_str(&format!(" {}", extra_sql));
         }
@@ -921,7 +921,7 @@ impl<'a> ColumnBuilder<'a> {
         self
     }
     
-    /// Add a CHECK constraint to the column (SeaORM 2.0)
+    /// Add a CHECK constraint to the column
     ///
     /// # Example
     ///
@@ -935,7 +935,7 @@ impl<'a> ColumnBuilder<'a> {
         self
     }
     
-    /// Add extra SQL to the column definition (SeaORM 2.0 `extra` attribute)
+    /// Add extra SQL to the column definition
     ///
     /// This allows adding arbitrary SQL after the column definition.
     ///
@@ -1482,9 +1482,9 @@ struct ColumnDefinition {
     primary_key: bool,
     auto_increment: bool,
     unique: bool,
-    /// CHECK constraint expression (SeaORM 2.0 `extra` attribute)
+    /// CHECK constraint expression
     check: Option<String>,
-    /// Extra SQL to append (SeaORM 2.0 `extra` attribute)
+    /// Extra SQL to append
     extra: Option<String>,
 }
 

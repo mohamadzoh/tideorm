@@ -11,7 +11,7 @@
 //! Run with: `cargo run --example seaorm2_features_demo`
 
 use tideorm::prelude::*;
-use tideorm::columns::{Column, ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn};
+use tideorm::columns::{ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn};
 
 // =============================================================================
 // MODEL DEFINITIONS
@@ -20,15 +20,6 @@ use tideorm::columns::{Column, ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, 
 // Note: These models would use #[tideorm::model] in a real application
 // For this demo, we show the structure and intended usage
 
-/// User model
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct User {
-    id: i64,
-    name: String,
-    email: String,
-    age: Option<i32>,
-    active: bool,
-}
 
 /// Post model - belongs to User
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -38,15 +29,6 @@ struct Post {
     title: String,
     content: String,
     published: bool,
-}
-
-/// Profile model - belongs to User (one-to-one)
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct Profile {
-    id: i64,
-    user_id: i64,
-    bio: String,
-    avatar_url: Option<String>,
 }
 
 /// Employee model - self-referencing (org chart)
@@ -88,8 +70,6 @@ mod user_columns {
     pub const ID: Column<i64> = Column::new("id");
     /// User name column (String)
     pub const NAME: Column<String> = Column::new("name");
-    /// User email column (String)
-    pub const EMAIL: Column<String> = Column::new("email");
     /// User age column (nullable i32)
     pub const AGE: Column<Option<i32>> = Column::new("age");
     /// User active status column (bool)
@@ -121,10 +101,6 @@ fn demo_strongly_typed_columns() {
     
     let id_between = ID.between(1, 1000);
     println!("  ID.between(1, 1000)      -> value: {}", id_between.value);
-    
-    // Nullable operations
-    let age_gt = AGE.gt(18);
-    println!("  AGE.gt(18)               -> works on Option<i32>!");
     
     let age_null = AGE.is_null();
     println!("  AGE.is_null()            -> op: {:?}", age_null.operator);
@@ -167,23 +143,6 @@ fn demo_strongly_typed_columns() {
 
 fn demo_nested_active_model() {
     println!("\n=== NESTED ACTIVE MODEL (CASCADE SAVE) ===\n");
-    
-    // Example data
-    let user = User {
-        id: 0, // Will be assigned on insert
-        name: "Alice".to_string(),
-        email: "alice@example.com".to_string(),
-        age: Some(30),
-        active: true,
-    };
-    
-    let profile = Profile {
-        id: 0,
-        user_id: 0, // Will be set from user.id after save
-        bio: "Software developer".to_string(),
-        avatar_url: Some("https://example.com/alice.jpg".to_string()),
-    };
-    
     let posts = vec![
         Post {
             id: 0,

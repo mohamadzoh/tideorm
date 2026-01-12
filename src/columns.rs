@@ -1,4 +1,4 @@
-//! Strongly-Typed Columns (SeaORM 2.0 feature)
+//! Strongly-Typed Columns
 //!
 //! This module provides compile-time type safety for column operations.
 //! Instead of using string column names that can have runtime errors,
@@ -49,7 +49,7 @@ use std::marker::PhantomData;
 // TYPED COLUMN
 // =============================================================================
 
-/// A strongly-typed column reference (SeaORM 2.0 feature)
+/// A strongly-typed column reference
 ///
 /// This provides compile-time type safety for column operations.
 /// The type parameter `T` represents the Rust type of the column.

@@ -8,7 +8,7 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 
 ## Features
 
-- **Clean Model Definitions** - Simple `#[tideorm::model]` attribute macro (SeaORM 2.0 style)
+- **Clean Model Definitions** - Simple `#[tideorm::model]` attribute macro
 - **SeaORM-Style Relations** - Define relations as struct fields
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development

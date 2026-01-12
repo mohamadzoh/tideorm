@@ -113,7 +113,7 @@ pub enum Error {
         message: String,
     },
     
-    /// Backend not supported for the requested operation (SeaORM 2.0)
+    /// Backend not supported for the requested operation
     ///
     /// Thrown when an operation is attempted that is not supported
     /// by the current database backend.
@@ -125,7 +125,7 @@ pub enum Error {
         backend: String,
     },
     
-    /// Primary key not set when required (SeaORM 2.0)
+    /// Primary key not set when required
     ///
     /// Thrown when an operation requires a primary key value
     /// but the model instance doesn't have one set.
@@ -137,7 +137,7 @@ pub enum Error {
         model: String,
     },
     
-    /// Insert with RETURNING not supported by this backend (SeaORM 2.0)
+    /// Insert with RETURNING not supported by this backend
     ///
     /// Thrown when trying to use insert().returning() on a database
     /// that doesn't support the RETURNING clause.
@@ -290,7 +290,7 @@ impl Error {
         }
     }
     
-    /// Create a BackendNotSupported error (SeaORM 2.0)
+    /// Create a BackendNotSupported error
     ///
     /// Use when an operation is not supported by the current database backend.
     pub fn backend_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
@@ -300,7 +300,7 @@ impl Error {
         }
     }
     
-    /// Create a PrimaryKeyNotSet error (SeaORM 2.0)
+    /// Create a PrimaryKeyNotSet error
     ///
     /// Use when an operation requires a primary key but it's not set.
     pub fn primary_key_not_set(message: impl Into<String>, model: impl Into<String>) -> Self {
@@ -310,7 +310,7 @@ impl Error {
         }
     }
     
-    /// Create an InsertReturningNotSupported error (SeaORM 2.0)
+    /// Create an InsertReturningNotSupported error
     ///
     /// Use when trying to use RETURNING on a database that doesn't support it.
     pub fn insert_returning_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
@@ -379,17 +379,17 @@ impl Error {
         matches!(self, Self::Configuration { .. })
     }
     
-    /// Check if this is a BackendNotSupported error (SeaORM 2.0)
+    /// Check if this is a BackendNotSupported error
     pub fn is_backend_not_supported(&self) -> bool {
         matches!(self, Self::BackendNotSupported { .. })
     }
     
-    /// Check if this is a PrimaryKeyNotSet error (SeaORM 2.0)
+    /// Check if this is a PrimaryKeyNotSet error
     pub fn is_primary_key_not_set(&self) -> bool {
         matches!(self, Self::PrimaryKeyNotSet { .. })
     }
     
-    /// Check if this is an InsertReturningNotSupported error (SeaORM 2.0)
+    /// Check if this is an InsertReturningNotSupported error
     pub fn is_insert_returning_not_supported(&self) -> bool {
         matches!(self, Self::InsertReturningNotSupported { .. })
     }

@@ -878,7 +878,7 @@ impl CTE {
 // QUERY FRAGMENT (SeaORM 2.0 consolidate() support)
 // =============================================================================
 
-/// A reusable query fragment that can be applied to multiple queries (SeaORM 2.0 feature)
+/// A reusable query fragment that can be applied to multiple queries 
 ///
 /// Query fragments allow you to consolidate common query conditions, ordering,
 /// and other clauses into a reusable unit. This is useful for:
@@ -968,7 +968,7 @@ impl<M: Model> QueryFragment<M> {
 // JOIN RESULT CONSOLIDATION (SeaORM 2.0 SelectThree::consolidate() equivalent)
 // =============================================================================
 
-/// Consolidates flat join results into nested structures (SeaORM 2.0 feature)
+/// Consolidates flat join results into nested structures 
 ///
 /// When you query with joins, you get flat tuples like:
 /// `[(order1, customer1, line1), (order1, customer1, line2), (order2, customer2, line3)]`
@@ -1261,7 +1261,7 @@ impl<M: Model> QueryBuilder<M> {
     // QUERY FRAGMENT SUPPORT (SeaORM 2.0 consolidate feature)
     // =========================================================================
     
-    /// Consolidate current query conditions into a reusable QueryFragment (SeaORM 2.0 feature)
+    /// Consolidate current query conditions into a reusable QueryFragment 
     ///
     /// This extracts the current WHERE conditions, ORDER BY clauses, JOINs,
     /// GROUP BY, and HAVING clauses into a reusable fragment that can be
@@ -1304,7 +1304,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
     
-    /// Apply a QueryFragment to this query builder (SeaORM 2.0 feature)
+    /// Apply a QueryFragment to this query builder 
     ///
     /// This merges all conditions and clauses from the fragment into
     /// the current query. Conditions are combined with AND logic.
@@ -1352,7 +1352,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
-    /// Create a new QueryBuilder from a QueryFragment (SeaORM 2.0 feature)
+    /// Create a new QueryBuilder from a QueryFragment 
     ///
     /// This is a convenient way to start a new query from an existing fragment.
     ///
@@ -1562,7 +1562,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
-    /// Add a WHERE condition using a strongly-typed column (SeaORM 2.0 feature)
+    /// Add a WHERE condition using a strongly-typed column 
     ///
     /// This method accepts conditions generated from `Column<T>` typed columns,
     /// providing compile-time type safety for column operations.
@@ -1749,7 +1749,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
-    /// Check if related records exist matching a condition (SeaORM 2.0 feature)
+    /// Check if related records exist matching a condition 
     ///
     /// This generates an EXISTS subquery to find records that have related records
     /// matching the specified condition. It's a cleaner API than manually constructing
@@ -2387,7 +2387,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
-    /// Select columns from this table and also from a linked/joined table (SeaORM 2.0 feature)
+    /// Select columns from this table and also from a linked/joined table 
     ///
     /// This is useful for partial model queries where you want to include
     /// data from related tables without loading the full models.
@@ -2441,7 +2441,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
-    /// Select all columns from this table plus specific columns from a linked table (SeaORM 2.0 feature)
+    /// Select all columns from this table plus specific columns from a linked table 
     ///
     /// # Example
     ///

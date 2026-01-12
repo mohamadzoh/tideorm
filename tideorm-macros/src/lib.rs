@@ -1695,7 +1695,7 @@ fn extract_string_value(s: &str) -> String {
         .to_string()
 }
 
-/// Attribute macro for defining TideORM models (SeaORM 2.0 style).
+/// Attribute macro for defining TideORM models.
 ///
 /// This is the recommended way to define models, similar to SeaORM 2.0's `#[sea_orm::model]`.
 /// It automatically adds the `#[derive(Model)]` along with other common derives.

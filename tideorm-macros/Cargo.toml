@@ -1,11 +1,10 @@
 [package]
 name = "tideorm-macros"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
 repository = "https://github.com/mohamadzoh/tideorm"
-readme = "../README.md"
 rust-version = "1.85"
 
 [lib]

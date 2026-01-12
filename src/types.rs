@@ -78,7 +78,7 @@ pub type FloatArray = Vec<f64>;
 pub type JsonArray = Vec<serde_json::Value>;
 
 // =============================================================================
-// UNIX TIMESTAMP TYPES (SeaORM 2.0)
+// UNIX TIMESTAMP TYPES
 // =============================================================================
 
 /// Unix timestamp stored as seconds since epoch (i64)
