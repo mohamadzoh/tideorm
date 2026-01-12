@@ -25,7 +25,7 @@ use tideorm::validation::{
 /// 
 /// Note: When using the #[validate(...)] attribute, validation is automatic
 /// when calling user.validate() method.
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]

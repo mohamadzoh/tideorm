@@ -20,7 +20,7 @@ use tideorm::prelude::*;
 // MODEL DEFINITIONS
 // =============================================================================
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -31,7 +31,7 @@ pub struct User {
     pub active: bool,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 pub struct Product {
     #[tide(primary_key, auto_increment)]

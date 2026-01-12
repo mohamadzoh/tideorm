@@ -317,7 +317,7 @@ async fn async_example() -> tideorm::Result<()> {
         .connect()
         .await?;
     
-    // In a real app with #[derive(Model)], you would:
+    // In a real app with #[tideorm::model], you would:
     // let mut product = Product { ... };
     // product.set_translation("name", "ar", "اسم عربي")?;
     // product.attach("thumbnail", "uploads/thumb.jpg")?;

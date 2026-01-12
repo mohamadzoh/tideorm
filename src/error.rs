@@ -112,6 +112,42 @@ pub enum Error {
         /// Details about the internal error
         message: String,
     },
+    
+    /// Backend not supported for the requested operation (SeaORM 2.0)
+    ///
+    /// Thrown when an operation is attempted that is not supported
+    /// by the current database backend.
+    #[error("Backend not supported: {message}")]
+    BackendNotSupported {
+        /// Details about what operation is not supported
+        message: String,
+        /// The backend that doesn't support the operation
+        backend: String,
+    },
+    
+    /// Primary key not set when required (SeaORM 2.0)
+    ///
+    /// Thrown when an operation requires a primary key value
+    /// but the model instance doesn't have one set.
+    #[error("Primary key not set: {message}")]
+    PrimaryKeyNotSet {
+        /// Details about the error
+        message: String,
+        /// The model type involved
+        model: String,
+    },
+    
+    /// Insert with RETURNING not supported by this backend (SeaORM 2.0)
+    ///
+    /// Thrown when trying to use insert().returning() on a database
+    /// that doesn't support the RETURNING clause.
+    #[error("Insert returning not supported: {message}")]
+    InsertReturningNotSupported {
+        /// Details about the error
+        message: String,
+        /// The backend that doesn't support RETURNING
+        backend: String,
+    },
 }
 
 /// Additional context for errors
@@ -254,6 +290,36 @@ impl Error {
         }
     }
     
+    /// Create a BackendNotSupported error (SeaORM 2.0)
+    ///
+    /// Use when an operation is not supported by the current database backend.
+    pub fn backend_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
+        Self::BackendNotSupported {
+            message: message.into(),
+            backend: backend.into(),
+        }
+    }
+    
+    /// Create a PrimaryKeyNotSet error (SeaORM 2.0)
+    ///
+    /// Use when an operation requires a primary key but it's not set.
+    pub fn primary_key_not_set(message: impl Into<String>, model: impl Into<String>) -> Self {
+        Self::PrimaryKeyNotSet {
+            message: message.into(),
+            model: model.into(),
+        }
+    }
+    
+    /// Create an InsertReturningNotSupported error (SeaORM 2.0)
+    ///
+    /// Use when trying to use RETURNING on a database that doesn't support it.
+    pub fn insert_returning_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
+        Self::InsertReturningNotSupported {
+            message: message.into(),
+            backend: backend.into(),
+        }
+    }
+    
     /// Create an invalid query error (semantic query issues, not DB errors)
     /// 
     /// Use this for errors like using soft_delete() on a non-soft-delete model,
@@ -311,6 +377,21 @@ impl Error {
     /// Check if this is a Configuration error
     pub fn is_configuration_error(&self) -> bool {
         matches!(self, Self::Configuration { .. })
+    }
+    
+    /// Check if this is a BackendNotSupported error (SeaORM 2.0)
+    pub fn is_backend_not_supported(&self) -> bool {
+        matches!(self, Self::BackendNotSupported { .. })
+    }
+    
+    /// Check if this is a PrimaryKeyNotSet error (SeaORM 2.0)
+    pub fn is_primary_key_not_set(&self) -> bool {
+        matches!(self, Self::PrimaryKeyNotSet { .. })
+    }
+    
+    /// Check if this is an InsertReturningNotSupported error (SeaORM 2.0)
+    pub fn is_insert_returning_not_supported(&self) -> bool {
+        matches!(self, Self::InsertReturningNotSupported { .. })
     }
     
     /// Get a helpful suggestion for fixing this error
@@ -420,6 +501,30 @@ impl Error {
             Self::Internal { .. } => {
                 "Internal error. Please report this issue at https://github.com/mohamadzoh/tideorm/issues".to_string()
             }
+            Self::BackendNotSupported { backend, message } => {
+                format!(
+                    "Operation not supported on {} backend. {}\n\
+                     Consider using a database-agnostic approach or checking backend with `db.backend()`.",
+                    backend, message
+                )
+            }
+            Self::PrimaryKeyNotSet { model, .. } => {
+                format!(
+                    "Set the primary key on your {} instance before this operation.\n\
+                     Use `Model::find(id)` to load an existing record, or ensure auto-increment is configured.",
+                    model
+                )
+            }
+            Self::InsertReturningNotSupported { backend, .. } => {
+                format!(
+                    "{} does not support INSERT ... RETURNING syntax.\n\
+                     Options:\n\
+                     1. Use separate insert() and find() calls\n\
+                     2. For MySQL, use last_insert_id() after insert\n\
+                     3. Consider using PostgreSQL which supports RETURNING",
+                    backend
+                )
+            }
         }
     }
     
@@ -449,6 +554,9 @@ impl Error {
             Self::Transaction { .. } => "TIDE_TRANSACTION",
             Self::Configuration { .. } => "TIDE_CONFIG",
             Self::Internal { .. } => "TIDE_INTERNAL",
+            Self::BackendNotSupported { .. } => "TIDE_BACKEND_NOT_SUPPORTED",
+            Self::PrimaryKeyNotSet { .. } => "TIDE_PRIMARY_KEY_NOT_SET",
+            Self::InsertReturningNotSupported { .. } => "TIDE_INSERT_RETURNING_NOT_SUPPORTED",
         }
     }
     
@@ -477,6 +585,9 @@ impl Error {
             Self::Transaction { .. } => 409, // Conflict
             Self::Configuration { .. } => 500,
             Self::Internal { .. } => 500,
+            Self::BackendNotSupported { .. } => 501, // Not Implemented
+            Self::PrimaryKeyNotSet { .. } => 400,    // Bad Request
+            Self::InsertReturningNotSupported { .. } => 501, // Not Implemented
         }
     }
     

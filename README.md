@@ -8,7 +8,7 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 
 ## Features
 
-- **Clean Model Definitions** - Simple `#[derive(Model)]` macro
+- **Clean Model Definitions** - Simple `#[tideorm::model]` attribute macro (SeaORM 2.0 style)
 - **SeaORM-Style Relations** - Define relations as struct fields
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development
@@ -29,7 +29,7 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 ```rust
 use tideorm::prelude::*;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -46,7 +46,7 @@ pub struct User {
     pub posts: HasMany<Post>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -106,7 +106,7 @@ async fn main() -> tideorm::Result<()> {
 TideORM supports SeaORM-style relations defined as struct fields:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -126,7 +126,7 @@ pub struct User {
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]

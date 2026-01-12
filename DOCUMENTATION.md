@@ -16,15 +16,19 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
   - [Loading Relations](#loading-relations)
   - [Many-to-Many Relations](#many-to-many-relations)
   - [Polymorphic Relations](#polymorphic-relations)
+  - [Self-Referencing Relations](#self-referencing-relations)
 - [Query Builder](#query-builder)
   - [WHERE Conditions](#where-conditions)
+  - [Strongly-Typed Columns](#strongly-typed-columns)
   - [Ordering](#ordering)
   - [Pagination](#pagination)
   - [Execution Methods](#execution-methods)
   - [UNION Queries](#union-queries)
   - [Window Functions](#window-functions)
   - [Common Table Expressions (CTEs)](#common-table-expressions-ctes)
+  - [Join Result Consolidation](#join-result-consolidation)
 - [CRUD Operations](#crud-operations)
+  - [Nested Save (Cascade Operations)](#nested-save-cascade-operations)
 - [Schema Synchronization](#schema-synchronization-development-only)
 - [Soft Deletes](#soft-deletes)
 - [Scopes](#scopes-reusable-query-fragments)
@@ -40,6 +44,7 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
 - [Raw SQL Queries](#raw-sql-queries)
 - [Query Logging](#query-logging)
 - [Error Handling](#error-handling)
+- [SeaORM 2.0 Features](#seaorm-20-features)
 - [Examples](#examples)
 - [Testing](#testing)
 
@@ -90,10 +95,10 @@ TideConfig::init()
 
 ### Default Behavior (Recommended)
 
-The simplest way to define a model - just `#[derive(Model)]`:
+The simplest way to define a model - just `#[tideorm::model]`:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 pub struct Product {
     #[tide(primary_key, auto_increment)]
@@ -103,7 +108,7 @@ pub struct Product {
 }
 ```
 
-The Model macro automatically implements:
+The `#[tideorm::model]` macro automatically implements:
 - `Debug` - for printing/logging
 - `Clone` - for cloning instances  
 - `Default` - for creating default instances
@@ -115,7 +120,7 @@ The Model macro automatically implements:
 If you need custom implementations, use `skip_derives` and provide your own:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products", skip_derives)]
 #[index("category")]
 #[index("active")]
@@ -179,7 +184,7 @@ TideORM supports SeaORM-style relations defined as struct fields. Relations are 
 ```rust
 use tideorm::prelude::*;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -196,7 +201,7 @@ pub struct User {
     pub posts: HasMany<Post>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "profiles")]
 pub struct Profile {
     #[tide(primary_key, auto_increment)]
@@ -209,7 +214,7 @@ pub struct Profile {
     pub user: BelongsTo<User>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -292,7 +297,7 @@ let profile = user.profile.load_with(|query| {
 ### Many-to-Many Relations
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -304,7 +309,7 @@ pub struct User {
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "roles")]
 pub struct Role {
     #[tide(primary_key, auto_increment)]
@@ -312,7 +317,7 @@ pub struct Role {
     pub name: String,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "user_roles")]
 pub struct UserRole {
     #[tide(primary_key, auto_increment)]
@@ -347,7 +352,7 @@ user.roles.sync(vec![
 use tideorm::prelude::*;
 
 // Images can belong to Posts or Videos (polymorphic)
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "images")]
 pub struct Image {
     #[tide(primary_key, auto_increment)]
@@ -357,7 +362,7 @@ pub struct Image {
     pub imageable_id: i64,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -725,7 +730,7 @@ TideConfig::init()
 TideORM supports soft deletes for models that have a `deleted_at` column:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts", soft_delete)]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -845,7 +850,7 @@ If it returns `Err` or panics, the transaction is rolled back.
 TideORM automatically manages `created_at` and `updated_at` fields:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 pub struct Post {
     #[tide(primary_key, auto_increment)]
@@ -881,7 +886,7 @@ Implement lifecycle callbacks for your models:
 ```rust
 use tideorm::callbacks::Callbacks;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -961,7 +966,7 @@ TideORM provides a file attachment system for managing file relationships. Attac
 ### Model Setup
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 #[tide(has_one_file = "thumbnail")]
 #[tide(has_many_files = "images,documents")]
@@ -1135,7 +1140,7 @@ TideORM provides a translation system for multilingual content. Translations are
 ### Model Setup
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 #[tide(translatable = "name,description")]
 pub struct Product {
@@ -1316,7 +1321,7 @@ Translations are stored in JSONB with this structure:
 Models can use both features together:
 
 ```rust
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 #[tide(translatable = "name,description")]
 #[tide(has_one_file = "thumbnail")]
@@ -1806,6 +1811,206 @@ return Err(Error::not_found("User not found").with_context(ctx));
 
 ---
 
+## SeaORM 2.0 Features
+
+TideORM includes all major features from SeaORM 2.0:
+
+### Strongly-Typed Columns
+
+Compile-time type safety for column operations. The compiler catches type mismatches before runtime.
+
+```rust
+use tideorm::columns::{Column, ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn};
+
+// Define typed columns for your model
+mod user_columns {
+    use tideorm::columns::Column;
+    
+    pub const ID: Column<i64> = Column::new("id");
+    pub const NAME: Column<String> = Column::new("name");
+    pub const AGE: Column<Option<i32>> = Column::new("age");
+    pub const ACTIVE: Column<bool> = Column::new("active");
+}
+
+use user_columns::*;
+
+// Type-safe queries - compiler catches errors!
+let users = User::query()
+    .where_col(NAME.eq("Alice"))           // ✓ String == &str
+    .where_col(NAME.contains("test"))      // ✓ LIKE '%test%'
+    .where_col(AGE.gt(18))                 // ✓ Option<i32> > i32
+    .where_col(AGE.is_null())              // ✓ Nullable check
+    .where_col(ACTIVE.eq(true))            // ✓ bool == bool
+    // .where_col(NAME.eq(123))            // ✗ COMPILE ERROR!
+    // .where_col(AGE.like("%a%"))         // ✗ COMPILE ERROR!
+    .get()
+    .await?;
+
+// Available operations by type:
+// - ColumnEq: eq(), ne()
+// - ColumnOrd: gt(), gte(), lt(), lte(), between()
+// - ColumnLike: like(), not_like(), contains(), starts_with(), ends_with()
+// - ColumnNullable: is_null(), is_not_null()
+// - ColumnIn: is_in(), not_in()
+```
+
+### Self-Referencing Relations
+
+Support for hierarchical data like org charts, categories, or comment threads:
+
+```rust
+#[tideorm::model]
+#[tide(table = "employees")]
+pub struct Employee {
+    #[tide(primary_key)]
+    pub id: i64,
+    pub name: String,
+    pub manager_id: Option<i64>,
+    
+    // Parent reference (manager)
+    #[tide(self_ref = "id", foreign_key = "manager_id")]
+    pub manager: SelfRef<Employee>,
+    
+    // Children reference (direct reports)
+    #[tide(self_ref_many = "id", foreign_key = "manager_id")]
+    pub reports: SelfRefMany<Employee>,
+}
+
+// Usage:
+let emp = Employee::find(5).await?;
+
+// Load parent (manager)
+let manager = emp.manager.load().await?;
+let has_manager = emp.manager.exists().await?;
+
+// Load children (direct reports)
+let reports = emp.reports.load().await?;
+let count = emp.reports.count().await?;
+
+// Load entire subtree recursively
+let tree = emp.reports.load_tree(3).await?;  // 3 levels deep
+```
+
+### Nested Save (Cascade Operations)
+
+Save parent and related models together with automatic foreign key handling:
+
+```rust
+// Save parent with single related model
+let (user, profile) = user.save_with_one(profile, "user_id").await?;
+// profile.user_id is automatically set to user.id
+
+// Save parent with multiple related models
+let posts = vec![post1, post2, post3];
+let (user, posts) = user.save_with_many(posts, "user_id").await?;
+// All posts have user_id set to user.id
+
+// Cascade updates
+let (user, profile) = user.update_with_one(profile).await?;
+let (user, posts) = user.update_with_many(posts).await?;
+
+// Cascade delete (children first for referential integrity)
+let deleted_count = user.delete_with_many(posts).await?;
+
+// Builder API for complex nested saves
+let (user, related_json) = NestedSaveBuilder::new(user)
+    .with_one(profile, "user_id")
+    .with_many(posts, "user_id")
+    .with_many(comments, "author_id")
+    .save()
+    .await?;
+```
+
+### Join Result Consolidation
+
+Transform flat JOIN results into nested structures:
+
+```rust
+use tideorm::prelude::JoinResultConsolidator;
+
+// Flat JOIN results: Vec<(Order, LineItem)>
+let flat = Order::query()
+    .find_also_related::<LineItem>()
+    .get()
+    .await?;
+// [(order1, item1), (order1, item2), (order2, item3)]
+
+// Consolidate into nested: Vec<(Order, Vec<LineItem>)>
+let nested = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
+// [(order1, [item1, item2]), (order2, [item3])]
+
+// For LEFT JOINs with Option<B>
+let nested = JoinResultConsolidator::consolidate_two_optional(flat, |o| o.id);
+
+// Three-level nesting
+let flat3: Vec<(Order, LineItem, Product)> = /* ... */;
+let nested3 = JoinResultConsolidator::consolidate_three(flat3, |o| o.id, |i| i.id);
+// Vec<(Order, Vec<(LineItem, Vec<Product>)>)>
+```
+
+### Linked Partial Select
+
+Select specific columns from related tables with automatic JOINs:
+
+```rust
+// Select specific columns from both tables
+let results = User::query()
+    .select_with_linked::<Profile>(
+        &["id", "name"],           // Local columns
+        &["bio", "avatar_url"],    // Linked columns
+        "user_id"                  // Foreign key for join
+    )
+    .get::<(i64, String, String, Option<String>)>()
+    .await?;
+
+// All local columns + specific linked columns
+let results = User::query()
+    .select_also_linked::<Profile>(
+        &["bio"],                  // Just the linked columns
+        "user_id"
+    )
+    .get::<(User, String)>()
+    .await?;
+```
+
+### Additional SeaORM 2.0 Features
+
+```rust
+// has_related() - EXISTS subqueries
+let cakes = Cake::query()
+    .has_related("fruits", "cake_id", "id", "name", "Mango")
+    .get().await?;
+
+// eq_any() / ne_all() - PostgreSQL array optimizations
+let users = User::query()
+    .eq_any("id", vec![1, 2, 3, 4, 5])    // "id" = ANY(ARRAY[...])
+    .ne_all("role", vec!["banned"])        // "role" <> ALL(ARRAY[...])
+    .get().await?;
+
+// Unix timestamps
+use tideorm::types::{UnixTimestamp, UnixTimestampMillis};
+let ts = UnixTimestamp::now();
+let dt = ts.to_datetime();
+
+// Insert many with returning
+let users: Vec<User> = User::insert_many_returning(vec![u1, u2]).await?;
+
+// consolidate() - Reusable query fragments
+let active_scope = User::query()
+    .where_eq("status", "active")
+    .consolidate();
+let admins = User::query().apply(&active_scope).where_eq("role", "admin").get().await?;
+
+// Multi-column unique constraints (migrations)
+builder.unique(&["user_id", "role_id"]);
+builder.unique_named("uq_email_tenant", &["email", "tenant_id"]);
+
+// CHECK constraints (migrations)
+builder.string("email").check("email LIKE '%@%'");
+```
+
+---
+
 ## Examples
 
 See the [examples](examples/) directory for complete working examples:
@@ -1820,11 +2025,13 @@ See the [examples](examples/) directory for complete working examples:
 | [attachments_translations_demo.rs](examples/attachments_translations_demo.rs) | Files & i18n |
 | [schema_file_demo.rs](examples/schema_file_demo.rs) | Schema generation |
 | [migrations.rs](examples/migrations.rs) | Database migrations |
+| [seaorm2_features_demo.rs](examples/seaorm2_features_demo.rs) | SeaORM 2.0 features |
 
 Run an example:
 
 ```bash
 cargo run --example basic --features postgres
+cargo run --example seaorm2_features_demo
 ```
 
 ---

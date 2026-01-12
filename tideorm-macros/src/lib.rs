@@ -1694,3 +1694,70 @@ fn extract_string_value(s: &str) -> String {
         .trim_matches('"')
         .to_string()
 }
+
+/// Attribute macro for defining TideORM models (SeaORM 2.0 style).
+///
+/// This is the recommended way to define models, similar to SeaORM 2.0's `#[sea_orm::model]`.
+/// It automatically adds the `#[derive(Model)]` along with other common derives.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use tideorm::prelude::*;
+///
+/// #[tideorm::model]
+/// #[tide(table = "users")]
+/// pub struct User {
+///     #[tide(primary_key, auto_increment)]
+///     pub id: i64,
+///     pub name: String,
+///     pub email: String,
+/// }
+/// ```
+///
+/// This is equivalent to:
+/// ```rust,ignore
+/// #[derive(Model)]
+/// #[tide(table = "users")]
+/// pub struct User {
+///     // ...
+/// }
+/// ```
+///
+/// The macro automatically implements:
+/// - `Debug` - for printing/logging
+/// - `Clone` - for cloning instances
+/// - `Default` - for creating default instances
+/// - `Serialize` - for JSON serialization
+/// - `Deserialize` - for JSON deserialization
+#[proc_macro_attribute]
+pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as DeriveInput);
+    let name = &input.ident;
+    let vis = &input.vis;
+    let attrs = &input.attrs;
+    let generics = &input.generics;
+    
+    // Get struct fields
+    let fields = match &input.data {
+        syn::Data::Struct(data) => &data.fields,
+        _ => {
+            return syn::Error::new_spanned(
+                &input,
+                "#[tideorm::model] can only be applied to structs"
+            ).to_compile_error().into();
+        }
+    };
+    
+    // Preserve all attributes except derive (we'll add our own)
+    let other_attrs: Vec<_> = attrs.iter()
+        .filter(|a| !a.path().is_ident("derive"))
+        .collect();
+    
+    // Generate the struct with derive(Model)
+    quote! {
+        #[derive(tideorm::Model)]
+        #(#other_attrs)*
+        #vis struct #name #generics #fields
+    }.into()
+}

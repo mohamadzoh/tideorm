@@ -22,7 +22,7 @@ use tideorm::prelude::*;
 // =============================================================================
 
 /// Product model for e-commerce examples
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 #[index("category")]
 #[index("active")]
@@ -40,7 +40,7 @@ pub struct Product {
 }
 
 /// CustomerOrder model with various statuses
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "customer_orders")]
 #[index("user_id")]
 #[index("status")]

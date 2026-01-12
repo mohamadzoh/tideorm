@@ -23,7 +23,7 @@
 
 use tideorm::prelude::*;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {
     #[tide(primary_key, auto_increment)]
@@ -35,7 +35,7 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "settings")]
 pub struct Setting {
     #[tide(primary_key, auto_increment)]

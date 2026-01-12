@@ -46,7 +46,7 @@ use std::collections::HashMap;
 /// Index macros (separate from #[tide]):
 /// - #[index("email")] - for fast lookups
 /// - #[unique_index("email")] - enforce uniqueness
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users", hidden = "password,deleted_at", searchable = "name,email")]
 #[index("email")]
 #[index("status")]
@@ -117,7 +117,7 @@ impl User {
 /// - #[unique_index("slug")] - unique constraint
 ///
 /// Note: languages and fallback_language are inherited from global TideConfig!
-#[derive(Model)]
+#[tideorm::model]
 #[tide(
     table = "posts",
     soft_delete,

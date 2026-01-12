@@ -14,7 +14,7 @@ pub use crate::database::{db, try_db, has_global_db};
 pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
-pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue};
+pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue, NestedSave, NestedSaveBuilder};
 pub use crate::query::{
     QueryBuilder, Order, JoinType,
     // UNION types
@@ -23,6 +23,10 @@ pub use crate::query::{
     WindowFunction, WindowFunctionType, FrameBound, FrameType,
     // CTE types
     CTE,
+    // Query fragment for consolidate() (SeaORM 2.0)
+    QueryFragment,
+    // Join result consolidation (SeaORM 2.0)
+    JoinResultConsolidator,
 };
 pub use crate::soft_delete::SoftDelete;
 pub use crate::callbacks::{Callbacks, CallbackRunner};
@@ -35,6 +39,8 @@ pub use crate::migration::{
     Migration, Migrator, Schema, ColumnType, DefaultValue,
     MigrationResult, MigrationInfo, MigrationStatus,
     async_trait,
+    // Multi-column constraint types (SeaORM 2.0)
+    UniqueConstraint, CompositePrimaryKey,
 };
 
 // Relations
@@ -43,6 +49,8 @@ pub use crate::relations::{
     BelongsTo, HasOne, HasMany, 
     // Many-to-many relations
     HasManyThrough, WithPivot,
+    // Self-referencing relations (SeaORM 2.0)
+    SelfRef, SelfRefMany,
     // Polymorphic relations
     MorphTo, MorphOne, MorphMany, MorphResult, MorphResult3, MorphResult4,
     // Extension traits
@@ -92,8 +100,17 @@ pub use crate::fulltext::{
     highlight_text, generate_snippet, pg_headline_sql,
 };
 
+// Strongly-typed columns (SeaORM 2.0)
+pub use crate::columns::{
+    Column, ColumnCondition, ColumnOperator,
+    ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn,
+};
+
 // Derive macro
 pub use tideorm_macros::Model;
+
+// Attribute macro (SeaORM 2.0 style)
+pub use tideorm_macros::model;
 
 // Relation attribute macros
 pub use tideorm_macros::{belongs_to, has_one, has_many};
@@ -117,4 +134,6 @@ pub use crate::types::{
     WithDefault, AttributeCaster, Accessor, Mutator,
     // Array types
     IntArray, BigIntArray, TextArray, BoolArray, FloatArray, JsonArray,
+    // Unix timestamp types (SeaORM 2.0)
+    UnixTimestamp, UnixTimestampMillis,
 };

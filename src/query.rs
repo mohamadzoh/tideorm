@@ -356,6 +356,39 @@ mod db_sql {
             DatabaseType::SQLite => format!("CAST({} AS REAL)", expr),
         }
     }
+    
+    /// Generate = ANY(array) expression (PostgreSQL optimization for IN)
+    ///
+    /// On PostgreSQL, `col = ANY(ARRAY[...])` is often faster than `col IN (...)`
+    /// because the query plan can be cached and reused with different arrays.
+    /// On other databases, falls back to standard IN clause.
+    pub fn eq_any(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+        match db_type {
+            DatabaseType::Postgres => {
+                format!("{} = ANY(ARRAY[{}])", column, values.join(","))
+            }
+            DatabaseType::MySQL | DatabaseType::SQLite => {
+                // Fall back to standard IN clause
+                format!("{} IN ({})", column, values.join(","))
+            }
+        }
+    }
+    
+    /// Generate <> ALL(array) expression (PostgreSQL optimization for NOT IN)
+    ///
+    /// On PostgreSQL, `col <> ALL(ARRAY[...])` is often faster than `col NOT IN (...)`
+    /// On other databases, falls back to standard NOT IN clause.
+    pub fn ne_all(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+        match db_type {
+            DatabaseType::Postgres => {
+                format!("{} <> ALL(ARRAY[{}])", column, values.join(","))
+            }
+            DatabaseType::MySQL | DatabaseType::SQLite => {
+                // Fall back to standard NOT IN clause
+                format!("{} NOT IN ({})", column, values.join(","))
+            }
+        }
+    }
 }
 
 /// Sort order for queries
@@ -434,6 +467,10 @@ pub enum Operator {
     SubqueryNotIn,
     /// Raw expression
     Raw,
+    /// = ANY(array) - PostgreSQL optimization for IN
+    EqAny,
+    /// <> ALL(array) - PostgreSQL optimization for NOT IN
+    NeAll,
 }
 
 /// A single where condition
@@ -837,6 +874,324 @@ impl CTE {
     }
 }
 
+// =============================================================================
+// QUERY FRAGMENT (SeaORM 2.0 consolidate() support)
+// =============================================================================
+
+/// A reusable query fragment that can be applied to multiple queries (SeaORM 2.0 feature)
+///
+/// Query fragments allow you to consolidate common query conditions, ordering,
+/// and other clauses into a reusable unit. This is useful for:
+///
+/// - Defining reusable scopes (e.g., "active users", "recent posts")
+/// - Applying consistent filtering across multiple queries
+/// - Composing complex queries from smaller building blocks
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Create a reusable "active and verified" filter
+/// let active_verified = User::query()
+///     .where_eq("status", "active")
+///     .where_eq("verified", true)
+///     .consolidate();
+///
+/// // Apply to different queries
+/// let recent_active = User::query()
+///     .apply(&active_verified)
+///     .order_by("created_at", Order::Desc)
+///     .limit(10)
+///     .get()
+///     .await?;
+///
+/// let active_count = User::query()
+///     .apply(&active_verified)
+///     .count()
+///     .await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct QueryFragment<M: Model> {
+    _marker: PhantomData<M>,
+    /// WHERE conditions to apply
+    pub conditions: Vec<WhereCondition>,
+    /// ORDER BY clauses to apply
+    pub order_by: Vec<(String, Order)>,
+    /// GROUP BY columns
+    pub group_by: Vec<String>,
+    /// HAVING conditions
+    pub having_conditions: Vec<String>,
+    /// JOIN clauses
+    pub joins: Vec<JoinClause>,
+    /// Soft delete: include trashed records
+    pub include_trashed: bool,
+    /// Soft delete: only show trashed records
+    pub only_trashed: bool,
+}
+
+impl<M: Model> Default for QueryFragment<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M: Model> QueryFragment<M> {
+    /// Create an empty query fragment
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+            conditions: Vec::new(),
+            order_by: Vec::new(),
+            group_by: Vec::new(),
+            having_conditions: Vec::new(),
+            joins: Vec::new(),
+            include_trashed: false,
+            only_trashed: false,
+        }
+    }
+    
+    /// Check if this fragment has any conditions or clauses
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty()
+            && self.order_by.is_empty()
+            && self.group_by.is_empty()
+            && self.having_conditions.is_empty()
+            && self.joins.is_empty()
+    }
+    
+    /// Get the number of conditions in this fragment
+    pub fn condition_count(&self) -> usize {
+        self.conditions.len()
+    }
+}
+
+// =============================================================================
+// JOIN RESULT CONSOLIDATION (SeaORM 2.0 SelectThree::consolidate() equivalent)
+// =============================================================================
+
+/// Consolidates flat join results into nested structures (SeaORM 2.0 feature)
+///
+/// When you query with joins, you get flat tuples like:
+/// `[(order1, customer1, line1), (order1, customer1, line2), (order2, customer2, line3)]`
+///
+/// This consolidator groups them into nested structures:
+/// `[(order1, customer1, [line1, line2]), (order2, customer2, [line3])]`
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use tideorm::query::JoinResultConsolidator;
+///
+/// // Flat join results
+/// let flat: Vec<(Order, Customer, LineItem)> = Order::query()
+///     .inner_join("customers", "orders.customer_id", "customers.id")
+///     .inner_join("lineitems", "orders.id", "lineitems.order_id")
+///     .get_tuples()
+///     .await?;
+///
+/// // Consolidate by order id, then customer id
+/// let nested: Vec<(Order, Vec<(Customer, Vec<LineItem>)>)> = 
+///     JoinResultConsolidator::consolidate_three(
+///         flat,
+///         |o| o.id,      // Group by order id
+///         |c| c.id,      // Then by customer id
+///     );
+/// ```
+pub struct JoinResultConsolidator;
+
+impl JoinResultConsolidator {
+    /// Consolidate two-way join results: `Vec<(A, B)>` -> `Vec<(A, Vec<B>)>`
+    ///
+    /// Groups all B records under their parent A record.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let flat: Vec<(User, Post)> = results;
+    /// let nested: Vec<(User, Vec<Post>)> = 
+    ///     JoinResultConsolidator::consolidate_two(flat, |u| u.id);
+    /// ```
+    pub fn consolidate_two<A, B, K, F>(items: Vec<(A, B)>, key_fn: F) -> Vec<(A, Vec<B>)>
+    where
+        A: Clone,
+        K: Eq + std::hash::Hash,
+        F: Fn(&A) -> K,
+    {
+        use std::collections::HashMap;
+        
+        let mut groups: HashMap<K, (A, Vec<B>)> = HashMap::new();
+        let mut order: Vec<K> = Vec::new();
+        
+        for (a, b) in items {
+            let key = key_fn(&a);
+            if let Some((_, bs)) = groups.get_mut(&key) {
+                bs.push(b);
+            } else {
+                order.push(key_fn(&a));
+                groups.insert(key, (a, vec![b]));
+            }
+        }
+        
+        // Preserve original order
+        order.into_iter()
+            .filter_map(|k| groups.remove(&k))
+            .collect()
+    }
+    
+    /// Consolidate two-way join results with optional second item: `Vec<(A, Option<B>)>` -> `Vec<(A, Vec<B>)>`
+    ///
+    /// Handles LEFT JOIN results where B might be NULL.
+    pub fn consolidate_two_optional<A, B, K, F>(items: Vec<(A, Option<B>)>, key_fn: F) -> Vec<(A, Vec<B>)>
+    where
+        A: Clone,
+        K: Eq + std::hash::Hash,
+        F: Fn(&A) -> K,
+    {
+        use std::collections::HashMap;
+        
+        let mut groups: HashMap<K, (A, Vec<B>)> = HashMap::new();
+        let mut order: Vec<K> = Vec::new();
+        
+        for (a, maybe_b) in items {
+            let key = key_fn(&a);
+            if let Some((_, bs)) = groups.get_mut(&key) {
+                if let Some(b) = maybe_b {
+                    bs.push(b);
+                }
+            } else {
+                order.push(key_fn(&a));
+                let bs = maybe_b.into_iter().collect();
+                groups.insert(key, (a, bs));
+            }
+        }
+        
+        order.into_iter()
+            .filter_map(|k| groups.remove(&k))
+            .collect()
+    }
+    
+    /// Consolidate three-way join results: `Vec<(A, B, C)>` -> `Vec<(A, Vec<(B, Vec<C>)>)>`
+    ///
+    /// Groups C records under B, then B groups under A.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Flat: [(order1, line1, product1), (order1, line1, product2), (order1, line2, product3)]
+    /// // Nested: [(order1, [(line1, [product1, product2]), (line2, [product3])])]
+    /// let nested = JoinResultConsolidator::consolidate_three(
+    ///     flat,
+    ///     |o| o.id,  // Group by order
+    ///     |l| l.id,  // Then by line item
+    /// );
+    /// ```
+    pub fn consolidate_three<A, B, C, KA, KB, FA, FB>(
+        items: Vec<(A, B, C)>,
+        key_a: FA,
+        key_b: FB,
+    ) -> Vec<(A, Vec<(B, Vec<C>)>)>
+    where
+        A: Clone,
+        B: Clone,
+        KA: Eq + std::hash::Hash + Clone,
+        KB: Eq + std::hash::Hash + Clone,
+        FA: Fn(&A) -> KA,
+        FB: Fn(&B) -> KB,
+    {
+        use std::collections::HashMap;
+        
+        // First, group by A
+        let mut a_groups: HashMap<KA, (A, HashMap<KB, (B, Vec<C>)>, Vec<KB>)> = HashMap::new();
+        let mut a_order: Vec<KA> = Vec::new();
+        
+        for (a, b, c) in items {
+            let ka = key_a(&a);
+            let kb = key_b(&b);
+            
+            if let Some((_, b_groups, b_order)) = a_groups.get_mut(&ka) {
+                if let Some((_, cs)) = b_groups.get_mut(&kb) {
+                    cs.push(c);
+                } else {
+                    b_order.push(kb.clone());
+                    b_groups.insert(kb, (b, vec![c]));
+                }
+            } else {
+                a_order.push(ka.clone());
+                let mut b_groups = HashMap::new();
+                let b_order = vec![kb.clone()];
+                b_groups.insert(kb, (b, vec![c]));
+                a_groups.insert(ka, (a, b_groups, b_order));
+            }
+        }
+        
+        // Convert to nested structure preserving order
+        a_order.into_iter()
+            .filter_map(|ka| {
+                a_groups.remove(&ka).map(|(a, mut b_groups, b_order)| {
+                    let bs: Vec<(B, Vec<C>)> = b_order.into_iter()
+                        .filter_map(|kb| b_groups.remove(&kb))
+                        .collect();
+                    (a, bs)
+                })
+            })
+            .collect()
+    }
+    
+    /// Consolidate with optional third item (for LEFT JOINs)
+    pub fn consolidate_three_optional<A, B, C, KA, KB, FA, FB>(
+        items: Vec<(A, B, Option<C>)>,
+        key_a: FA,
+        key_b: FB,
+    ) -> Vec<(A, Vec<(B, Vec<C>)>)>
+    where
+        A: Clone,
+        B: Clone,
+        KA: Eq + std::hash::Hash + Clone,
+        KB: Eq + std::hash::Hash + Clone,
+        FA: Fn(&A) -> KA,
+        FB: Fn(&B) -> KB,
+    {
+        use std::collections::HashMap;
+        
+        let mut a_groups: HashMap<KA, (A, HashMap<KB, (B, Vec<C>)>, Vec<KB>)> = HashMap::new();
+        let mut a_order: Vec<KA> = Vec::new();
+        
+        for (a, b, maybe_c) in items {
+            let ka = key_a(&a);
+            let kb = key_b(&b);
+            
+            if let Some((_, b_groups, b_order)) = a_groups.get_mut(&ka) {
+                if let Some((_, cs)) = b_groups.get_mut(&kb) {
+                    if let Some(c) = maybe_c {
+                        cs.push(c);
+                    }
+                } else {
+                    b_order.push(kb.clone());
+                    let cs = maybe_c.into_iter().collect();
+                    b_groups.insert(kb, (b, cs));
+                }
+            } else {
+                a_order.push(ka.clone());
+                let mut b_groups = HashMap::new();
+                let b_order = vec![kb.clone()];
+                let cs = maybe_c.into_iter().collect();
+                b_groups.insert(kb, (b, cs));
+                a_groups.insert(ka, (a, b_groups, b_order));
+            }
+        }
+        
+        a_order.into_iter()
+            .filter_map(|ka| {
+                a_groups.remove(&ka).map(|(a, mut b_groups, b_order)| {
+                    let bs: Vec<(B, Vec<C>)> = b_order.into_iter()
+                        .filter_map(|kb| b_groups.remove(&kb))
+                        .collect();
+                    (a, bs)
+                })
+            })
+            .collect()
+    }
+}
+
 /// Fluent query builder for TideORM models
 ///
 /// The query builder provides a chainable API for constructing database queries.
@@ -900,6 +1255,122 @@ impl<M: Model> QueryBuilder<M> {
             cache_options: None,
             cache_key: None,
         }
+    }
+    
+    // =========================================================================
+    // QUERY FRAGMENT SUPPORT (SeaORM 2.0 consolidate feature)
+    // =========================================================================
+    
+    /// Consolidate current query conditions into a reusable QueryFragment (SeaORM 2.0 feature)
+    ///
+    /// This extracts the current WHERE conditions, ORDER BY clauses, JOINs,
+    /// GROUP BY, and HAVING clauses into a reusable fragment that can be
+    /// applied to other queries.
+    ///
+    /// Note: This does NOT include LIMIT, OFFSET, UNION, CTEs, window functions,
+    /// or SELECT columns, as these are typically query-specific.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Create a reusable scope for active, verified users
+    /// let active_scope = User::query()
+    ///     .where_eq("status", "active")
+    ///     .where_eq("verified", true)
+    ///     .consolidate();
+    ///
+    /// // Use in different queries
+    /// let admins = User::query()
+    ///     .apply(&active_scope)
+    ///     .where_eq("role", "admin")
+    ///     .get()
+    ///     .await?;
+    ///
+    /// let count = User::query()
+    ///     .apply(&active_scope)
+    ///     .count()
+    ///     .await?;
+    /// ```
+    pub fn consolidate(&self) -> QueryFragment<M> {
+        QueryFragment {
+            _marker: PhantomData,
+            conditions: self.conditions.clone(),
+            order_by: self.order_by.clone(),
+            group_by: self.group_by.clone(),
+            having_conditions: self.having_conditions.clone(),
+            joins: self.joins.clone(),
+            include_trashed: self.include_trashed,
+            only_trashed: self.only_trashed,
+        }
+    }
+    
+    /// Apply a QueryFragment to this query builder (SeaORM 2.0 feature)
+    ///
+    /// This merges all conditions and clauses from the fragment into
+    /// the current query. Conditions are combined with AND logic.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let active_scope = User::query()
+    ///     .where_eq("status", "active")
+    ///     .consolidate();
+    ///
+    /// let results = User::query()
+    ///     .apply(&active_scope)
+    ///     .where_eq("role", "editor")
+    ///     .order_by("name", Order::Asc)
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
+        // Merge conditions
+        self.conditions.extend(fragment.conditions.clone());
+        
+        // Merge order_by (fragment's ordering takes precedence if not already set)
+        if self.order_by.is_empty() {
+            self.order_by.extend(fragment.order_by.clone());
+        }
+        
+        // Merge group_by
+        self.group_by.extend(fragment.group_by.clone());
+        
+        // Merge having_conditions
+        self.having_conditions.extend(fragment.having_conditions.clone());
+        
+        // Merge joins
+        self.joins.extend(fragment.joins.clone());
+        
+        // Apply soft delete flags (OR logic - if either wants them included)
+        if fragment.include_trashed {
+            self.include_trashed = true;
+        }
+        if fragment.only_trashed {
+            self.only_trashed = true;
+        }
+        
+        self
+    }
+    
+    /// Create a new QueryBuilder from a QueryFragment (SeaORM 2.0 feature)
+    ///
+    /// This is a convenient way to start a new query from an existing fragment.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let active_scope = User::query()
+    ///     .where_eq("status", "active")
+    ///     .consolidate();
+    ///
+    /// // Start a new query from the scope
+    /// let results = QueryBuilder::<User>::from_fragment(&active_scope)
+    ///     .limit(10)
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn from_fragment(fragment: &QueryFragment<M>) -> Self {
+        Self::new().apply(fragment)
     }
     
     // =========================================================================
@@ -1030,6 +1501,144 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
+    /// Add a WHERE column = ANY(array) condition (PostgreSQL optimization)
+    ///
+    /// This is an optimized version of `where_in` for PostgreSQL that uses
+    /// the `= ANY()` operator. This is more efficient for large arrays as
+    /// the query plan can be cached and reused with different array values.
+    ///
+    /// For other databases, this falls back to standard IN clause behavior.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users with specific IDs - uses = ANY() on PostgreSQL
+    /// let users = User::query()
+    ///     .eq_any("id", vec![1, 2, 3, 4, 5])
+    ///     .get()
+    ///     .await?;
+    ///
+    /// // Generates on PostgreSQL: WHERE "id" = ANY(ARRAY[1, 2, 3, 4, 5])
+    /// // Generates on others: WHERE "id" IN (1, 2, 3, 4, 5)
+    ///
+    /// // Find users by roles
+    /// let users = User::query()
+    ///     .eq_any("role", vec!["admin", "moderator", "editor"])
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn eq_any<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::EqAny,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a WHERE column <> ALL(array) condition - inverse of eq_any (PostgreSQL optimization)
+    ///
+    /// This is an optimized version of `where_not_in` for PostgreSQL that uses
+    /// the `<> ALL()` operator.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users NOT with specific IDs
+    /// let users = User::query()
+    ///     .ne_all("id", vec![1, 2, 3])
+    ///     .get()
+    ///     .await?;
+    ///
+    /// // Generates on PostgreSQL: WHERE "id" <> ALL(ARRAY[1, 2, 3])
+    /// // Generates on others: WHERE "id" NOT IN (1, 2, 3)
+    /// ```
+    pub fn ne_all<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NeAll,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a WHERE condition using a strongly-typed column (SeaORM 2.0 feature)
+    ///
+    /// This method accepts conditions generated from `Column<T>` typed columns,
+    /// providing compile-time type safety for column operations.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use tideorm::prelude::*;
+    ///
+    /// // Define typed columns
+    /// mod user_cols {
+    ///     use tideorm::columns::*;
+    ///     pub const ID: Column<i64> = Column::new("id");
+    ///     pub const NAME: Column<String> = Column::new("name");
+    ///     pub const AGE: Column<Option<i32>> = Column::new("age");
+    /// }
+    ///
+    /// // Type-safe queries - compiler catches type errors
+    /// let users = User::query()
+    ///     .where_col(user_cols::NAME.eq("Alice"))          // OK: String == &str
+    ///     .where_col(user_cols::AGE.gt(18))                // OK: Option<i32> > i32
+    ///     // .where_col(user_cols::NAME.eq(123))           // COMPILE ERROR!
+    ///     // .where_col(user_cols::AGE.like("%test%"))     // COMPILE ERROR!
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn where_col(mut self, condition: crate::columns::ColumnCondition) -> Self {
+        let operator = match condition.operator {
+            crate::columns::ColumnOperator::Eq => Operator::Eq,
+            crate::columns::ColumnOperator::NotEq => Operator::NotEq,
+            crate::columns::ColumnOperator::Gt => Operator::Gt,
+            crate::columns::ColumnOperator::Gte => Operator::Gte,
+            crate::columns::ColumnOperator::Lt => Operator::Lt,
+            crate::columns::ColumnOperator::Lte => Operator::Lte,
+            crate::columns::ColumnOperator::Like => Operator::Like,
+            crate::columns::ColumnOperator::NotLike => Operator::NotLike,
+            crate::columns::ColumnOperator::In => Operator::In,
+            crate::columns::ColumnOperator::NotIn => Operator::NotIn,
+            crate::columns::ColumnOperator::IsNull => Operator::IsNull,
+            crate::columns::ColumnOperator::IsNotNull => Operator::IsNotNull,
+            crate::columns::ColumnOperator::Between => Operator::Between,
+        };
+        
+        let value = match condition.operator {
+            crate::columns::ColumnOperator::IsNull | crate::columns::ColumnOperator::IsNotNull => {
+                ConditionValue::None
+            }
+            crate::columns::ColumnOperator::In | crate::columns::ColumnOperator::NotIn => {
+                if let serde_json::Value::Array(arr) = condition.value {
+                    ConditionValue::List(arr)
+                } else {
+                    ConditionValue::List(vec![condition.value])
+                }
+            }
+            crate::columns::ColumnOperator::Between => {
+                if let serde_json::Value::Array(arr) = condition.value {
+                    if arr.len() >= 2 {
+                        ConditionValue::Range(arr[0].clone(), arr[1].clone())
+                    } else {
+                        ConditionValue::Single(serde_json::Value::Null)
+                    }
+                } else {
+                    ConditionValue::Single(condition.value)
+                }
+            }
+            _ => ConditionValue::Single(condition.value),
+        };
+        
+        self.conditions.push(WhereCondition {
+            column: condition.column,
+            operator,
+            value,
+        });
+        self
+    }
+    
     // =========================================================================
     // SUBQUERIES
     // =========================================================================
@@ -1136,6 +1745,188 @@ impl<M: Model> QueryBuilder<M> {
             column: String::new(),
             operator: Operator::Raw,
             value: ConditionValue::RawExpr(format!("NOT EXISTS ({})", subquery_sql)),
+        });
+        self
+    }
+    
+    /// Check if related records exist matching a condition (SeaORM 2.0 feature)
+    ///
+    /// This generates an EXISTS subquery to find records that have related records
+    /// matching the specified condition. It's a cleaner API than manually constructing
+    /// EXISTS queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `related_table` - The related table name
+    /// * `foreign_key` - The foreign key column on the related table
+    /// * `local_key` - The local key column (usually primary key)
+    /// * `condition_column` - Column in the related table to filter on
+    /// * `condition_value` - Value to filter the related records by
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find all cakes that have a fruit named "Mango"
+    /// let cakes = Cake::query()
+    ///     .has_related("fruits", "cake_id", "id", "name", "Mango")
+    ///     .get()
+    ///     .await?;
+    ///
+    /// // Generates: SELECT * FROM cakes WHERE EXISTS(
+    /// //   SELECT 1 FROM fruits WHERE fruits.cake_id = cakes.id AND fruits.name = 'Mango'
+    /// // )
+    ///
+    /// // Find users who have at least one active post
+    /// let users = User::query()
+    ///     .has_related("posts", "user_id", "id", "status", "active")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn has_related(
+        mut self,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+        condition_column: &str,
+        condition_value: impl Into<serde_json::Value>,
+    ) -> Self {
+        let table = M::table_name();
+        let value = condition_value.into();
+        let value_sql = match &value {
+            serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "NULL".to_string(),
+            _ => value.to_string(),
+        };
+        
+        let exists_sql = format!(
+            "EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\" AND \"{}\".\"{}\" = {})",
+            related_table,
+            related_table, foreign_key,
+            table, local_key,
+            related_table, condition_column, value_sql
+        );
+        
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(exists_sql),
+        });
+        self
+    }
+    
+    /// Check if related records do NOT exist matching a condition
+    ///
+    /// The inverse of `has_related` - finds records that do NOT have matching related records.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find all cakes that don't have any fruit named "Mango"
+    /// let cakes = Cake::query()
+    ///     .has_no_related("fruits", "cake_id", "id", "name", "Mango")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn has_no_related(
+        mut self,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+        condition_column: &str,
+        condition_value: impl Into<serde_json::Value>,
+    ) -> Self {
+        let table = M::table_name();
+        let value = condition_value.into();
+        let value_sql = match &value {
+            serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "NULL".to_string(),
+            _ => value.to_string(),
+        };
+        
+        let not_exists_sql = format!(
+            "NOT EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\" AND \"{}\".\"{}\" = {})",
+            related_table,
+            related_table, foreign_key,
+            table, local_key,
+            related_table, condition_column, value_sql
+        );
+        
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(not_exists_sql),
+        });
+        self
+    }
+    
+    /// Check if any related records exist (without condition)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find all users who have at least one post
+    /// let users = User::query()
+    ///     .has_any_related("posts", "user_id", "id")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn has_any_related(
+        mut self,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+    ) -> Self {
+        let table = M::table_name();
+        
+        let exists_sql = format!(
+            "EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\")",
+            related_table,
+            related_table, foreign_key,
+            table, local_key
+        );
+        
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(exists_sql),
+        });
+        self
+    }
+    
+    /// Check if NO related records exist
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find all users who have no posts
+    /// let users = User::query()
+    ///     .has_no_related_at_all("posts", "user_id", "id")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn has_no_related_at_all(
+        mut self,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+    ) -> Self {
+        let table = M::table_name();
+        
+        let not_exists_sql = format!(
+            "NOT EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\")",
+            related_table,
+            related_table, foreign_key,
+            table, local_key
+        );
+        
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(not_exists_sql),
         });
         self
     }
@@ -1593,6 +2384,111 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     pub fn select(mut self, columns: Vec<&str>) -> Self {
         self.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
+        self
+    }
+    
+    /// Select columns from this table and also from a linked/joined table (SeaORM 2.0 feature)
+    ///
+    /// This is useful for partial model queries where you want to include
+    /// data from related tables without loading the full models.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Select cake fields and also bakery name through a link
+    /// let results: Vec<(i64, String, Option<String>)> = Cake::query()
+    ///     .select_with_linked(
+    ///         vec!["id", "name"],           // Local columns
+    ///         "bakeries",                    // Linked table
+    ///         "bakery_id",                   // Local FK
+    ///         "id",                          // Remote PK
+    ///         vec!["name as bakery_name"]    // Remote columns
+    ///     )
+    ///     .get_raw()
+    ///     .await?;
+    /// ```
+    pub fn select_with_linked(
+        mut self,
+        local_columns: Vec<&str>,
+        linked_table: &str,
+        local_fk: &str,
+        remote_pk: &str,
+        linked_columns: Vec<&str>,
+    ) -> Self {
+        // Set local columns with table prefix
+        let table_name = M::table_name();
+        let mut all_columns: Vec<String> = local_columns
+            .iter()
+            .map(|c| format!("{}.{}", table_name, c))
+            .collect();
+        
+        // Add linked columns with table prefix
+        for col in linked_columns {
+            all_columns.push(format!("{}.{}", linked_table, col));
+        }
+        
+        self.select_columns = Some(all_columns);
+        
+        // Add the join
+        self.joins.push(JoinClause {
+            join_type: JoinType::Left,
+            table: linked_table.to_string(),
+            alias: None,
+            left_column: format!("{}.{}", table_name, local_fk),
+            right_column: format!("{}.{}", linked_table, remote_pk),
+        });
+        
+        self
+    }
+    
+    /// Select all columns from this table plus specific columns from a linked table (SeaORM 2.0 feature)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Get all user fields plus their profile picture
+    /// let results = User::query()
+    ///     .select_also_linked(
+    ///         "profiles",
+    ///         "id",
+    ///         "user_id", 
+    ///         vec!["picture", "bio"]
+    ///     )
+    ///     .get_with_extra::<(String, String)>()
+    ///     .await?;
+    /// ```
+    pub fn select_also_linked(
+        mut self,
+        linked_table: &str,
+        local_pk: &str,
+        remote_fk: &str,
+        linked_columns: Vec<&str>,
+    ) -> Self {
+        let table_name = M::table_name();
+        
+        // Start with all local columns
+        let local_cols: Vec<String> = M::column_names()
+            .iter()
+            .map(|c| format!("{}.{}", table_name, c))
+            .collect();
+        
+        // Add linked columns
+        let mut all_columns = local_cols;
+        for col in linked_columns {
+            all_columns.push(format!("{}.{}", linked_table, col));
+        }
+        
+        self.select_columns = Some(all_columns);
+        
+        // Add the join
+        self.joins.push(JoinClause {
+            join_type: JoinType::Left,
+            table: linked_table.to_string(),
+            alias: None,
+            left_column: format!("{}.{}", table_name, local_pk),
+            right_column: format!("{}.{}", linked_table, remote_fk),
+        });
+        
         self
     }
     
@@ -2839,6 +3735,42 @@ impl<M: Model> QueryBuilder<M> {
                         continue;
                     }
                 }
+                // = ANY(array) optimization for PostgreSQL
+                Operator::EqAny => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(db_sql::eq_any(db_type, &col_quoted, &array_vals))
+                    } else {
+                        continue;
+                    }
+                }
+                // <> ALL(array) optimization for PostgreSQL  
+                Operator::NeAll => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(db_sql::ne_all(db_type, &col_quoted, &array_vals))
+                    } else {
+                        continue;
+                    }
+                }
             };
             
             condition = condition.add(expr);
@@ -2933,6 +3865,8 @@ impl<M: Model> QueryBuilder<M> {
                 Operator::SubqueryIn => "IN (subquery)",
                 Operator::SubqueryNotIn => "NOT IN (subquery)",
                 Operator::Raw => "RAW",
+                Operator::EqAny => "= ANY(array)",
+                Operator::NeAll => "<> ALL(array)",
             };
             
             let value_str = match &condition.value {
@@ -3039,6 +3973,8 @@ impl<M: Model> QueryBuilder<M> {
                         Operator::SubqueryIn => "IN (SELECT ...)",
                         Operator::SubqueryNotIn => "NOT IN (SELECT ...)",
                         Operator::Raw => "...",
+                        Operator::EqAny => "= ANY(ARRAY[?])",
+                        Operator::NeAll => "<> ALL(ARRAY[?])",
                     };
                     format!("{} {}", cond.column, op_str)
                 })
@@ -3618,6 +4554,36 @@ impl<M: Model> QueryBuilder<M> {
                             // Column with raw expression
                             format!("{} {}", col, raw_sql)
                         }
+                    } else { continue; }
+                }
+                // = ANY(array) optimization for PostgreSQL
+                Operator::EqAny => {
+                    if let ConditionValue::List(values) = &cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        db_sql::eq_any(db_type, &col, &array_vals)
+                    } else { continue; }
+                }
+                // <> ALL(array) optimization for PostgreSQL
+                Operator::NeAll => {
+                    if let ConditionValue::List(values) = &cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        db_sql::ne_all(db_type, &col, &array_vals)
                     } else { continue; }
                 }
             };

@@ -1,6 +1,6 @@
 use tideorm::prelude::*;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 #[index("email")]
 #[index("active")]
@@ -17,7 +17,7 @@ pub struct User {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts")]
 #[index("user_id")]
 #[index(name = "idx_user_published", columns = "user_id,published")]
@@ -107,7 +107,7 @@ async fn main() -> tideorm::Result<()> {
 fn print_api_examples() {
     println!(r#"
 // Model Definition:
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 pub struct User {{
     #[tide(primary_key, auto_increment)]

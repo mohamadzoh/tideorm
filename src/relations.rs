@@ -107,6 +107,335 @@ use crate::model::Model;
 use crate::query::{QueryBuilder, Order};
 
 // =============================================================================
+// SELF-REFERENCING RELATIONS (SeaORM 2.0 feature)
+// =============================================================================
+
+/// SelfRef relation type - represents a self-referencing relationship (SeaORM 2.0 feature)
+///
+/// Use this for hierarchical data like org charts, categories, or tree structures
+/// where a model references itself.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// #[tide(table = "employees")]
+/// pub struct Employee {
+///     #[tide(primary_key)]
+///     pub id: i64,
+///     pub name: String,
+///     pub manager_id: Option<i64>,
+///     
+///     // Self-reference: each employee optionally reports to another employee
+///     #[tide(self_ref = "id", foreign_key = "manager_id")]
+///     pub manager: SelfRef<Employee>,
+///     
+///     // Inverse: employees who report to this employee
+///     #[tide(self_ref_many = "id", foreign_key = "manager_id")]
+///     pub reports: SelfRefMany<Employee>,
+/// }
+///
+/// // Usage:
+/// let employee = Employee::find(5).await?;
+/// let manager = employee.manager.load().await?;  // Get their manager
+/// let reports = employee.reports.load().await?;  // Get their direct reports
+/// ```
+#[derive(Debug, Clone)]
+pub struct SelfRef<E: Model> {
+    /// Foreign key column that references the parent (e.g., "manager_id")
+    pub foreign_key: &'static str,
+    /// Local key being referenced (usually "id")
+    pub local_key: &'static str,
+    /// Cached related model
+    cached: Option<Box<E>>,
+    /// The foreign key value for loading (e.g., the manager_id value)
+    fk_value: Option<serde_json::Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E: Model> SelfRef<E> {
+    /// Create a new SelfRef relation
+    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
+        Self {
+            foreign_key,
+            local_key,
+            cached: None,
+            fk_value: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the foreign key value for lazy loading
+    pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
+        self.fk_value = Some(fk);
+        self
+    }
+    
+    /// Load the referenced model (e.g., load the manager)
+    pub async fn load(&self) -> Result<Option<E>> {
+        let fk = match &self.fk_value {
+            Some(v) if !v.is_null() => v,
+            _ => return Ok(None), // No FK set means no relation
+        };
+        
+        E::query()
+            .where_eq(self.local_key, fk.clone())
+            .first()
+            .await
+    }
+    
+    /// Load with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
+    where
+        F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
+    {
+        let fk = match &self.fk_value {
+            Some(v) if !v.is_null() => v,
+            _ => return Ok(None),
+        };
+        
+        let query = E::query().where_eq(self.local_key, fk.clone());
+        constraint_fn(query).first().await
+    }
+    
+    /// Check if the self-reference exists
+    pub async fn exists(&self) -> Result<bool> {
+        let fk = match &self.fk_value {
+            Some(v) if !v.is_null() => v,
+            _ => return Ok(false),
+        };
+        
+        E::query()
+            .where_eq(self.local_key, fk.clone())
+            .exists()
+            .await
+    }
+    
+    /// Get the cached value if already loaded
+    pub fn get_cached(&self) -> Option<&E> {
+        self.cached.as_deref()
+    }
+}
+
+impl<E: Model> Default for SelfRef<E> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "parent_id",
+            local_key: "id",
+            cached: None,
+            fk_value: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: Model + Serialize> Serialize for SelfRef<E> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+/// SelfRefMany relation type - represents the inverse of a self-referencing relationship
+///
+/// Use this to get all records that reference this record (e.g., all reports of a manager).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Model)]
+/// pub struct Category {
+///     pub id: i64,
+///     pub name: String,
+///     pub parent_id: Option<i64>,
+///     
+///     // Get the parent category
+///     #[tide(self_ref = "id", foreign_key = "parent_id")]
+///     pub parent: SelfRef<Category>,
+///     
+///     // Get all child categories
+///     #[tide(self_ref_many = "id", foreign_key = "parent_id")]
+///     pub children: SelfRefMany<Category>,
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct SelfRefMany<E: Model> {
+    /// Foreign key column on the related records (e.g., "parent_id")
+    pub foreign_key: &'static str,
+    /// Local key being referenced (usually "id")
+    pub local_key: &'static str,
+    /// Cached related models
+    cached: Option<Vec<E>>,
+    /// This record's primary key value
+    parent_pk: Option<serde_json::Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E: Model> SelfRefMany<E> {
+    /// Create a new SelfRefMany relation
+    pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
+        Self {
+            foreign_key,
+            local_key,
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+    
+    /// Set the parent primary key for lazy loading
+    pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
+        self.parent_pk = Some(pk);
+        self
+    }
+    
+    /// Load all records that reference this one
+    pub async fn load(&self) -> Result<Vec<E>> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .get()
+            .await
+    }
+    
+    /// Load with custom constraints
+    pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<E>>
+    where
+        F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
+    {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
+        
+        let query = E::query().where_eq(self.foreign_key, pk.clone());
+        constraint_fn(query).get().await
+    }
+    
+    /// Count records that reference this one
+    pub async fn count(&self) -> Result<u64> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .count()
+            .await
+            .map(|c| c as u64)
+    }
+    
+    /// Check if any records reference this one
+    pub async fn exists(&self) -> Result<bool> {
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
+        
+        E::query()
+            .where_eq(self.foreign_key, pk.clone())
+            .exists()
+            .await
+    }
+    
+    /// Get the cached values if already loaded
+    pub fn get_cached(&self) -> Option<&[E]> {
+        self.cached.as_deref()
+    }
+    
+    /// Load the full tree of descendants (recursive)
+    ///
+    /// This loads all descendants recursively up to the specified depth.
+    /// Use with caution on large datasets.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let all_subcategories = category.children.load_tree(5).await?;
+    /// ```
+    pub async fn load_tree(&self, max_depth: usize) -> Result<Vec<E>> {
+        if max_depth == 0 {
+            return Ok(Vec::new());
+        }
+        
+        let pk = self.parent_pk.as_ref()
+            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
+        
+        self.load_tree_recursive(pk.clone(), max_depth).await
+    }
+    
+    /// Internal recursive tree loading
+    #[async_recursion::async_recursion]
+    async fn load_tree_recursive(&self, parent_pk: serde_json::Value, depth: usize) -> Result<Vec<E>> {
+        if depth == 0 {
+            return Ok(Vec::new());
+        }
+        
+        let children: Vec<E> = E::query()
+            .where_eq(self.foreign_key, parent_pk)
+            .get()
+            .await?;
+        
+        let mut all = children.clone();
+        
+        for child in children {
+            // Convert primary key to JSON value using Display trait
+            let pk_string = format!("{}", child.primary_key());
+            let child_pk = if let Ok(num) = pk_string.parse::<i64>() {
+                serde_json::Value::Number(num.into())
+            } else {
+                serde_json::Value::String(pk_string)
+            };
+            
+            if !child_pk.is_null() {
+                let descendants = self.load_tree_recursive(child_pk, depth - 1).await?;
+                all.extend(descendants);
+            }
+        }
+        
+        Ok(all)
+    }
+}
+
+impl<E: Model> Default for SelfRefMany<E> {
+    fn default() -> Self {
+        Self {
+            foreign_key: "parent_id",
+            local_key: "id",
+            cached: None,
+            parent_pk: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: Model + Serialize> Serialize for SelfRefMany<E> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.cached.serialize(serializer)
+    }
+}
+
+impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::default())
+    }
+}
+
+// =============================================================================
 // RELATION TYPE WRAPPERS (SeaORM-style)
 // =============================================================================
 

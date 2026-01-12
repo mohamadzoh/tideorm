@@ -490,8 +490,8 @@ mod transaction_behavior_tests {
 mod auto_derives_tests {
     use tideorm::prelude::*;
     
-    // Test model with just #[derive(Model)] - all traits auto-generated
-    #[derive(Model)]
+    // Test model with just #[tideorm::model] - all traits auto-generated
+    #[tideorm::model]
     #[tide(table = "auto_derive_products")]
     pub struct AutoDeriveProduct {
         #[tide(primary_key, auto_increment)]
@@ -502,7 +502,7 @@ mod auto_derives_tests {
     }
     
     // Test that skip_derives works when user wants to provide custom implementations
-    #[derive(Model)]
+    #[tideorm::model]
     #[tide(table = "skip_derive_items", skip_derives)]
     pub struct SkipDeriveItem {
         #[tide(primary_key, auto_increment)]

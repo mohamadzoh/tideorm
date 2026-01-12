@@ -356,6 +356,22 @@ impl Schema {
 // TABLE BUILDER
 // ============================================================================
 
+/// Definition of a composite unique constraint
+#[derive(Debug, Clone)]
+pub struct UniqueConstraint {
+    /// Optional name for the constraint
+    pub name: Option<String>,
+    /// Columns that form the unique constraint
+    pub columns: Vec<String>,
+}
+
+/// Definition of a composite primary key
+#[derive(Debug, Clone)]
+pub struct CompositePrimaryKey {
+    /// Columns that form the composite primary key
+    pub columns: Vec<String>,
+}
+
 /// Builder for creating tables
 pub struct TableBuilder {
     name: String,
@@ -363,6 +379,10 @@ pub struct TableBuilder {
     columns: Vec<ColumnDefinition>,
     indexes: Vec<IndexBuilder>,
     primary_key: Option<String>,
+    /// Multi-column unique constraints (SeaORM 2.0 feature)
+    unique_constraints: Vec<UniqueConstraint>,
+    /// Composite primary key support
+    composite_primary_key: Option<CompositePrimaryKey>,
 }
 
 impl TableBuilder {
@@ -374,6 +394,8 @@ impl TableBuilder {
             columns: Vec::new(),
             indexes: Vec::new(),
             primary_key: None,
+            unique_constraints: Vec::new(),
+            composite_primary_key: None,
         }
     }
 
@@ -398,6 +420,8 @@ impl TableBuilder {
             primary_key: true,
             auto_increment: true,
             unique: false,
+            check: None,
+            extra: None,
         };
         self.columns.push(col);
         self.primary_key = Some(name.to_string());
@@ -414,6 +438,8 @@ impl TableBuilder {
             primary_key: true,
             auto_increment: true,
             unique: false,
+            check: None,
+            extra: None,
         };
         self.columns.push(col);
         self.primary_key = Some(name.to_string());
@@ -555,6 +581,8 @@ impl TableBuilder {
                 primary_key: false,
                 auto_increment: false,
                 unique: false,
+                check: None,
+                extra: None,
             },
         }
     }
@@ -599,6 +627,58 @@ impl TableBuilder {
         self
     }
 
+    /// Add a multi-column unique constraint (SeaORM 2.0 feature)
+    ///
+    /// Unlike `unique_index`, this creates an inline UNIQUE constraint in the
+    /// CREATE TABLE statement rather than a separate CREATE UNIQUE INDEX.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.unique(&["email", "tenant_id"]);
+    /// // Generates: UNIQUE ("email", "tenant_id")
+    /// ```
+    pub fn unique(&mut self, columns: &[&str]) -> &mut Self {
+        self.unique_constraints.push(UniqueConstraint {
+            name: None,
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+        });
+        self
+    }
+
+    /// Add a named multi-column unique constraint (SeaORM 2.0 feature)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.unique_named("uq_user_email_tenant", &["email", "tenant_id"]);
+    /// // Generates: CONSTRAINT "uq_user_email_tenant" UNIQUE ("email", "tenant_id")
+    /// ```
+    pub fn unique_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+        self.unique_constraints.push(UniqueConstraint {
+            name: Some(name.to_string()),
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+        });
+        self
+    }
+
+    /// Set a composite primary key on multiple columns (SeaORM 2.0 feature)
+    ///
+    /// This is useful for junction tables or tables with natural composite keys.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.primary_key(&["user_id", "role_id"]);
+    /// // Generates: PRIMARY KEY ("user_id", "role_id")
+    /// ```
+    pub fn primary_key(&mut self, columns: &[&str]) -> &mut Self {
+        self.composite_primary_key = Some(CompositePrimaryKey {
+            columns: columns.iter().map(|s| s.to_string()).collect(),
+        });
+        self
+    }
+
     /// Add a named index
     pub fn index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
         let idx = IndexBuilder {
@@ -636,13 +716,43 @@ impl TableBuilder {
 
         sql.push_str(&column_defs.join(",\n"));
 
-        // Add primary key constraint if specified
+        // Add primary key constraint if specified (single column)
         if let Some(ref pk) = self.primary_key {
             sql.push_str(",\n");
             sql.push_str(&format!(
                 "    PRIMARY KEY ({})",
                 self.quote_identifier(pk)
             ));
+        }
+
+        // Add composite primary key if specified (SeaORM 2.0 feature)
+        if let Some(ref cpk) = self.composite_primary_key {
+            sql.push_str(",\n");
+            let cols: Vec<String> = cpk
+                .columns
+                .iter()
+                .map(|c| self.quote_identifier(c))
+                .collect();
+            sql.push_str(&format!("    PRIMARY KEY ({})", cols.join(", ")));
+        }
+
+        // Add unique constraints (SeaORM 2.0 multi-column unique keys)
+        for uc in &self.unique_constraints {
+            sql.push_str(",\n");
+            let cols: Vec<String> = uc
+                .columns
+                .iter()
+                .map(|c| self.quote_identifier(c))
+                .collect();
+            if let Some(ref name) = uc.name {
+                sql.push_str(&format!(
+                    "    CONSTRAINT {} UNIQUE ({})",
+                    self.quote_identifier(name),
+                    cols.join(", ")
+                ));
+            } else {
+                sql.push_str(&format!("    UNIQUE ({})", cols.join(", ")));
+            }
         }
 
         sql.push_str("\n)");
@@ -695,6 +805,16 @@ impl TableBuilder {
         // UNIQUE (handled separately from indexes)
         if col.unique && !col.primary_key {
             def.push_str(" UNIQUE");
+        }
+        
+        // CHECK constraint (SeaORM 2.0)
+        if let Some(ref check_expr) = col.check {
+            def.push_str(&format!(" CHECK ({})", check_expr));
+        }
+        
+        // Extra SQL (SeaORM 2.0)
+        if let Some(ref extra_sql) = col.extra {
+            def.push_str(&format!(" {}", extra_sql));
         }
 
         def
@@ -800,6 +920,35 @@ impl<'a> ColumnBuilder<'a> {
         self.table.primary_key = Some(self.definition.name.clone());
         self
     }
+    
+    /// Add a CHECK constraint to the column (SeaORM 2.0)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.integer("price").check("price > 0");
+    /// t.integer("quantity").check("quantity >= 0 AND quantity <= 1000");
+    /// t.string("status", 50).check("status IN ('active', 'pending', 'inactive')");
+    /// ```
+    pub fn check(mut self, expression: &str) -> Self {
+        self.definition.check = Some(expression.to_string());
+        self
+    }
+    
+    /// Add extra SQL to the column definition (SeaORM 2.0 `extra` attribute)
+    ///
+    /// This allows adding arbitrary SQL after the column definition.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.integer("version").extra("GENERATED ALWAYS AS IDENTITY");
+    /// t.string("code", 10).extra("COLLATE utf8mb4_unicode_ci");
+    /// ```
+    pub fn extra(mut self, sql: &str) -> Self {
+        self.definition.extra = Some(sql.to_string());
+        self
+    }
 }
 
 impl<'a> Drop for ColumnBuilder<'a> {
@@ -815,6 +964,8 @@ impl<'a> Drop for ColumnBuilder<'a> {
                 primary_key: false,
                 auto_increment: false,
                 unique: false,
+                check: None,
+                extra: None,
             },
         );
         if !def.name.is_empty() {
@@ -856,6 +1007,8 @@ impl AlterTableBuilder {
                 primary_key: false,
                 auto_increment: false,
                 unique: false,
+                check: None,
+                extra: None,
             },
         }
     }
@@ -1092,6 +1245,8 @@ impl<'a> Drop for AlterColumnBuilder<'a> {
                 primary_key: false,
                 auto_increment: false,
                 unique: false,
+                check: None,
+                extra: None,
             },
         );
         if !def.name.is_empty() {
@@ -1327,6 +1482,10 @@ struct ColumnDefinition {
     primary_key: bool,
     auto_increment: bool,
     unique: bool,
+    /// CHECK constraint expression (SeaORM 2.0 `extra` attribute)
+    check: Option<String>,
+    /// Extra SQL to append (SeaORM 2.0 `extra` attribute)
+    extra: Option<String>,
 }
 
 /// Internal index definition
@@ -1906,5 +2065,71 @@ mod tests {
         assert!(statements[0].contains("ADD COLUMN"));
         assert!(statements[1].contains("DROP COLUMN"));
         assert!(statements[2].contains("RENAME COLUMN"));
+    }
+
+    #[test]
+    fn test_multi_column_unique_constraint() {
+        // Test unnamed unique constraint
+        let mut builder = TableBuilder::new("user_roles", DatabaseType::Postgres);
+        builder.big_integer("user_id").not_null();
+        builder.big_integer("role_id").not_null();
+        builder.unique(&["user_id", "role_id"]);
+
+        let sql = builder.build_create();
+        assert!(sql.contains("UNIQUE (\"user_id\", \"role_id\")"),
+            "Should have multi-column unique constraint. Got: {}", sql);
+
+        // Test named unique constraint
+        let mut builder = TableBuilder::new("users", DatabaseType::Postgres);
+        builder.id();
+        builder.string("email").not_null();
+        builder.big_integer("tenant_id").not_null();
+        builder.unique_named("uq_user_email_tenant", &["email", "tenant_id"]);
+
+        let sql = builder.build_create();
+        assert!(sql.contains("CONSTRAINT \"uq_user_email_tenant\" UNIQUE (\"email\", \"tenant_id\")"),
+            "Should have named unique constraint. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_composite_primary_key() {
+        // Test composite primary key for junction table
+        let mut builder = TableBuilder::new("user_roles", DatabaseType::Postgres);
+        builder.big_integer("user_id").not_null();
+        builder.big_integer("role_id").not_null();
+        builder.timestamps();
+        builder.primary_key(&["user_id", "role_id"]);
+
+        let sql = builder.build_create();
+        assert!(sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
+            "Should have composite primary key. Got: {}", sql);
+        // Should NOT have individual primary keys
+        assert!(!sql.contains("BIGINT PRIMARY KEY"),
+            "Individual columns should not be marked as primary key. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_check_constraint() {
+        let mut builder = TableBuilder::new("products", DatabaseType::Postgres);
+        builder.id();
+        builder.decimal("price").check("price >= 0");
+        builder.integer("quantity").check("quantity >= 0");
+
+        let sql = builder.build_create();
+        assert!(sql.contains("CHECK (price >= 0)"),
+            "Should have CHECK constraint on price. Got: {}", sql);
+        assert!(sql.contains("CHECK (quantity >= 0)"),
+            "Should have CHECK constraint on quantity. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_extra_sql_attribute() {
+        let mut builder = TableBuilder::new("logs", DatabaseType::MySQL);
+        builder.id();
+        builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
+
+        let sql = builder.build_create();
+        assert!(sql.contains("COLLATE utf8mb4_unicode_ci"),
+            "Should include extra SQL. Got: {}", sql);
     }
 }

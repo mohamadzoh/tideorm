@@ -16,7 +16,7 @@
 
 use tideorm::prelude::*;
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users")]
 #[index("email")]
 #[unique_index("email")]
@@ -29,7 +29,7 @@ pub struct User {
     pub age: Option<i32>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "notes")]
 pub struct Note {
     #[tide(primary_key, auto_increment)]

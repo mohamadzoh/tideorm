@@ -60,7 +60,7 @@ use tideorm::relations::{HasOne, HasMany, BelongsTo};
 // ============================================================================
 
 /// User model - demonstrates has_many and has_one relations
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "users", hidden = "password_hash,deleted_at", searchable = "name,email")]
 #[index("email")]
 #[unique_index("email")]
@@ -99,7 +99,7 @@ impl User {
 }
 
 /// Profile model - demonstrates belongs_to relation and JSON column
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "profiles")]
 pub struct Profile {
     #[tide(primary_key, auto_increment)]
@@ -134,7 +134,7 @@ impl Profile {
 }
 
 /// Post model - demonstrates belongs_to, soft delete, and array columns
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "posts", soft_delete, hidden = "deleted_at")]
 #[index("user_id")]
 #[index("status")]
@@ -201,7 +201,7 @@ impl Post {
 }
 
 /// Comment model - demonstrates belongs_to with multiple relations
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "comments")]
 #[index("post_id")]
 #[index("user_id")]
@@ -235,7 +235,7 @@ impl Comment {
 }
 
 /// Product model - demonstrates callbacks and JSON queries
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "products")]
 #[index("category")]
 #[index("active")]

@@ -26,7 +26,7 @@ pub struct TestUser {
     pub active: bool,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_posts")]
 pub struct TestPost {
     #[tide(primary_key, auto_increment)]
@@ -37,7 +37,7 @@ pub struct TestPost {
     pub published: bool,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_products")]
 pub struct TestProduct {
     #[tide(primary_key, auto_increment)]
@@ -49,7 +49,7 @@ pub struct TestProduct {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_soft_deletes", soft_delete)]
 pub struct TestSoftDelete {
     #[tide(primary_key, auto_increment)]

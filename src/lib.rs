@@ -554,6 +554,9 @@ pub mod validation;
 /// Full-text search support
 pub mod fulltext;
 
+/// Strongly-typed columns for compile-time type safety
+pub mod columns;
+
 /// Re-exports for convenience
 pub mod prelude;
 
@@ -590,6 +593,9 @@ pub use validation::{Validate, ValidationErrors, ValidationRule, ValidationBuild
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;
+
+// Re-export the attribute macro (SeaORM 2.0 style)
+pub use tideorm_macros::model;
 
 // Re-export relation attribute macros
 pub use tideorm_macros::{belongs_to, has_one, has_many};

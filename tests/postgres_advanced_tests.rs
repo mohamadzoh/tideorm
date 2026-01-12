@@ -22,7 +22,7 @@ use test_config::test_database_url;
 // TEST MODELS WITH JSON AND ARRAY COLUMNS
 // =============================================================================
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_documents")]
 pub struct TestDocument {
     #[tide(primary_key, auto_increment)]
@@ -33,7 +33,7 @@ pub struct TestDocument {
     pub ratings: Vec<i32>,            // Array of integers
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_authors")]
 pub struct TestAuthor {
     #[tide(primary_key, auto_increment)]
@@ -46,7 +46,7 @@ pub struct TestAuthor {
     pub books: HasMany<TestBook>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_books")]
 pub struct TestBook {
     #[tide(primary_key, auto_increment)]
@@ -64,7 +64,7 @@ pub struct TestBook {
     pub detail: HasOne<TestBookDetail>,
 }
 
-#[derive(Model)]
+#[tideorm::model]
 #[tide(table = "test_book_details")]
 pub struct TestBookDetail {
     #[tide(primary_key, auto_increment)]
