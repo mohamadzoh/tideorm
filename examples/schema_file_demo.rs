@@ -179,7 +179,7 @@ async fn demo_programmatic_schema_generation() -> tideorm::Result<()> {
     std::fs::write("schema_programmatic.sql", &sql)
         .expect("Failed to write schema file");
 
-    println!("   ✅ Generated schema_programmatic.sql");
+    println!("    Generated schema_programmatic.sql");
     println!("   Preview:");
     println!("   ----------------------------------------");
     for line in sql.lines().take(15) {
@@ -218,8 +218,8 @@ async fn demo_auto_schema_file() -> tideorm::Result<()> {
         .connect()
         .await?;
 
-    println!("   ✅ Connected to database");
-    println!("   ✅ Generated schema_auto.sql from database introspection");
+    println!("    Connected to database");
+    println!("    Generated schema_auto.sql from database introspection");
 
     // Verify file was created
     if std::path::Path::new("schema_auto.sql").exists() {
@@ -252,7 +252,7 @@ async fn demo_manual_schema_generation() -> tideorm::Result<()> {
     // Manually trigger schema generation
     SchemaWriter::write_schema("schema_manual.sql").await?;
 
-    println!("   ✅ Generated schema_manual.sql");
+    println!("    Generated schema_manual.sql");
 
     // Also demonstrate generating schema for different database types
     println!("\n   Generating schemas for different database types:");
@@ -266,7 +266,7 @@ async fn demo_manual_schema_generation() -> tideorm::Result<()> {
     let mysql_sql = mysql_gen.generate();
     std::fs::write("schema_mysql_example.sql", &mysql_sql)
         .expect("Failed to write MySQL schema file");
-    println!("   ✅ Generated schema_mysql_example.sql (MySQL syntax)");
+    println!("    Generated schema_mysql_example.sql (MySQL syntax)");
 
     // SQLite schema
     let mut sqlite_gen = SchemaGenerator::new(DatabaseType::SQLite);
@@ -277,7 +277,7 @@ async fn demo_manual_schema_generation() -> tideorm::Result<()> {
     let sqlite_sql = sqlite_gen.generate();
     std::fs::write("schema_sqlite_example.sql", &sqlite_sql)
         .expect("Failed to write SQLite schema file");
-    println!("   ✅ Generated schema_sqlite_example.sql (SQLite syntax)");
+    println!("Generated schema_sqlite_example.sql (SQLite syntax)");
 
     println!();
 

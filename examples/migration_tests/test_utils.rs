@@ -151,7 +151,7 @@ pub async fn cleanup_test_tables() -> tideorm::Result<()> {
 /// Print test result with formatting
 pub fn print_test_result(name: &str, passed: bool) {
     if passed {
-        println!("  ✅ {}", name);
+        println!("   {}", name);
     } else {
         println!("  ❌ {}", name);
     }

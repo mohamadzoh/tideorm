@@ -1,7 +1,7 @@
 //! Database Schema Synchronization Module
 //!
 //! This module provides automatic schema synchronization between TideORM models
-//! and the database using SeaORM 2.0's built-in SchemaBuilder capabilities.
+//! and the database using SeaORM built-in SchemaBuilder capabilities.
 //!
 //! ## Two Synchronization Approaches
 //!
@@ -31,7 +31,7 @@
 //! ### 2. SeaORM Entities (Advanced)
 //!
 //! For SeaORM entities, you can use `SyncRegistry::register_entity::<E>()` to
-//! leverage SeaORM 2.0's native SchemaBuilder with incremental sync:
+//! leverage SeaORM  native SchemaBuilder with incremental sync:
 //!
 //! ```rust,ignore
 //! use tideorm::sync::SyncRegistry;
@@ -50,9 +50,9 @@
 //! SyncRegistry::register_entity::<Entity>();
 //! ```
 //!
-//! ## SeaORM 2.0 Schema Sync Features
+//! ## SeaORM Schema Sync Features
 //!
-//! When using SeaORM entities, the sync uses SeaORM 2.0's native capabilities:
+//! When using SeaORM entities, the sync uses SeaORM  native capabilities:
 //!
 //! - **Incremental Schema Sync**: Creates missing tables, columns, indexes, and foreign keys
 //! - **Schema Discovery**: Automatically discovers existing database schema
@@ -117,7 +117,7 @@ use parking_lot::RwLock;
 use crate::database::Database;
 use crate::error::{Error, Result};
 
-// Use SeaORM 2.0's schema management
+// Use SeaORM  schema management
 use sea_orm::{
     ConnectionTrait, DbBackend, EntityTrait, Statement,
     schema::{Schema, SchemaBuilder},
@@ -314,11 +314,11 @@ impl<A: SyncModel, B: SyncModel, C: SyncModel, D: SyncModel, E: SyncModel, F: Sy
     }
 }
 
-/// Registry for models to be synchronized using SeaORM 2.0's SchemaBuilder
+/// Registry for models to be synchronized using SeaORM  SchemaBuilder
 pub struct SyncRegistry;
 
 impl SyncRegistry {
-    /// Register an entity type for synchronization using SeaORM 2.0
+    /// Register an entity type for synchronization using SeaORM
     /// 
     /// This stores a registration function that will call SchemaBuilder.register()
     /// when sync is performed.
@@ -336,7 +336,7 @@ impl SyncRegistry {
     
     /// Build a SchemaBuilder with all registered entities
     /// 
-    /// Uses SeaORM 2.0's native SchemaBuilder.register() for each entity.
+    /// Uses SeaORM  native SchemaBuilder.register() for each entity.
     pub fn build_schema_builder(backend: DbBackend) -> SchemaBuilder {
         let registry = get_entity_registry();
         let fns = registry.read();
@@ -502,10 +502,10 @@ impl ModelSchema {
 }
 
 // ============================================================================
-// Main sync functions using SeaORM 2.0's SchemaBuilder
+// Main sync functions using SeaORM  SchemaBuilder
 // ============================================================================
 
-/// Synchronize all registered models with the database using SeaORM 2.0
+/// Synchronize all registered models with the database using SeaORM
 ///
 /// This uses SeaORM's built-in `SchemaBuilder.sync()` to:
 /// 1. Create missing tables
@@ -531,7 +531,7 @@ pub async fn sync_database(db: &Database) -> Result<()> {
 
 /// Synchronize all registered models with force_sync option
 ///
-/// This uses SeaORM 2.0's schema management with additional options.
+/// This uses SeaORM  schema management with additional options.
 ///
 /// # Arguments
 ///
@@ -565,7 +565,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         return Ok(());
     }
 
-    eprintln!("Syncing {} model(s) using SeaORM 2.0 SchemaBuilder...", total_count);
+    eprintln!("Syncing {} model(s) using SeaORM SchemaBuilder...", total_count);
     eprintln!("  - {} entity-based models", entity_count);
     eprintln!("  - {} legacy schema models", legacy_count);
 
@@ -573,7 +573,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
     if entity_count > 0 {
         let schema_builder = SyncRegistry::build_schema_builder(backend);
         
-        // Use SeaORM 2.0's sync or apply based on force_sync option
+        // Use SeaORM  sync or apply based on force_sync option
         if force_sync {
             eprintln!("  Using SeaORM SchemaBuilder.apply() - fresh schema creation");
             schema_builder.apply(conn).await
@@ -591,7 +591,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         sync_legacy_schemas(db, force_sync).await?;
     }
 
-    eprintln!("✅ Database sync completed using SeaORM 2.0");
+    eprintln!(" Database sync completed using SeaORM");
     Ok(())
 }
 
@@ -624,9 +624,9 @@ async fn sync_legacy_schemas(db: &Database, force_sync: bool) -> Result<()> {
         if !table_exists || force_sync {
             // Create new table
             create_table_from_legacy_schema(conn, &model, backend).await?;
-            eprintln!("    ✅ Created legacy table: {}", model.table_name);
+            eprintln!("     Created legacy table: {}", model.table_name);
         } else {
-            eprintln!("    ✅ Legacy table exists: {}", model.table_name);
+            eprintln!("     Legacy table exists: {}", model.table_name);
         }
     }
     

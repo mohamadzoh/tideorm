@@ -469,7 +469,6 @@
 //!
 //! 1. **Convention over Configuration** - Smart defaults, minimal boilerplate
 //! 2. **Developer Happiness** - APIs that feel natural and are hard to misuse
-//! 3. **Abstraction without Leakage** - SeaORM internals never leak to users
 //! 4. **Type Safety** - Catch errors at compile time when possible
 //! 5. **Performance** - Zero-cost abstractions where possible
 
@@ -477,16 +476,10 @@
 #![warn(clippy::all)]
 #![deny(unsafe_code)]
 
-// ============================================================================
-// INTERNAL MODULES (Never exposed to users)
-// ============================================================================
-
-/// Internal SeaORM adapter - NEVER publicly exposed
 #[doc(hidden)]
 pub mod internal;
 
 /// Re-export sea_orm for internal macro use only
-/// ⚠️ Users should NEVER use this directly
 #[doc(hidden)]
 pub use sea_orm;
 

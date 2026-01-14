@@ -339,7 +339,7 @@ async fn main() -> tideorm::Result<()> {
         .connect()
         .await?;
     
-    println!("✅ Connected to database!");
+    println!(" Connected to database!");
     println!("   Languages: {:?}", Config::get_languages());
     println!("   Fallback: {}", Config::get_fallback_language());
     println!();
@@ -352,7 +352,7 @@ async fn main() -> tideorm::Result<()> {
     use tideorm::internal::ConnectionTrait;
     let conn = db().__internal_connection();
     conn.execute_unprepared(CREATE_TABLES_SQL).await.map_err(|e| tideorm::Error::query(e.to_string()))?;
-    println!("✅ Tables ready!\n");
+    println!(" Tables ready!\n");
     
     // ========================================================================
     // CREATE USERS
@@ -603,17 +603,17 @@ async fn main() -> tideorm::Result<()> {
     println!("   - Posts: {}", Post::count().await?);
     println!();
     println!("🌊 TideORM Features Demonstrated:");
-    println!("   ✅ Global config (TideConfig) - languages, fallback set ONCE");
-    println!("   ✅ DB_SYNC mode");
-    println!("   ✅ CRUD operations (Create, Read, Update, Delete)");
-    println!("   ✅ find, find_or_fail, exists, first, last");
-    println!("   ✅ Pagination (paginate)");
-    println!("   ✅ Soft deletes (soft_delete attribute)");
-    println!("   ✅ JSON serialization with options");
-    println!("   ✅ Hidden attributes (hidden = \"...\")");
-    println!("   ✅ Translations config (translatable - uses global languages)");
-    println!("   ✅ File attachments config (has_one_files, has_many_files)");
-    println!("   ✅ Searchable fields (searchable = \"...\")");
+    println!("    Global config (TideConfig) - languages, fallback set ONCE");
+    println!("    DB_SYNC mode");
+    println!("    CRUD operations (Create, Read, Update, Delete)");
+    println!("    find, find_or_fail, exists, first, last");
+    println!("    Pagination (paginate)");
+    println!("    Soft deletes (soft_delete attribute)");
+    println!("    JSON serialization with options");
+    println!("    Hidden attributes (hidden = \"...\")");
+    println!("    Translations config (translatable - uses global languages)");
+    println!("    File attachments config (has_one_files, has_many_files)");
+    println!("    Searchable fields (searchable = \"...\")");
     println!();
     println!("🌊 TideORM - SeaORM completely hidden!");
     println!("   Notice: No SeaORM imports required in user code!");

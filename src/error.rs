@@ -1,11 +1,10 @@
-//! Error types for TideORM
+//! Error types
 //!
-//! This module provides user-friendly error types that NEVER expose SeaORM internals.
 //! All database errors are translated into these types before reaching user code.
 //!
 //! ## Error Handling
 //!
-//! TideORM provides detailed, actionable error messages to help you debug issues quickly:
+//! provides detailed, actionable error messages to help you debug issues quickly:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;

@@ -84,7 +84,7 @@ pub struct TestBookDetail {
 
 #[tokio::test]
 async fn postgres_advanced_tests() {
-    println!("🚀 Starting Advanced PostgreSQL Integration Tests...\n");
+    println!(" Starting Advanced PostgreSQL Integration Tests...\n");
     
     // Setup database
     TideConfig::init()
@@ -120,7 +120,7 @@ async fn postgres_advanced_tests() {
     // =========================================================================
     cleanup_tables().await;
     
-    println!("\n✅ All advanced PostgreSQL tests passed!\n");
+    println!("\n All advanced PostgreSQL tests passed!\n");
 }
 
 // =============================================================================
@@ -192,7 +192,7 @@ async fn cleanup_tables() {
 // =============================================================================
 
 async fn test_json_operators() {
-    println!("📦 Testing: JSON/JSONB Operators");
+    println!(" Testing: JSON/JSONB Operators");
     
     // Seed test data
     let _ = Database::execute("TRUNCATE TABLE test_documents RESTART IDENTITY CASCADE").await;

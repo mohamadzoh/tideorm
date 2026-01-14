@@ -47,7 +47,7 @@ pub struct Setting {
 
 #[tokio::main]
 async fn main() -> tideorm::Result<()> {
-    println!("🚀 TideORM Upsert Demo\n");
+    println!(" TideORM Upsert Demo\n");
     
     // =========================================================================
     // SETUP
@@ -95,7 +95,7 @@ async fn main() -> tideorm::Result<()> {
     // SIMPLE UPSERT - insert_or_update
     // =========================================================================
     
-    println!("📦 Simple Upsert with insert_or_update()\n");
+    println!(" Simple Upsert with insert_or_update()\n");
     
     // First insert
     let user = User {
@@ -205,7 +205,7 @@ async fn main() -> tideorm::Result<()> {
     Database::execute("DROP TABLE IF EXISTS settings CASCADE").await?;
     Database::execute("DROP TABLE IF EXISTS users CASCADE").await?;
     
-    println!("\n✅ Upsert demo complete!\n");
+    println!("\n Upsert demo complete!\n");
     
     Ok(())
 }

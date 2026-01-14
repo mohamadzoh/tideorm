@@ -875,7 +875,7 @@ impl CTE {
 }
 
 // =============================================================================
-// QUERY FRAGMENT (SeaORM 2.0 consolidate() support)
+// QUERY FRAGMENT (SeaORM consolidate() support)
 // =============================================================================
 
 /// A reusable query fragment that can be applied to multiple queries 

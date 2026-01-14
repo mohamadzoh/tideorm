@@ -19,17 +19,17 @@
 //!
 //! ## Test Coverage
 //!
-//! - ✅ Migration registration and ordering
-//! - ✅ Running pending migrations
-//! - ✅ Skipping already applied migrations
-//! - ✅ Table creation verification
-//! - ✅ Column and index creation
-//! - ✅ Single migration rollback
-//! - ✅ Multiple step rollback
-//! - ✅ Complete reset (rollback all)
-//! - ✅ Refresh (reset + run)
-//! - ✅ Migration status tracking
-//! - ✅ Alter table operations (add/drop columns)
+//! -  Migration registration and ordering
+//! -  Running pending migrations
+//! -  Skipping already applied migrations
+//! -  Table creation verification
+//! -  Column and index creation
+//! -  Single migration rollback
+//! -  Multiple step rollback
+//! -  Complete reset (rollback all)
+//! -  Refresh (reset + run)
+//! -  Migration status tracking
+//! -  Alter table operations (add/drop columns)
 
 use tideorm::prelude::*;
 
@@ -304,7 +304,7 @@ async fn main() -> tideorm::Result<()> {
     println!("📊 TEST RESULTS");
     println!("{}", "=".repeat(60));
     println!();
-    println!("  ✅ Passed: {}", passed);
+    println!("   Passed: {}", passed);
     println!("  ❌ Failed: {}", failed);
     println!("  📋 Total:  {}", passed + failed);
     println!();

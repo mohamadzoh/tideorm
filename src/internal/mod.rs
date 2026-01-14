@@ -1,11 +1,9 @@
 //! Internal SeaORM adapter layer
 //!
-//! ⚠️ **WARNING: This module is internal and should NEVER be exposed to end users.**
 //!
 //! This module serves as the adapter between TideORM's public API and SeaORM's internals.
 //! All SeaORM interactions happen through this layer, ensuring:
 //!
-//! 1. SeaORM types never leak to the public API
 //! 2. We can swap the underlying ORM engine if needed
 //! 3. Error translation happens in one place
 //! 4. Query translation is centralized
@@ -30,8 +28,6 @@ pub use sea_orm::{
 
 /// Internal trait that maps TideORM models to SeaORM entities
 /// This is implemented by the `#[derive(Model)]` macro
-/// 
-/// ⚠️ Users should NEVER implement or interact with this trait directly
 #[doc(hidden)]
 pub trait InternalModel: Sized + Send + Sync + Clone {
     type Entity: EntityTrait;

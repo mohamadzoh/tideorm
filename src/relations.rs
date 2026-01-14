@@ -436,7 +436,7 @@ impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
 }
 
 // =============================================================================
-// RELATION TYPE WRAPPERS (SeaORM-style)
+// RELATION TYPE WRAPPERS
 // =============================================================================
 
 /// HasOne relation type - represents a one-to-one relationship

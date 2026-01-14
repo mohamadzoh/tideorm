@@ -196,7 +196,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     
     /// Check if model has timestamps (created_at, updated_at)
     /// 
-    /// When true, TideORM automatically:
+    /// When true, automatically:
     /// - Sets `created_at` to now on save()
     /// - Sets `updated_at` to now on save() and update()
     fn has_timestamps() -> bool {
@@ -404,7 +404,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        // Check if empty - return empty Vec without error (SeaORM 2.0 behavior)
+        // Check if empty - return empty Vec without error
         if models.is_empty() {
             return Ok(Vec::new());
         }

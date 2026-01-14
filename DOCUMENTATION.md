@@ -847,7 +847,7 @@ If it returns `Err` or panics, the transaction is rolled back.
 
 ## Auto-Timestamps
 
-TideORM automatically manages `created_at` and `updated_at` fields:
+automatically manages `created_at` and `updated_at` fields:
 
 ```rust
 #[tideorm::model]
@@ -1457,7 +1457,7 @@ let tide_error: tideorm::error::Error = errors.into();
 
 ## Full-Text Search
 
-TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsquery), MySQL (FULLTEXT), and SQLite (FTS5).
+provides full-text search capabilities across PostgreSQL (tsvector/tsquery), MySQL (FULLTEXT), and SQLite (FTS5).
 
 ### Search Basics
 
@@ -1603,7 +1603,7 @@ let headline_sql = pg_headline_sql(
 
 ## Multi-Database Support
 
-TideORM automatically detects your database type and generates appropriate SQL syntax. The same code works seamlessly across PostgreSQL, MySQL, and SQLite.
+automatically detects your database type and generates appropriate SQL syntax. The same code works seamlessly across PostgreSQL, MySQL, and SQLite.
 
 ### Connecting to Different Databases
 
@@ -1676,7 +1676,7 @@ if db_type.supports_fulltext_search() {
 
 ### Database-Specific JSON Operations
 
-TideORM automatically translates JSON queries to the appropriate syntax:
+automatically translates JSON queries to the appropriate syntax:
 
 ```rust
 // This query works on all databases with JSON support
@@ -1716,7 +1716,7 @@ Product::query()
 
 ### Database-Specific Optimizations
 
-TideORM applies optimizations based on your database:
+applies optimizations based on your database:
 
 | Feature | PostgreSQL | MySQL | SQLite |
 |---------|------------|-------|--------|
@@ -1786,7 +1786,7 @@ When enabled, all SQL queries will be logged to stderr.
 
 ## Error Handling
 
-TideORM provides rich error types with optional context:
+provides rich error types with optional context:
 
 ```rust
 // Get context from errors

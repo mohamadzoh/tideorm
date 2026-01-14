@@ -1,6 +1,6 @@
-//! SeaORM 2.0 Features Demo
+//! SeaORM Features Demo
 //!
-//! This example demonstrates the new SeaORM 2.0 features implemented in TideORM:
+//! This example demonstrates the new SeaORM features implemented in TideORM:
 //!
 //! 1. **Strongly-Typed Columns** - Compile-time type safety for queries
 //! 2. **Nested ActiveModel** - Cascade save operations for related models
@@ -119,7 +119,7 @@ fn demo_strongly_typed_columns() {
     let name_in = NAME.is_in(vec!["Alice", "Bob", "Charlie"]);
     println!("  NAME.is_in([...])        -> value: {}", name_in.value);
     
-    println!("\n  ✅ Compile-time type safety:");
+    println!("\n   Compile-time type safety:");
     println!("     - NAME.eq(\"text\")  ✓ String == &str");
     println!("     - ID.gt(100)        ✓ i64 > i64");
     println!("     - AGE.is_null()     ✓ Only on Option<T>");
@@ -357,10 +357,10 @@ fn demo_linked_partial_select() {
     println!("       .await?;\n");
     
     println!("Benefits:");
-    println!("  ✅ Only fetches columns you need (performance)");
-    println!("  ✅ Auto-generates the JOIN clause");
-    println!("  ✅ Type-safe column selection");
-    println!("  ✅ Works with any related model");
+    println!("   Only fetches columns you need (performance)");
+    println!("   Auto-generates the JOIN clause");
+    println!("   Type-safe column selection");
+    println!("   Works with any related model");
 }
 
 // =============================================================================
@@ -369,7 +369,7 @@ fn demo_linked_partial_select() {
 
 fn main() {
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║           TideORM - SeaORM 2.0 Features Demo                  ║");
+    println!("║           TideORM - SeaORM Features Demo                  ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
     
     demo_strongly_typed_columns();
@@ -381,7 +381,7 @@ fn main() {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║                     Demo Complete!                             ║");
     println!("║                                                                 ║");
-    println!("║  All SeaORM 2.0 features are now available in TideORM:        ║");
+    println!("║  All SeaORM features are now available in TideORM:        ║");
     println!("║  - Strongly-typed columns with compile-time safety            ║");
     println!("║  - Nested ActiveModel for cascade saves                       ║");
     println!("║  - Self-referencing relations for hierarchical data           ║");

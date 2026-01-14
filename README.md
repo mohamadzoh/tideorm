@@ -38,7 +38,7 @@ pub struct User {
     pub name: String,
     pub active: bool,
     
-    // Relations defined as struct fields (SeaORM-style)
+    // Relations defined as struct fields
     #[tide(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
     

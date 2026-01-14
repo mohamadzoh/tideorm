@@ -2,3 +2,4 @@
 demo.db
 # Environment variables (contains local database credentials)
 .env
+*.sql

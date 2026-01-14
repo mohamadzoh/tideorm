@@ -392,7 +392,7 @@ async fn main() -> tideorm::Result<()> {
         .connect()
         .await?;
     
-    println!("✅ Connected to PostgreSQL");
+    println!(" Connected to PostgreSQL");
     println!("   Database type: {:?}", TideConfig::get_database_type());
     println!("   Languages: {:?}", Config::get_languages());
     
@@ -403,7 +403,7 @@ async fn main() -> tideorm::Result<()> {
     conn.execute_unprepared(CREATE_TABLES_SQL)
         .await
         .map_err(|e| tideorm::Error::query(e.to_string()))?;
-    println!("✅ Schema ready!");
+    println!(" Schema ready!");
 
     // ========================================================================
     // 2. CRUD OPERATIONS
@@ -781,7 +781,7 @@ async fn main() -> tideorm::Result<()> {
     // ========================================================================
     section("9. BATCH OPERATIONS");
     
-    println!("📦 Batch insert...");
+    println!(" Batch insert...");
     
     let products_to_insert = vec![
         Product::new("Headphones", "Electronics", 14999),
@@ -793,7 +793,7 @@ async fn main() -> tideorm::Result<()> {
     let inserted = Product::insert_all(products_to_insert).await?;
     println!("   Inserted {} products", inserted.len());
     
-    println!("\n📦 Batch update (using query builder)...");
+    println!("\n Batch update (using query builder)...");
     
     // Note: update_all is a Model method, not query builder method
     // For bulk updates, use raw SQL or iterate
@@ -1159,7 +1159,7 @@ async fn main() -> tideorm::Result<()> {
     
     // Write schema to file (optional - commented out to avoid file creation in demo)
     // tideorm::schema::SchemaWriter::write_schema("generated_schema.sql").await?;
-    // println!("   ✅ Schema written to generated_schema.sql");
+    // println!("    Schema written to generated_schema.sql");
     
     println!("\n   Schema introspection from database...");
     
@@ -1197,24 +1197,24 @@ async fn main() -> tideorm::Result<()> {
     println!("   Products: {}", Product::count().await?);
     
     println!("\n🌊 All PostgreSQL Features Demonstrated:");
-    println!("   ✅ Configuration (TideConfig)");
-    println!("   ✅ CRUD Operations");
-    println!("   ✅ Relations (#[belongs_to], #[has_one], #[has_many])");
-    println!("   ✅ Query Builder (WHERE, ORDER, LIMIT, OFFSET)");
-    println!("   ✅ JSON/JSONB Operations");
-    println!("   ✅ Array Operations");
-    println!("   ✅ Soft Delete");
-    println!("   ✅ Transactions");
-    println!("   ✅ Batch Operations");
-    println!("   ✅ Scopes");
-    println!("   ✅ Callbacks");
-    println!("   ✅ Raw SQL");
-    println!("   ✅ JSON Serialization");
-    println!("   ✅ Pagination");
-    println!("   ✅ JOIN Operations (INNER, LEFT, RIGHT)");
-    println!("   ✅ Aggregations (SUM, AVG, MIN, MAX, COUNT DISTINCT)");
-    println!("   ✅ GROUP BY / HAVING");
-    println!("   ✅ Schema Generation");
+    println!("    Configuration (TideConfig)");
+    println!("    CRUD Operations");
+    println!("    Relations (#[belongs_to], #[has_one], #[has_many])");
+    println!("    Query Builder (WHERE, ORDER, LIMIT, OFFSET)");
+    println!("    JSON/JSONB Operations");
+    println!("    Array Operations");
+    println!("    Soft Delete");
+    println!("    Transactions");
+    println!("    Batch Operations");
+    println!("    Scopes");
+    println!("    Callbacks");
+    println!("    Raw SQL");
+    println!("    JSON Serialization");
+    println!("    Pagination");
+    println!("    JOIN Operations (INNER, LEFT, RIGHT)");
+    println!("    Aggregations (SUM, AVG, MIN, MAX, COUNT DISTINCT)");
+    println!("    GROUP BY / HAVING");
+    println!("    Schema Generation");
     
     println!("\n📝 Next: Use this as reference for MySQL/SQLite support!");
     

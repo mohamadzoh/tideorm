@@ -48,21 +48,21 @@ pub struct Product {
 
 #[tokio::main]
 async fn main() -> tideorm::Result<()> {
-    println!("🚀 TideORM Caching Demo\n");
+    println!(" TideORM Caching Demo\n");
     
     // Check for database URL
     let db_url = std::env::var("POSTGRESQL_DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string());
     
     // Initialize database
-    println!("📦 Connecting to database...");
+    println!(" Connecting to database...");
     TideConfig::init()
         .database(&db_url)
         .max_connections(10)
         .connect()
         .await?;
     
-    println!("✅ Connected!\n");
+    println!(" Connected!\n");
     
     // =========================================================================
     // QUERY CACHE DEMONSTRATION
@@ -74,7 +74,7 @@ async fn main() -> tideorm::Result<()> {
     demo_prepared_statement_cache().await;
     demo_cache_statistics().await;
     
-    println!("\n✅ Demo completed successfully!");
+    println!("\n Demo completed successfully!");
     Ok(())
 }
 
@@ -95,7 +95,7 @@ async fn demo_query_cache_basic() {
         .set_strategy(CacheStrategy::LRU)
         .enable();
     
-    println!("✅ Query cache enabled with:");
+    println!(" Query cache enabled with:");
     println!("   - Max entries: 1000");
     println!("   - Default TTL: 60 seconds");
     println!("   - Strategy: LRU (Least Recently Used)\n");
@@ -207,7 +207,7 @@ async fn demo_prepared_statement_cache() {
         .set_max_age(Duration::from_secs(3600))
         .enable();
     
-    println!("✅ Prepared statement cache enabled with:");
+    println!(" Prepared statement cache enabled with:");
     println!("   - Max statements: 500");
     println!("   - Max age: 1 hour\n");
     

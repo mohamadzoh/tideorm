@@ -308,7 +308,7 @@ async fn main() -> tideorm::Result<()> {
     let database_url =
         std::env::var("POSTGRESQL_DATABASE_URL").unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string());
 
-    println!("🚀 TideORM Migration Example");
+    println!(" TideORM Migration Example");
     println!("===========================\n");
     println!("Database: {}\n", database_url);
 
@@ -414,7 +414,7 @@ async fn main() -> tideorm::Result<()> {
     }
     println!();
 
-    println!("✅ Migration example completed!");
+    println!(" Migration example completed!");
     println!("\n📖 Migration Registration Options:");
     println!("-----------------------------------");
     println!("// Option 1: Individual registration");

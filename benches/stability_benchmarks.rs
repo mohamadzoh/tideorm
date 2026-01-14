@@ -116,7 +116,7 @@ fn bench_json_operations(c: &mut Criterion) {
 fn bench_special_characters(c: &mut Criterion) {
     c.bench_function("unicode_string_operations", |b| {
         b.iter(|| {
-            let unicode = black_box("Привет 世界 مرحبا 🚀");
+            let unicode = black_box("Привет 世界 مرحبا ");
             unicode.chars().count()
         });
     });

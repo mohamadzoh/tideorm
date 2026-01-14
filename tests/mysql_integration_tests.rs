@@ -107,7 +107,7 @@ async fn mysql_integration_tests() {
     // Verify database type
     let db_type = Database::global().backend();
     assert_eq!(db_type, DatabaseType::MySQL, "Expected MySQL database");
-    println!("✅ Connected to MySQL\n");
+    println!(" Connected to MySQL\n");
 
     // Create tables (MySQL syntax with backticks)
     let _ = Database::execute("DROP TABLE IF EXISTS `test_soft_deletes`").await;
@@ -153,7 +153,7 @@ async fn mysql_integration_tests() {
         ) ENGINE=InnoDB
     "#).await.expect("Failed to create test_soft_deletes table");
     
-    println!("✅ Database setup complete\n");
+    println!(" Database setup complete\n");
 
     // =========================================================================
     // CONNECTION TESTS
@@ -479,7 +479,7 @@ async fn mysql_integration_tests() {
     // =========================================================================
     // JSON TESTS (MySQL JSON Type)
     // =========================================================================
-    println!("📦 Testing: JSON Operations");
+    println!(" Testing: JSON Operations");
     {
         let _ = Database::execute("DELETE FROM `test_products`").await;
         
@@ -638,5 +638,5 @@ async fn mysql_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS `test_users`").await;
     println!("   ✓ Tables dropped");
     
-    println!("\n✅ All MySQL integration tests passed!");
+    println!("\n All MySQL integration tests passed!");
 }

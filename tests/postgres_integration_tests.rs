@@ -69,7 +69,7 @@ async fn postgres_integration_tests() {
     // =========================================================================
     // SETUP
     // =========================================================================
-    println!("🚀 Starting PostgreSQL Integration Tests...\n");
+    println!(" Starting PostgreSQL Integration Tests...\n");
     
     TideConfig::init()
         .database(test_database_url())
@@ -112,7 +112,7 @@ async fn postgres_integration_tests() {
         )
     "#).await.expect("Failed to create test_soft_deletes table");
     
-    println!("✅ Database setup complete\n");
+    println!(" Database setup complete\n");
 
     // =========================================================================
     // CONNECTION TESTS
@@ -647,7 +647,7 @@ async fn postgres_integration_tests() {
     // =========================================================================
     // BATCH OPERATIONS TESTS
     // =========================================================================
-    println!("📦 Testing: Batch Operations");
+    println!(" Testing: Batch Operations");
     {
         let _ = Database::execute("TRUNCATE TABLE test_users RESTART IDENTITY CASCADE").await;
         
@@ -855,5 +855,5 @@ async fn postgres_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_posts CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_users CASCADE").await;
     
-    println!("\n✅ All PostgreSQL integration tests passed!\n");
+    println!("\n All PostgreSQL integration tests passed!\n");
 }

@@ -105,7 +105,7 @@ async fn sqlite_integration_tests() {
     // Verify database type
     let db_type = Database::global().backend();
     assert_eq!(db_type, DatabaseType::SQLite, "Expected SQLite database");
-    println!("✅ Connected to SQLite\n");
+    println!(" Connected to SQLite\n");
 
     // Create tables (SQLite syntax)
     let _ = Database::execute("DROP TABLE IF EXISTS test_soft_deletes").await;
@@ -151,7 +151,7 @@ async fn sqlite_integration_tests() {
         )
     "#).await.expect("Failed to create test_soft_deletes table");
     
-    println!("✅ Database setup complete\n");
+    println!(" Database setup complete\n");
 
     // =========================================================================
     // CONNECTION TESTS
@@ -477,7 +477,7 @@ async fn sqlite_integration_tests() {
     // =========================================================================
     // JSON TESTS (SQLite JSON1 Extension)
     // =========================================================================
-    println!("📦 Testing: JSON Operations (JSON1 Extension)");
+    println!(" Testing: JSON Operations (JSON1 Extension)");
     {
         let _ = Database::execute("DELETE FROM test_products").await;
         
@@ -566,5 +566,5 @@ async fn sqlite_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_users").await;
     println!("   ✓ Tables dropped");
     
-    println!("\n✅ All SQLite integration tests passed!");
+    println!("\n All SQLite integration tests passed!");
 }

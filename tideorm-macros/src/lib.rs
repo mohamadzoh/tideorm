@@ -1,7 +1,6 @@
 //! TideORM Procedural Macros
 //!
 //! This crate provides derive macros for TideORM models.
-//! Users should never need to import this crate directly - it's re-exported from `tideorm`.
 
 use darling::{ast::Data, FromDeriveInput, FromField};
 use proc_macro::TokenStream;
@@ -492,7 +491,7 @@ struct ModelInput {
 ///     
 ///     pub name: String,
 ///     
-///     // Relation defined inside the struct (SeaORM-style)
+///     // Relation defined inside the struct
 ///     #[tide(has_one = "Profile", foreign_key = "user_id")]
 ///     pub profile: HasOne<Profile>,
 ///     
@@ -1697,7 +1696,6 @@ fn extract_string_value(s: &str) -> String {
 
 /// Attribute macro for defining TideORM models.
 ///
-/// This is the recommended way to define models, similar to SeaORM 2.0's `#[sea_orm::model]`.
 /// It automatically adds the `#[derive(Model)]` along with other common derives.
 ///
 /// # Example
