@@ -570,9 +570,6 @@ async fn main() -> tideorm::Result<()> {
     println!("   Post title before reload: '{}'", post.title);
     let reloaded = post.reload().await?;
     println!("   Post title after reload: '{}'", reloaded.title);
-    
-    println!();
-    
     // ========================================================================
     // PAGINATION
     // ========================================================================

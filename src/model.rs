@@ -682,6 +682,9 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     
     /// Check if this record is new (not yet saved)
     fn is_new(&self) -> bool {
+        if self.primary_key().to_string().is_empty() {
+            return true;
+        }
         false
     }
     
@@ -1530,6 +1533,94 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
     
+    // =========================================================================
+    // OR CLAUSE METHODS FOR BATCH UPDATE
+    // =========================================================================
+    
+    /// Add an OR equals condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// User::update_all()
+    ///     .set("status", "inactive")
+    ///     .where_eq("banned", true)
+    ///     .or_where_eq("expired", true)
+    ///     .execute()
+    ///     .await?;
+    /// // Updates users where banned = true OR expired = true
+    /// ```
+    pub fn or_where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        // For batch updates, we treat OR as a separate condition group
+        // We'll mark these by using a special prefix in the column name that we'll parse later
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::Eq,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add an OR not equals condition
+    pub fn or_where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::NotEq,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add an OR greater than condition
+    pub fn or_where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::Gt,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add an OR less than condition
+    pub fn or_where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::Lt,
+            value: crate::query::ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add an OR IN condition
+    pub fn or_where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::In,
+            value: crate::query::ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add an OR IS NULL condition
+    pub fn or_where_null(mut self, column: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::IsNull,
+            value: crate::query::ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add an OR LIKE condition
+    pub fn or_where_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column),
+            operator: crate::query::Operator::Like,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
     /// Format a value for SQL
     fn format_value(v: &serde_json::Value) -> String {
         match v {
@@ -1623,70 +1714,86 @@ impl<M: Model> BatchUpdateBuilder<M> {
             })
             .collect();
         
-        // Build WHERE clause
-        let where_parts: Vec<String> = self.conditions.iter()
-            .filter_map(|cond| {
-                let col = format!("{0}{1}{0}", quote, cond.column);
-                
-                match &cond.operator {
-                    crate::query::Operator::Eq => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} = {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::NotEq => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} != {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::Gt => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} > {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::Gte => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} >= {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::Lt => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} < {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::Lte => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} <= {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    crate::query::Operator::In => {
-                        if let crate::query::ConditionValue::List(vals) = &cond.value {
-                            let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
-                            Some(format!("{} IN ({})", col, list))
-                        } else { None }
-                    }
-                    crate::query::Operator::NotIn => {
-                        if let crate::query::ConditionValue::List(vals) = &cond.value {
-                            let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
-                            Some(format!("{} NOT IN ({})", col, list))
-                        } else { None }
-                    }
-                    crate::query::Operator::IsNull => Some(format!("{} IS NULL", col)),
-                    crate::query::Operator::IsNotNull => Some(format!("{} IS NOT NULL", col)),
-                    crate::query::Operator::Between => {
-                        if let crate::query::ConditionValue::Range(min, max) = &cond.value {
-                            Some(format!("{} BETWEEN {} AND {}", col, Self::format_value(min), Self::format_value(max)))
-                        } else { None }
-                    }
-                    crate::query::Operator::Like => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} LIKE {}", col, Self::format_value(v)))
-                        } else { None }
-                    }
-                    _ => None,
+        // Build WHERE clause - separate AND and OR conditions
+        let mut and_parts: Vec<String> = Vec::new();
+        let mut or_parts: Vec<String> = Vec::new();
+        
+        for cond in &self.conditions {
+            // Check if this is an OR condition (marked with __OR__ prefix)
+            let (is_or, actual_column) = if cond.column.starts_with("__OR__") {
+                (true, cond.column.strip_prefix("__OR__").unwrap_or(&cond.column))
+            } else {
+                (false, cond.column.as_str())
+            };
+            
+            let col = format!("{0}{1}{0}", quote, actual_column);
+            
+            let part = match &cond.operator {
+                crate::query::Operator::Eq => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} = {}", col, Self::format_value(v)))
+                    } else { None }
                 }
-            })
-            .collect();
+                crate::query::Operator::NotEq => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} != {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                crate::query::Operator::Gt => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} > {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                crate::query::Operator::Gte => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} >= {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                crate::query::Operator::Lt => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} < {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                crate::query::Operator::Lte => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} <= {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                crate::query::Operator::In => {
+                    if let crate::query::ConditionValue::List(vals) = &cond.value {
+                        let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                        Some(format!("{} IN ({})", col, list))
+                    } else { None }
+                }
+                crate::query::Operator::NotIn => {
+                    if let crate::query::ConditionValue::List(vals) = &cond.value {
+                        let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                        Some(format!("{} NOT IN ({})", col, list))
+                    } else { None }
+                }
+                crate::query::Operator::IsNull => Some(format!("{} IS NULL", col)),
+                crate::query::Operator::IsNotNull => Some(format!("{} IS NOT NULL", col)),
+                crate::query::Operator::Between => {
+                    if let crate::query::ConditionValue::Range(min, max) = &cond.value {
+                        Some(format!("{} BETWEEN {} AND {}", col, Self::format_value(min), Self::format_value(max)))
+                    } else { None }
+                }
+                crate::query::Operator::Like => {
+                    if let crate::query::ConditionValue::Single(v) = &cond.value {
+                        Some(format!("{} LIKE {}", col, Self::format_value(v)))
+                    } else { None }
+                }
+                _ => None,
+            };
+            
+            if let Some(part) = part {
+                if is_or {
+                    or_parts.push(part);
+                } else {
+                    and_parts.push(part);
+                }
+            }
+        }
         
         let table = format!("{0}{1}{0}", quote, M::table_name());
         let mut sql = format!(
@@ -1695,9 +1802,35 @@ impl<M: Model> BatchUpdateBuilder<M> {
             set_parts.join(", ")
         );
         
-        if !where_parts.is_empty() {
+        // Build final WHERE clause with AND and OR parts
+        if !and_parts.is_empty() || !or_parts.is_empty() {
             sql.push_str(" WHERE ");
-            sql.push_str(&where_parts.join(" AND "));
+            
+            let mut where_parts: Vec<String> = Vec::new();
+            
+            if !and_parts.is_empty() {
+                where_parts.push(and_parts.join(" AND "));
+            }
+            
+            if !or_parts.is_empty() {
+                // OR conditions are grouped together
+                let or_clause = if or_parts.len() == 1 {
+                    or_parts[0].clone()
+                } else {
+                    format!("({})", or_parts.join(" OR "))
+                };
+                where_parts.push(or_clause);
+            }
+            
+            // Combine AND and OR groups with OR
+            if and_parts.is_empty() {
+                sql.push_str(&or_parts.join(" OR "));
+            } else if or_parts.is_empty() {
+                sql.push_str(&and_parts.join(" AND "));
+            } else {
+                // AND conditions AND (OR conditions)
+                sql.push_str(&format!("{} AND ({})", and_parts.join(" AND "), or_parts.join(" OR ")));
+            }
         }
         
         // Add LIMIT for MySQL

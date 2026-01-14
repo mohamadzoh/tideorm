@@ -64,6 +64,21 @@ Master the fluent query builder API for complex queries.
 cargo run --example query_builder
 ```
 
+**[where_and_or_demo.rs](where_and_or_demo.rs)** - Comprehensive WHERE & OR conditions
+- All WHERE operators (eq, not, gt, gte, lt, lte, like, in, null, between)
+- Simple OR conditions (or_where_*)
+- Fluent OR API with `begin_or()` / `end_or()`
+- AND chaining within OR groups (and_where_*)
+- Multiple sequential OR groups
+- Real-world business scenarios (flash sales, inventory alerts, cross-sell)
+- Edge cases and special patterns
+- Reporting & analytics queries
+- 50+ test cases with result validation
+
+```bash
+cargo run --example where_and_or_demo
+```
+
 ---
 
 ### 🔄 Upsert Operations

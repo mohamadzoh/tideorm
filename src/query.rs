@@ -502,6 +502,819 @@ pub enum ConditionValue {
     RawExpr(String),
 }
 
+// =============================================================================
+// OR CLAUSE SUPPORT
+// =============================================================================
+
+/// Logical operator for combining conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOp {
+    /// AND - all conditions must match
+    And,
+    /// OR - any condition must match
+    Or,
+}
+
+impl LogicalOp {
+    /// Convert to SQL keyword
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            LogicalOp::And => "AND",
+            LogicalOp::Or => "OR",
+        }
+    }
+}
+
+/// A group of conditions combined with a logical operator
+///
+/// This allows building complex WHERE clauses like:
+/// `WHERE (status = 'active' OR status = 'pending') AND category = 'books'`
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Simple OR group
+/// let users = User::query()
+///     .or_where(|q| q
+///         .where_eq("role", "admin")
+///         .where_eq("role", "moderator")
+///     )
+///     .get()
+///     .await?;
+/// // Generates: WHERE (role = 'admin' OR role = 'moderator')
+///
+/// // Complex nested conditions
+/// let products = Product::query()
+///     .where_eq("active", true)
+///     .or_where(|q| q
+///         .where_lt("price", 100)
+///         .where_eq("featured", true)
+///     )
+///     .get()
+///     .await?;
+/// // Generates: WHERE active = true AND (price < 100 OR featured = true)
+/// ```
+#[derive(Debug, Clone)]
+pub struct OrGroup {
+    /// Conditions in this OR group
+    pub conditions: Vec<WhereCondition>,
+    /// Nested OR groups (for complex nesting)
+    pub nested_groups: Vec<OrGroup>,
+    /// Whether this group is combined with AND or OR with siblings
+    pub combine_with: LogicalOp,
+}
+
+impl OrGroup {
+    /// Create a new OR group
+    pub fn new() -> Self {
+        Self {
+            conditions: Vec::new(),
+            nested_groups: Vec::new(),
+            combine_with: LogicalOp::Or,
+        }
+    }
+    
+    /// Add a where equals condition to this OR group
+    pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Eq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where not equals condition
+    pub fn where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotEq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where greater than condition
+    pub fn where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where greater than or equal condition
+    pub fn where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where less than condition
+    pub fn where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where less than or equal condition
+    pub fn where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where LIKE condition
+    pub fn where_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Like,
+            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
+    /// Add a where NOT LIKE condition
+    pub fn where_not_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotLike,
+            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
+    /// Add a where IN condition
+    pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::In,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a where NOT IN condition
+    pub fn where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotIn,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a where IS NULL condition
+    pub fn where_null(mut self, column: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNull,
+            value: ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where IS NOT NULL condition
+    pub fn where_not_null(mut self, column: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNotNull,
+            value: ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where BETWEEN condition
+    pub fn where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Between,
+            value: ConditionValue::Range(min.into(), max.into()),
+        });
+        self
+    }
+    
+    /// Add a raw WHERE condition
+    pub fn where_raw(mut self, raw_sql: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(raw_sql.to_string()),
+        });
+        self
+    }
+    
+    /// Nest another OR group within this group
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let query = User::query()
+    ///     .or_where(|q| q
+    ///         .where_eq("status", "active")
+    ///         .nested_or(|inner| inner
+    ///             .where_eq("role", "admin")
+    ///             .where_eq("role", "super_admin")
+    ///         )
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// // Generates: WHERE (status = 'active' OR (role = 'admin' OR role = 'super_admin'))
+    /// ```
+    pub fn nested_or<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(OrGroup) -> OrGroup,
+    {
+        let mut nested = OrGroup::new();
+        nested.combine_with = LogicalOp::Or;
+        nested = f(nested);
+        self.nested_groups.push(nested);
+        self
+    }
+    
+    /// Nest an AND group within this OR group
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let query = User::query()
+    ///     .or_where(|q| q
+    ///         .nested_and(|inner| inner
+    ///             .where_eq("status", "active")
+    ///             .where_eq("verified", true)
+    ///         )
+    ///         .nested_and(|inner| inner
+    ///             .where_eq("role", "admin")
+    ///         )
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// // Generates: WHERE ((status = 'active' AND verified = true) OR (role = 'admin'))
+    /// ```
+    pub fn nested_and<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(OrGroup) -> OrGroup,
+    {
+        let mut nested = OrGroup::new();
+        nested.combine_with = LogicalOp::And;
+        nested = f(nested);
+        self.nested_groups.push(nested);
+        self
+    }
+    
+    /// Check if the group is empty
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty() && self.nested_groups.is_empty()
+    }
+    
+    /// Get the total number of conditions (including nested)
+    pub fn condition_count(&self) -> usize {
+        let nested_count: usize = self.nested_groups.iter()
+            .map(|g| g.condition_count())
+            .sum();
+        self.conditions.len() + nested_count
+    }
+}
+
+impl Default for OrGroup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// OR BRANCH BUILDER (Fluent API for chained OR conditions)
+// =============================================================================
+
+/// A single branch in an OR expression
+///
+/// Each branch contains conditions that are combined with AND logic,
+/// and branches are combined with OR logic.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Two branches: (role = 'admin' AND active = true) OR (role = 'moderator' AND verified = true)
+/// let branch1 = OrBranch::new()
+///     .where_eq("role", "admin")
+///     .where_eq("active", true);
+/// let branch2 = OrBranch::new()
+///     .where_eq("role", "moderator")
+///     .where_eq("verified", true);
+/// ```
+#[derive(Debug, Clone)]
+pub struct OrBranch {
+    /// Conditions within this branch (combined with AND)
+    pub conditions: Vec<WhereCondition>,
+}
+
+impl OrBranch {
+    /// Create a new empty OR branch
+    pub fn new() -> Self {
+        Self {
+            conditions: Vec::new(),
+        }
+    }
+    
+    /// Add a where equals condition to this branch
+    pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Eq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where not equals condition
+    pub fn where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotEq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where greater than condition
+    pub fn where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where greater than or equal condition
+    pub fn where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where less than condition
+    pub fn where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where less than or equal condition
+    pub fn where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self
+    }
+    
+    /// Add a where LIKE condition
+    pub fn where_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Like,
+            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
+    /// Add a where NOT LIKE condition
+    pub fn where_not_like(mut self, column: &str, pattern: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotLike,
+            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+    
+    /// Add a where IN condition
+    pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::In,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a where NOT IN condition
+    pub fn where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotIn,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self
+    }
+    
+    /// Add a where IS NULL condition
+    pub fn where_null(mut self, column: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNull,
+            value: ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where IS NOT NULL condition
+    pub fn where_not_null(mut self, column: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNotNull,
+            value: ConditionValue::None,
+        });
+        self
+    }
+    
+    /// Add a where BETWEEN condition
+    pub fn where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Between,
+            value: ConditionValue::Range(min.into(), max.into()),
+        });
+        self
+    }
+    
+    /// Add a raw WHERE condition
+    pub fn where_raw(mut self, raw_sql: &str) -> Self {
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(raw_sql.to_string()),
+        });
+        self
+    }
+    
+    /// Check if the branch is empty
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty()
+    }
+    
+    /// Get the number of conditions in this branch
+    pub fn len(&self) -> usize {
+        self.conditions.len()
+    }
+}
+
+impl Default for OrBranch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Fluent builder for chaining OR conditions with AND modifiers
+///
+/// This builder allows creating complex OR expressions where each OR branch
+/// can have multiple AND conditions.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// // Complex OR with AND conditions in each branch:
+/// // WHERE active = true AND (
+/// //     (role = 'admin' AND verified = true) OR
+/// //     (role = 'moderator' AND age > 25) OR
+/// //     role = 'superuser'
+/// // )
+/// let users = User::query()
+///     .where_eq("active", true)
+///     .or_where_eq("role", "admin").and_where_eq("verified", true)
+///     .or_where_eq("role", "moderator").and_where_gt("age", 25)
+///     .or_where_eq("role", "superuser")
+///     .end_or()
+///     .get()
+///     .await?;
+/// ```
+#[derive(Debug)]
+pub struct OrBranchBuilder<M: Model> {
+    /// The query builder we're building on
+    query: QueryBuilder<M>,
+    /// All completed branches
+    branches: Vec<OrBranch>,
+    /// Current branch being built
+    current_branch: OrBranch,
+}
+
+impl<M: Model> OrBranchBuilder<M> {
+    /// Create a new OR branch builder from a QueryBuilder
+    pub fn new(query: QueryBuilder<M>) -> Self {
+        Self {
+            query,
+            branches: Vec::new(),
+            current_branch: OrBranch::new(),
+        }
+    }
+    
+    /// Start a new OR branch with an equals condition
+    ///
+    /// This finishes the current branch (if any) and starts a new one.
+    pub fn or_where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        // Save current branch if it has conditions
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        // Start new branch with the condition
+        self.current_branch = OrBranch::new().where_eq(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a not equals condition
+    pub fn or_where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_not(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a greater than condition
+    pub fn or_where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_gt(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a greater than or equal condition
+    pub fn or_where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_gte(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a less than condition
+    pub fn or_where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_lt(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a less than or equal condition
+    pub fn or_where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_lte(column, value);
+        self
+    }
+    
+    /// Start a new OR branch with a LIKE condition
+    pub fn or_where_like(mut self, column: &str, pattern: &str) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_like(column, pattern);
+        self
+    }
+    
+    /// Start a new OR branch with an IN condition
+    pub fn or_where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_in(column, values);
+        self
+    }
+    
+    /// Start a new OR branch with a NOT IN condition
+    pub fn or_where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_not_in(column, values);
+        self
+    }
+    
+    /// Start a new OR branch with an IS NULL condition
+    pub fn or_where_null(mut self, column: &str) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_null(column);
+        self
+    }
+    
+    /// Start a new OR branch with an IS NOT NULL condition
+    pub fn or_where_not_null(mut self, column: &str) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_not_null(column);
+        self
+    }
+    
+    /// Start a new OR branch with a BETWEEN condition
+    pub fn or_where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_between(column, min, max);
+        self
+    }
+    
+    /// Start a new OR branch with a raw SQL condition
+    pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_raw(raw_sql);
+        self
+    }
+    
+    // =========================================================================
+    // AND modifiers for current branch
+    // =========================================================================
+    
+    /// Add an AND equals condition to the current OR branch
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // (role = 'admin' AND active = true) OR (role = 'moderator')
+    /// User::query()
+    ///     .or_where_eq("role", "admin").and_where_eq("active", true)
+    ///     .or_where_eq("role", "moderator")
+    ///     .end_or()
+    /// ```
+    pub fn and_where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_eq(column, value);
+        self
+    }
+    
+    /// Add an AND not equals condition to the current OR branch
+    pub fn and_where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_not(column, value);
+        self
+    }
+    
+    /// Add an AND greater than condition to the current OR branch
+    pub fn and_where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_gt(column, value);
+        self
+    }
+    
+    /// Add an AND greater than or equal condition to the current OR branch
+    pub fn and_where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_gte(column, value);
+        self
+    }
+    
+    /// Add an AND less than condition to the current OR branch
+    pub fn and_where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_lt(column, value);
+        self
+    }
+    
+    /// Add an AND less than or equal condition to the current OR branch
+    pub fn and_where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        self.current_branch = self.current_branch.where_lte(column, value);
+        self
+    }
+    
+    /// Add an AND LIKE condition to the current OR branch
+    pub fn and_where_like(mut self, column: &str, pattern: &str) -> Self {
+        self.current_branch = self.current_branch.where_like(column, pattern);
+        self
+    }
+    
+    /// Add an AND NOT LIKE condition to the current OR branch
+    pub fn and_where_not_like(mut self, column: &str, pattern: &str) -> Self {
+        self.current_branch = self.current_branch.where_not_like(column, pattern);
+        self
+    }
+    
+    /// Add an AND IN condition to the current OR branch
+    pub fn and_where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.current_branch = self.current_branch.where_in(column, values);
+        self
+    }
+    
+    /// Add an AND NOT IN condition to the current OR branch
+    pub fn and_where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        self.current_branch = self.current_branch.where_not_in(column, values);
+        self
+    }
+    
+    /// Add an AND IS NULL condition to the current OR branch
+    pub fn and_where_null(mut self, column: &str) -> Self {
+        self.current_branch = self.current_branch.where_null(column);
+        self
+    }
+    
+    /// Add an AND IS NOT NULL condition to the current OR branch
+    pub fn and_where_not_null(mut self, column: &str) -> Self {
+        self.current_branch = self.current_branch.where_not_null(column);
+        self
+    }
+    
+    /// Add an AND BETWEEN condition to the current OR branch
+    pub fn and_where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.current_branch = self.current_branch.where_between(column, min, max);
+        self
+    }
+    
+    /// Add an AND raw SQL condition to the current OR branch
+    pub fn and_where_raw(mut self, raw_sql: &str) -> Self {
+        self.current_branch = self.current_branch.where_raw(raw_sql);
+        self
+    }
+    
+    // =========================================================================
+    // Finish and return to QueryBuilder
+    // =========================================================================
+    
+    /// Finish building OR branches and return to the QueryBuilder
+    ///
+    /// This converts all branches into an OrGroup and adds it to the query.
+    pub fn end_or(mut self) -> QueryBuilder<M> {
+        // Save current branch if it has conditions
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        
+        // Convert branches to OrGroup format
+        if !self.branches.is_empty() {
+            let mut or_group = OrGroup::new();
+            
+            for branch in self.branches {
+                if branch.conditions.len() == 1 {
+                    // Single condition - add directly to OR group
+                    or_group.conditions.push(branch.conditions.into_iter().next().unwrap());
+                } else {
+                    // Multiple conditions - create nested AND group
+                    let mut nested = OrGroup::new();
+                    nested.combine_with = LogicalOp::And;
+                    nested.conditions = branch.conditions;
+                    or_group.nested_groups.push(nested);
+                }
+            }
+            
+            self.query.or_groups.push(or_group);
+        }
+        
+        self.query
+    }
+    
+    /// Get the number of branches currently built
+    pub fn branch_count(&self) -> usize {
+        let current = if self.current_branch.is_empty() { 0 } else { 1 };
+        self.branches.len() + current
+    }
+    
+    /// Get the total number of conditions across all branches
+    pub fn total_conditions(&self) -> usize {
+        let mut total: usize = self.branches.iter().map(|b| b.len()).sum();
+        total += self.current_branch.len();
+        total
+    }
+}
+
 /// Type of JOIN operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinType {
@@ -1210,7 +2023,10 @@ impl JoinResultConsolidator {
 #[derive(Debug, Clone)]
 pub struct QueryBuilder<M: Model> {
     _marker: PhantomData<M>,
-    conditions: Vec<WhereCondition>,
+    /// WHERE conditions (combined with AND)
+    pub conditions: Vec<WhereCondition>,
+    /// OR groups for complex conditions
+    pub or_groups: Vec<OrGroup>,
     order_by: Vec<(String, Order)>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
@@ -1239,6 +2055,7 @@ impl<M: Model> QueryBuilder<M> {
         Self {
             _marker: PhantomData,
             conditions: Vec::new(),
+            or_groups: Vec::new(),
             order_by: Vec::new(),
             limit_value: None,
             offset_value: None,
@@ -1501,6 +2318,401 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
     
+    // =========================================================================
+    // OR CLAUSE METHODS
+    // =========================================================================
+    
+    /// Add an OR group to the query
+    ///
+    /// Conditions within the closure are combined with OR logic,
+    /// and the entire group is combined with the rest of the query using AND.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users who are either admin OR moderator
+    /// let users = User::query()
+    ///     .or_where(|q| q
+    ///         .where_eq("role", "admin")
+    ///         .where_eq("role", "moderator")
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// // Generates: WHERE (role = 'admin' OR role = 'moderator')
+    ///
+    /// // Combined with other conditions
+    /// let users = User::query()
+    ///     .where_eq("active", true)
+    ///     .or_where(|q| q
+    ///         .where_eq("role", "admin")
+    ///         .where_eq("role", "moderator")
+    ///     )
+    ///     .get()
+    ///     .await?;
+    /// // Generates: WHERE active = true AND (role = 'admin' OR role = 'moderator')
+    /// ```
+    pub fn or_where<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(OrGroup) -> OrGroup,
+    {
+        let group = f(OrGroup::new());
+        if !group.is_empty() {
+            self.or_groups.push(group);
+        }
+        self
+    }
+    
+    /// Add an OR condition directly (simple shorthand)
+    ///
+    /// This is a shorthand for adding two conditions combined with OR.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Find users where role is admin OR status is active
+    /// let users = User::query()
+    ///     .where_eq("role", "admin")
+    ///     .or_where_eq("status", "active")
+    ///     .get()
+    ///     .await?;
+    /// // Generates: WHERE role = 'admin' OR status = 'active'
+    /// ```
+    pub fn or_where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Eq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR NOT EQUAL condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let users = User::query()
+    ///     .where_eq("role", "admin")
+    ///     .or_where_not("status", "banned")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn or_where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotEq,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR GREATER THAN condition
+    pub fn or_where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR GREATER THAN OR EQUAL condition
+    pub fn or_where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Gte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR LESS THAN condition
+    pub fn or_where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lt,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR LESS THAN OR EQUAL condition
+    pub fn or_where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Lte,
+            value: ConditionValue::Single(value.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR LIKE condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let users = User::query()
+    ///     .where_like("email", "%@gmail.com")
+    ///     .or_where_like("email", "%@yahoo.com")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn or_where_like(mut self, column: &str, pattern: &str) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Like,
+            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR IN condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let products = Product::query()
+    ///     .where_in("category", vec!["electronics"])
+    ///     .or_where_in("category", vec!["books", "games"])
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn or_where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::In,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR NOT IN condition
+    pub fn or_where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::NotIn,
+            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR IS NULL condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let users = User::query()
+    ///     .where_eq("verified", true)
+    ///     .or_where_null("email")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn or_where_null(mut self, column: &str) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNull,
+            value: ConditionValue::None,
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR IS NOT NULL condition
+    pub fn or_where_not_null(mut self, column: &str) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::IsNotNull,
+            value: ConditionValue::None,
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR BETWEEN condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let products = Product::query()
+    ///     .where_between("price", 0, 50)
+    ///     .or_where_between("price", 200, 500)
+    ///     .get()
+    ///     .await?;
+    /// // Finds products priced $0-50 OR $200-500
+    /// ```
+    pub fn or_where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.to_string(),
+            operator: Operator::Between,
+            value: ConditionValue::Range(min.into(), max.into()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    /// Add an OR raw SQL condition
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let users = User::query()
+    ///     .where_eq("active", true)
+    ///     .or_where_raw("created_at > NOW() - INTERVAL '7 days'")
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExpr(raw_sql.to_string()),
+        });
+        self.or_groups.push(group);
+        self
+    }
+    
+    // =========================================================================
+    // FLUENT OR BRANCH BUILDER
+    // =========================================================================
+    
+    /// Start building a fluent OR expression with chained AND conditions
+    ///
+    /// This method begins an OR expression builder that allows you to chain
+    /// multiple conditions where conditions after `or_where_*` are part of
+    /// the same OR branch, and `and_where_*` adds to that branch.
+    ///
+    /// Use `.end_or()` to finish the OR expression and return to the QueryBuilder.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Complex OR with AND conditions in each branch:
+    /// // WHERE active = true AND (
+    /// //     (role = 'admin' AND verified = true) OR
+    /// //     (role = 'moderator' AND age > 25) OR
+    /// //     role = 'superuser'
+    /// // )
+    /// let users = User::query()
+    ///     .where_eq("active", true)
+    ///     .begin_or()
+    ///         .or_where_eq("role", "admin").and_where_eq("verified", true)
+    ///         .or_where_eq("role", "moderator").and_where_gt("age", 25)
+    ///         .or_where_eq("role", "superuser")
+    ///     .end_or()
+    ///     .get()
+    ///     .await?;
+    /// ```
+    ///
+    /// # Flow
+    ///
+    /// - `.begin_or()` - starts the OR builder
+    /// - `.or_where_*()` - starts a new OR branch with a condition
+    /// - `.and_where_*()` - adds an AND condition to the current branch
+    /// - `.end_or()` - finishes and returns to QueryBuilder
+    pub fn begin_or(self) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self)
+    }
+    
+    /// Start a fluent OR expression with an initial equals condition
+    ///
+    /// Shorthand for `.begin_or().or_where_eq(column, value)`
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // WHERE active = true AND (
+    /// //     (role = 'admin' AND verified = true) OR
+    /// //     (role = 'moderator')
+    /// // )
+    /// let users = User::query()
+    ///     .where_eq("active", true)
+    ///     .begin_or_where_eq("role", "admin").and_where_eq("verified", true)
+    ///     .or_where_eq("role", "moderator")
+    ///     .end_or()
+    ///     .get()
+    ///     .await?;
+    /// ```
+    pub fn begin_or_where_eq(self, column: &str, value: impl Into<serde_json::Value>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_eq(column, value)
+    }
+    
+    /// Start a fluent OR expression with an initial greater than condition
+    pub fn begin_or_where_gt(self, column: &str, value: impl Into<serde_json::Value>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_gt(column, value)
+    }
+    
+    /// Start a fluent OR expression with an initial greater than or equal condition
+    pub fn begin_or_where_gte(self, column: &str, value: impl Into<serde_json::Value>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_gte(column, value)
+    }
+    
+    /// Start a fluent OR expression with an initial less than condition
+    pub fn begin_or_where_lt(self, column: &str, value: impl Into<serde_json::Value>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_lt(column, value)
+    }
+    
+    /// Start a fluent OR expression with an initial less than or equal condition
+    pub fn begin_or_where_lte(self, column: &str, value: impl Into<serde_json::Value>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_lte(column, value)
+    }
+    
+    /// Start a fluent OR expression with an initial LIKE condition
+    pub fn begin_or_where_like(self, column: &str, pattern: &str) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_like(column, pattern)
+    }
+    
+    /// Start a fluent OR expression with an initial IN condition
+    pub fn begin_or_where_in<V: Into<serde_json::Value>>(self, column: &str, values: Vec<V>) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_in(column, values)
+    }
+    
+    /// Start a fluent OR expression with an initial IS NULL condition
+    pub fn begin_or_where_null(self, column: &str) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_null(column)
+    }
+    
+    /// Start a fluent OR expression with an initial IS NOT NULL condition
+    pub fn begin_or_where_not_null(self, column: &str) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_not_null(column)
+    }
+    
+    /// Start a fluent OR expression with an initial BETWEEN condition
+    pub fn begin_or_where_between(
+        self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_between(column, min, max)
+    }
+
     /// Add a WHERE column = ANY(array) condition (PostgreSQL optimization)
     ///
     /// This is an optimized version of `where_in` for PostgreSQL that uses
@@ -2811,7 +4023,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut select = M::Entity::find();
         
         // Apply WHERE conditions
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
@@ -2842,7 +4054,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut select = M::Entity::find();
         
         // Apply WHERE conditions
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
@@ -3776,6 +4988,12 @@ impl<M: Model> QueryBuilder<M> {
             condition = condition.add(expr);
         }
         
+        // Process OR groups
+        for or_group in &self.or_groups {
+            let or_condition = self.build_or_group_condition(or_group, db_type);
+            condition = condition.add(or_condition);
+        }
+        
         // Apply soft delete filter if model supports it
         if M::soft_delete_enabled() {
             use sea_orm::sea_query::Alias;
@@ -3792,6 +5010,218 @@ impl<M: Model> QueryBuilder<M> {
         }
         
         condition
+    }
+    
+    /// Build a SeaORM Condition from an OrGroup
+    fn build_or_group_condition(&self, group: &OrGroup, db_type: DatabaseType) -> Condition {
+        use sea_orm::sea_query::{Alias, SimpleExpr};
+        
+        let mut or_condition = match group.combine_with {
+            LogicalOp::Or => Condition::any(),
+            LogicalOp::And => Condition::all(),
+        };
+        
+        // Add conditions from this group
+        for where_cond in &group.conditions {
+            let col = Expr::col(Alias::new(&where_cond.column));
+            
+            let expr: SimpleExpr = match &where_cond.operator {
+                Operator::Eq => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.eq(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::NotEq => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.ne(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::Gt => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.gt(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::Gte => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.gte(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::Lt => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.lt(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::Lte => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        col.lte(Self::json_to_sea_value(val))
+                    } else { continue; }
+                }
+                Operator::Like => {
+                    if let ConditionValue::Single(serde_json::Value::String(pattern)) = &where_cond.value {
+                        col.like(pattern.as_str())
+                    } else { continue; }
+                }
+                Operator::NotLike => {
+                    if let ConditionValue::Single(serde_json::Value::String(pattern)) = &where_cond.value {
+                        col.not_like(pattern.as_str())
+                    } else { continue; }
+                }
+                Operator::In => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let sea_values: Vec<_> = values.iter().map(Self::json_to_sea_value).collect();
+                        col.is_in(sea_values)
+                    } else { continue; }
+                }
+                Operator::NotIn => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let sea_values: Vec<_> = values.iter().map(Self::json_to_sea_value).collect();
+                        col.is_not_in(sea_values)
+                    } else { continue; }
+                }
+                Operator::IsNull => col.is_null(),
+                Operator::IsNotNull => col.is_not_null(),
+                Operator::Between => {
+                    if let ConditionValue::Range(low, high) = &where_cond.value {
+                        col.between(Self::json_to_sea_value(low), Self::json_to_sea_value(high))
+                    } else { continue; }
+                }
+                Operator::Raw => {
+                    if let ConditionValue::RawExpr(raw_sql) = &where_cond.value {
+                        if where_cond.column.is_empty() {
+                            Expr::cust(raw_sql.clone())
+                        } else {
+                            let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                            Expr::cust(format!("{} {}", col_quoted, raw_sql))
+                        }
+                    } else { continue; }
+                }
+                // JSON operations
+                Operator::JsonContains => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        Expr::cust(db_sql::json_contains(db_type, &where_cond.column, &val.to_string()))
+                    } else { continue; }
+                }
+                Operator::JsonContainedBy => {
+                    if let ConditionValue::Single(val) = &where_cond.value {
+                        Expr::cust(db_sql::json_contained_by(db_type, &where_cond.column, &val.to_string()))
+                    } else { continue; }
+                }
+                Operator::JsonKeyExists => {
+                    if let ConditionValue::Single(serde_json::Value::String(key)) = &where_cond.value {
+                        Expr::cust(db_sql::json_key_exists(db_type, &where_cond.column, key))
+                    } else { continue; }
+                }
+                Operator::JsonKeyNotExists => {
+                    if let ConditionValue::Single(serde_json::Value::String(key)) = &where_cond.value {
+                        Expr::cust(db_sql::json_key_not_exists(db_type, &where_cond.column, key))
+                    } else { continue; }
+                }
+                Operator::JsonPathExists => {
+                    if let ConditionValue::Single(serde_json::Value::String(path)) = &where_cond.value {
+                        Expr::cust(db_sql::json_path_exists(db_type, &where_cond.column, path))
+                    } else { continue; }
+                }
+                Operator::JsonPathNotExists => {
+                    if let ConditionValue::Single(serde_json::Value::String(path)) = &where_cond.value {
+                        Expr::cust(db_sql::json_path_not_exists(db_type, &where_cond.column, path))
+                    } else { continue; }
+                }
+                // Array operations
+                Operator::ArrayContains | Operator::ArrayContainsAll => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        Expr::cust(db_sql::array_contains(db_type, &where_cond.column, &array_vals))
+                    } else { continue; }
+                }
+                Operator::ArrayContainedBy => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        Expr::cust(db_sql::array_contained_by(db_type, &where_cond.column, &array_vals))
+                    } else { continue; }
+                }
+                Operator::ArrayOverlaps | Operator::ArrayContainsAny => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        Expr::cust(db_sql::array_overlaps(db_type, &where_cond.column, &array_vals))
+                    } else { continue; }
+                }
+                // Subquery operations
+                Operator::SubqueryIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &where_cond.value {
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(format!("{} IN ({})", col_quoted, subquery_sql))
+                    } else { continue; }
+                }
+                Operator::SubqueryNotIn => {
+                    if let ConditionValue::Subquery(subquery_sql) = &where_cond.value {
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(format!("{} NOT IN ({})", col_quoted, subquery_sql))
+                    } else { continue; }
+                }
+                // PostgreSQL optimizations
+                Operator::EqAny => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(db_sql::eq_any(db_type, &col_quoted, &array_vals))
+                    } else { continue; }
+                }
+                Operator::NeAll => {
+                    if let ConditionValue::List(values) = &where_cond.value {
+                        let array_vals: Vec<String> = values.iter()
+                            .map(|v| match v {
+                                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                serde_json::Value::Null => "NULL".to_string(),
+                                _ => v.to_string(),
+                            })
+                            .collect();
+                        let col_quoted = db_sql::quote_ident(db_type, &where_cond.column);
+                        Expr::cust(db_sql::ne_all(db_type, &col_quoted, &array_vals))
+                    } else { continue; }
+                }
+            };
+            
+            or_condition = or_condition.add(expr);
+        }
+        
+        // Recursively process nested groups
+        for nested_group in &group.nested_groups {
+            let nested_condition = self.build_or_group_condition(nested_group, db_type);
+            or_condition = or_condition.add(nested_condition);
+        }
+        
+        or_condition
     }
     
     /// Log the query if logging is enabled
@@ -3916,7 +5346,24 @@ impl<M: Model> QueryBuilder<M> {
     }
     
     /// Build a SQL preview string for debugging
-    fn build_sql_preview(&self) -> String {
+    ///
+    /// Returns a human-readable representation of the query that will be executed.
+    /// This is useful for debugging and testing query construction.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let query = User::query()
+    ///     .where_eq("active", true)
+    ///     .begin_or()
+    ///         .or_where_eq("role", "admin")
+    ///         .or_where_eq("role", "moderator")
+    ///     .end_or();
+    ///
+    /// println!("Query: {}", query.build_sql_preview());
+    /// // Output: SELECT * FROM users WHERE active = true AND (role = 'admin' OR role = 'moderator')
+    /// ```
+    pub fn build_sql_preview(&self) -> String {
         let mut sql = String::new();
         
         // SELECT clause
@@ -3980,6 +5427,24 @@ impl<M: Model> QueryBuilder<M> {
                 })
                 .collect();
             sql.push_str(&conditions.join(" AND "));
+            
+            // Add OR groups to preview
+            if !self.or_groups.is_empty() {
+                for or_group in &self.or_groups {
+                    let or_preview = self.build_or_group_preview(or_group);
+                    if !or_preview.is_empty() {
+                        sql.push_str(&format!(" AND ({})", or_preview));
+                    }
+                }
+            }
+        } else if !self.or_groups.is_empty() {
+            // Only OR groups, no regular conditions
+            sql.push_str(" WHERE ");
+            let or_previews: Vec<String> = self.or_groups.iter()
+                .map(|g| format!("({})", self.build_or_group_preview(g)))
+                .filter(|s| s != "()")
+                .collect();
+            sql.push_str(&or_previews.join(" AND "));
         }
         
         // GROUP BY
@@ -4006,6 +5471,45 @@ impl<M: Model> QueryBuilder<M> {
         }
         
         sql
+    }
+    
+    /// Build a preview string for an OR group
+    fn build_or_group_preview(&self, group: &OrGroup) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        
+        for cond in &group.conditions {
+            let op_str = match &cond.operator {
+                Operator::Eq => "= ?",
+                Operator::NotEq => "!= ?",
+                Operator::Gt => "> ?",
+                Operator::Gte => ">= ?",
+                Operator::Lt => "< ?",
+                Operator::Lte => "<= ?",
+                Operator::Like | Operator::NotLike => "LIKE ?",
+                Operator::In | Operator::NotIn => "IN (?)",
+                Operator::IsNull => "IS NULL",
+                Operator::IsNotNull => "IS NOT NULL",
+                Operator::Between => "BETWEEN ? AND ?",
+                Operator::Raw => "...",
+                _ => "?",
+            };
+            parts.push(format!("{} {}", cond.column, op_str));
+        }
+        
+        // Include nested groups
+        for nested in &group.nested_groups {
+            let nested_preview = self.build_or_group_preview(nested);
+            if !nested_preview.is_empty() {
+                parts.push(format!("({})", nested_preview));
+            }
+        }
+        
+        let joiner = match group.combine_with {
+            LogicalOp::Or => " OR ",
+            LogicalOp::And => " AND ",
+        };
+        
+        parts.join(joiner)
     }
 
     // =========================================================================
@@ -4182,8 +5686,8 @@ impl<M: Model> QueryBuilder<M> {
         let mut select = M::Entity::find();
         
         // Apply WHERE conditions (including soft delete filter if applicable)
-        // Always build conditions if there are explicit conditions or soft delete is enabled
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        // Always build conditions if there are explicit conditions, or_groups, or soft delete is enabled
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
@@ -4652,7 +6156,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut select = M::Entity::find();
         
         // Apply WHERE conditions (including soft delete filter if applicable)
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
@@ -4719,7 +6223,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut select = M::Entity::find();
         
         // Apply WHERE conditions (including soft delete filter if applicable)
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
@@ -4779,7 +6283,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut delete = M::Entity::delete_many();
         
         // Apply WHERE conditions (including soft delete filter if applicable)
-        if !self.conditions.is_empty() || M::soft_delete_enabled() {
+        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             delete = delete.filter(condition);
         }

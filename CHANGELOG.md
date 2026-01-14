@@ -5,6 +5,20 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-01-14
+
+### Added
+
+#### Comprehensive OR Conditions Support
+- **Simple OR methods**: `or_where_eq`, `or_where_not`, `or_where_gt`, `or_where_gte`, `or_where_lt`, `or_where_lte`, `or_where_like`, `or_where_not_like`, `or_where_in`, `or_where_not_in`, `or_where_null`, `or_where_not_null`, `or_where_between`
+- **Fluent OR API**: `begin_or()` / `end_or()` for grouped OR conditions
+- **AND chaining within OR groups**: `and_where_eq`, `and_where_not`, `and_where_gt`, `and_where_gte`, `and_where_lt`, `and_where_lte`, `and_where_like`, `and_where_in`, `and_where_not_in`, `and_where_null`, `and_where_not_null`, `and_where_between`
+- Multiple sequential OR groups support for complex business logic
+- New comprehensive example: `examples/where_and_or_demo.rs` with 50+ test cases
+
+### Fixed
+- Fixed critical bug where `or_groups` were not being applied to queries in `get()`, `first()`, `count()`, `delete()`, `count_distinct()`, and `aggregate_f64()` methods
+
 ## [0.1.0] - 2026-01-08
 
 ### 🎉 Initial Release

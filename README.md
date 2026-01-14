@@ -85,6 +85,16 @@ async fn main() -> tideorm::Result<()> {
         .get()
         .await?;
 
+    // Complex queries with OR conditions
+    let premium_or_featured = Product::query()
+        .where_eq("active", true)
+        .begin_or()
+            .or_where_gt("price", 500.0).and_where_gte("rating", 4.5)
+            .or_where_eq("featured", true)
+        .end_or()
+        .get()
+        .await?;
+
     // Load relations
     let posts = user.posts.load().await?;
     let profile = user.profile.load().await?;
@@ -202,6 +212,7 @@ Key sections:
 - [Configuration](DOCUMENTATION.md#configuration) - Database connections and pool settings
 - [Model Definition](DOCUMENTATION.md#model-definition) - Defining your models
 - [Query Builder](DOCUMENTATION.md#query-builder) - Building complex queries
+- [OR Conditions](DOCUMENTATION.md#or-conditions) - Fluent OR API with begin_or/end_or
 - [CRUD Operations](DOCUMENTATION.md#crud-operations) - Create, Read, Update, Delete
 - [Soft Deletes](DOCUMENTATION.md#soft-deletes) - Soft delete support
 - [Transactions](DOCUMENTATION.md#transactions) - Transaction handling

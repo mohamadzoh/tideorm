@@ -17,6 +17,8 @@ pub use crate::error::Error;
 pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue, NestedSave, NestedSaveBuilder};
 pub use crate::query::{
     QueryBuilder, Order, JoinType,
+    // OR clause types
+    OrGroup, LogicalOp, OrBranch, OrBranchBuilder,
     // UNION types
     UnionType, UnionClause,
     // Window function types

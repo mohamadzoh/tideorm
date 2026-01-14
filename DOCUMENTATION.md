@@ -19,6 +19,7 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
   - [Self-Referencing Relations](#self-referencing-relations)
 - [Query Builder](#query-builder)
   - [WHERE Conditions](#where-conditions)
+  - [OR Conditions](#or-conditions)
   - [Strongly-Typed Columns](#strongly-typed-columns)
   - [Ordering](#ordering)
   - [Pagination](#pagination)
@@ -415,6 +416,205 @@ User::query()
     .where_eq("active", true)
     .where_gt("age", 18)
     .where_not_null("email")
+    .get()
+    .await?;
+```
+
+### OR Conditions
+
+TideORM provides comprehensive OR support with two approaches: simple OR methods and the fluent OR API.
+
+#### Simple OR Methods
+
+```rust
+// Basic OR conditions (applied at query level)
+User::query()
+    .or_where_eq("role", "admin")       // role = 'admin'
+    .or_where_eq("role", "moderator")   // OR role = 'moderator'
+    .get()
+    .await?;
+
+// OR with comparison operators
+Product::query()
+    .or_where_gt("price", 1000.0)       // price > 1000
+    .or_where_lt("price", 50.0)         // OR price < 50
+    .get()
+    .await?;  // Gets premium OR budget products
+
+// OR with pattern matching
+User::query()
+    .or_where_like("name", "John%")     // name LIKE 'John%'
+    .or_where_like("name", "Jane%")     // OR name LIKE 'Jane%'
+    .get()
+    .await?;
+
+// OR with IN clause
+Product::query()
+    .or_where_in("category", vec!["Electronics", "Books"])
+    .or_where_eq("featured", true)
+    .get()
+    .await?;
+
+// OR with NULL checks
+User::query()
+    .or_where_null("deleted_at")
+    .or_where_gt("reactivated_at", some_date)
+    .get()
+    .await?;
+
+// OR with BETWEEN
+Product::query()
+    .or_where_between("price", 10.0, 50.0)   // Budget range
+    .or_where_between("price", 500.0, 1000.0) // Premium range
+    .get()
+    .await?;
+```
+
+#### Fluent OR API (begin_or / end_or)
+
+For complex queries with grouped OR conditions combined with AND, use the fluent OR API:
+
+```rust
+// Basic OR group: (category = 'Electronics' OR category = 'Home')
+Product::query()
+    .begin_or()
+        .or_where_eq("category", "Electronics")
+        .or_where_eq("category", "Home")
+    .end_or()
+    .get()
+    .await?;
+
+// OR with AND chains: (Apple AND active) OR (Samsung AND featured)
+Product::query()
+    .begin_or()
+        .or_where_eq("brand", "Apple").and_where_eq("active", true)
+        .or_where_eq("brand", "Samsung").and_where_eq("featured", true)
+    .end_or()
+    .get()
+    .await?;
+
+// Complex: active AND rating >= 4.0 AND ((Electronics AND price < 1000) OR (Home AND featured))
+Product::query()
+    .where_eq("active", true)
+    .where_gte("rating", 4.0)
+    .begin_or()
+        .or_where_eq("category", "Electronics").and_where_lt("price", 1000.0)
+        .or_where_eq("category", "Home").and_where_eq("featured", true)
+    .end_or()
+    .get()
+    .await?;
+
+// Multiple sequential OR groups
+Product::query()
+    .where_eq("active", true)
+    .begin_or()
+        .or_where_eq("category", "Electronics")
+        .or_where_eq("category", "Home")
+    .end_or()
+    .begin_or()
+        .or_where_eq("brand", "Apple")
+        .or_where_eq("brand", "Samsung")
+    .end_or()
+    .get()
+    .await?;
+// SQL: WHERE active = true 
+//      AND (category = 'Electronics' OR category = 'Home') 
+//      AND (brand = 'Apple' OR brand = 'Samsung')
+```
+
+#### AND Methods within OR Groups
+
+Use `and_where_*` methods to chain AND conditions within an OR branch:
+
+```rust
+Product::query()
+    .begin_or()
+        // First OR branch: Electronics with price > 500 and good rating
+        .or_where_eq("category", "Electronics")
+            .and_where_gt("price", 500.0)
+            .and_where_gte("rating", 4.5)
+        // Second OR branch: Home items that are featured
+        .or_where_eq("category", "Home")
+            .and_where_eq("featured", true)
+        // Third OR branch: Any discounted item
+        .or_where_not_null("discount_percent")
+    .end_or()
+    .get()
+    .await?;
+```
+
+Available `and_where_*` methods:
+- `and_where_eq(col, val)` - AND column = value
+- `and_where_not(col, val)` - AND column != value  
+- `and_where_gt(col, val)` - AND column > value
+- `and_where_gte(col, val)` - AND column >= value
+- `and_where_lt(col, val)` - AND column < value
+- `and_where_lte(col, val)` - AND column <= value
+- `and_where_like(col, pattern)` - AND column LIKE pattern
+- `and_where_in(col, values)` - AND column IN (values)
+- `and_where_not_in(col, values)` - AND column NOT IN (values)
+- `and_where_null(col)` - AND column IS NULL
+- `and_where_not_null(col)` - AND column IS NOT NULL
+- `and_where_between(col, min, max)` - AND column BETWEEN min AND max
+
+#### Real-World Examples
+
+```rust
+// E-commerce: Flash sale eligibility
+let flash_sale_products = Product::query()
+    .where_eq("active", true)
+    .where_gt("stock", 100)
+    .where_gte("rating", 4.3)
+    .where_null("discount_percent")  // Not already discounted
+    .get()
+    .await?;
+
+// Inventory: Reorder alerts
+let reorder_needed = Product::query()
+    .where_eq("active", true)
+    .begin_or()
+        .or_where_lt("stock", 50).and_where_gt("rating", 4.5)  // Popular items low
+        .or_where_lt("stock", 30)  // Any item critically low
+    .end_or()
+    .order_by("stock", Order::Asc)
+    .get()
+    .await?;
+
+// Marketing: Cross-sell recommendations
+let recommendations = Product::query()
+    .where_eq("active", true)
+    .begin_or()
+        .or_where_eq("brand", "Apple")
+        .or_where_eq("brand", "Samsung").and_where_gt("price", 500.0)
+        .or_where_eq("featured", true).and_where_not("category", "Electronics")
+    .end_or()
+    .order_by("rating", Order::Desc)
+    .limit(10)
+    .get()
+    .await?;
+
+// Search: Multi-pattern name matching
+let search_results = Product::query()
+    .begin_or()
+        .or_where_like("name", "iPhone%")
+        .or_where_like("name", "Galaxy%")
+        .or_where_like("name", "%Pro%")
+    .end_or()
+    .where_eq("active", true)
+    .get()
+    .await?;
+
+// Analytics: Price segmentation
+let segmented = Product::query()
+    .begin_or()
+        .or_where_eq("category", "Electronics")
+        .or_where_eq("category", "Books")
+    .end_or()
+    .begin_or()
+        .or_where_gt("price", 1000.0)   // Premium
+        .or_where_lt("price", 50.0)     // Budget
+    .end_or()
+    .order_by("price", Order::Desc)
     .get()
     .await?;
 ```

@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -93,4 +93,8 @@ harness = false
 
 [[bench]]
 name = "relations_benchmarks"
+harness = false
+
+[[bench]]
+name = "or_clause_benchmarks"
 harness = false
