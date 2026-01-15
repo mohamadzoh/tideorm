@@ -921,6 +921,8 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         #[doc(hidden)]
         #[allow(non_snake_case, dead_code, unused_imports, clippy::all)]
         mod #internal_entity_mod {
+            // Re-export sea_orm as a local alias so SeaORM derive macros can resolve `sea_orm::` paths
+            use ::tideorm::sea_orm as sea_orm;
             use ::tideorm::sea_orm::entity::prelude::*;
             use ::tideorm::sea_orm::{ActiveValue, DeriveEntity, DeriveModel, DeriveActiveModel};
             
