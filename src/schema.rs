@@ -240,6 +240,100 @@ impl TableSchemaBuilder {
         self
     }
     
+    // ========================================================================
+    // Convenience methods for common column types
+    // ========================================================================
+    
+    /// Add a BIGINT column
+    pub fn bigint(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "BIGINT"))
+    }
+    
+    /// Add an INTEGER column
+    pub fn integer(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "INTEGER"))
+    }
+    
+    /// Add a SMALLINT column
+    pub fn smallint(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "SMALLINT"))
+    }
+    
+    /// Add a TEXT column
+    pub fn text(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "TEXT"))
+    }
+    
+    /// Add a VARCHAR column with specified length
+    pub fn varchar(self, name: impl Into<String>, length: u32) -> Self {
+        self.column(ColumnSchema::new(name, format!("VARCHAR({})", length)))
+    }
+    
+    /// Add a BOOLEAN column
+    pub fn boolean(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "BOOLEAN"))
+    }
+    
+    /// Add a TIMESTAMP column (without time zone)
+    pub fn timestamp(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "TIMESTAMP"))
+    }
+    
+    /// Add a TIMESTAMPTZ column (timestamp with time zone) - use for DateTime<Utc>
+    pub fn timestamptz(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "TIMESTAMPTZ"))
+    }
+    
+    /// Add a DATE column
+    pub fn date(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "DATE"))
+    }
+    
+    /// Add a TIME column
+    pub fn time(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "TIME"))
+    }
+    
+    /// Add a UUID column
+    pub fn uuid(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "UUID"))
+    }
+    
+    /// Add a DECIMAL column
+    pub fn decimal(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "DECIMAL"))
+    }
+    
+    /// Add a DECIMAL column with precision and scale
+    pub fn decimal_with_precision(self, name: impl Into<String>, precision: u32, scale: u32) -> Self {
+        self.column(ColumnSchema::new(name, format!("DECIMAL({},{})", precision, scale)))
+    }
+    
+    /// Add a JSONB column (PostgreSQL)
+    pub fn jsonb(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "JSONB"))
+    }
+    
+    /// Add a JSON column
+    pub fn json(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "JSON"))
+    }
+    
+    /// Add a BYTEA column (PostgreSQL binary)
+    pub fn bytea(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "BYTEA"))
+    }
+    
+    /// Add an REAL (single precision float) column
+    pub fn real(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "REAL"))
+    }
+    
+    /// Add a DOUBLE PRECISION column
+    pub fn double(self, name: impl Into<String>) -> Self {
+        self.column(ColumnSchema::new(name, "DOUBLE PRECISION"))
+    }
+    
     /// Add an index
     pub fn index(mut self, index: IndexDefinition) -> Self {
         self.indexes.push(index);
@@ -328,7 +422,10 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
             "bool" => "BOOLEAN".to_string(),
             "String" | "str" => "TEXT".to_string(),
             "Uuid" => "UUID".to_string(),
-            "DateTime<Utc>" | "DateTime" | "NaiveDateTime" => "TIMESTAMP".to_string(),
+            // DateTime<Utc> uses TIMESTAMPTZ (timestamp with time zone)
+            "DateTime<Utc>" | "chrono::DateTime<Utc>" | "chrono::DateTime<chrono::Utc>" => "TIMESTAMPTZ".to_string(),
+            // NaiveDateTime uses TIMESTAMP (without time zone)
+            "DateTime" | "NaiveDateTime" => "TIMESTAMP".to_string(),
             "NaiveDate" => "DATE".to_string(),
             "NaiveTime" => "TIME".to_string(),
             "Decimal" => "DECIMAL".to_string(),

@@ -106,6 +106,81 @@ impl ModelField {
         ty_str.contains("MorphMany") ||
         ty_str.contains("MorphTo")
     }
+    
+    /// Get the SeaORM ColumnType for this field's type
+    fn column_type_expr(&self) -> proc_macro2::TokenStream {
+        let ty = &self.ty;
+        let ty_str = quote!(#ty).to_string();
+        // Normalize whitespace
+        let ty_str: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
+        
+        // Check if nullable (wrapped in Option)
+        let is_nullable = ty_str.starts_with("Option<");
+        let base_type = if is_nullable {
+            ty_str
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix(">"))
+                .unwrap_or(&ty_str)
+        } else {
+            &ty_str
+        };
+        
+        let column_type = match base_type {
+            // Integer types
+            "i8" | "i16" => quote!(ColumnType::SmallInteger),
+            "i32" => quote!(ColumnType::Integer),
+            "i64" => quote!(ColumnType::BigInteger),
+            "u8" | "u16" => quote!(ColumnType::SmallInteger),
+            "u32" => quote!(ColumnType::Integer),
+            "u64" => quote!(ColumnType::BigInteger),
+            
+            // Float types
+            "f32" => quote!(ColumnType::Float),
+            "f64" => quote!(ColumnType::Double),
+            
+            // Boolean
+            "bool" => quote!(ColumnType::Boolean),
+            
+            // String types
+            "String" | "&str" | "str" => quote!(ColumnType::Text),
+            
+            // UUID
+            "Uuid" | "uuid::Uuid" => quote!(ColumnType::Uuid),
+            
+            // Date/Time types - Use TimestampWithTimeZone for DateTime<Utc>
+            s if s.contains("DateTime<Utc>") || s.contains("DateTime<chrono::Utc>") || s.contains("chrono::DateTime<Utc>") || s.contains("chrono::DateTime<chrono::Utc>") => {
+                quote!(ColumnType::TimestampWithTimeZone)
+            }
+            "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => quote!(ColumnType::DateTime),
+            "NaiveDate" | "chrono::NaiveDate" => quote!(ColumnType::Date),
+            "NaiveTime" | "chrono::NaiveTime" => quote!(ColumnType::Time),
+            
+            // Decimal
+            "Decimal" | "rust_decimal::Decimal" => quote!(ColumnType::Decimal(None)),
+            
+            // JSON types
+            "Json" | "JsonValue" | "Value" | "serde_json::Value" => quote!(ColumnType::Json),
+            
+            // Binary
+            "Vec<u8>" => quote!(ColumnType::Binary(sea_orm::sea_query::BlobSize::Blob(None))),
+            
+            // Array types (PostgreSQL)
+            "Vec<i32>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Integer))),
+            "Vec<i64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::BigInteger))),
+            "Vec<String>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Text))),
+            "Vec<bool>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Boolean))),
+            "Vec<f64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Double))),
+            
+            // Default to Text for unknown types
+            _ => quote!(ColumnType::Text),
+        };
+        
+        if is_nullable || self.nullable {
+            quote!(#column_type.def().nullable())
+        } else {
+            quote!(#column_type.def())
+        }
+    }
 }
 
 /// Index definition parsed from #[index(...)] attribute
@@ -731,6 +806,15 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         .map(|i| format_ident!("{}", i.to_string().to_case(Case::Pascal)))
         .collect();
     
+    // Generate column type definitions for ColumnTrait impl
+    let column_type_defs: Vec<_> = db_fields.iter()
+        .filter_map(|f| {
+            let variant = format_ident!("{}", f.ident.as_ref()?.to_string().to_case(Case::Pascal));
+            let col_type_expr = f.column_type_expr();
+            Some(quote!(Self::#variant => #col_type_expr))
+        })
+        .collect();
+    
     // Primary key info
     let pk_column_variant = format_ident!("{}", pk_ident.to_string().to_case(Case::Pascal));
     let pk_column_name = pk_field
@@ -963,7 +1047,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 
                 fn def(&self) -> ColumnDef {
                     match self {
-                        #(Self::#column_variants => ColumnType::String(StringLen::None).def()),*
+                        #(#column_type_defs),*
                     }
                 }
             }

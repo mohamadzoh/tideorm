@@ -511,19 +511,49 @@ impl TableBuilder {
         self.column(name, ColumnType::DateTime)
     }
 
-    /// Add a timestamp column
+    /// Add a timestamp column (without time zone)
+    /// 
+    /// Use this for `chrono::NaiveDateTime` fields.
     pub fn timestamp(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnType::Timestamp)
     }
 
-    /// Add created_at and updated_at timestamp columns
+    /// Add a timestamp with time zone column (TIMESTAMPTZ)
+    /// 
+    /// Use this for `chrono::DateTime<Utc>` fields in PostgreSQL.
+    /// For MySQL, this falls back to TIMESTAMP.
+    /// 
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// t.timestamptz("expires_at").not_null();
+    /// t.timestamptz("created_at").default_now();
+    /// ```
+    pub fn timestamptz(&mut self, name: &str) -> ColumnBuilder<'_> {
+        self.column(name, ColumnType::TimestampTz)
+    }
+
+    /// Add created_at and updated_at timestamp columns with time zone
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// t.timestamps();  // Adds created_at and updated_at columns
+    /// t.timestamps();  // Adds created_at and updated_at columns (TIMESTAMPTZ for PostgreSQL)
     /// ```
     pub fn timestamps(&mut self) -> &mut Self {
+        self.column("created_at", ColumnType::TimestampTz)
+            .default_now()
+            .not_null();
+        self.column("updated_at", ColumnType::TimestampTz)
+            .default_now()
+            .not_null();
+        self
+    }
+
+    /// Add created_at and updated_at timestamp columns (without time zone)
+    /// 
+    /// Use this for `chrono::NaiveDateTime` fields.
+    pub fn timestamps_naive(&mut self) -> &mut Self {
         self.column("created_at", ColumnType::Timestamp)
             .default_now()
             .not_null();
@@ -535,7 +565,7 @@ impl TableBuilder {
 
     /// Add a soft delete column (deleted_at)
     pub fn soft_deletes(&mut self) -> &mut Self {
-        self.column("deleted_at", ColumnType::Timestamp).nullable();
+        self.column("deleted_at", ColumnType::TimestampTz).nullable();
         self
     }
 
@@ -1291,8 +1321,11 @@ pub enum ColumnType {
     Time,
     /// DateTime
     DateTime,
-    /// Timestamp
+    /// Timestamp (without time zone)
     Timestamp,
+    /// Timestamp with time zone (PostgreSQL: TIMESTAMPTZ)
+    /// Use this for `chrono::DateTime<Utc>` fields
+    TimestampTz,
     /// UUID
     Uuid,
     /// JSON
@@ -1328,6 +1361,7 @@ impl ColumnType {
             ColumnType::Time => "TIME".to_string(),
             ColumnType::DateTime => "TIMESTAMP".to_string(),
             ColumnType::Timestamp => "TIMESTAMP".to_string(),
+            ColumnType::TimestampTz => "TIMESTAMPTZ".to_string(),
             ColumnType::Uuid => "UUID".to_string(),
             ColumnType::Json => "JSON".to_string(),
             ColumnType::Jsonb => "JSONB".to_string(),
@@ -1355,7 +1389,7 @@ impl ColumnType {
             ColumnType::Date => "DATE".to_string(),
             ColumnType::Time => "TIME".to_string(),
             ColumnType::DateTime => "DATETIME".to_string(),
-            ColumnType::Timestamp => "TIMESTAMP".to_string(),
+            ColumnType::Timestamp | ColumnType::TimestampTz => "TIMESTAMP".to_string(), // MySQL doesn't have TIMESTAMPTZ
             ColumnType::Uuid => "CHAR(36)".to_string(),
             ColumnType::Json | ColumnType::Jsonb => "JSON".to_string(),
             ColumnType::Binary => "BLOB".to_string(),
@@ -1381,6 +1415,7 @@ impl ColumnType {
             | ColumnType::Time
             | ColumnType::DateTime
             | ColumnType::Timestamp
+            | ColumnType::TimestampTz
             | ColumnType::Json
             | ColumnType::Jsonb
             | ColumnType::IntegerArray
@@ -1952,6 +1987,10 @@ mod tests {
         assert_eq!(ColumnType::Boolean.to_postgres_sql(), "BOOLEAN");
         assert_eq!(ColumnType::Jsonb.to_postgres_sql(), "JSONB");
         assert_eq!(ColumnType::IntegerArray.to_postgres_sql(), "INTEGER[]");
+        assert_eq!(ColumnType::Timestamp.to_postgres_sql(), "TIMESTAMP");
+        assert_eq!(ColumnType::TimestampTz.to_postgres_sql(), "TIMESTAMPTZ");
+        assert_eq!(ColumnType::Date.to_postgres_sql(), "DATE");
+        assert_eq!(ColumnType::Time.to_postgres_sql(), "TIME");
     }
 
     #[test]
@@ -1960,6 +1999,10 @@ mod tests {
         assert_eq!(ColumnType::BigInteger.to_mysql_sql(), "BIGINT");
         assert_eq!(ColumnType::Boolean.to_mysql_sql(), "TINYINT(1)");
         assert_eq!(ColumnType::Jsonb.to_mysql_sql(), "JSON");
+        assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "TIMESTAMP");
+        assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "TIMESTAMP"); // MySQL doesn't have TIMESTAMPTZ
+        assert_eq!(ColumnType::Date.to_mysql_sql(), "DATE");
+        assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME");
     }
 
     #[test]
@@ -1968,6 +2011,10 @@ mod tests {
         assert_eq!(ColumnType::BigInteger.to_sqlite_sql(), "INTEGER");
         assert_eq!(ColumnType::String.to_sqlite_sql(), "TEXT");
         assert_eq!(ColumnType::Boolean.to_sqlite_sql(), "INTEGER");
+        assert_eq!(ColumnType::Timestamp.to_sqlite_sql(), "TEXT");
+        assert_eq!(ColumnType::TimestampTz.to_sqlite_sql(), "TEXT");
+        assert_eq!(ColumnType::Date.to_sqlite_sql(), "TEXT");
+        assert_eq!(ColumnType::Time.to_sqlite_sql(), "TEXT");
     }
 
     #[test]
@@ -2001,20 +2048,20 @@ mod tests {
 
     #[test]
     fn test_timestamps_feature() {
-        // Test PostgreSQL timestamps
+        // Test PostgreSQL timestamps - now uses TIMESTAMPTZ by default
         let mut builder = TableBuilder::new("posts", DatabaseType::Postgres);
         builder.id();
         builder.string("title").not_null();
         builder.timestamps();
 
         let sql = builder.build_create();
-        // Verify timestamps have NOT NULL and DEFAULT CURRENT_TIMESTAMP
-        assert!(sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
-            "PostgreSQL should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"updated_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "PostgreSQL should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        // Verify timestamps use TIMESTAMPTZ with NOT NULL and DEFAULT CURRENT_TIMESTAMP
+        assert!(sql.contains("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
+            "PostgreSQL should have created_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL should have updated_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
 
-        // Test MySQL timestamps
+        // Test MySQL timestamps - TIMESTAMPTZ falls back to TIMESTAMP
         let mut builder = TableBuilder::new("posts", DatabaseType::MySQL);
         builder.id();
         builder.string("title").not_null();
@@ -2022,9 +2069,9 @@ mod tests {
 
         let sql = builder.build_create();
         assert!(sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MySQL should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+            "MySQL should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
         assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MySQL should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+            "MySQL should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
 
         // Test SQLite timestamps
         let mut builder = TableBuilder::new("posts", DatabaseType::SQLite);
@@ -2034,22 +2081,92 @@ mod tests {
 
         let sql = builder.build_create();
         assert!(sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite should have created_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+            "SQLite should have created_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
         assert!(sql.contains("\"updated_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite should have updated_at with NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+            "SQLite should have updated_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_timestamps_naive_feature() {
+        // Test timestamps_naive() which uses TIMESTAMP (without timezone)
+        let mut builder = TableBuilder::new("logs", DatabaseType::Postgres);
+        builder.id();
+        builder.text("message").not_null();
+        builder.timestamps_naive();
+
+        let sql = builder.build_create();
+        // Verify naive timestamps use TIMESTAMP (not TIMESTAMPTZ)
+        assert!(sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
+            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"updated_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_timestamptz_column() {
+        // Test individual timestamptz column
+        let mut builder = TableBuilder::new("sessions", DatabaseType::Postgres);
+        builder.id();
+        builder.string("token").not_null();
+        builder.timestamptz("expires_at").not_null();
+        builder.timestamptz("last_activity").nullable();
+
+        let sql = builder.build_create();
+        assert!(sql.contains("\"expires_at\" TIMESTAMPTZ NOT NULL"),
+            "Should have expires_at as TIMESTAMPTZ NOT NULL. Got: {}", sql);
+        assert!(sql.contains("\"last_activity\" TIMESTAMPTZ"),
+            "Should have last_activity as TIMESTAMPTZ. Got: {}", sql);
+        // last_activity should be nullable (no NOT NULL)
+        assert!(!sql.contains("\"last_activity\" TIMESTAMPTZ NOT NULL"),
+            "last_activity should be nullable. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_timestamp_vs_timestamptz() {
+        // Test that timestamp() and timestamptz() produce different SQL in PostgreSQL
+        let mut builder = TableBuilder::new("events", DatabaseType::Postgres);
+        builder.id();
+        builder.timestamp("local_time");      // TIMESTAMP (no timezone)
+        builder.timestamptz("utc_time");      // TIMESTAMPTZ (with timezone)
+
+        let sql = builder.build_create();
+        assert!(sql.contains("\"local_time\" TIMESTAMP"),
+            "timestamp() should produce TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"utc_time\" TIMESTAMPTZ"),
+            "timestamptz() should produce TIMESTAMPTZ. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_date_time_columns() {
+        // Test all date/time column types
+        let mut builder = TableBuilder::new("schedules", DatabaseType::Postgres);
+        builder.id();
+        builder.date("event_date");
+        builder.time("start_time");
+        builder.datetime("local_datetime");
+        builder.timestamp("naive_timestamp");
+        builder.timestamptz("utc_timestamp");
+
+        let sql = builder.build_create();
+        assert!(sql.contains("\"event_date\" DATE"), "Should have DATE column. Got: {}", sql);
+        assert!(sql.contains("\"start_time\" TIME"), "Should have TIME column. Got: {}", sql);
+        assert!(sql.contains("\"local_datetime\" TIMESTAMP"), "Should have TIMESTAMP for datetime. Got: {}", sql);
+        assert!(sql.contains("\"naive_timestamp\" TIMESTAMP"), "Should have TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("\"utc_timestamp\" TIMESTAMPTZ"), "Should have TIMESTAMPTZ. Got: {}", sql);
     }
 
     #[test]
     fn test_soft_deletes_feature() {
+        // soft_deletes now uses TIMESTAMPTZ
         let mut builder = TableBuilder::new("posts", DatabaseType::Postgres);
         builder.id();
         builder.soft_deletes();
 
         let sql = builder.build_create();
-        // soft_deletes should be nullable (no NOT NULL)
-        assert!(sql.contains("\"deleted_at\" TIMESTAMP"),
-            "Should have deleted_at TIMESTAMP column. Got: {}", sql);
-        assert!(!sql.contains("\"deleted_at\" TIMESTAMP NOT NULL"),
+        // soft_deletes should be nullable TIMESTAMPTZ
+        assert!(sql.contains("\"deleted_at\" TIMESTAMPTZ"),
+            "Should have deleted_at TIMESTAMPTZ column. Got: {}", sql);
+        assert!(!sql.contains("\"deleted_at\" TIMESTAMPTZ NOT NULL"),
             "deleted_at should be nullable (no NOT NULL). Got: {}", sql);
     }
 

@@ -96,14 +96,16 @@ impl Migration for CreatePostsTable {
                 t.text("content");
                 t.text("excerpt");
                 t.boolean("published").default(false);
-                t.datetime("published_at");
+                
+                // Use timestamptz for DateTime<Utc> fields
+                t.timestamptz("published_at").nullable();
 
                 // PostgreSQL-specific types
                 t.jsonb("metadata"); // JSONB column
                 t.text_array("tags"); // TEXT[] column
 
-                t.timestamps();
-                t.soft_deletes();
+                t.timestamps(); // created_at, updated_at as TIMESTAMPTZ
+                t.soft_deletes(); // deleted_at as TIMESTAMPTZ
 
                 // Indexes
                 t.index(&["user_id"]);

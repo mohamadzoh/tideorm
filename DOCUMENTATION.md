@@ -8,6 +8,10 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
   - [Basic Connection](#basic-connection)
   - [Pool Configuration](#pool-configuration)
   - [Database Types](#database-types)
+- [Data Type Mappings](#data-type-mappings)
+  - [Rust to SQL Type Reference](#rust-to-sql-type-reference)
+  - [Date and Time Types](#date-and-time-types)
+  - [Schema Builder Column Types](#schema-builder-column-types)
 - [Model Definition](#model-definition)
   - [Model Attributes](#model-attributes)
 - [Model Relations](#model-relations)
@@ -88,6 +92,284 @@ TideConfig::init()
     .database("postgres://localhost/mydb")
     .connect()
     .await?;
+```
+
+---
+
+## Data Type Mappings
+
+This section explains how Rust types map to SQL types across different databases, and how to properly configure your models and migrations.
+
+### Rust to SQL Type Reference
+
+| Rust Type | PostgreSQL | MySQL | SQLite | Notes |
+|-----------|------------|-------|--------|-------|
+| `i8`, `i16` | SMALLINT | SMALLINT | INTEGER | |
+| `i32` | INTEGER | INT | INTEGER | |
+| `i64` | BIGINT | BIGINT | INTEGER | Recommended for primary keys |
+| `u8`, `u16` | SMALLINT | SMALLINT UNSIGNED | INTEGER | |
+| `u32` | INTEGER | INT UNSIGNED | INTEGER | |
+| `u64` | BIGINT | BIGINT UNSIGNED | INTEGER | |
+| `f32` | REAL | FLOAT | REAL | |
+| `f64` | DOUBLE PRECISION | DOUBLE | REAL | |
+| `bool` | BOOLEAN | TINYINT(1) | INTEGER | |
+| `String` | TEXT | TEXT | TEXT | |
+| `Option<T>` | (nullable) | (nullable) | (nullable) | Wraps any type to make it nullable |
+| `uuid::Uuid` | UUID | CHAR(36) | TEXT | |
+| `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | TEXT | |
+| `serde_json::Value` | JSONB | JSON | TEXT | |
+| `Vec<u8>` | BYTEA | BLOB | BLOB | Binary data |
+| `chrono::NaiveDate` | DATE | DATE | TEXT | Date only |
+| `chrono::NaiveTime` | TIME | TIME | TEXT | Time only |
+| `chrono::NaiveDateTime` | TIMESTAMP | DATETIME | TEXT | No timezone |
+| `chrono::DateTime<Utc>` | **TIMESTAMPTZ** | TIMESTAMP | TEXT | **With timezone** |
+
+### Date and Time Types
+
+TideORM provides proper support for all common date/time scenarios:
+
+#### DateTime with Timezone (Recommended for most cases)
+
+Use `chrono::DateTime<Utc>` for timestamps that should include timezone information:
+
+```rust
+use chrono::{DateTime, Utc};
+
+#[tideorm::model]
+#[tide(table = "sessions")]
+pub struct Session {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,        // Maps to TIMESTAMPTZ in PostgreSQL
+    pub created_at: DateTime<Utc>,        // Maps to TIMESTAMPTZ in PostgreSQL
+    pub updated_at: DateTime<Utc>,        // Maps to TIMESTAMPTZ in PostgreSQL
+}
+```
+
+In migrations, use `timestamptz()`:
+
+```rust
+schema.create_table("sessions", |t| {
+    t.id();
+    t.big_integer("user_id").not_null();
+    t.string("token").not_null();
+    t.timestamptz("expires_at").not_null();
+    t.timestamps();  // Uses TIMESTAMPTZ by default
+}).await?;
+```
+
+#### DateTime without Timezone
+
+Use `chrono::NaiveDateTime` when you don't need timezone information:
+
+```rust
+use chrono::NaiveDateTime;
+
+#[tideorm::model]
+#[tide(table = "logs")]
+pub struct Log {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub message: String,
+    pub logged_at: NaiveDateTime,         // Maps to TIMESTAMP (no timezone)
+}
+```
+
+In migrations, use `timestamp()`:
+
+```rust
+schema.create_table("logs", |t| {
+    t.id();
+    t.text("message").not_null();
+    t.timestamp("logged_at").default_now();
+}).await?;
+```
+
+#### Date Only
+
+Use `chrono::NaiveDate` for date-only fields:
+
+```rust
+use chrono::NaiveDate;
+
+#[tideorm::model]
+#[tide(table = "events")]
+pub struct Event {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub event_date: NaiveDate,            // Maps to DATE
+}
+```
+
+In migrations, use `date()`:
+
+```rust
+schema.create_table("events", |t| {
+    t.id();
+    t.string("name").not_null();
+    t.date("event_date").not_null();
+}).await?;
+```
+
+#### Time Only
+
+Use `chrono::NaiveTime` for time-only fields:
+
+```rust
+use chrono::NaiveTime;
+
+#[tideorm::model]
+#[tide(table = "schedules")]
+pub struct Schedule {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub start_time: NaiveTime,            // Maps to TIME
+    pub end_time: NaiveTime,
+}
+```
+
+In migrations, use `time()`:
+
+```rust
+schema.create_table("schedules", |t| {
+    t.id();
+    t.string("name").not_null();
+    t.time("start_time").not_null();
+    t.time("end_time").not_null();
+}).await?;
+```
+
+### Schema Builder Column Types
+
+The migration schema builder provides convenience methods for all common column types:
+
+#### Numeric Types
+
+```rust
+t.small_integer("count");              // SMALLINT
+t.integer("quantity");                 // INTEGER  
+t.big_integer("total");                // BIGINT
+t.float("rate");                       // REAL/FLOAT
+t.double("precise_rate");              // DOUBLE PRECISION
+t.decimal("price");                    // DECIMAL(10,2)
+t.decimal_with("amount", 16, 4);       // DECIMAL(16,4)
+```
+
+#### String Types
+
+```rust
+t.string("name");                      // VARCHAR(255)
+t.text("description");                 // TEXT (unlimited)
+```
+
+#### Boolean
+
+```rust
+t.boolean("active");                   // BOOLEAN
+```
+
+#### Date/Time Types
+
+```rust
+t.date("birth_date");                  // DATE
+t.time("start_time");                  // TIME
+t.datetime("logged_at");               // DATETIME (MySQL) / TIMESTAMP (Postgres)
+t.timestamp("created_at");             // TIMESTAMP (without timezone)
+t.timestamptz("expires_at");           // TIMESTAMPTZ (with timezone) - PostgreSQL
+```
+
+#### Special Types
+
+```rust
+t.uuid("external_id");                 // UUID (Postgres) / CHAR(36) (MySQL)
+t.json("metadata");                    // JSON
+t.jsonb("data");                       // JSONB (PostgreSQL only)
+t.binary("file_data");                 // BYTEA/BLOB
+t.integer_array("tag_ids");            // INTEGER[] (PostgreSQL only)
+t.text_array("tags");                  // TEXT[] (PostgreSQL only)
+```
+
+#### Convenience Methods
+
+```rust
+t.id();                                // BIGSERIAL PRIMARY KEY (auto-increment)
+t.big_increments("id");                // Same as id()
+t.increments("id");                    // INTEGER PRIMARY KEY (auto-increment)
+t.foreign_id("user_id");               // BIGINT (for foreign keys)
+t.timestamps();                        // created_at + updated_at (TIMESTAMPTZ)
+t.timestamps_naive();                  // created_at + updated_at (TIMESTAMP, no tz)
+t.soft_deletes();                      // deleted_at (nullable TIMESTAMPTZ)
+```
+
+### Complete Migration Example
+
+```rust
+use tideorm::prelude::*;
+use tideorm::migration::*;
+
+struct CreateUsersTable;
+
+#[async_trait]
+impl Migration for CreateUsersTable {
+    fn version(&self) -> &str { "20260115_001" }
+    fn name(&self) -> &str { "create_users_table" }
+
+    async fn up(&self, schema: &mut Schema) -> Result<()> {
+        schema.create_table("users", |t| {
+            t.id();                                    // id BIGSERIAL PRIMARY KEY
+            t.string("email").unique().not_null();    // email VARCHAR(255) UNIQUE NOT NULL
+            t.string("name").not_null();              // name VARCHAR(255) NOT NULL
+            t.text("bio").nullable();                 // bio TEXT NULL
+            t.boolean("active").default(true);        // active BOOLEAN DEFAULT true
+            t.date("birth_date").nullable();          // birth_date DATE NULL
+            t.decimal_with("balance", 12, 2)          // balance DECIMAL(12,2) DEFAULT 0.00
+                .default("0.00");
+            t.jsonb("preferences").nullable();        // preferences JSONB NULL
+            t.timestamptz("email_verified_at")        // email_verified_at TIMESTAMPTZ NULL
+                .nullable();
+            t.timestamps();                           // created_at, updated_at TIMESTAMPTZ
+            t.soft_deletes();                         // deleted_at TIMESTAMPTZ NULL
+        }).await?;
+
+        // Add custom index
+        schema.create_index("users", "idx_users_email_active", &["email", "active"], false).await?;
+
+        Ok(())
+    }
+
+    async fn down(&self, schema: &mut Schema) -> Result<()> {
+        schema.drop_table("users").await
+    }
+}
+```
+
+### Matching Model Definition
+
+```rust
+use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
+
+#[tideorm::model]
+#[tide(table = "users", soft_delete)]
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+    pub bio: Option<String>,
+    pub active: bool,
+    pub birth_date: Option<NaiveDate>,
+    pub balance: Decimal,
+    pub preferences: Option<serde_json::Value>,
+    pub email_verified_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
 ```
 
 ---
