@@ -102,3 +102,7 @@ harness = false
 [[bench]]
 name = "attachment_url_benchmarks"
 harness = false
+
+[[bench]]
+name = "tokenization_benchmarks"
+harness = false

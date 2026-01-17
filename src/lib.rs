@@ -550,6 +550,9 @@ pub mod fulltext;
 /// Strongly-typed columns for compile-time type safety
 pub mod columns;
 
+/// Record tokenization for secure ID encoding
+pub mod tokenization;
+
 /// Re-exports for convenience
 pub mod prelude;
 
@@ -583,6 +586,9 @@ pub use cache::{QueryCache, PreparedStatementCache, CacheConfig, CacheStrategy, 
 
 // Validation
 pub use validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
+
+// Tokenization
+pub use tokenization::{TokenConfig, TokenEncoder, TokenDecoder, Tokenizable};
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;

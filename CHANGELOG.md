@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Record Tokenization
+- **New `#[tide(tokenize)]` attribute**: Enable tokenization on any model with a single attribute
+- **Secure ID encryption**: Convert record IDs to encrypted, URL-safe tokens via `Tokenizable` trait
+- **Model-specific tokens**: Tokens include model name in HMAC, preventing cross-model token reuse
+- **Tamper detection**: HMAC verification ensures tokens haven't been modified
+- **Instance methods**: `user.tokenize()`, `user.to_token()`, `user.regenerate_token()`
+- **Static methods**: `User::tokenize_id(42)`, `User::detokenize(&token)`, `User::decode_token(&token)`
+- **Async fetch**: `User::from_token(&token).await` - decode and fetch in one call
+- **Configuration hierarchy**: Default → TideConfig → Model (most specific wins)
+- **Global encryption key**: Configure via `TokenConfig::set_encryption_key("your-secret-key")`
+- **Custom encoders/decoders**: Use `TokenConfig::set_encoder()` and `set_decoder()` for custom strategies
+- **Model-level overrides**: Implement `Tokenizable` trait manually for custom logic
+- **URL-safe output**: Base64-URL encoding (A-Za-z0-9-_) safe for URLs without escaping
+- **New error types**: `TideError::Tokenization` and `TideError::InvalidToken` for clear error handling
+- New types exported: `TokenConfig`, `TokenEncoder`, `TokenDecoder`, `Tokenizable`
+- New comprehensive example: `examples/tokenization_demo.rs`
+- New test file: `tests/tokenization_tests.rs` (48 tests total)
+- New benchmarks: `benches/tokenization_benchmarks.rs`
+
+### Example
+```rust
+use tideorm::prelude::*;
+
+#[derive(Model)]
+#[tide(table = "users", tokenize)]  // Just add `tokenize` here!
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+}
+
+// Configure encryption key once
+TokenConfig::set_encryption_key("my-super-secret-key-at-least-32-chars");
+
+// Tokenize a record
+let user = User::find(1).await?.unwrap();
+let token = user.tokenize()?;  // "iIBmdKYhJh4_vSKFlBTP..."
+
+// Decode token to ID
+let id = User::detokenize(&token)?;  // 1
+
+// Or fetch directly from token
+let same_user = User::from_token(&token).await?;
+
+// Tokens are model-specific
+let user_token = User::tokenize_id(1)?;
+let product_token = Product::tokenize_id(1)?;
+assert_ne!(user_token, product_token);  // Different!
+
+// Cross-model decoding fails
+assert!(User::detokenize(&product_token).is_err());
+```
+
 #### Strongly-Typed Column Support
 - **Auto-generated typed columns**: `#[tideorm::model]` now generates a `{Model}Columns` struct with typed column accessors
 - **Access columns via model attribute**: `User::columns.name`, `User::columns.age`, etc.

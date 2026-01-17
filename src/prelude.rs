@@ -94,6 +94,9 @@ pub use crate::seeding::{
 // Validation
 pub use crate::validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
 
+// Tokenization
+pub use crate::tokenization::{TokenConfig, TokenEncoder, TokenDecoder, Tokenizable};
+
 // Full-text search
 pub use crate::fulltext::{
     FullTextSearch, FullTextSearchBuilder, FullTextConfig, FullTextIndex,

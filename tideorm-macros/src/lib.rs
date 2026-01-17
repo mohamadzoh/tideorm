@@ -498,6 +498,13 @@ struct ModelInput {
     /// Enable auto Deserialize impl
     #[darling(default)]
     auto_deserialize: bool,
+    
+    /// Enable tokenization for this model
+    /// When enabled, generates `Tokenizable` trait implementation
+    /// allowing conversion between record IDs and encrypted tokens.
+    /// Example: #[tide(table = "users", tokenize)]
+    #[darling(default)]
+    tokenize: bool,
 }
 
 /// Derive macro for TideORM models
@@ -1671,6 +1678,39 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         }
     };
     
+    // Generate Tokenizable trait implementation if enabled
+    let tokenize_enabled = input.tokenize;
+    let struct_name_str = struct_name.to_string();
+    let tokenizable_impl = if tokenize_enabled {
+        quote! {
+            #[::tideorm::async_trait::async_trait]
+            impl ::tideorm::tokenization::Tokenizable for #struct_name {
+                fn token_model_name() -> &'static str {
+                    #struct_name_str
+                }
+                
+                fn token_primary_key(&self) -> i64 {
+                    self.#pk_ident as i64
+                }
+                
+                fn tokenization_enabled() -> bool {
+                    true
+                }
+                
+                async fn from_token(token: &str) -> ::tideorm::Result<Self> {
+                    let id = Self::decode_token(token)?;
+                    Self::find(id as #pk_type)
+                        .await?
+                        .ok_or_else(|| ::tideorm::Error::not_found(
+                            format!("{} with decoded token ID {} not found", #struct_name_str, id)
+                        ))
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+    
     quote! {
         #base_output
         
@@ -1681,6 +1721,8 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         #clone_impl
         #serialize_impl
         #deserialize_impl
+        
+        #tokenizable_impl
     }
 }
 

@@ -18,6 +18,7 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
   - Fluent Query Builder with Window Functions & CTEs
   - Database Migrations & Seeding
   - Model Validation System
+  - Record Tokenization (secure ID encryption)
   - Translations (i18n) for multilingual content
   - File Attachments with metadata
   - Full-Text Search with highlighting

@@ -285,6 +285,73 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn has_indexes() -> bool {
         !Self::indexes().is_empty() || !Self::unique_indexes().is_empty()
     }
+    
+    // =========================================================================
+    // TOKENIZATION
+    // =========================================================================
+    
+    /// Check if tokenization is enabled for this model
+    ///
+    /// Override this to enable tokenization via `#[tide(tokenize)]` attribute.
+    /// When enabled, the model will have `to_token()` and `from_token()` methods.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// #[derive(Model)]
+    /// #[tide(table = "users", tokenize)]
+    /// pub struct User {
+    ///     #[tide(primary_key)]
+    ///     pub id: i64,
+    ///     pub email: String,
+    /// }
+    /// ```
+    fn tokenization_enabled() -> bool {
+        false
+    }
+    
+    /// Returns the token encoder for this model
+    ///
+    /// Override to provide model-specific token encoding logic.
+    /// Returns `None` to use the global encoder from TideConfig.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// impl ModelMeta for SecretDocument {
+    ///     fn token_encoder() -> Option<crate::tokenization::TokenEncoder> {
+    ///         Some(|record_id, _model_name| {
+    ///             // Custom encoding for this model
+    ///             Ok(format!("DOC-{}", base64_encode(record_id)))
+    ///         })
+    ///     }
+    /// }
+    /// ```
+    fn token_encoder() -> Option<crate::tokenization::TokenEncoder> {
+        None
+    }
+    
+    /// Returns the token decoder for this model
+    ///
+    /// Override to provide model-specific token decoding logic.
+    /// Returns `None` to use the global decoder from TideConfig.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// impl ModelMeta for SecretDocument {
+    ///     fn token_decoder() -> Option<crate::tokenization::TokenDecoder> {
+    ///         Some(|token, _model_name| {
+    ///             // Custom decoding for this model
+    ///             token.strip_prefix("DOC-")
+    ///                 .and_then(|encoded| base64_decode(encoded))
+    ///         })
+    ///     }
+    /// }
+    /// ```
+    fn token_decoder() -> Option<crate::tokenization::TokenDecoder> {
+        None
+    }
 }
 
 /// Core trait for TideORM models

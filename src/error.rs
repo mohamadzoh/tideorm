@@ -147,6 +147,26 @@ pub enum Error {
         /// The backend that doesn't support RETURNING
         backend: String,
     },
+    
+    /// Tokenization error
+    ///
+    /// Thrown when tokenization operations fail, such as encoding
+    /// a record to a token or decoding a token back to a record ID.
+    #[error("Tokenization error: {message}")]
+    Tokenization {
+        /// Details about the tokenization error
+        message: String,
+    },
+    
+    /// Invalid token error
+    ///
+    /// Thrown when attempting to decode an invalid, expired, or
+    /// tampered token.
+    #[error("Invalid token: {message}")]
+    InvalidToken {
+        /// Details about why the token is invalid
+        message: String,
+    },
 }
 
 /// Additional context for errors
@@ -316,6 +336,24 @@ impl Error {
         Self::InsertReturningNotSupported {
             message: message.into(),
             backend: backend.into(),
+        }
+    }
+    
+    /// Create a Tokenization error
+    ///
+    /// Use when token encoding/decoding fails.
+    pub fn tokenization(message: impl Into<String>) -> Self {
+        Self::Tokenization {
+            message: message.into(),
+        }
+    }
+    
+    /// Create an InvalidToken error
+    ///
+    /// Use when a token is invalid, tampered, or for the wrong model.
+    pub fn invalid_token(message: impl Into<String>) -> Self {
+        Self::InvalidToken {
+            message: message.into(),
         }
     }
     
@@ -524,6 +562,26 @@ impl Error {
                     backend
                 )
             }
+            Self::Tokenization { message } => {
+                format!(
+                    "Tokenization failed: {}\n\
+                     Ensure:\n\
+                     1. An encryption key is configured via TideConfig::encryption_key()\n\
+                     2. The model has tokenization enabled via #[tide(tokenize)]\n\
+                     3. The record has a valid primary key",
+                    message
+                )
+            }
+            Self::InvalidToken { message } => {
+                format!(
+                    "Invalid token: {}\n\
+                     Possible causes:\n\
+                     1. Token was tampered with or corrupted\n\
+                     2. Token is for a different model type\n\
+                     3. Encryption key has changed since token was created",
+                    message
+                )
+            }
         }
     }
     
@@ -556,6 +614,8 @@ impl Error {
             Self::BackendNotSupported { .. } => "TIDE_BACKEND_NOT_SUPPORTED",
             Self::PrimaryKeyNotSet { .. } => "TIDE_PRIMARY_KEY_NOT_SET",
             Self::InsertReturningNotSupported { .. } => "TIDE_INSERT_RETURNING_NOT_SUPPORTED",
+            Self::Tokenization { .. } => "TIDE_TOKENIZATION",
+            Self::InvalidToken { .. } => "TIDE_INVALID_TOKEN",
         }
     }
     
@@ -587,6 +647,8 @@ impl Error {
             Self::BackendNotSupported { .. } => 501, // Not Implemented
             Self::PrimaryKeyNotSet { .. } => 400,    // Bad Request
             Self::InsertReturningNotSupported { .. } => 501, // Not Implemented
+            Self::Tokenization { .. } => 400,        // Bad Request
+            Self::InvalidToken { .. } => 401,        // Unauthorized
         }
     }
     

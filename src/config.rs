@@ -449,6 +449,9 @@ pub struct TideConfig {
     run_migrations: bool,
     seeds: Vec<Box<dyn crate::seeding::Seed>>,
     run_seeds: bool,
+    encryption_key: Option<String>,
+    token_encoder: Option<crate::tokenization::TokenEncoder>,
+    token_decoder: Option<crate::tokenization::TokenDecoder>,
 }
 
 /// Global database type (set after connect)
@@ -469,6 +472,9 @@ impl TideConfig {
             run_migrations: false,
             seeds: Vec::new(),
             run_seeds: false,
+            encryption_key: None,
+            token_encoder: None,
+            token_decoder: None,
         }
     }
     
@@ -990,6 +996,93 @@ impl TideConfig {
     }
     
     // ========================================================================
+    // TOKENIZATION CONFIGURATION
+    // ========================================================================
+    
+    /// Set the encryption key for record tokenization
+    ///
+    /// This key is used to encrypt/decrypt record IDs when generating tokens.
+    /// The key should be at least 32 bytes for security. Keep this key secret
+    /// and consistent - changing it will invalidate existing tokens.
+    ///
+    /// # Security Warning
+    ///
+    /// - **Never commit encryption keys to version control**
+    /// - Use environment variables in production
+    /// - Rotate keys only when necessary (invalidates existing tokens)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Load from environment variable
+    /// let key = std::env::var("ENCRYPTION_KEY").expect("ENCRYPTION_KEY required");
+    ///
+    /// TideConfig::init()
+    ///     .database("postgres://localhost/mydb")
+    ///     .encryption_key(&key)  // At least 32 characters
+    ///     .connect()
+    ///     .await?;
+    ///
+    /// // Now tokenization uses this key
+    /// let user = User::find(1).await?;
+    /// let token = user.to_token()?;  // Encrypted with your key
+    /// ```
+    pub fn encryption_key(mut self, key: &str) -> Self {
+        self.encryption_key = Some(key.to_string());
+        self
+    }
+    
+    /// Set a custom token encoder function
+    ///
+    /// Override the default token encoding logic for all models.
+    /// Model-level overrides take precedence over this global setting.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Simple prefix-based encoding
+    /// fn custom_encoder(record_id: i64, model_name: &str) -> tideorm::Result<String> {
+    ///     Ok(format!("{}-{}", model_name.to_lowercase(), record_id))
+    /// }
+    ///
+    /// TideConfig::init()
+    ///     .database("postgres://localhost/mydb")
+    ///     .token_encoder(custom_encoder)
+    ///     .connect()
+    ///     .await?;
+    /// ```
+    pub fn token_encoder(mut self, encoder: crate::tokenization::TokenEncoder) -> Self {
+        self.token_encoder = Some(encoder);
+        self
+    }
+    
+    /// Set a custom token decoder function
+    ///
+    /// Override the default token decoding logic for all models.
+    /// Model-level overrides take precedence over this global setting.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Matching decoder for the prefix-based encoder
+    /// fn custom_decoder(token: &str, model_name: &str) -> Option<i64> {
+    ///     let prefix = format!("{}-", model_name.to_lowercase());
+    ///     token.strip_prefix(&prefix)
+    ///         .and_then(|id_str| id_str.parse().ok())
+    /// }
+    ///
+    /// TideConfig::init()
+    ///     .database("postgres://localhost/mydb")
+    ///     .token_decoder(custom_decoder)
+    ///     .connect()
+    ///     .await?;
+    /// ```
+    pub fn token_decoder(mut self, decoder: crate::tokenization::TokenDecoder) -> Self {
+        self.token_decoder = Some(decoder);
+        self
+    }
+    
+    // ========================================================================
     // FINALIZATION
     // ========================================================================
     
@@ -1029,6 +1122,17 @@ impl TideConfig {
         // Apply configuration
         let config = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
         *config.write() = self.config;
+        
+        // Apply tokenization settings
+        if let Some(key) = &self.encryption_key {
+            crate::tokenization::TokenConfig::set_encryption_key(key);
+        }
+        if let Some(encoder) = self.token_encoder {
+            crate::tokenization::TokenConfig::set_encoder(encoder);
+        }
+        if let Some(decoder) = self.token_decoder {
+            crate::tokenization::TokenConfig::set_decoder(decoder);
+        }
         
         // Get database URL
         let url = self.database_url.ok_or_else(|| {

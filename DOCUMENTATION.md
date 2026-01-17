@@ -45,6 +45,11 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
   - [File URL Generation](#file-url-generation)
 - [Translations (i18n)](#translations-i18n)
 - [Model Validation](#model-validation)
+- [Record Tokenization](#record-tokenization)
+  - [Quick Start](#tokenization-quick-start)
+  - [Available Methods](#tokenization-methods)
+  - [Custom Encoders](#custom-encoders)
+  - [Security Notes](#tokenization-security)
 - [Full-Text Search](#full-text-search)
 - [Multi-Database Support](#multi-database-support)
 - [Raw SQL Queries](#raw-sql-queries)
@@ -2123,6 +2128,173 @@ if errors.has_errors() {
 
 // Convert to TideORM Error
 let tide_error: tideorm::error::Error = errors.into();
+```
+
+---
+
+## Record Tokenization
+
+TideORM provides secure tokenization for record IDs, converting them to encrypted, URL-safe tokens. This prevents exposing internal database IDs in URLs and APIs.
+
+### Tokenization Quick Start
+
+Enable tokenization with the `#[tide(tokenize)]` attribute:
+
+```rust
+use tideorm::prelude::*;
+
+#[derive(Model)]
+#[tide(table = "users", tokenize)]  // Enable tokenization
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+}
+
+// Configure encryption key once at startup
+TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
+
+// Tokenize a record
+let user = User::find(1).await?.unwrap();
+let token = user.tokenize()?;  // "iIBmdKYhJh4_vSKFlBTP..."
+
+// Decode token to ID (doesn't hit database)
+let id = User::detokenize(&token)?;  // 1
+
+// Fetch record directly from token
+let same_user = User::from_token(&token).await?;
+assert_eq!(user.id, same_user.id);
+```
+
+### Tokenization Methods
+
+When a model has `#[tide(tokenize)]`, these methods are available:
+
+| Method | Description |
+|--------|-------------|
+| `user.tokenize()` | Convert record to token (instance method) |
+| `user.to_token()` | Alias for `tokenize()` |
+| `User::tokenize_id(42)` | Tokenize an ID without having the record |
+| `User::detokenize(&token)` | Decode token to ID (doesn't fetch from DB) |
+| `User::decode_token(&token)` | Alias for `detokenize()` |
+| `User::from_token(&token).await` | Decode token and fetch record from DB |
+| `user.regenerate_token()` | Generate a new token (same as tokenize) |
+
+### Model-Specific Tokens
+
+Tokens are bound to their model type. A User token cannot decode a Product:
+
+```rust
+#[derive(Model)]
+#[tide(table = "users", tokenize)]
+pub struct User { /* ... */ }
+
+#[derive(Model)]
+#[tide(table = "products", tokenize)]
+pub struct Product { /* ... */ }
+
+// Same ID, different tokens
+let user_token = User::tokenize_id(1)?;
+let product_token = Product::tokenize_id(1)?;
+assert_ne!(user_token, product_token);  // Different!
+
+// Cross-model decoding fails
+assert!(User::detokenize(&product_token).is_err());  // Error!
+```
+
+### Using Tokens in APIs
+
+Tokens are URL-safe and perfect for REST APIs:
+
+```rust
+// In your API handler
+async fn get_user(token: String) -> Result<Json<User>> {
+    let user = User::from_token(&token).await?;
+    Ok(Json(user))
+}
+
+// Example URLs:
+// GET /api/users/iIBmdKYhJh4_vSKFlBTPgWRlbW8tZW5isZqLo_EU4YI
+// GET /api/products/1NhY5XxAm_D53flvEc-5JmRlbW8tZW5iShKwXZjCb9s
+```
+
+### Custom Encoders
+
+For custom tokenization logic, implement the `Tokenizable` trait manually:
+
+```rust
+use tideorm::tokenization::{Tokenizable, TokenEncoder, TokenDecoder};
+
+#[derive(Model)]
+#[tide(table = "documents")]
+pub struct Document {
+    #[tide(primary_key)]
+    pub id: i64,
+    pub title: String,
+}
+
+#[async_trait::async_trait]
+impl Tokenizable for Document {
+    fn token_model_name() -> &'static str { "Document" }
+    fn token_primary_key(&self) -> i64 { self.id }
+    
+    // Custom encoder - prefix with "DOC-"
+    fn token_encoder() -> Option<TokenEncoder> {
+        Some(|id, _model| Ok(format!("DOC-{}", id)))
+    }
+    
+    // Custom decoder
+    fn token_decoder() -> Option<TokenDecoder> {
+        Some(|token, _model| {
+            token.strip_prefix("DOC-")?.parse().ok()
+        })
+    }
+    
+    async fn from_token(token: &str) -> tideorm::Result<Self> {
+        let id = Self::decode_token(token)?;
+        Self::find(id).await?.ok_or_else(|| 
+            tideorm::Error::not_found("Document not found")
+        )
+    }
+}
+```
+
+### Global Custom Encoder
+
+Set a custom encoder for all models:
+
+```rust
+// Set global custom encoder
+TokenConfig::set_encoder(|id, model| {
+    Ok(format!("{}-{}", model.to_lowercase(), id))
+});
+
+TokenConfig::set_decoder(|token, model| {
+    let prefix = format!("{}-", model.to_lowercase());
+    token.strip_prefix(&prefix)?.parse().ok()
+});
+```
+
+### Tokenization Security
+
+**Features:**
+- **XOR encryption** with HMAC integrity verification
+- **Model binding**: HMAC includes model name, preventing cross-model reuse
+- **Tamper detection**: Modified tokens are rejected
+- **URL-safe**: Base64-URL encoding (A-Za-z0-9-_), no escaping needed
+
+**Best Practices:**
+- Use a secure 32+ character encryption key in production
+- Store keys in environment variables, never in code
+- Changing the key invalidates all existing tokens
+- Consider token rotation for high-security applications
+
+```rust
+// Configure from environment variable
+TokenConfig::set_encryption_key(
+    &std::env::var("ENCRYPTION_KEY").expect("ENCRYPTION_KEY must be set")
+);
 ```
 
 ---
