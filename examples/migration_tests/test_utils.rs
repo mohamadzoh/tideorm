@@ -2,6 +2,8 @@
 //!
 //! Helper functions for migration testing.
 
+#![allow(dead_code)]
+
 use tideorm::database::db;
 use tideorm::Database;
 
@@ -92,7 +94,7 @@ pub async fn index_exists(index_name: &str) -> bool {
 pub async fn get_migration_count() -> i64 {
     use tideorm::internal::{ConnectionTrait, Statement};
     
-    let sql = r#"SELECT COUNT(*) as cnt FROM "_migrations""#;
+    let sql = r#"SELECT COUNT(*)::bigint as cnt FROM "_migrations""#;
     
     let database = db();
     let backend = database.__internal_connection().get_database_backend();
@@ -100,9 +102,35 @@ pub async fn get_migration_count() -> i64 {
     
     match database.__internal_connection().query_one_raw(stmt).await {
         Ok(Some(row)) => {
-            row.try_get::<i64>("", "cnt").unwrap_or(0)
+            // Try different column access methods
+            let result = row.try_get::<i64>("", "cnt")
+                .or_else(|_| row.try_get_by_index::<i64>(0))
+                .unwrap_or(0);
+            result
         }
-        _ => 0,
+        Ok(None) => 0,
+        Err(_) => 0,
+    }
+}
+
+/// Get count of test migrations (those with version starting with "20260106_")
+pub async fn get_test_migration_count() -> i64 {
+    use tideorm::internal::{ConnectionTrait, Statement};
+    
+    let sql = r#"SELECT COUNT(*)::bigint as cnt FROM "_migrations" WHERE "version" LIKE '20260106_%'"#;
+    
+    let database = db();
+    let backend = database.__internal_connection().get_database_backend();
+    let stmt = Statement::from_string(backend, sql.to_string());
+    
+    match database.__internal_connection().query_one_raw(stmt).await {
+        Ok(Some(row)) => {
+            row.try_get::<i64>("", "cnt")
+                .or_else(|_| row.try_get_by_index::<i64>(0))
+                .unwrap_or(0)
+        }
+        Ok(None) => 0,
+        Err(_) => 0,
     }
 }
 
@@ -111,6 +139,26 @@ pub async fn get_applied_versions() -> Vec<String> {
     use tideorm::internal::{ConnectionTrait, Statement};
     
     let sql = r#"SELECT "version" FROM "_migrations" ORDER BY "version" ASC"#;
+    
+    let database = db();
+    let backend = database.__internal_connection().get_database_backend();
+    let stmt = Statement::from_string(backend, sql.to_string());
+    
+    match database.__internal_connection().query_all_raw(stmt).await {
+        Ok(rows) => {
+            rows.iter()
+                .filter_map(|row| row.try_get::<String>("", "version").ok())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Get applied test migration versions (those with version starting with "20260106_")
+pub async fn get_test_applied_versions() -> Vec<String> {
+    use tideorm::internal::{ConnectionTrait, Statement};
+    
+    let sql = r#"SELECT "version" FROM "_migrations" WHERE "version" LIKE '20260106_%' ORDER BY "version" ASC"#;
     
     let database = db();
     let backend = database.__internal_connection().get_database_backend();

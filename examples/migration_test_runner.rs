@@ -169,9 +169,9 @@ async fn main() -> tideorm::Result<()> {
     print_test_result("All migrations should show as applied", all_applied);
     if all_applied { passed += 1; } else { failed += 1; }
 
-    let migration_count = get_migration_count().await;
+    let migration_count = get_test_migration_count().await;
     let correct_db_count = migration_count == 5;
-    print_test_result("_migrations table should have 5 records", correct_db_count);
+    print_test_result("_migrations table should have 5 test records", correct_db_count);
     if correct_db_count { passed += 1; } else { failed += 1; }
 
     // =========================================================================
@@ -251,8 +251,8 @@ async fn main() -> tideorm::Result<()> {
     print_test_result("All test tables should be dropped after reset", all_dropped);
     if all_dropped { passed += 1; } else { failed += 1; }
 
-    let zero_migrations = get_migration_count().await == 0;
-    print_test_result("_migrations table should be empty after reset", zero_migrations);
+    let zero_migrations = get_test_migration_count().await == 0;
+    print_test_result("_migrations table should have 0 test records after reset", zero_migrations);
     if zero_migrations { passed += 1; } else { failed += 1; }
 
     // =========================================================================
@@ -279,7 +279,7 @@ async fn main() -> tideorm::Result<()> {
     // =========================================================================
     print_section("TEST 11: Migration Version Ordering");
 
-    let versions = get_applied_versions().await;
+    let versions = get_test_applied_versions().await;
     let correctly_ordered = versions == vec![
         "20260106_001",
         "20260106_002",
@@ -287,7 +287,7 @@ async fn main() -> tideorm::Result<()> {
         "20260106_004",
         "20260106_005",
     ];
-    print_test_result("Migrations should be ordered by version", correctly_ordered);
+    print_test_result("Test migrations should be ordered by version", correctly_ordered);
     if correctly_ordered { passed += 1; } else { failed += 1; }
 
     // =========================================================================

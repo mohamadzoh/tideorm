@@ -106,6 +106,7 @@ pub use crate::fulltext::{
 pub use crate::columns::{
     Column, ColumnCondition, ColumnOperator,
     ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn,
+    IntoColumnName,
 };
 
 // Derive macro

@@ -668,87 +668,120 @@ TideORM provides a fluent query builder with all common operations.
 
 ### WHERE Conditions
 
+**Type-Safe Approach (Recommended)**
+
+Use auto-generated typed columns for compile-time safety. The same `where_eq`, `where_gt`, etc. methods accept both strings and typed columns:
+
 ```rust
-// Equality
-User::query().where_eq("status", "active")
-User::query().where_not("role", "admin")
+// Every model gets a `columns` constant with typed column accessors
+// User::columns.id, User::columns.name, User::columns.active, etc.
 
-// Comparison
-User::query().where_gt("age", 18)     // >
-User::query().where_gte("age", 18)    // >=
-User::query().where_lt("age", 65)     // <
-User::query().where_lte("age", 65)    // <=
+// SAME method works with both strings AND typed columns:
+User::query().where_eq("active", true)                    // String-based (runtime checked)
+User::query().where_eq(User::columns.active, true)        // Typed column (compile-time checked)
 
-// Pattern matching
-User::query().where_like("name", "%John%")
-User::query().where_not_like("email", "%spam%")
-
-// IN / NOT IN
-User::query().where_in("role", vec!["admin", "moderator"])
-User::query().where_not_in("status", vec!["banned", "suspended"])
-
-// NULL checks
-User::query().where_null("deleted_at")
-User::query().where_not_null("email_verified_at")
-
-// Range
-User::query().where_between("age", 18, 65)
-
-// Combine conditions (AND)
+// Type-safe queries with compile-time column name validation
 User::query()
-    .where_eq("active", true)
-    .where_gt("age", 18)
-    .where_not_null("email")
+    .where_eq(User::columns.status, "active")
+    .where_gt(User::columns.age, 18)
+    .where_not_null(User::columns.email)
     .get()
     .await?;
 ```
 
+**All WHERE Methods Support Both Approaches**
+
+```rust
+// Equality - works with string OR typed column
+User::query().where_eq("status", "active")
+User::query().where_eq(User::columns.status, "active")
+User::query().where_not("role", "admin")
+User::query().where_not(User::columns.role, "admin")
+
+// Comparison - works with string OR typed column
+User::query().where_gt("age", 18)
+User::query().where_gt(User::columns.age, 18)
+User::query().where_gte("age", 18)
+User::query().where_lt("age", 65)
+User::query().where_lte("age", 65)
+
+// Pattern matching - works with string OR typed column
+User::query().where_like("name", "%John%")
+User::query().where_like(User::columns.name, "%John%")
+User::query().where_not_like("email", "%spam%")
+
+// IN / NOT IN - works with string OR typed column
+User::query().where_in("role", vec!["admin", "moderator"])
+User::query().where_in(User::columns.role, vec!["admin", "moderator"])
+User::query().where_not_in("status", vec!["banned", "suspended"])
+
+// NULL checks - works with string OR typed column
+User::query().where_null("deleted_at")
+User::query().where_null(User::columns.deleted_at)
+User::query().where_not_null("email_verified_at")
+
+// Range - works with string OR typed column
+User::query().where_between("age", 18, 65)
+User::query().where_between(User::columns.age, 18, 65)
+
+// Combine conditions (AND)
+User::query()
+    .where_eq(User::columns.active, true)
+    .where_gt(User::columns.age, 18)
+    .where_not_null(User::columns.email)
+    .get()
+    .await?;
+```
+
+> ⚠️ **Tip**: Use typed columns like `User::columns.name` for compile-time safety. Typos in column names will be caught by the compiler instead of at runtime.
+
 ### OR Conditions
 
-TideORM provides comprehensive OR support with two approaches: simple OR methods and the fluent OR API.
+TideORM provides comprehensive OR support with two approaches: simple OR methods and the fluent OR API. All OR methods support both string column names and typed columns.
 
 #### Simple OR Methods
 
 ```rust
 // Basic OR conditions (applied at query level)
+// Works with both strings and typed columns:
 User::query()
-    .or_where_eq("role", "admin")       // role = 'admin'
-    .or_where_eq("role", "moderator")   // OR role = 'moderator'
+    .or_where_eq("role", "admin")                    // String-based
+    .or_where_eq(User::columns.role, "moderator")   // Typed column
     .get()
     .await?;
 
 // OR with comparison operators
 Product::query()
-    .or_where_gt("price", 1000.0)       // price > 1000
-    .or_where_lt("price", 50.0)         // OR price < 50
+    .or_where_gt(Product::columns.price, 1000.0)   // price > 1000
+    .or_where_lt(Product::columns.price, 50.0)     // OR price < 50
     .get()
     .await?;  // Gets premium OR budget products
 
 // OR with pattern matching
 User::query()
-    .or_where_like("name", "John%")     // name LIKE 'John%'
-    .or_where_like("name", "Jane%")     // OR name LIKE 'Jane%'
+    .or_where_like(User::columns.name, "John%")    // name LIKE 'John%'
+    .or_where_like(User::columns.name, "Jane%")    // OR name LIKE 'Jane%'
     .get()
     .await?;
 
 // OR with IN clause
 Product::query()
-    .or_where_in("category", vec!["Electronics", "Books"])
-    .or_where_eq("featured", true)
+    .or_where_in(Product::columns.category, vec!["Electronics", "Books"])
+    .or_where_eq(Product::columns.featured, true)
     .get()
     .await?;
 
 // OR with NULL checks
 User::query()
-    .or_where_null("deleted_at")
-    .or_where_gt("reactivated_at", some_date)
+    .or_where_null(User::columns.deleted_at)
+    .or_where_gt(User::columns.reactivated_at, some_date)
     .get()
     .await?;
 
 // OR with BETWEEN
 Product::query()
-    .or_where_between("price", 10.0, 50.0)   // Budget range
-    .or_where_between("price", 500.0, 1000.0) // Premium range
+    .or_where_between(Product::columns.price, 10.0, 50.0)    // Budget range
+    .or_where_between(Product::columns.price, 500.0, 1000.0) // Premium range
     .get()
     .await?;
 ```
@@ -761,8 +794,8 @@ For complex queries with grouped OR conditions combined with AND, use the fluent
 // Basic OR group: (category = 'Electronics' OR category = 'Home')
 Product::query()
     .begin_or()
-        .or_where_eq("category", "Electronics")
-        .or_where_eq("category", "Home")
+        .or_where_eq(Product::columns.category, "Electronics")
+        .or_where_eq(Product::columns.category, "Home")
     .end_or()
     .get()
     .await?;
@@ -905,18 +938,18 @@ let segmented = Product::query()
 ### Ordering
 
 ```rust
-// Basic ordering
+// Basic ordering - works with both strings and typed columns
 User::query()
-    .order_by("created_at", Order::Desc)
-    .order_by("name", Order::Asc)
+    .order_by("created_at", Order::Desc)           // String-based
+    .order_by(User::columns.name, Order::Asc)      // Typed column
     .get()
     .await?;
 
-// Convenience methods
-User::query().order_asc("name")        // ORDER BY name ASC
-User::query().order_desc("created_at") // ORDER BY created_at DESC
-User::query().latest()                 // ORDER BY created_at DESC
-User::query().oldest()                 // ORDER BY created_at ASC
+// Convenience methods - also work with typed columns
+User::query().order_asc(User::columns.name)        // ORDER BY name ASC
+User::query().order_desc(User::columns.created_at) // ORDER BY created_at DESC
+User::query().latest()                              // ORDER BY created_at DESC
+User::query().oldest()                              // ORDER BY created_at ASC
 ```
 
 ### Pagination
@@ -2458,40 +2491,115 @@ TideORM includes all major features from SeaORM 2.0:
 
 Compile-time type safety for column operations. The compiler catches type mismatches before runtime.
 
-```rust
-use tideorm::columns::{Column, ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn};
+**Auto-Generated Columns**
 
-// Define typed columns for your model
-mod user_columns {
-    use tideorm::columns::Column;
-    
-    pub const ID: Column<i64> = Column::new("id");
-    pub const NAME: Column<String> = Column::new("name");
-    pub const AGE: Column<Option<i32>> = Column::new("age");
-    pub const ACTIVE: Column<bool> = Column::new("active");
+When you define a model with `#[tideorm::model]`, typed columns are automatically generated as an attribute on the model:
+
+```rust
+#[tideorm::model]
+#[tide(table = "users")]
+pub struct User {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub age: Option<i32>,
+    pub active: bool,
 }
 
-use user_columns::*;
+// A `UserColumns` struct is automatically generated with typed column accessors.
+// Access columns via `User::columns`:
+// User::columns.id, User::columns.name, User::columns.age, User::columns.active
+```
 
-// Type-safe queries - compiler catches errors!
+**Unified Type-Safe Queries**
+
+All query methods accept BOTH string column names AND typed columns. Use `User::columns.field_name` for compile-time safety:
+
+```rust
+// SAME method works with both strings AND typed columns:
+User::query().where_eq("name", "Alice")                    // String-based (runtime checked)
+User::query().where_eq(User::columns.name, "Alice")        // Typed column (compile-time checked)
+
+// Type-safe query - compiler catches typos!
 let users = User::query()
-    .where_col(NAME.eq("Alice"))           // ✓ String == &str
-    .where_col(NAME.contains("test"))      // ✓ LIKE '%test%'
-    .where_col(AGE.gt(18))                 // ✓ Option<i32> > i32
-    .where_col(AGE.is_null())              // ✓ Nullable check
-    .where_col(ACTIVE.eq(true))            // ✓ bool == bool
-    // .where_col(NAME.eq(123))            // ✗ COMPILE ERROR!
-    // .where_col(AGE.like("%a%"))         // ✗ COMPILE ERROR!
+    .where_eq(User::columns.name, "Alice")     // ✓ Type-safe
+    .where_gt(User::columns.age, 18)           // ✓ Type-safe
+    .where_eq(User::columns.active, true)      // ✓ Type-safe
     .get()
     .await?;
 
-// Available operations by type:
-// - ColumnEq: eq(), ne()
-// - ColumnOrd: gt(), gte(), lt(), lte(), between()
-// - ColumnLike: like(), not_like(), contains(), starts_with(), ends_with()
-// - ColumnNullable: is_null(), is_not_null()
-// - ColumnIn: is_in(), not_in()
+// All query methods support typed columns:
+User::query().where_eq(User::columns.name, "Alice")              // =
+User::query().where_not(User::columns.role, "admin")             // <>
+User::query().where_gt(User::columns.age, 18)                    // >
+User::query().where_gte(User::columns.age, 18)                   // >=
+User::query().where_lt(User::columns.age, 65)                    // <
+User::query().where_lte(User::columns.age, 65)                   // <=
+User::query().where_like(User::columns.email, "%@test.com")      // LIKE
+User::query().where_not_like(User::columns.email, "%spam%")      // NOT LIKE
+User::query().where_in(User::columns.role, vec!["admin", "mod"]) // IN
+User::query().where_not_in(User::columns.status, vec!["banned"]) // NOT IN
+User::query().where_null(User::columns.deleted_at)               // IS NULL
+User::query().where_not_null(User::columns.email)                // IS NOT NULL
+User::query().where_between(User::columns.age, 18, 65)           // BETWEEN
+
+// Ordering and grouping also support typed columns:
+User::query()
+    .order_by(User::columns.created_at, Order::Desc)
+    .order_asc(User::columns.name)
+    .group_by(User::columns.role)
+    .get()
+    .await?;
+
+// Aggregations with typed columns:
+let total = Order::query().sum(Order::columns.amount).await?;
+let average = Product::query().avg(Product::columns.price).await?;
+let max_age = User::query().max(User::columns.age).await?;
+
+// OR conditions with typed columns:
+User::query()
+    .or_where_eq(User::columns.role, "admin")
+    .or_where_eq(User::columns.role, "moderator")
+    .get()
+    .await?;
 ```
+
+**Why Use Typed Columns?**
+
+- **Compile-time safety**: Wrong column names won't compile
+- **IDE autocomplete**: `User::columns.` shows all available columns with their types
+- **Refactoring-friendly**: Rename a field and the compiler tells you everywhere to update
+- **No conflicts**: Columns are accessed via `.columns`, won't override other struct attributes
+- **Backward compatible**: String column names still work for quick prototyping
+
+**Manual Column Definitions (Advanced)**
+
+If you need custom behavior or computed columns, you can define columns manually:
+
+```rust
+use tideorm::columns::Column;
+
+// Custom columns that map to different DB column names
+pub const FULL_NAME: Column<String> = Column::new("full_name");
+pub const COMPUTED_FIELD: Column<i32> = Column::new("computed_field");
+
+// Use in queries
+User::query().where_eq(FULL_NAME, "John Doe").get().await?;
+```
+
+**Typed Column Support Summary:**
+
+All these methods accept both `"column_name"` (string) and `Model::columns.field` (typed):
+
+| Category | Methods |
+|----------|---------|
+| **WHERE** | `where_eq`, `where_not`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_like`, `where_not_like`, `where_in`, `where_not_in`, `where_null`, `where_not_null`, `where_between` |
+| **OR WHERE** | `or_where_eq`, `or_where_not`, `or_where_gt`, `or_where_gte`, `or_where_lt`, `or_where_lte`, `or_where_like`, `or_where_in`, `or_where_not_in`, `or_where_null`, `or_where_not_null`, `or_where_between` |
+| **ORDER BY** | `order_by`, `order_asc`, `order_desc` |
+| **GROUP BY** | `group_by` |
+| **Aggregations** | `sum`, `avg`, `min`, `max`, `count_distinct` |
+| **HAVING** | `having_sum_gt`, `having_avg_gt` |
+| **Window** | `partition_by`, `order_by` (in WindowFunctionBuilder) |
 
 ### Self-Referencing Relations
 

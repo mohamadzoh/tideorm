@@ -49,6 +49,39 @@ use std::marker::PhantomData;
 // TYPED COLUMN
 // =============================================================================
 
+/// Trait for types that can be used as column names in queries.
+/// 
+/// This allows both string literals and typed `Column<T>` to be used
+/// interchangeably in query methods like `where_eq`.
+pub trait IntoColumnName {
+    /// Get the column name as a string
+    fn column_name(&self) -> &str;
+}
+
+impl IntoColumnName for &str {
+    fn column_name(&self) -> &str {
+        self
+    }
+}
+
+impl IntoColumnName for String {
+    fn column_name(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl IntoColumnName for &String {
+    fn column_name(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<T> IntoColumnName for Column<T> {
+    fn column_name(&self) -> &str {
+        self.name
+    }
+}
+
 /// A strongly-typed column reference
 ///
 /// This provides compile-time type safety for column operations.

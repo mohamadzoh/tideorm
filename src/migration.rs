@@ -1790,12 +1790,19 @@ impl Migrator {
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
+        // Get the list of registered migration versions for filtering
+        let registered_versions: std::collections::HashSet<_> = 
+            self.migrations.iter().map(|m| m.version().to_string()).collect();
+
         let mut versions = Vec::new();
         for row in results {
             let version: String = row
                 .try_get("", "version")
                 .map_err(|e| Error::query(e.to_string()))?;
-            versions.push(version);
+            // Only include versions that are registered in this migrator
+            if registered_versions.contains(&version) {
+                versions.push(version);
+            }
         }
 
         Ok(versions)

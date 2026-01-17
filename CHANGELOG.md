@@ -5,6 +5,42 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-01-17
+
+### Added
+
+#### Strongly-Typed Column Support
+- **Auto-generated typed columns**: `#[tideorm::model]` now generates a `{Model}Columns` struct with typed column accessors
+- **Access columns via model attribute**: `User::columns.name`, `User::columns.age`, etc.
+- **Unified query methods**: All query methods now accept both strings AND typed columns:
+  - WHERE clauses: `where_eq`, `where_not`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_like`, `where_not_like`, `where_in`, `where_not_in`, `where_null`, `where_not_null`, `where_between`
+  - OR conditions: `or_where_eq`, `or_where_not`, `or_where_gt`, `or_where_gte`, `or_where_lt`, `or_where_lte`, `or_where_like`, `or_where_in`, `or_where_not_in`, `or_where_null`, `or_where_not_null`, `or_where_between`
+  - AND within OR branches: `and_where_eq`, `and_where_not`, `and_where_gt`, `and_where_gte`, `and_where_lt`, `and_where_lte`, `and_where_like`, `and_where_in`, `and_where_not_in`, `and_where_null`, `and_where_not_null`, `and_where_between`
+  - ORDER BY: `order_by`, `order_asc`, `order_desc`
+  - GROUP BY: `group_by`
+  - Aggregations: `sum`, `avg`, `min`, `max`, `count_distinct`
+  - HAVING: `having_sum_gt`, `having_avg_gt`
+  - Window functions: `partition_by`, `order_by` (in `WindowFunctionBuilder`)
+- **IDE autocomplete support**: Type `User::columns.` to see all available columns with their types
+- **Compile-time type safety**: Wrong column names caught at compile time when using typed columns
+- **`IntoColumnName` trait**: New trait allows any type implementing it to be used as a column name
+
+### Example
+```rust
+// All of these work with the SAME methods:
+User::query().where_eq("active", true)                      // String-based (runtime checked)
+User::query().where_eq(User::columns.active, true)          // Typed column (compile-time checked)
+
+// Works for all query methods:
+User::query()
+    .where_eq(User::columns.status, "active")
+    .where_gt(User::columns.age, 18)
+    .order_by(User::columns.created_at, Order::Desc)
+    .group_by(User::columns.role)
+    .get()
+    .await?;
+```
+
 ## [0.4.4] - 2026-01-16
 
 ### Added

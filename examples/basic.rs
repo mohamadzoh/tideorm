@@ -78,12 +78,22 @@ async fn main() -> tideorm::Result<()> {
     let all_users = User::all().await?;
     println!("Total users: {}", all_users.len());
     
+    // Using typed columns (compile-time checked, recommended)
     let active_users = User::query()
-        .where_eq("active", true)
+        .where_eq(User::columns.active, true)
         .order_by("name", Order::Asc)
         .limit(10)
         .get()
         .await?;
+    
+    // Using typed columns with name filter
+    let johns = User::query()
+        .where_like(User::columns.name, "John%")
+        .where_eq(User::columns.active, true)
+        .get()
+        .await?;
+    
+    println!("Users named John: {}", johns.len());
     
     println!("Active users: {}", active_users.len());
     
@@ -94,7 +104,7 @@ async fn main() -> tideorm::Result<()> {
     }
     
     let deleted = User::query()
-        .where_eq("active", false)
+        .where_eq(User::columns.active, false)
         .delete()
         .await?;
     
@@ -114,19 +124,32 @@ pub struct User {{
     pub id: i64,
     pub email: String,
     pub name: String,
+    pub active: bool,
 }}
 
 // Initialize database (once at startup):
 Database::init("postgres://localhost/mydb").await?;
 
 // Create:
-let user = User {{ id: 0, email: "test@example.com".into(), name: "Test".into() }};
+let user = User {{ id: 0, email: "test@example.com".into(), name: "Test".into(), active: true }};
 let user = user.save().await?;
 
 // Read:
 let users = User::all().await?;
 let user = User::find(1).await?;
+
+// String-based query (runtime checked):
 let users = User::query().where_eq("active", true).get().await?;
+
+// Typed column query (compile-time checked - RECOMMENDED):
+// Same method, just pass typed column instead of string!
+let users = User::query().where_eq(User::columns.active, true).get().await?;
+let users = User::query().where_like(User::columns.name, "John%").get().await?;
+let users = User::query()
+    .where_eq(User::columns.active, true)
+    .where_gt(User::columns.id, 10)
+    .get()
+    .await?;
 
 // Update:
 user.name = "New Name".into();

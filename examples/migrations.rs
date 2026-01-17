@@ -417,27 +417,6 @@ async fn main() -> tideorm::Result<()> {
     println!();
 
     println!(" Migration example completed!");
-    println!("\n📖 Migration Registration Options:");
-    println!("-----------------------------------");
-    println!("// Option 1: Individual registration");
-    println!("TideConfig::init()");
-    println!("    .database(url)");
-    println!("    .migration(CreateUsersTable)");
-    println!("    .migration(CreatePostsTable)");
-    println!("    .run_migrations(true)");
-    println!("    .connect().await?;");
-    println!();
-    println!("// Option 2: Tuple registration (requires #[derive(Default)])");
-    println!("TideConfig::init()");
-    println!("    .database(url)");
-    println!("    .migrations::<(CreateUsersTable, CreatePostsTable)>()");
-    println!("    .run_migrations(true)");
-    println!("    .connect().await?;");
-    println!();
-    println!("\nTry these commands to explore:");
-    println!("  - psql migration_demo -c '\\dt' -- List all tables");
-    println!("  - psql migration_demo -c '\\d users' -- Describe users table");
-    println!("  - psql migration_demo -c 'SELECT * FROM _migrations' -- View migration history");
 
     Ok(())
 }

@@ -1214,10 +1214,7 @@ async fn main() -> tideorm::Result<()> {
     println!("    JOIN Operations (INNER, LEFT, RIGHT)");
     println!("    Aggregations (SUM, AVG, MIN, MAX, COUNT DISTINCT)");
     println!("    GROUP BY / HAVING");
-    println!("    Schema Generation");
-    
-    println!("\n📝 Next: Use this as reference for MySQL/SQLite support!");
-    
+    println!("    Schema Generation");    
     Ok(())
 }
 

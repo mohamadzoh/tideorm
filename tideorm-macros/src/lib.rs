@@ -1000,6 +1000,34 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     let derive_field_names: Vec<_> = all_fields_for_derives.iter().map(|(i, _)| i.clone()).collect();
     let derive_field_names_str: Vec<_> = derive_field_names.iter().map(|i| i.to_string()).collect();
     
+    // Generate typed column struct and instance for User::columns.name access
+    // This allows usage like: User::columns.name.eq("Alice")
+    let columns_struct_name = format_ident!("{}Columns", struct_name);
+    
+    // Generate struct fields for the Columns struct
+    let columns_struct_fields: Vec<_> = db_fields.iter()
+        .filter_map(|f| {
+            let ident = f.ident.as_ref()?;
+            let ty = &f.ty;
+            Some(quote! {
+                pub #ident: ::tideorm::columns::Column<#ty>
+            })
+        })
+        .collect();
+    
+    // Generate field initializers for the columns constant
+    let columns_field_inits: Vec<_> = db_fields.iter()
+        .filter_map(|f| {
+            let ident = f.ident.as_ref()?;
+            let column_name = f.column.clone().unwrap_or_else(|| {
+                ident.to_string().to_case(Case::Snake)
+            });
+            Some(quote! {
+                #ident: ::tideorm::columns::Column::new(#column_name)
+            })
+        })
+        .collect();
+    
     let base_impl = quote! {
         // Internal SeaORM entity
         #[doc(hidden)]
@@ -1614,8 +1642,39 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         quote! {}
     };
     
+    // Generate the Columns struct and constant for this model
+    // This allows usage like: User::columns.name.eq("Alice")
+    let columns_impl = quote! {
+        /// Auto-generated struct containing typed column definitions for type-safe queries.
+        #[allow(non_camel_case_types)]
+        #[derive(Clone)]
+        pub struct #columns_struct_name {
+            #(#columns_struct_fields),*
+        }
+        
+        impl #struct_name {
+            /// Typed column definitions for type-safe queries.
+            /// 
+            /// # Example
+            /// ```ignore
+            /// // Type-safe column access
+            /// User::query()
+            ///     .where_col(User::columns.name.eq("Alice"))
+            ///     .where_col(User::columns.age.gt(18))
+            ///     .get()
+            ///     .await?;
+            /// ```
+            #[allow(non_upper_case_globals)]
+            pub const columns: #columns_struct_name = #columns_struct_name {
+                #(#columns_field_inits),*
+            };
+        }
+    };
+    
     quote! {
         #base_output
+        
+        #columns_impl
         
         #default_impl
         #debug_impl
