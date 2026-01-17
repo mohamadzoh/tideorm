@@ -15,6 +15,7 @@ use std::hint::black_box;
 type TokenEncoder = fn(i64, &str) -> Result<String, &'static str>;
 type TokenDecoder = fn(&str, &str) -> Option<i64>;
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct TokenConfig {
     encryption_key: String,
