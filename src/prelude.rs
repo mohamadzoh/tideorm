@@ -32,7 +32,7 @@ pub use crate::query::{
 };
 pub use crate::soft_delete::SoftDelete;
 pub use crate::callbacks::{Callbacks, CallbackRunner};
-pub use crate::config::{TideConfig, Config, PoolConfig, DatabaseType, RegisterMigrations, RegisterSeeds};
+pub use crate::config::{TideConfig, Config, PoolConfig, DatabaseType, RegisterMigrations, RegisterSeeds, FileUrlGenerator};
 pub use crate::schema::{SchemaGenerator, TableSchema, ColumnSchema, TableSchemaBuilder, SchemaWriter};
 pub use crate::sync::{SyncModel, RegisterModels};
 

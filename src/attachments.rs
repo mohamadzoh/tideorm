@@ -145,6 +145,54 @@ impl FileAttachment {
         self
     }
     
+    /// Get the full URL for this file attachment using the global URL generator
+    /// 
+    /// This uses the global file URL generator configured via `TideConfig`.
+    /// For model-specific URL generation, use the model's `generate_file_url` method.
+    /// 
+    /// # Arguments
+    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// let attachment = FileAttachment::new("uploads/2024/image.jpg");
+    /// let url = attachment.url("thumbnail");
+    /// // Returns: "https://cdn.example.com/uploads/2024/image.jpg"
+    /// ```
+    #[inline]
+    pub fn url(&self, field_name: &str) -> String {
+        crate::config::Config::generate_file_url(field_name, self)
+    }
+    
+    /// Get the full URL for this file attachment using a specific URL generator
+    /// 
+    /// # Arguments
+    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
+    /// * `generator` - Custom URL generator function
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// let attachment = FileAttachment::with_metadata(
+    ///     "uploads/2024/image.jpg",
+    ///     None,
+    ///     Some(1024),
+    ///     Some("image/jpeg"),
+    /// );
+    /// let url = attachment.url_with_generator("thumbnail", |field_name, file| {
+    ///     // Generate different URLs based on field name and mime type
+    ///     match field_name {
+    ///         "thumbnail" => format!("https://images-cdn.example.com/thumb/{}", file.key),
+    ///         _ => format!("https://cdn.example.com/{}", file.key),
+    ///     }
+    /// });
+    /// ```
+    #[inline]
+    pub fn url_with_generator(&self, field_name: &str, generator: crate::config::FileUrlGenerator) -> String {
+        generator(field_name, self)
+    }
+    
     /// Convert to JSON value
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::json!({}))

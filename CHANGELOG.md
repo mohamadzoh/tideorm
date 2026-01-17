@@ -5,6 +5,28 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-01-16
+
+### Added
+
+#### File Attachment URL Generation
+- **Field name context**: URL generators now receive the field name (e.g., "thumbnail", "avatar") for context-aware routing
+- **Full metadata access**: URL generators also receive full `FileAttachment` struct with all metadata
+- **Global base URL**: Configure via `TideConfig::file_base_url("https://cdn.example.com")` 
+- **Custom URL generators**: Use `TideConfig::file_url_generator(fn(field_name, file) -> String)` for smart URL routing
+- **Model-specific overrides**: Override `file_url_generator()` in `ModelMeta` for per-model customization
+- **Automatic URL in JSON**: `to_json()` now includes `url` field in file attachments
+- **Manual URL generation**: `Config::generate_file_url()`, `Model::generate_file_url()`, `FileAttachment::url()`
+- **FileUrlGenerator type**: Exported in prelude for custom generator functions
+- New comprehensive example: `examples/attachment_url_demo.rs` with 24 test cases
+- New benchmarks: `benches/attachment_url_benchmarks.rs` with 39 benchmark tests
+
+### Changed
+- **BREAKING**: `FileUrlGenerator` signature is now `fn(field_name: &str, file: &FileAttachment) -> String`
+  - Migration: Change `|file| format!("...{}", file.key)` to `|_field_name, file| format!("...{}", file.key)`
+  - Or use field_name: `|field_name, file| match field_name { "thumbnail" => ..., _ => ... }`
+  - Benefit: Route URLs based on field type (thumbnails to image CDN, videos to streaming, etc.)
+
 ## [0.4.3] - 2026-01-14
 
 ### Added

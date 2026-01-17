@@ -189,6 +189,53 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         !Self::files_relations().is_empty()
     }
     
+    /// Returns the file URL generator for this model
+    /// 
+    /// Override this method to customize URL generation for a specific model.
+    /// By default, uses the global file URL generator from TideConfig.
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// impl ModelMeta for Product {
+    ///     // ... other implementations ...
+    ///     
+    ///     fn file_url_generator() -> crate::config::FileUrlGenerator {
+    ///         |field_name, file| {
+    ///             // Use field name and file metadata for URL generation
+    ///             match field_name {
+    ///                 "thumbnail" => format!("https://images-cdn.example.com/thumb/{}", file.key),
+    ///                 "avatar" => format!("https://avatars.example.com/{}", file.key),
+    ///                 _ => format!("https://cdn.example.com/{}", file.key),
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    fn file_url_generator() -> crate::config::FileUrlGenerator {
+        crate::config::Config::get_file_url_generator()
+    }
+    
+    /// Generate a URL for a file attachment using this model's URL generator
+    /// 
+    /// This is a convenience method that uses the model's `file_url_generator()`.
+    /// 
+    /// # Arguments
+    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
+    /// * `file` - The file attachment with metadata
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// let file = FileAttachment::new("products/123/image.jpg");
+    /// let url = Product::generate_file_url("thumbnail", &file);
+    /// // Returns: "https://images-cdn.example.com/thumb/products/123/image.jpg"
+    /// ```
+    #[inline]
+    fn generate_file_url(field_name: &str, file: &crate::attachments::FileAttachment) -> String {
+        Self::file_url_generator()(field_name, file)
+    }
+    
     /// Check if model supports soft deletes
     fn soft_delete_enabled() -> bool {
         false
@@ -767,12 +814,13 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         
         // Flatten file attachments to root level
         if Self::has_file_attachments() {
+            let url_generator = Self::file_url_generator();
             if let Some(files) = json.remove("files") {
                 if let Some(files_obj) = files.as_object() {
                     for relation in &file_relations {
                         if let Some(file_data) = files_obj.get(*relation) {
-                            // Process file data to remove hidden attributes
-                            let processed = Self::process_file_for_json(file_data, &hidden);
+                            // Process file data to remove hidden attributes and add URLs
+                            let processed = Self::process_file_for_json(*relation, file_data, &hidden, url_generator);
                             json.insert(relation.to_string(), processed);
                         }
                     }
@@ -783,10 +831,23 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         serde_json::Value::Object(json)
     }
     
-    /// Process file data for JSON output, removing hidden attributes
+    /// Process file data for JSON output, removing hidden attributes and adding URLs
+    /// 
+    /// This method:
+    /// - Removes hidden attributes from file data
+    /// - Adds a `url` field with the full URL generated from the file attachment
+    /// 
+    /// # Arguments
+    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
+    /// * `file_data` - The JSON value containing file data
+    /// * `hidden_attrs` - Attributes to exclude from output
+    /// * `url_generator` - Function to generate URLs
+    #[inline]
     fn process_file_for_json(
+        field_name: &str,
         file_data: &serde_json::Value,
         hidden_attrs: &[&str],
+        url_generator: crate::config::FileUrlGenerator,
     ) -> serde_json::Value {
         match file_data {
             serde_json::Value::Object(obj) => {
@@ -796,12 +857,17 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                         cleaned.insert(key.clone(), value.clone());
                     }
                 }
+                // Add URL field by deserializing the file attachment
+                if let Ok(file_attachment) = serde_json::from_value::<crate::attachments::FileAttachment>(serde_json::Value::Object(obj.clone())) {
+                    let url = url_generator(field_name, &file_attachment);
+                    cleaned.insert("url".to_string(), serde_json::Value::String(url));
+                }
                 serde_json::Value::Object(cleaned)
             }
             serde_json::Value::Array(arr) => {
                 let cleaned: Vec<serde_json::Value> = arr
                     .iter()
-                    .map(|item| Self::process_file_for_json(item, hidden_attrs))
+                    .map(|item| Self::process_file_for_json(field_name, item, hidden_attrs, url_generator))
                     .collect();
                 serde_json::Value::Array(cleaned)
             }

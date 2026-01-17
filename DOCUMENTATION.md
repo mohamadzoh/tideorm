@@ -42,6 +42,7 @@ Complete documentation for TideORM - a developer-friendly ORM for Rust.
 - [Callbacks / Hooks](#callbacks--hooks)
 - [Batch Operations](#batch-operations)
 - [File Attachments](#file-attachments)
+  - [File URL Generation](#file-url-generation)
 - [Translations (i18n)](#translations-i18n)
 - [Model Validation](#model-validation)
 - [Full-Text Search](#full-text-search)
@@ -1613,6 +1614,162 @@ Attachments are stored in JSONB with this structure:
 }
 ```
 
+### File URL Generation
+
+TideORM can automatically generate full URLs for file attachments. This is useful when you store file keys/paths in the database but need to serve them from a CDN or storage service.
+
+#### Global Base URL
+
+Configure a base URL that will be prepended to all file keys:
+
+```rust
+TideConfig::init()
+    .database("postgres://localhost/mydb")
+    .file_base_url("https://cdn.example.com/uploads")
+    .connect()
+    .await?;
+```
+
+Now when you call `to_json()`, file attachments will include a `url` field:
+
+```json
+{
+  "thumbnail": {
+    "key": "products/123/thumb.jpg",
+    "filename": "thumb.jpg",
+    "url": "https://cdn.example.com/uploads/products/123/thumb.jpg"
+  }
+}
+```
+
+#### Custom URL Generator
+
+For more complex URL generation (signed URLs, image transformations, etc.), use a custom generator that receives **both the field name and the full `FileAttachment`**:
+
+```rust
+use tideorm::attachments::FileAttachment;
+
+// Define a custom URL generator function with field name and full metadata access
+fn smart_url_generator(field_name: &str, file: &FileAttachment) -> String {
+    // Route based on field name first
+    match field_name {
+        "thumbnail" => {
+            let quality = if file.size.unwrap_or(0) > 500_000 { "60" } else { "auto" };
+            return format!("https://thumbs.example.com/q_{}/{}", quality, file.key);
+        }
+        "avatar" => {
+            return format!("https://avatars.example.com/w_200,h_200/{}", file.key);
+        }
+        _ => {}
+    }
+    
+    // Fall back to mime_type routing
+    match file.mime_type.as_deref() {
+        Some(m) if m.starts_with("video/") => {
+            format!("https://stream.example.com/{}", file.key)
+        }
+        Some(m) if m.starts_with("image/") => {
+            let quality = if file.size.unwrap_or(0) > 1_000_000 { "80" } else { "auto" };
+            format!("https://images.example.com/q_{}/{}", quality, file.key)
+        }
+        _ => format!("https://cdn.example.com/{}", file.key),
+    }
+}
+
+// Use it globally
+TideConfig::init()
+    .database("postgres://localhost/mydb")
+    .file_url_generator(smart_url_generator)
+    .connect()
+    .await?;
+```
+
+**Parameters available to URL generators:**
+- `field_name` - The attachment field name (e.g., "thumbnail", "avatar", "documents")
+- `file` - The full `FileAttachment` struct with:
+  - `key` - Storage key/path
+  - `filename` - Extracted filename
+  - `created_at` - Creation timestamp
+  - `original_filename` - Original upload name (if available)
+  - `size` - File size in bytes (if available)
+  - `mime_type` - MIME type (if available)
+  - `metadata` - Custom HashMap for additional data
+
+#### Model-Specific URL Generator
+
+Override the URL generator for specific models:
+
+```rust
+#[tideorm::model]
+#[tide(table = "products")]
+#[tide(has_one_file = "thumbnail")]
+pub struct Product {
+    #[tide(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub files: Option<Json>,
+}
+
+impl ModelMeta for Product {
+    // ... other required methods ...
+    
+    fn file_url_generator() -> FileUrlGenerator {
+        |field_name, file| {
+            match field_name {
+                "thumbnail" => format!("https://products-cdn.example.com/thumb/{}", file.key),
+                "gallery" => format!("https://products-cdn.example.com/gallery/{}", file.key),
+                _ => format!("https://products-cdn.example.com/assets/{}", file.key),
+            }
+        }
+    }
+}
+```
+
+#### Manual URL Generation
+
+Generate URLs programmatically:
+
+```rust
+use tideorm::prelude::*;
+use tideorm::attachments::FileAttachment;
+
+// Create a FileAttachment for URL generation
+let file = FileAttachment::new("uploads/image.jpg");
+let url = Config::generate_file_url("thumbnail", &file);
+
+// With metadata for smarter URL generation
+let file = FileAttachment::with_metadata(
+    "uploads/video.mp4",
+    Some("My Video.mp4"),
+    Some(50_000_000),
+    Some("video/mp4"),
+);
+let url = Config::generate_file_url("video", &file);
+
+// Using model-specific generator
+let url = Product::generate_file_url("thumbnail", &file);
+
+// Using FileAttachment method directly
+let attachment = product.get_file("thumbnail")?;
+if let Some(thumb) = attachment {
+    let url = thumb.url("thumbnail");  // Uses global generator with field name
+    
+    // Or with custom generator
+    let url = thumb.url_with_generator("thumbnail", |field_name, file| {
+        format!("https://custom-cdn.com/{}/{}", field_name, file.key)
+    });
+}
+```
+
+#### URL Generator Priority
+
+URL generators are resolved in this order:
+
+1. **Model-specific generator** - If the model overrides `file_url_generator()`
+2. **Global custom generator** - If set via `TideConfig::file_url_generator()`
+3. **Global base URL** - If set via `TideConfig::file_base_url()`
+4. **Key as-is** - If no configuration, returns the key unchanged
+
 ---
 
 ## Translations (i18n)
@@ -2505,9 +2662,11 @@ See the [examples](examples/) directory for complete working examples:
 | [caching_demo.rs](examples/caching_demo.rs) | Query caching |
 | [fulltext_demo.rs](examples/fulltext_demo.rs) | Full-text search |
 | [attachments_translations_demo.rs](examples/attachments_translations_demo.rs) | Files & i18n |
+| [attachment_url_demo.rs](examples/attachment_url_demo.rs) | File URL generation |
 | [schema_file_demo.rs](examples/schema_file_demo.rs) | Schema generation |
 | [migrations.rs](examples/migrations.rs) | Database migrations |
 | [seaorm2_features_demo.rs](examples/seaorm2_features_demo.rs) | SeaORM 2.0 features |
+| [where_and_or_demo.rs](examples/where_and_or_demo.rs) | WHERE and OR conditions |
 
 Run an example:
 

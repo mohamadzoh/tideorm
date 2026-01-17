@@ -37,6 +37,22 @@ static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 /// Global schema file path (set via TideConfig::schema_file())
 static SCHEMA_FILE_PATH: OnceLock<String> = OnceLock::new();
 
+/// File URL generator function type
+/// 
+/// This function takes a field name and file attachment with full metadata and returns the full URL.
+/// It can be customized globally via `TideConfig::file_url_generator()` or
+/// per-model by overriding `ModelMeta::file_url_generator()`.
+/// 
+/// The generator receives:
+/// - `field_name`: The name of the attachment field (e.g., "thumbnail", "avatar", "documents")
+/// - `file`: The full `FileAttachment` struct with all metadata (key, filename, size, mime_type, etc.)
+/// 
+/// This allows URL generation based on both the field context and file metadata.
+pub type FileUrlGenerator = fn(field_name: &str, file: &crate::attachments::FileAttachment) -> String;
+
+/// Global file URL generator
+static GLOBAL_FILE_URL_GENERATOR: OnceLock<FileUrlGenerator> = OnceLock::new();
+
 /// Global pool configuration (set during connect)
 static GLOBAL_POOL_CONFIG: OnceLock<PoolConfig> = OnceLock::new();
 
@@ -229,6 +245,9 @@ pub struct Config {
     
     /// Whether to enable soft delete by default
     pub soft_delete_by_default: bool,
+    
+    /// Base URL for file attachments (e.g., "https://cdn.example.com/uploads")
+    pub file_base_url: Option<String>,
 }
 
 impl Default for Config {
@@ -238,6 +257,7 @@ impl Default for Config {
             fallback_language: "en".to_string(),
             hidden_attributes: vec![],
             soft_delete_by_default: false,
+            file_base_url: None,
         }
     }
 }
@@ -274,6 +294,79 @@ impl Config {
     /// Check if soft delete is enabled by default
     pub fn is_soft_delete_default() -> bool {
         Self::global().soft_delete_by_default
+    }
+    
+    /// Get the file base URL from global config
+    pub fn get_file_base_url() -> Option<String> {
+        Self::global().file_base_url
+    }
+    
+    /// Get the global file URL generator function
+    /// 
+    /// Returns the custom generator if set, otherwise returns the default generator
+    /// which uses `file_base_url` to construct URLs.
+    pub fn get_file_url_generator() -> FileUrlGenerator {
+        GLOBAL_FILE_URL_GENERATOR
+            .get()
+            .copied()
+            .unwrap_or(Self::default_file_url_generator)
+    }
+    
+    /// Set a custom global file URL generator
+    /// 
+    /// This allows full customization of how file URLs are generated.
+    /// The function receives the field name and full `FileAttachment` with all metadata.
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// Config::set_file_url_generator(|field_name, file| {
+    ///     // Use field name and file metadata for advanced URL generation
+    ///     match field_name {
+    ///         "thumbnail" => format!("https://images-cdn.example.com/thumb/{}", file.key),
+    ///         "avatar" => format!("https://avatars.example.com/{}", file.key),
+    ///         _ => format!("https://cdn.example.com/{}", file.key),
+    ///     }
+    /// });
+    /// ```
+    pub fn set_file_url_generator(generator: FileUrlGenerator) {
+        let _ = GLOBAL_FILE_URL_GENERATOR.set(generator);
+    }
+    
+    /// Default file URL generator
+    /// 
+    /// Uses `file_base_url` if set, otherwise returns the key as-is.
+    /// The field_name parameter is available but not used in the default implementation.
+    #[inline]
+    pub fn default_file_url_generator(_field_name: &str, file: &crate::attachments::FileAttachment) -> String {
+        if let Some(base_url) = Self::get_file_base_url() {
+            let base = base_url.trim_end_matches('/');
+            let key = file.key.trim_start_matches('/');
+            format!("{}/{}", base, key)
+        } else {
+            file.key.clone()
+        }
+    }
+    
+    /// Generate a file URL using the global generator
+    /// 
+    /// This is a convenience method to generate URLs without needing
+    /// to manually call the generator function.
+    /// 
+    /// # Arguments
+    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
+    /// * `file` - The file attachment with metadata
+    /// 
+    /// # Example
+    /// 
+    /// ```rust,ignore
+    /// let file = FileAttachment::new("uploads/2024/image.jpg");
+    /// let url = Config::generate_file_url("thumbnail", &file);
+    /// // Returns: "https://cdn.example.com/uploads/2024/image.jpg"
+    /// ```
+    #[inline]
+    pub fn generate_file_url(field_name: &str, file: &crate::attachments::FileAttachment) -> String {
+        Self::get_file_url_generator()(field_name, file)
     }
 }
 
@@ -847,6 +940,52 @@ impl TideConfig {
     /// Enable soft delete by default for all models
     pub fn soft_delete_by_default(mut self, enabled: bool) -> Self {
         self.config.soft_delete_by_default = enabled;
+        self
+    }
+    
+    /// Set the base URL for file attachments
+    ///
+    /// This URL will be prepended to file keys when generating full URLs
+    /// in JSON output. Use this for CDN URLs or storage service URLs.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// TideConfig::init()
+    ///     .database("postgres://localhost/mydb")
+    ///     .file_base_url("https://cdn.example.com/uploads")
+    ///     .connect()
+    ///     .await?;
+    ///
+    /// // Now file URLs in JSON will be like:
+    /// // "https://cdn.example.com/uploads/2024/image.jpg"
+    /// ```
+    pub fn file_base_url(mut self, url: &str) -> Self {
+        self.config.file_base_url = Some(url.to_string());
+        self
+    }
+    
+    /// Set a custom file URL generator function
+    ///
+    /// Use this when you need full control over URL generation, such as
+    /// adding signed URLs, custom query parameters, or transformations.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// fn generate_signed_url(key: &str) -> String {
+    ///     let token = generate_access_token();
+    ///     format!("https://cdn.example.com/{}?token={}", key, token)
+    /// }
+    ///
+    /// TideConfig::init()
+    ///     .database("postgres://localhost/mydb")
+    ///     .file_url_generator(generate_signed_url)
+    ///     .connect()
+    ///     .await?;
+    /// ```
+    pub fn file_url_generator(self, generator: FileUrlGenerator) -> Self {
+        Config::set_file_url_generator(generator);
         self
     }
     
