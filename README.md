@@ -224,13 +224,41 @@ Key sections:
 - [Full-Text Search](DOCUMENTATION.md#full-text-search) - Search with highlighting
 - [Multi-Database](DOCUMENTATION.md#multi-database-support) - Cross-database compatibility
 
-## Examples & Testing
+## Examples
 
-Run an example:
+For comprehensive examples demonstrating TideORM features, see the **[tideorm-examples](https://github.com/mohamadzoh/tideorm-examples)** repository.
 
 ```bash
-cargo run --example basic --features postgres
+# Clone the examples repository
+git clone https://github.com/mohamadzoh/tideorm-examples.git
+cd tideorm-examples
+
+# Run a basic example
+cargo run --bin basic
+
+# Run with different databases
+cargo run --bin postgres_demo
+cargo run --bin mysql_demo --features "mysql runtime-tokio" --no-default-features
+cargo run --bin sqlite_demo --features "sqlite runtime-tokio" --no-default-features
 ```
+
+### Available Examples
+
+| Example | Description |
+|---------|-------------|
+| `basic` | Core CRUD operations |
+| `query_builder` | Advanced querying (WHERE, ORDER BY, LIMIT) |
+| `where_and_or_demo` | Comprehensive WHERE & OR conditions |
+| `upsert_demo` | Insert-or-update with conflict handling |
+| `postgres_complete` | Complete PostgreSQL feature showcase |
+| `migrations` | Database schema migrations |
+| `validation_demo` | Model validation system |
+| `fulltext_demo` | Full-text search with highlighting |
+| `tokenization_demo` | Secure record ID tokenization |
+
+See the [tideorm-examples README](https://github.com/mohamadzoh/tideorm-examples#readme) for the complete list.
+
+## Testing
 
 Run tests:
 
@@ -238,7 +266,7 @@ Run tests:
 cargo test --features postgres
 ```
 
-See the [examples](examples/) directory and [DOCUMENTATION.md](DOCUMENTATION.md#examples) for more.
+See [DOCUMENTATION.md](DOCUMENTATION.md#examples) for more.
 
 ## Rusty Rails Project
 

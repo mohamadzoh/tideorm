@@ -2932,28 +2932,8 @@ builder.string("email").check("email LIKE '%@%'");
 
 ## Examples
 
-See the [examples](examples/) directory for complete working examples:
-
-| Example | Description |
-|---------|-------------|
-| [basic.rs](examples/basic.rs) | Basic CRUD operations |
-| [query_builder.rs](examples/query_builder.rs) | Advanced query building |
-| [validation_demo.rs](examples/validation_demo.rs) | Model validation |
-| [caching_demo.rs](examples/caching_demo.rs) | Query caching |
-| [fulltext_demo.rs](examples/fulltext_demo.rs) | Full-text search |
-| [attachments_translations_demo.rs](examples/attachments_translations_demo.rs) | Files & i18n |
-| [attachment_url_demo.rs](examples/attachment_url_demo.rs) | File URL generation |
-| [schema_file_demo.rs](examples/schema_file_demo.rs) | Schema generation |
-| [migrations.rs](examples/migrations.rs) | Database migrations |
-| [seaorm2_features_demo.rs](examples/seaorm2_features_demo.rs) | SeaORM 2.0 features |
-| [where_and_or_demo.rs](examples/where_and_or_demo.rs) | WHERE and OR conditions |
-
-Run an example:
-
-```bash
-cargo run --example basic --features postgres
-cargo run --example seaorm2_features_demo
-```
+See the [examples] repository for complete working examples:
+Repository: https://github.com/mohamadzoh/tideorm-examples
 
 ---
 
