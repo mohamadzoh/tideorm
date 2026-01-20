@@ -6,6 +6,34 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 [![Rust](https://img.shields.io/badge/rust-1.82+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+## TideORM CLI & Studio
+
+**NEW!** TideORM now includes a powerful CLI with a beautiful web-based interface!
+
+```bash
+# Install the CLI
+cargo install tideorm-cli
+
+# Initialize a project
+tideorm init my_project
+
+# Generate models with a single command
+tideorm make model User --fields="name:string,email:string:unique" --relations="posts:has_many:Post" --migration
+
+# Launch TideORM Studio (Web UI)
+tideorm ui
+```
+
+TideORM Studio provides a visual interface for:
+- 🏗️ Model generation with all options
+- 📦 Migration management
+- 🌱 Database seeding
+- ⚡ Interactive SQL query playground
+
+See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
+
+---
+
 ## Features
 
 - **Clean Model Definitions** - Simple `#[tideorm::model]` attribute macro
@@ -224,6 +252,16 @@ Key sections:
 - [Full-Text Search](DOCUMENTATION.md#full-text-search) - Search with highlighting
 - [Multi-Database](DOCUMENTATION.md#multi-database-support) - Cross-database compatibility
 
+### TideORM CLI
+
+For the command-line interface and TideORM Studio, see the **[TideORM CLI README](../tideorm-cli/README.md)**.
+
+CLI features:
+- **Model Generator** - Create models with fields, relations, attachments, translations
+- **Migration System** - Create, run, rollback database migrations
+- **Seeders & Factories** - Database seeding and test data generation
+- **TideORM Studio** - Web-based UI for all CLI operations
+
 ## Examples
 
 For comprehensive examples demonstrating TideORM features, see the **[tideorm-examples](https://github.com/mohamadzoh/tideorm-examples)** repository.
@@ -274,6 +312,8 @@ TideORM is part of the larger **Rusty Rails** project, which aims to bridge the 
 
 ### Related Projects
 
+- **[TideORM CLI](https://github.com/mohamadzoh/tideorm-cli)** - Command-line interface with TideORM Studio web UI
+- **[TideORM Examples](https://github.com/mohamadzoh/tideorm-examples)** - Comprehensive examples
 - More Rust libraries coming soon!
 
 ---
