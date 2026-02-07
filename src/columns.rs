@@ -215,6 +215,7 @@ pub trait ColumnLike {
 }
 
 /// Trait for nullable columns
+#[allow(clippy::wrong_self_convention)]
 pub trait ColumnNullable {
     /// Create an IS NULL condition
     fn is_null(self) -> ColumnCondition;
@@ -223,6 +224,7 @@ pub trait ColumnNullable {
 }
 
 /// Trait for types that support IN clauses
+#[allow(clippy::wrong_self_convention)]
 pub trait ColumnIn<T> {
     /// Create an IN list condition
     fn is_in(self, values: Vec<T>) -> ColumnCondition;

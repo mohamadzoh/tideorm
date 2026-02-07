@@ -5,6 +5,34 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-07-22
+
+### Improved
+- **Zero clippy warnings**: Resolved all clippy warnings across lib, macros, tests, and benchmarks
+- **Macro code quality**: `Model` derive macro no longer emits `needless_update` (`..Default::default()`) when structs have no relation fields — generates cleaner, more idiomatic output
+- **Regex performance**: `highlight_text()` in fulltext module pre-compiles regex patterns outside the loop instead of re-creating them per word
+- **Config access optimization**: Config accessor methods (`get_languages`, `get_fallback_language`, etc.) now read directly from the `RwLock` without cloning the entire `Config` struct
+- **Macro lint fixes**: Converted `match` single-arm patterns to `if let`, removed useless `.into()` conversion, replaced `i.to_string() == "created_at"` comparisons with direct ident comparison
+
+### Changed
+- **`LogLevel::from_str()` → `LogLevel::parse_str()`**: Renamed to avoid confusion with `std::str::FromStr` trait (clippy `should_implement_trait`)
+- **`CastType::from_str()` → `CastType::parse_str()`**: Same rename for consistency
+- **`CommaSeparated::to_string()`** inherent method removed — `Display` trait implementation provides this automatically
+- **`sort_seeds_by_priority_and_deps()`** return type changed from `Vec<&Box<dyn Seed>>` to `Vec<&dyn Seed>` (clippy `borrowed_box`)
+
+### Fixed
+- **`identity_map` in relations**: Removed `.map(|c| c)` identity mapping
+- **Profiling scoring**: Combined identical UPDATE/DELETE score branches
+- **Test assertions**: Replaced `assert!(true)` placeholders with proper empty test bodies
+- **Benchmark code quality**: Fixed `iter().count()` → `.len()`, range loops → iterators, redundant closures, unnecessary borrows, redundant match guards
+
+### Dependencies
+- Updated all transitive dependencies to latest Rust 1.85-compatible versions
+- `uuid`: 1.19.0 → 1.20.0
+- `proc-macro2`: 1.0.105 → 1.0.106
+- `quote`: 1.0.43 → 1.0.44
+- Plus 40+ transitive dependency updates
+
 ## [0.4.5] - 2026-01-17
 
 ### Added

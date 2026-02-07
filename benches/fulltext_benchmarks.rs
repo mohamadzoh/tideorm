@@ -240,7 +240,7 @@ fn bench_config_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("fulltext_config");
     
     group.bench_function("config_default", |b| {
-        b.iter(|| FullTextConfig::default())
+        b.iter(FullTextConfig::default)
     });
     
     group.bench_function("config_simple", |b| {

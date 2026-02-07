@@ -115,7 +115,7 @@ fn complex_url_generator(field_name: &str, file: &FileAttachment) -> String {
     let base = match file.mime_type.as_deref() {
         Some(m) if m.starts_with("video/") => "stream",
         Some(m) if m.starts_with("image/") => "images",
-        Some(m) if m == "application/pdf" => "docs",
+        Some("application/pdf") => "docs",
         _ => "cdn",
     };
     

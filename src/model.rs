@@ -887,7 +887,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                     for relation in &file_relations {
                         if let Some(file_data) = files_obj.get(*relation) {
                             // Process file data to remove hidden attributes and add URLs
-                            let processed = Self::process_file_for_json(*relation, file_data, &hidden, url_generator);
+                            let processed = Self::process_file_for_json(relation, file_data, &hidden, url_generator);
                             json.insert(relation.to_string(), processed);
                         }
                     }
@@ -1124,12 +1124,10 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                     files.insert(relation_type.to_string(), serde_json::Value::Array(filtered));
                 }
             }
-        } else {
-            if Self::has_one_attached_file().contains(&relation_type) {
-                files.insert(relation_type.to_string(), serde_json::Value::Null);
-            } else if Self::has_many_attached_files().contains(&relation_type) {
-                files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
-            }
+        } else if Self::has_one_attached_file().contains(&relation_type) {
+            files.insert(relation_type.to_string(), serde_json::Value::Null);
+        } else if Self::has_many_attached_files().contains(&relation_type) {
+            files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
         }
         
         self.set_files_attribute(files)?;
@@ -1150,26 +1148,24 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
             } else if Self::has_many_attached_files().contains(&relation_type) {
                 files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
             }
-        } else {
-            if Self::has_one_attached_file().contains(&relation_type) {
-                let file_metadata = serde_json::json!({
-                    "key": file_keys[0],
-                    "filename": file_keys[0].split('/').next_back().unwrap_or(file_keys[0]),
+        } else if Self::has_one_attached_file().contains(&relation_type) {
+            let file_metadata = serde_json::json!({
+                "key": file_keys[0],
+                "filename": file_keys[0].split('/').next_back().unwrap_or(file_keys[0]),
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            files.insert(relation_type.to_string(), file_metadata);
+        } else if Self::has_many_attached_files().contains(&relation_type) {
+            let file_array: Vec<serde_json::Value> = file_keys.iter().map(|key| {
+                serde_json::json!({
+                    "key": key,
+                    "filename": key.split('/').next_back().unwrap_or(key),
                     "created_at": chrono::Utc::now().to_rfc3339(),
-                });
-                files.insert(relation_type.to_string(), file_metadata);
-            } else if Self::has_many_attached_files().contains(&relation_type) {
-                let file_array: Vec<serde_json::Value> = file_keys.iter().map(|key| {
-                    serde_json::json!({
-                        "key": key,
-                        "filename": key.split('/').next_back().unwrap_or(key),
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                    })
-                }).collect();
-                files.insert(relation_type.to_string(), serde_json::Value::Array(file_array));
-            } else {
-                return Err(format!("Unknown file relation: {}", relation_type));
-            }
+                })
+            }).collect();
+            files.insert(relation_type.to_string(), serde_json::Value::Array(file_array));
+        } else {
+            return Err(format!("Unknown file relation: {}", relation_type));
         }
         
         self.set_files_attribute(files)?;

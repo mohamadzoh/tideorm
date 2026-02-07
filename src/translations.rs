@@ -184,7 +184,7 @@ impl TranslationsData {
     
     /// Get mutable translations for a field
     pub fn get_field_mut(&mut self, field: &str) -> &mut FieldTranslations {
-        self.fields.entry(field.to_string()).or_insert_with(FieldTranslations::new)
+        self.fields.entry(field.to_string()).or_default()
     }
     
     /// Get translation for a specific field and language
@@ -482,7 +482,7 @@ pub trait HasTranslations {
         
         // Get translations data
         let translations = json.get("translations")
-            .map(|v| TranslationsData::from_json(v))
+            .map(TranslationsData::from_json)
             .unwrap_or_default();
         
         // Apply translations to translatable fields
@@ -595,7 +595,7 @@ impl TranslationInput {
     pub fn add(&mut self, field: &str, lang: &str, value: impl Into<serde_json::Value>) {
         self.fields
             .entry(field.to_string())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(lang.to_string(), value.into());
     }
 }

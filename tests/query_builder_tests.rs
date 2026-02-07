@@ -499,8 +499,7 @@ mod bulk_delete_tests {
     #[test]
     fn test_delete_conditions_can_be_built() {
         // Test that we can build conditions suitable for bulk delete
-        let conditions = vec![
-            WhereCondition {
+        let conditions = [WhereCondition {
                 column: "status".to_string(),
                 operator: Operator::Eq,
                 value: ConditionValue::Single(serde_json::json!("inactive")),
@@ -509,8 +508,7 @@ mod bulk_delete_tests {
                 column: "last_login".to_string(),
                 operator: Operator::Lt,
                 value: ConditionValue::Single(serde_json::json!("2024-01-01")),
-            },
-        ];
+            }];
         
         assert_eq!(conditions.len(), 2);
         assert_eq!(conditions[0].column, "status");

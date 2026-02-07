@@ -57,7 +57,7 @@ const TOKEN_DATA_SIZE: usize = IV_SIZE + ID_SIZE + HMAC_SIZE;
 fn base64_url_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     
-    let mut result = String::with_capacity((data.len() * 4 + 2) / 3);
+    let mut result = String::with_capacity((data.len() * 4).div_ceil(3));
     
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
@@ -157,9 +157,9 @@ fn generate_iv() -> [u8; IV_SIZE] {
     let hash = hasher.finish();
     let mut iv = [0u8; IV_SIZE];
     
-    for i in 0..IV_SIZE {
-        iv[i] = ((hash >> ((i % 8) * 8)) & 0xFF) as u8;
-        iv[i] ^= (i as u8).wrapping_mul(17);
+    for (i, item) in iv.iter_mut().enumerate().take(IV_SIZE) {
+        *item = ((hash >> ((i % 8) * 8)) & 0xFF) as u8;
+        *item ^= (i as u8).wrapping_mul(17);
     }
     
     iv
@@ -186,8 +186,8 @@ fn compute_hmac(data: &[u8], key: &[u8]) -> [u8; HMAC_SIZE] {
     
     let hash = hasher.finish();
     let mut hmac = [0u8; HMAC_SIZE];
-    for i in 0..HMAC_SIZE {
-        hmac[i] = ((hash >> (i * 8)) & 0xFF) as u8;
+    for (i, item) in hmac.iter_mut().enumerate().take(HMAC_SIZE) {
+        *item = ((hash >> (i * 8)) & 0xFF) as u8;
     }
     hmac
 }

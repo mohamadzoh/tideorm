@@ -550,7 +550,10 @@ impl Database {
             DbBackend::Postgres => crate::config::DatabaseType::Postgres,
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
-            _ => crate::config::DatabaseType::Postgres, // Default to Postgres for unknown backends
+            other => {
+                eprintln!("[TideORM] Warning: unknown database backend {:?}, defaulting to Postgres", other);
+                crate::config::DatabaseType::Postgres
+            }
         }
     }
     

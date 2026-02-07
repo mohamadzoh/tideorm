@@ -234,50 +234,47 @@ fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>)
         
         let unique = is_unique_index;
         
-        match &attr.meta {
-            Meta::List(list) => {
-                let tokens = list.tokens.to_string();
+        if let Meta::List(list) = &attr.meta {
+            let tokens = list.tokens.to_string();
+            
+            if tokens.contains("name") && tokens.contains("columns") {
+                let mut name = None;
+                let mut columns = None;
                 
-                if tokens.contains("name") && tokens.contains("columns") {
-                    let mut name = None;
-                    let mut columns = None;
-                    
-                    let _ = attr.parse_nested_meta(|nested| {
-                        if nested.path.is_ident("name") {
-                            let value: syn::LitStr = nested.value()?.parse()?;
-                            name = Some(value.value());
-                        } else if nested.path.is_ident("columns") {
-                            let value: syn::LitStr = nested.value()?.parse()?;
-                            columns = Some(value.value());
-                        }
-                        Ok(())
-                    });
-                    
-                    if let Some(cols) = columns {
-                        let idx = if let Some(n) = name {
-                            IndexDef::from_named(n, &cols, unique)
-                        } else {
-                            IndexDef::from_columns(&cols, unique)
-                        };
-                        if unique {
-                            unique_indexes.push(idx);
-                        } else {
-                            indexes.push(idx);
-                        }
+                let _ = attr.parse_nested_meta(|nested| {
+                    if nested.path.is_ident("name") {
+                        let value: syn::LitStr = nested.value()?.parse()?;
+                        name = Some(value.value());
+                    } else if nested.path.is_ident("columns") {
+                        let value: syn::LitStr = nested.value()?.parse()?;
+                        columns = Some(value.value());
                     }
-                } else {
-                    let clean = tokens.trim().trim_matches('"');
-                    if !clean.is_empty() {
-                        let idx = IndexDef::from_columns(clean, unique);
-                        if unique {
-                            unique_indexes.push(idx);
-                        } else {
-                            indexes.push(idx);
-                        }
+                    Ok(())
+                });
+                
+                if let Some(cols) = columns {
+                    let idx = if let Some(n) = name {
+                        IndexDef::from_named(n, &cols, unique)
+                    } else {
+                        IndexDef::from_columns(&cols, unique)
+                    };
+                    if unique {
+                        unique_indexes.push(idx);
+                    } else {
+                        indexes.push(idx);
+                    }
+                }
+            } else {
+                let clean = tokens.trim().trim_matches('"');
+                if !clean.is_empty() {
+                    let idx = IndexDef::from_columns(clean, unique);
+                    if unique {
+                        unique_indexes.push(idx);
+                    } else {
+                        indexes.push(idx);
                     }
                 }
             }
-            _ => {}
         }
     }
     
@@ -293,83 +290,80 @@ fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<pr
             continue;
         }
         
-        match &attr.meta {
-            Meta::List(list) => {
-                let tokens = list.tokens.to_string();
+        if let Meta::List(list) = &attr.meta {
+            let tokens = list.tokens.to_string();
+            
+            for part in tokens.split(',') {
+                let part = part.trim();
                 
-                for part in tokens.split(',') {
-                    let part = part.trim();
-                    
-                    if part == "required" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Required });
-                    } else if part == "email" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Email });
-                    } else if part == "url" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Url });
-                    } else if part == "alpha" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Alpha });
-                    } else if part == "alphanumeric" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Alphanumeric });
-                    } else if part == "numeric" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Numeric });
-                    } else if part == "uuid" {
-                        rules.push(quote! { ::tideorm::validation::ValidationRule::Uuid });
-                    } else if part.starts_with("min_length") {
-                        if let Some(val) = extract_value(part, "min_length") {
-                            if let Ok(n) = val.parse::<usize>() {
-                                rules.push(quote! { ::tideorm::validation::ValidationRule::MinLength(#n) });
-                            }
+                if part == "required" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Required });
+                } else if part == "email" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Email });
+                } else if part == "url" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Url });
+                } else if part == "alpha" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Alpha });
+                } else if part == "alphanumeric" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Alphanumeric });
+                } else if part == "numeric" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Numeric });
+                } else if part == "uuid" {
+                    rules.push(quote! { ::tideorm::validation::ValidationRule::Uuid });
+                } else if part.starts_with("min_length") {
+                    if let Some(val) = extract_value(part, "min_length") {
+                        if let Ok(n) = val.parse::<usize>() {
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::MinLength(#n) });
                         }
-                    } else if part.starts_with("max_length") {
-                        if let Some(val) = extract_value(part, "max_length") {
-                            if let Ok(n) = val.parse::<usize>() {
-                                rules.push(quote! { ::tideorm::validation::ValidationRule::MaxLength(#n) });
-                            }
+                    }
+                } else if part.starts_with("max_length") {
+                    if let Some(val) = extract_value(part, "max_length") {
+                        if let Ok(n) = val.parse::<usize>() {
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::MaxLength(#n) });
                         }
-                    } else if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") {
-                        if let Some(val) = extract_value(part, "length") {
-                            if let Ok(n) = val.parse::<usize>() {
-                                rules.push(quote! { ::tideorm::validation::ValidationRule::Length(#n) });
-                            }
+                    }
+                } else if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") {
+                    if let Some(val) = extract_value(part, "length") {
+                        if let Ok(n) = val.parse::<usize>() {
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::Length(#n) });
                         }
-                    } else if part.starts_with("min") && !part.contains("length") {
-                        if let Some(val) = extract_value(part, "min") {
-                            if let Ok(n) = val.parse::<f64>() {
-                                rules.push(quote! { ::tideorm::validation::ValidationRule::Min(#n) });
-                            }
+                    }
+                } else if part.starts_with("min") && !part.contains("length") {
+                    if let Some(val) = extract_value(part, "min") {
+                        if let Ok(n) = val.parse::<f64>() {
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::Min(#n) });
                         }
-                    } else if part.starts_with("max") && !part.contains("length") {
-                        if let Some(val) = extract_value(part, "max") {
-                            if let Ok(n) = val.parse::<f64>() {
-                                rules.push(quote! { ::tideorm::validation::ValidationRule::Max(#n) });
-                            }
+                    }
+                } else if part.starts_with("max") && !part.contains("length") {
+                    if let Some(val) = extract_value(part, "max") {
+                        if let Ok(n) = val.parse::<f64>() {
+                            rules.push(quote! { ::tideorm::validation::ValidationRule::Max(#n) });
                         }
-                    } else if part.starts_with("range") {
-                        if let Some(val) = extract_value(part, "range") {
-                            let val = val.trim_matches('"');
-                            if val.contains("..") {
-                                let parts: Vec<&str> = val.split("..").collect();
-                                if parts.len() == 2 {
-                                    if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                                        rules.push(quote! { ::tideorm::validation::ValidationRule::Range(#min, #max) });
-                                    }
+                    }
+                } else if part.starts_with("range") {
+                    if let Some(val) = extract_value(part, "range") {
+                        let val = val.trim_matches('"');
+                        if val.contains("..") {
+                            let parts: Vec<&str> = val.split("..").collect();
+                            if parts.len() == 2 {
+                                if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                    rules.push(quote! { ::tideorm::validation::ValidationRule::Range(#min, #max) });
                                 }
                             }
                         }
-                    } else if part.starts_with("regex") {
-                        if let Some(val) = extract_value(part, "regex") {
-                            let pattern = val.trim_matches('"');
-                            rules.push(quote! { ::tideorm::validation::ValidationRule::Regex(#pattern.to_string()) });
-                        }
-                    } else if part.starts_with("custom") {
-                        if let Some(val) = extract_value(part, "custom") {
-                            let msg = val.trim_matches('"');
-                            rules.push(quote! { ::tideorm::validation::ValidationRule::Custom(#msg.to_string()) });
-                        }
+                    }
+                } else if part.starts_with("regex") {
+                    if let Some(val) = extract_value(part, "regex") {
+                        let pattern = val.trim_matches('"');
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Regex(#pattern.to_string()) });
+                    }
+                } else if part.starts_with("custom") {
+                    if let Some(val) = extract_value(part, "custom") {
+                        let msg = val.trim_matches('"');
+                        rules.push(quote! { ::tideorm::validation::ValidationRule::Custom(#msg.to_string()) });
                     }
                 }
             }
-            _ => {}
         }
     }
     
@@ -751,7 +745,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     
     let fields = match &input.data {
         Data::Struct(fields) => fields,
-        _ => panic!("Model can only be derived for structs"),
+        _ => return syn::Error::new_spanned(
+            &input.ident,
+            "Model can only be derived for structs with named fields"
+        ).to_compile_error(),
     };
     
     // Separate relation fields from database fields
@@ -831,10 +828,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     
     // Detect timestamp fields
     let has_created_at = db_fields.iter().any(|f| {
-        f.ident.as_ref().map(|i| i.to_string() == "created_at").unwrap_or(false)
+        f.ident.as_ref().map(|i| *i == "created_at").unwrap_or(false)
     });
     let has_updated_at = db_fields.iter().any(|f| {
-        f.ident.as_ref().map(|i| i.to_string() == "updated_at").unwrap_or(false)
+        f.ident.as_ref().map(|i| *i == "updated_at").unwrap_or(false)
     });
     let timestamps_enabled = input.timestamps || (has_created_at && has_updated_at);
     
@@ -983,6 +980,16 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     // All field names for struct conversion (DB fields only)
     let all_field_names: Vec<_> = db_fields.iter()
         .filter_map(|f| f.ident.as_ref())
+        .collect();
+    
+    // Generate default initializers for relation fields only (avoids needless_update clippy warning)
+    let relation_field_defaults: Vec<_> = relation_fields.iter()
+        .filter_map(|f| {
+            let ident = f.ident.as_ref()?;
+            Some(quote! {
+                #ident: Default::default()
+            })
+        })
         .collect();
     
     // Generate Default impl field initializers for ALL fields (both DB and relation fields)
@@ -1249,8 +1256,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             fn from_sea_model(model: #internal_entity_mod::Model) -> Self {
                 Self {
                     #(#all_field_names: model.#all_field_names),*,
-                    // Initialize relation fields with defaults
-                    ..Default::default()
+                    #(#relation_field_defaults),*
                 }
             }
         }
@@ -1754,7 +1760,14 @@ pub fn belongs_to(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, owner_key) = parse_relation_attr(&attr_str);
     
-    let _related_ident: proc_macro2::TokenStream = related_type.parse().unwrap();
+    // Validate the related type is parseable
+    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
+    if _related_ident.is_err() {
+        return syn::Error::new_spanned(
+            &input.ident,
+            format!("Invalid related type '{}' in belongs_to attribute", related_type),
+        ).to_compile_error().into();
+    }
     
     let _owner_key_impl = if let Some(ok) = owner_key {
         quote! {
@@ -1787,7 +1800,14 @@ pub fn has_one(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
     
-    let _related_ident: proc_macro2::TokenStream = related_type.parse().unwrap();
+    // Validate the related type is parseable
+    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
+    if _related_ident.is_err() {
+        return syn::Error::new_spanned(
+            &input.ident,
+            format!("Invalid related type '{}' in has_one attribute", related_type),
+        ).to_compile_error().into();
+    }
     
     let _local_key_impl = if let Some(lk) = local_key {
         quote! {
@@ -1820,7 +1840,14 @@ pub fn has_many(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
     
-    let _related_ident: proc_macro2::TokenStream = related_type.parse().unwrap();
+    // Validate the related type is parseable
+    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
+    if _related_ident.is_err() {
+        return syn::Error::new_spanned(
+            &input.ident,
+            format!("Invalid related type '{}' in has_many attribute", related_type),
+        ).to_compile_error().into();
+    }
     
     let _local_key_impl = if let Some(lk) = local_key {
         quote! {

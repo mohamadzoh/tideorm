@@ -653,10 +653,13 @@ async fn check_table_exists(
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
             table
         ),
-        _ => format!(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
-            table
-        ),
+        other => {
+            eprintln!("[TideORM] Warning: unknown backend {:?} in check_table_exists, falling back to SQLite SQL", other);
+            format!(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
+                table
+            )
+        }
     };
     
     let stmt = Statement::from_string(backend, sql);
@@ -669,10 +672,6 @@ async fn check_table_exists(
         Some(row) => {
             let exists: bool = match backend {
                 DbBackend::Postgres => row.try_get_by_index(0).unwrap_or(false),
-                DbBackend::MySql | DbBackend::Sqlite => {
-                    let val: i32 = row.try_get_by_index(0).unwrap_or(0);
-                    val > 0
-                }
                 _ => {
                     let val: i32 = row.try_get_by_index(0).unwrap_or(0);
                     val > 0
@@ -779,7 +778,14 @@ fn apply_column_type(
         "Vec<String>" | "TextArray" => { column.array(SeaColumnType::Text); }
         "Vec<bool>" | "BoolArray" => { column.array(SeaColumnType::Boolean); }
         "Vec<f64>" | "FloatArray" => { column.array(SeaColumnType::Double); }
-        _ => { column.text(); }
+        unknown_type => {
+            eprintln!(
+                "[TideORM] Warning: unknown Rust type '{}' mapped to TEXT column. \
+                 Consider adding explicit type mapping.",
+                unknown_type
+            );
+            column.text();
+        }
     };
 }
 

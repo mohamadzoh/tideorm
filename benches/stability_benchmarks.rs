@@ -9,14 +9,14 @@ fn bench_empty_result_handling(c: &mut Criterion) {
     c.bench_function("empty_vec_iteration", |b| {
         b.iter(|| {
             let empty: Vec<i32> = black_box(vec![]);
-            empty.iter().count()
+            empty.len()
         });
     });
 
     c.bench_function("empty_vec_first", |b| {
         b.iter(|| {
             let empty: Vec<i32> = black_box(vec![]);
-            empty.first().is_some()
+            !empty.is_empty()
         });
     });
 
@@ -184,7 +184,7 @@ fn bench_iteration_patterns(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("find_first", size), size, |b, &size| {
             b.iter(|| {
                 let vec: Vec<i32> = (0..black_box(size)).collect();
-                vec.iter().find(|x| **x > size / 2).is_some()
+                vec.iter().any(|x| *x > size / 2)
             });
         });
     }
@@ -299,6 +299,7 @@ fn bench_timestamp_operations(c: &mut Criterion) {
     });
 }
 
+#[allow(clippy::unnecessary_literal_unwrap)]
 fn bench_error_handling(c: &mut Criterion) {
     c.bench_function("result_ok_unwrap", |b| {
         b.iter(|| {
@@ -317,7 +318,7 @@ fn bench_error_handling(c: &mut Criterion) {
     c.bench_function("option_unwrap_or_else", |b| {
         b.iter(|| {
             let none: Option<i32> = black_box(None);
-            none.unwrap_or_else(|| 99)
+            none.unwrap_or(99)
         });
     });
 }

@@ -1001,11 +1001,14 @@ pub fn highlight_text(
     let words: Vec<&str> = query.split_whitespace().collect();
     let mut result = text.to_string();
     
-    for word in words {
-        // Case-insensitive replacement
-        let pattern = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(word)))
-            .unwrap_or_else(|_| regex::Regex::new(r"$^").unwrap());
-        
+    // Pre-compile all regex patterns outside the loop to avoid regex_creation_in_loops
+    let patterns: Vec<regex::Regex> = words.iter()
+        .filter_map(|word| {
+            regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(word))).ok()
+        })
+        .collect();
+    
+    for pattern in &patterns {
         result = pattern.replace_all(&result, |caps: &regex::Captures| {
             format!("{}{}{}", start_tag, &caps[0], end_tag)
         }).to_string();

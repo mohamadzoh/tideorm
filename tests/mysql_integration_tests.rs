@@ -92,7 +92,7 @@ async fn mysql_integration_tests() {
     
     let connect_result = TideConfig::init()
         .database_type(DatabaseType::MySQL)
-        .database(&db_url)
+        .database(db_url)
         .max_connections(5)
         .connect()
         .await;

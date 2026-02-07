@@ -257,7 +257,7 @@ fn bench_validation_errors(c: &mut Criterion) {
         b.iter(|| {
             let mut errors = ValidationErrors::new();
             for i in 0..10 {
-                errors.add(&format!("field_{}", i), &format!("Error message {}", i));
+                errors.add(format!("field_{}", i), format!("Error message {}", i));
             }
             errors
         })
@@ -266,7 +266,7 @@ fn bench_validation_errors(c: &mut Criterion) {
     group.bench_function("field_errors_lookup", |b| {
         let mut errors = ValidationErrors::new();
         for i in 0..100 {
-            errors.add(&format!("field_{}", i % 10), &format!("Error {}", i));
+            errors.add(format!("field_{}", i % 10), format!("Error {}", i));
         }
         
         b.iter(|| errors.field_errors("field_5"))

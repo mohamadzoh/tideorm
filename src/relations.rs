@@ -332,7 +332,6 @@ impl<E: Model> SelfRefMany<E> {
             .where_eq(self.foreign_key, pk.clone())
             .count()
             .await
-            .map(|c| c as u64)
     }
     
     /// Check if any records reference this one
@@ -1654,7 +1653,7 @@ impl RelationTree {
         }
         
         let root = path.root().to_string();
-        let child = self.children.entry(root).or_insert_with(RelationTree::new);
+        let child = self.children.entry(root).or_default();
         
         if let Some(nested) = path.nested() {
             child.add_path(&nested);
@@ -1792,6 +1791,7 @@ pub struct RelationLoader<M> {
     /// Name of the relation to load
     pub name: String,
     /// Loader function
+    #[allow(clippy::type_complexity)]
     pub loader: Box<dyn Fn(&[M]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>> + Send>> + Send + Sync>,
 }
 

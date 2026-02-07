@@ -421,7 +421,6 @@ mod self_referencing {
         // - src/columns.rs (Column type unit tests)
         //
         // This test verifies the module compiles correctly.
-        assert!(true);
     }
     
     #[test]
@@ -447,7 +446,6 @@ mod self_referencing {
         // let manager = emp.manager.load().await?;
         // let reports = emp.reports.load().await?;
         // let tree = emp.reports.load_tree(3).await?;
-        assert!(true);
     }
 }
 
@@ -558,7 +556,6 @@ mod nested_save {
         //     .with_many(posts, "user_id")
         //     .save()
         //     .await?;
-        assert!(true);
     }
 }
 

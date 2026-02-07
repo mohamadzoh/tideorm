@@ -601,6 +601,7 @@ impl<T: Default> Default for Encrypted<T> {
 /// }
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub struct Hashed {
     /// The hashed value (stored)
     hash: String,
@@ -678,11 +679,6 @@ impl<'de> Deserialize<'de> for Hashed {
     }
 }
 
-impl Default for Hashed {
-    fn default() -> Self {
-        Self { hash: String::new() }
-    }
-}
 
 // =============================================================================
 // COMMA SEPARATED TYPE
@@ -756,15 +752,7 @@ impl<T> CommaSeparated<T> {
     }
 }
 
-impl<T: fmt::Display> CommaSeparated<T> {
-    /// Convert to comma-separated string
-    pub fn to_string(&self) -> String {
-        self.values.iter()
-            .map(|v| v.to_string())
-            .collect::<Vec<_>>()
-            .join(",")
-    }
-}
+
 
 impl<T: FromStr> CommaSeparated<T>
 where
@@ -836,7 +824,11 @@ impl<T: Default> Default for CommaSeparated<T> {
 
 impl<T: fmt::Display> fmt::Display for CommaSeparated<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        let s = self.values.iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        write!(f, "{}", s)
     }
 }
 
@@ -1089,7 +1081,7 @@ pub enum CastType {
 
 impl CastType {
     /// Parse from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "string" | "str" => Some(Self::String),
             "integer" | "int" | "i64" | "i32" => Some(Self::Integer),

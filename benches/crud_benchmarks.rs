@@ -147,7 +147,7 @@ fn bench_batch_insert(c: &mut Criterion) {
                             id: 0,
                             email: format!("batch_{base}_{i}@example.com"),
                             name: format!("Batch User {i}"),
-                            age: 20 + (i % 50) as i32,
+                            age: 20 + (i % 50),
                             active: i % 2 == 0,
                         })
                         .collect();
@@ -305,7 +305,7 @@ fn bench_count(c: &mut Criterion) {
                         id: 0,
                         email: format!("count_{batch}_{i}@example.com"),
                         name: format!("Count User {i}"),
-                        age: 20 + (i % 50) as i32,
+                        age: 20 + (i % 50),
                         active: i % 2 == 0,
                     })
                     .collect();
@@ -318,7 +318,7 @@ fn bench_count(c: &mut Criterion) {
                         id: 0,
                         email: format!("count_rem_{i}@example.com"),
                         name: format!("Count User Rem {i}"),
-                        age: 20 + (i % 50) as i32,
+                        age: 20 + (i % 50),
                         active: i % 2 == 0,
                     })
                     .collect();

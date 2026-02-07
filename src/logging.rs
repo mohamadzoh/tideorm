@@ -72,8 +72,10 @@ use std::time::{Duration, Instant};
 
 /// Log level for query logging
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default)]
 pub enum LogLevel {
     /// No logging
+    #[default]
     Off = 0,
     /// Only errors
     Error = 1,
@@ -87,15 +89,10 @@ pub enum LogLevel {
     Trace = 5,
 }
 
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self::Off
-    }
-}
 
 impl LogLevel {
     /// Parse log level from string
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "off" | "none" | "0" => Self::Off,
             "error" | "1" => Self::Error,
@@ -519,7 +516,7 @@ impl QueryLogger {
         
         // TIDE_LOG_LEVEL
         if let Ok(val) = std::env::var("TIDE_LOG_LEVEL") {
-            let level = LogLevel::from_str(&val);
+            let level = LogLevel::parse_str(&val);
             *LOG_LEVEL.write().unwrap() = level;
             if level != LogLevel::Off {
                 LOGGER_ENABLED.store(true, Ordering::SeqCst);
@@ -810,11 +807,11 @@ mod tests {
     
     #[test]
     fn test_log_level_parsing() {
-        assert_eq!(LogLevel::from_str("debug"), LogLevel::Debug);
-        assert_eq!(LogLevel::from_str("DEBUG"), LogLevel::Debug);
-        assert_eq!(LogLevel::from_str("warn"), LogLevel::Warn);
-        assert_eq!(LogLevel::from_str("4"), LogLevel::Debug);
-        assert_eq!(LogLevel::from_str("invalid"), LogLevel::Off);
+        assert_eq!(LogLevel::parse_str("debug"), LogLevel::Debug);
+        assert_eq!(LogLevel::parse_str("DEBUG"), LogLevel::Debug);
+        assert_eq!(LogLevel::parse_str("warn"), LogLevel::Warn);
+        assert_eq!(LogLevel::parse_str("4"), LogLevel::Debug);
+        assert_eq!(LogLevel::parse_str("invalid"), LogLevel::Off);
     }
     
     #[test]

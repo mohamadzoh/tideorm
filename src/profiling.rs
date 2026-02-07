@@ -556,9 +556,7 @@ impl QueryAnalyzer {
             score += 1;
         } else if sql_upper.starts_with("INSERT") {
             score += 2;
-        } else if sql_upper.starts_with("UPDATE") {
-            score += 3;
-        } else if sql_upper.starts_with("DELETE") {
+        } else if sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE") {
             score += 3;
         }
         

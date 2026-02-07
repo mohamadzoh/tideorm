@@ -170,6 +170,7 @@ impl Seeder {
     }
 
     /// Add a seed
+    #[allow(clippy::should_implement_trait)]
     pub fn add<S: Seed + 'static>(mut self, seed: S) -> Self {
         self.seeds.push(Box::new(seed));
         self
@@ -390,17 +391,77 @@ impl Seeder {
     // HELPER METHODS
     // =========================================================================
 
-    /// Sort seeds by priority, respecting dependencies
-    fn sort_seeds_by_priority_and_deps(&self) -> Vec<&Box<dyn Seed>> {
-        let mut seeds: Vec<_> = self.seeds.iter().collect();
+    /// Sort seeds by priority, respecting dependencies via topological sort
+    fn sort_seeds_by_priority_and_deps(&self) -> Vec<&dyn Seed> {
+        use std::collections::{HashMap, HashSet, VecDeque};
 
-        // First sort by priority
-        seeds.sort_by_key(|s| s.priority());
+        let seeds: Vec<_> = self.seeds.iter().collect();
 
-        // TODO: Implement topological sort for dependencies
-        // For now, just sort by priority
+        // Build a name -> index map
+        let name_to_idx: HashMap<String, usize> = seeds
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.name().to_string(), i))
+            .collect();
 
-        seeds
+        let n = seeds.len();
+        let mut in_degree = vec![0usize; n];
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        // Build dependency graph: if seed B depends on seed A, A -> B
+        for (i, seed) in seeds.iter().enumerate() {
+            for dep in seed.depends_on() {
+                if let Some(&dep_idx) = name_to_idx.get(dep) {
+                    adj[dep_idx].push(i);
+                    in_degree[i] += 1;
+                }
+            }
+        }
+
+        // Kahn's algorithm for topological sort
+        // Use a BinaryHeap to break ties by priority (lower priority first)
+        let mut queue: VecDeque<usize> = VecDeque::new();
+
+        // Collect all roots (no dependencies), sorted by priority
+        let mut roots: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+        roots.sort_by_key(|&i| seeds[i].priority());
+        for r in roots {
+            queue.push_back(r);
+        }
+
+        let mut sorted_indices: Vec<usize> = Vec::with_capacity(n);
+        let mut visited = HashSet::new();
+
+        while let Some(idx) = queue.pop_front() {
+            if !visited.insert(idx) {
+                continue;
+            }
+            sorted_indices.push(idx);
+
+            // Collect neighbors, reduce in-degree, add ready ones sorted by priority
+            let mut next: Vec<usize> = Vec::new();
+            for &neighbor in &adj[idx] {
+                in_degree[neighbor] -= 1;
+                if in_degree[neighbor] == 0 {
+                    next.push(neighbor);
+                }
+            }
+            next.sort_by_key(|&i| seeds[i].priority());
+            for n in next {
+                queue.push_back(n);
+            }
+        }
+
+        // Any remaining seeds (circular deps) are appended at the end sorted by priority
+        if sorted_indices.len() < n {
+            let mut remaining: Vec<usize> = (0..n)
+                .filter(|i| !visited.contains(i))
+                .collect();
+            remaining.sort_by_key(|&i| seeds[i].priority());
+            sorted_indices.extend(remaining);
+        }
+
+        sorted_indices.into_iter().map(|i| seeds[i].as_ref()).collect()
     }
 
     // =========================================================================
@@ -458,8 +519,12 @@ impl Seeder {
         use crate::internal::Statement;
 
         let backend = database.__internal_connection().get_database_backend();
-        let sql = r#"SELECT "name" FROM "_seeds" ORDER BY "executed_at" ASC"#;
-        let stmt = Statement::from_string(backend, sql.to_string());
+        let q = |id: &str| quote_identifier(id, backend);
+        let sql = format!(
+            "SELECT {} FROM {} ORDER BY {} ASC",
+            q("name"), q("_seeds"), q("executed_at")
+        );
+        let stmt = Statement::from_string(backend, sql);
 
         let results = database
             .__internal_connection()
@@ -481,10 +546,12 @@ impl Seeder {
     /// Record a seed as executed
     async fn record_seed(&self, name: &str) -> Result<()> {
         let database = db();
+        let backend = database.__internal_connection().get_database_backend();
+        let q = |id: &str| quote_identifier(id, backend);
 
         let sql = format!(
-            r#"INSERT INTO "_seeds" ("name") VALUES ('{}')"#,
-            name.replace('\'', "''")
+            "INSERT INTO {} ({}) VALUES ('{}')",
+            q("_seeds"), q("name"), name.replace('\'', "''")
         );
 
         database
@@ -499,10 +566,12 @@ impl Seeder {
     /// Remove a seed record
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
         let database = db();
+        let backend = database.__internal_connection().get_database_backend();
+        let q = |id: &str| quote_identifier(id, backend);
 
         let sql = format!(
-            r#"DELETE FROM "_seeds" WHERE "name" = '{}'"#,
-            name.replace('\'', "''")
+            "DELETE FROM {} WHERE {} = '{}'",
+            q("_seeds"), q("name"), name.replace('\'', "''")
         );
 
         database
@@ -619,29 +688,37 @@ impl fmt::Display for SeedStatus {
 
 /// Detect database type from connection
 fn detect_database_type(database: &Database) -> DatabaseType {
-    use crate::internal::DbBackend;
+    database.backend()
+}
 
-    match database.__internal_connection().get_database_backend() {
-        DbBackend::Postgres => DatabaseType::Postgres,
-        DbBackend::MySql => DatabaseType::MySQL,
-        DbBackend::Sqlite => DatabaseType::SQLite,
-        _ => DatabaseType::Postgres, // Default to Postgres for unknown backends
+/// Quote an identifier (table/column name) for the current database backend
+fn quote_identifier(name: &str, backend: crate::internal::DbBackend) -> String {
+    use crate::internal::DbBackend;
+    match backend {
+        DbBackend::MySql => format!("`{}`", name),
+        _ => format!(r#""{}""#, name), // Postgres & SQLite use double quotes
     }
 }
 
 /// Log seed start
 fn log_seed_start(name: &str) {
-    eprintln!("Running seed: {}", name);
+    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
+        eprintln!("[Seed] Running: {}", name);
+    }
 }
 
 /// Log seed complete
 fn log_seed_complete(name: &str) {
-    eprintln!("Completed seed: {}", name);
+    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
+        eprintln!("[Seed] Completed: {}", name);
+    }
 }
 
 /// Log seed rollback
 fn log_seed_rollback(name: &str) {
-    eprintln!("Rolling back seed: {}", name);
+    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
+        eprintln!("[Seed] Rolling back: {}", name);
+    }
 }
 
 // ============================================================================

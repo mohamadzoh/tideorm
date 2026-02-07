@@ -276,29 +276,37 @@ impl Config {
             .clone()
     }
     
+    /// Read a value from the global config without cloning the entire struct
+    #[inline]
+    fn with_global<T>(f: impl FnOnce(&Config) -> T) -> T {
+        let lock = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
+        let guard = lock.read();
+        f(&guard)
+    }
+    
     /// Get allowed languages from global config
     pub fn get_languages() -> Vec<String> {
-        Self::global().languages
+        Self::with_global(|c| c.languages.clone())
     }
     
     /// Get fallback language from global config
     pub fn get_fallback_language() -> String {
-        Self::global().fallback_language
+        Self::with_global(|c| c.fallback_language.clone())
     }
     
     /// Get hidden attributes from global config
     pub fn get_hidden_attributes() -> Vec<String> {
-        Self::global().hidden_attributes
+        Self::with_global(|c| c.hidden_attributes.clone())
     }
     
     /// Check if soft delete is enabled by default
     pub fn is_soft_delete_default() -> bool {
-        Self::global().soft_delete_by_default
+        Self::with_global(|c| c.soft_delete_by_default)
     }
     
     /// Get the file base URL from global config
     pub fn get_file_base_url() -> Option<String> {
-        Self::global().file_base_url
+        Self::with_global(|c| c.file_base_url.clone())
     }
     
     /// Get the global file URL generator function
@@ -330,7 +338,9 @@ impl Config {
     /// });
     /// ```
     pub fn set_file_url_generator(generator: FileUrlGenerator) {
-        let _ = GLOBAL_FILE_URL_GENERATOR.set(generator);
+        if GLOBAL_FILE_URL_GENERATOR.set(generator).is_err() {
+            eprintln!("[TideORM] Warning: file URL generator already set, ignoring subsequent call");
+        }
     }
     
     /// Default file URL generator

@@ -3,6 +3,7 @@
 //! These tests verify the OR clause query builder features:
 //! - OrGroup construction and methods
 //! - or_where and or_where_* methods on QueryBuilder
+#![allow(clippy::approx_constant)]
 //! - Nested OR groups
 //! - OR with BatchUpdateBuilder
 //!
@@ -1421,7 +1422,7 @@ mod fluent_or_integration_tests {
         println!("Results: {} users", results.len());
         
         // All users have @example.com emails, so all should match
-        assert!(results.len() >= 1, "Should find at least one user");
+        assert!(!results.is_empty(), "Should find at least one user");
         
         for user in &results {
             let matches = 

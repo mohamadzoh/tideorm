@@ -1897,6 +1897,7 @@ impl JoinResultConsolidator {
     ///     |l| l.id,  // Then by line item
     /// );
     /// ```
+    #[allow(clippy::type_complexity)]
     pub fn consolidate_three<A, B, C, KA, KB, FA, FB>(
         items: Vec<(A, B, C)>,
         key_a: FA,
@@ -1950,6 +1951,7 @@ impl JoinResultConsolidator {
     }
     
     /// Consolidate with optional third item (for LEFT JOINs)
+    #[allow(clippy::type_complexity)]
     pub fn consolidate_three_optional<A, B, C, KA, KB, FA, FB>(
         items: Vec<(A, B, Option<C>)>,
         key_a: FA,
@@ -4355,6 +4357,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .get_raw()
     ///     .await?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn lag(
         mut self,
         alias: &str,
@@ -4388,6 +4391,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .get_raw()
     ///     .await?;
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn lead(
         mut self,
         alias: &str,
@@ -5100,6 +5104,7 @@ impl<M: Model> QueryBuilder<M> {
     }
     
     /// Build a SeaORM Condition from an OrGroup
+    #[allow(clippy::only_used_in_recursion)]
     fn build_or_group_condition(&self, group: &OrGroup, db_type: DatabaseType) -> Condition {
         use sea_orm::sea_query::{Alias, SimpleExpr};
         
@@ -5561,6 +5566,7 @@ impl<M: Model> QueryBuilder<M> {
     }
     
     /// Build a preview string for an OR group
+    #[allow(clippy::only_used_in_recursion)]
     fn build_or_group_preview(&self, group: &OrGroup) -> String {
         let mut parts: Vec<String> = Vec::new();
         

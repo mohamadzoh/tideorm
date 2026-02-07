@@ -110,7 +110,7 @@ impl SchemaGenerator {
         // Generate CREATE TABLE statements
         for table in &self.tables {
             sql.push_str(&self.generate_create_table(table));
-            sql.push_str("\n");
+            sql.push('\n');
         }
         
         // Generate CREATE INDEX statements
@@ -118,7 +118,7 @@ impl SchemaGenerator {
             let indexes = self.generate_indexes(table);
             if !indexes.is_empty() {
                 sql.push_str(&indexes);
-                sql.push_str("\n");
+                sql.push('\n');
             }
         }
         
@@ -477,6 +477,7 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     

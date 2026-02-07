@@ -1573,6 +1573,7 @@ impl Migrator {
     }
 
     /// Add a migration
+    #[allow(clippy::should_implement_trait)]
     pub fn add<M: Migration + 'static>(mut self, migration: M) -> Self {
         self.migrations.push(Box::new(migration));
         self
@@ -1781,8 +1782,13 @@ impl Migrator {
         use crate::internal::Statement;
 
         let backend = db.__internal_connection().get_database_backend();
-        let sql = r#"SELECT "version" FROM "_migrations" ORDER BY "version" ASC"#;
-        let stmt = Statement::from_string(backend, sql.to_string());
+        let db_type = detect_database_type(db);
+        let q = |id: &str| quote_migration_identifier(id, db_type);
+        let sql = format!(
+            "SELECT {} FROM {} ORDER BY {} ASC",
+            q("version"), q("_migrations"), q("version")
+        );
+        let stmt = Statement::from_string(backend, sql);
 
         let results = db
             .__internal_connection()
@@ -1811,9 +1817,12 @@ impl Migrator {
     /// Record a migration as applied
     async fn record_migration(&self, version: &str, name: &str) -> Result<()> {
         let db = db();
+        let db_type = detect_database_type(db);
+        let q = |id: &str| quote_migration_identifier(id, db_type);
 
         let sql = format!(
-            r#"INSERT INTO "_migrations" ("version", "name") VALUES ('{}', '{}')"#,
+            "INSERT INTO {} ({}, {}) VALUES ('{}', '{}')",
+            q("_migrations"), q("version"), q("name"),
             version.replace('\'', "''"),
             name.replace('\'', "''")
         );
@@ -1829,9 +1838,12 @@ impl Migrator {
     /// Remove a migration record
     async fn remove_migration_record(&self, version: &str) -> Result<()> {
         let db = db();
+        let db_type = detect_database_type(db);
+        let q = |id: &str| quote_migration_identifier(id, db_type);
 
         let sql = format!(
-            r#"DELETE FROM "_migrations" WHERE "version" = '{}'"#,
+            "DELETE FROM {} WHERE {} = '{}'",
+            q("_migrations"), q("version"),
             version.replace('\'', "''")
         );
 
@@ -1945,13 +1957,14 @@ impl fmt::Display for MigrationStatus {
 
 /// Detect database type from connection
 fn detect_database_type(db: &Database) -> DatabaseType {
-    use crate::internal::DbBackend;
+    db.backend()
+}
 
-    match db.__internal_connection().get_database_backend() {
-        DbBackend::Postgres => DatabaseType::Postgres,
-        DbBackend::MySql => DatabaseType::MySQL,
-        DbBackend::Sqlite => DatabaseType::SQLite,
-        _ => DatabaseType::Postgres, // Default to Postgres for unknown backends
+/// Quote an identifier for the given database type (standalone helper for Migrator)
+fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> String {
+    match db_type {
+        DatabaseType::MySQL => format!("`{}`", name),
+        _ => format!(r#""{}""#, name), // Postgres & SQLite use double quotes
     }
 }
 

@@ -2,6 +2,7 @@
 //!
 //! These tests verify core functionality without requiring a database connection.
 //! Run with: `cargo test --test unit_tests`
+#![allow(clippy::approx_constant)]
 
 // =============================================================================
 // VALIDATION MODULE TESTS
@@ -802,7 +803,7 @@ mod config_tests {
     #[test]
     fn test_database_type_clone() {
         let db_type = DatabaseType::MySQL;
-        let cloned = db_type.clone();
+        let cloned = db_type;
         assert_eq!(db_type, cloned);
     }
     
@@ -1045,7 +1046,7 @@ mod query_tests {
     #[test]
     fn test_order_clone_eq() {
         let order1 = Order::Asc;
-        let order2 = order1.clone();
+        let order2 = order1;
         assert_eq!(order1, order2);
     }
     
@@ -1210,7 +1211,7 @@ mod relations_tests {
     #[test]
     fn test_relation_type_clone_eq() {
         let rt1 = RelationType::HasMany;
-        let rt2 = rt1.clone();
+        let rt2 = rt1;
         assert_eq!(rt1, rt2);
     }
     
@@ -1416,7 +1417,7 @@ mod json_array_types_tests {
         // Test BoolArray
         let bool_array: BoolArray = vec![true, false, true];
         assert_eq!(bool_array.len(), 3);
-        assert_eq!(bool_array[0], true);
+        assert!(bool_array[0]);
         
         // Test FloatArray
         let float_array: FloatArray = vec![1.1, 2.2, 3.3];
@@ -1467,7 +1468,7 @@ mod join_aggregation_tests {
     #[test]
     fn test_join_type_clone_eq() {
         let jt1 = JoinType::Inner;
-        let jt2 = jt1.clone();
+        let jt2 = jt1;
         assert_eq!(jt1, jt2);
         
         assert_ne!(JoinType::Inner, JoinType::Left);
@@ -1792,26 +1793,22 @@ mod query_edge_cases {
     
     #[test]
     fn test_json_operators_exist() {
-        let operators = vec![
-            Operator::JsonContains,
+        let operators = [Operator::JsonContains,
             Operator::JsonContainedBy,
             Operator::JsonKeyExists,
             Operator::JsonKeyNotExists,
             Operator::JsonPathExists,
-            Operator::JsonPathNotExists,
-        ];
+            Operator::JsonPathNotExists];
         assert_eq!(operators.len(), 6);
     }
     
     #[test]
     fn test_array_operators_exist() {
-        let operators = vec![
-            Operator::ArrayContains,
+        let operators = [Operator::ArrayContains,
             Operator::ArrayContainedBy,
             Operator::ArrayOverlaps,
             Operator::ArrayContainsAny,
-            Operator::ArrayContainsAll,
-        ];
+            Operator::ArrayContainsAll];
         assert_eq!(operators.len(), 5);
     }
     
@@ -1916,7 +1913,7 @@ mod schema_edge_cases {
     fn test_table_schema_many_columns() {
         let mut builder = TableSchemaBuilder::new("wide_table");
         for i in 0..100 {
-            builder = builder.column(ColumnSchema::new(&format!("col_{}", i), "TEXT"));
+            builder = builder.column(ColumnSchema::new(format!("col_{}", i), "TEXT"));
         }
         let schema = builder.build();
         assert_eq!(schema.columns.len(), 100);
@@ -1963,7 +1960,7 @@ mod schema_edge_cases {
         let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
         
         for i in 0..5 {
-            let schema = TableSchemaBuilder::new(&format!("table_{}", i))
+            let schema = TableSchemaBuilder::new(format!("table_{}", i))
                 .column(ColumnSchema::new("id", "BIGINT").primary_key())
                 .build();
             generator.add_table(schema);
@@ -2196,7 +2193,7 @@ mod config_edge_cases {
         
         // All should be clonable and comparable
         for t in &types {
-            let cloned = t.clone();
+            let cloned = *t;
             assert_eq!(*t, cloned);
         }
     }
@@ -2335,7 +2332,7 @@ mod order_edge_cases {
     #[test]
     fn test_order_eq_behavior() {
         // Order implements PartialEq + Eq
-        let orders = vec![Order::Asc, Order::Desc, Order::Asc];
+        let orders = [Order::Asc, Order::Desc, Order::Asc];
         
         // Count Asc values
         let asc_count = orders.iter().filter(|&&o| o == Order::Asc).count();
@@ -2423,14 +2420,12 @@ mod migration_tests {
     
     #[test]
     fn test_default_value_variants() {
-        let defaults = vec![
-            DefaultValue::String("active".to_string()),
+        let defaults = [DefaultValue::String("active".to_string()),
             DefaultValue::Integer(0),
             DefaultValue::Float(0.0),
             DefaultValue::Boolean(true),
             DefaultValue::Null,
-            DefaultValue::Raw("CURRENT_TIMESTAMP".to_string()),
-        ];
+            DefaultValue::Raw("CURRENT_TIMESTAMP".to_string())];
         
         assert_eq!(defaults.len(), 6);
     }
@@ -2684,41 +2679,33 @@ mod operator_coverage_tests {
     
     #[test]
     fn test_all_comparison_operators() {
-        let ops = vec![
-            Operator::Eq,
+        let ops = [Operator::Eq,
             Operator::NotEq,
             Operator::Gt,
             Operator::Gte,
             Operator::Lt,
-            Operator::Lte,
-        ];
+            Operator::Lte];
         assert_eq!(ops.len(), 6);
     }
     
     #[test]
     fn test_all_pattern_operators() {
-        let ops = vec![
-            Operator::Like,
-            Operator::NotLike,
-        ];
+        let ops = [Operator::Like,
+            Operator::NotLike];
         assert_eq!(ops.len(), 2);
     }
     
     #[test]
     fn test_all_membership_operators() {
-        let ops = vec![
-            Operator::In,
-            Operator::NotIn,
-        ];
+        let ops = [Operator::In,
+            Operator::NotIn];
         assert_eq!(ops.len(), 2);
     }
     
     #[test]
     fn test_all_null_operators() {
-        let ops = vec![
-            Operator::IsNull,
-            Operator::IsNotNull,
-        ];
+        let ops = [Operator::IsNull,
+            Operator::IsNotNull];
         assert_eq!(ops.len(), 2);
     }
     
@@ -2730,26 +2717,22 @@ mod operator_coverage_tests {
     
     #[test]
     fn test_all_json_operators() {
-        let ops = vec![
-            Operator::JsonContains,
+        let ops = [Operator::JsonContains,
             Operator::JsonContainedBy,
             Operator::JsonKeyExists,
             Operator::JsonKeyNotExists,
             Operator::JsonPathExists,
-            Operator::JsonPathNotExists,
-        ];
+            Operator::JsonPathNotExists];
         assert_eq!(ops.len(), 6);
     }
     
     #[test]
     fn test_all_array_operators() {
-        let ops = vec![
-            Operator::ArrayContains,
+        let ops = [Operator::ArrayContains,
             Operator::ArrayContainedBy,
             Operator::ArrayOverlaps,
             Operator::ArrayContainsAny,
-            Operator::ArrayContainsAll,
-        ];
+            Operator::ArrayContainsAll];
         assert_eq!(ops.len(), 5);
     }
     
@@ -4385,22 +4368,22 @@ mod attribute_casting_tests {
     // CastType tests
     #[test]
     fn test_cast_type_from_str() {
-        assert_eq!(CastType::from_str("string"), Some(CastType::String));
-        assert_eq!(CastType::from_str("integer"), Some(CastType::Integer));
-        assert_eq!(CastType::from_str("float"), Some(CastType::Float));
-        assert_eq!(CastType::from_str("boolean"), Some(CastType::Boolean));
-        assert_eq!(CastType::from_str("json"), Some(CastType::Json));
-        assert_eq!(CastType::from_str("array"), Some(CastType::Array));
-        assert_eq!(CastType::from_str("datetime"), Some(CastType::DateTime));
-        assert_eq!(CastType::from_str("date"), Some(CastType::Date));
-        assert_eq!(CastType::from_str("time"), Some(CastType::Time));
-        assert_eq!(CastType::from_str("uuid"), Some(CastType::Uuid));
-        assert_eq!(CastType::from_str("decimal"), Some(CastType::Decimal));
-        assert_eq!(CastType::from_str("encrypted"), Some(CastType::Encrypted));
-        assert_eq!(CastType::from_str("hashed"), Some(CastType::Hashed));
-        assert_eq!(CastType::from_str("comma_separated"), Some(CastType::CommaSeparated));
-        assert_eq!(CastType::from_str("collection"), Some(CastType::Collection));
-        assert_eq!(CastType::from_str("unknown"), None);
+        assert_eq!(CastType::parse_str("string"), Some(CastType::String));
+        assert_eq!(CastType::parse_str("integer"), Some(CastType::Integer));
+        assert_eq!(CastType::parse_str("float"), Some(CastType::Float));
+        assert_eq!(CastType::parse_str("boolean"), Some(CastType::Boolean));
+        assert_eq!(CastType::parse_str("json"), Some(CastType::Json));
+        assert_eq!(CastType::parse_str("array"), Some(CastType::Array));
+        assert_eq!(CastType::parse_str("datetime"), Some(CastType::DateTime));
+        assert_eq!(CastType::parse_str("date"), Some(CastType::Date));
+        assert_eq!(CastType::parse_str("time"), Some(CastType::Time));
+        assert_eq!(CastType::parse_str("uuid"), Some(CastType::Uuid));
+        assert_eq!(CastType::parse_str("decimal"), Some(CastType::Decimal));
+        assert_eq!(CastType::parse_str("encrypted"), Some(CastType::Encrypted));
+        assert_eq!(CastType::parse_str("hashed"), Some(CastType::Hashed));
+        assert_eq!(CastType::parse_str("comma_separated"), Some(CastType::CommaSeparated));
+        assert_eq!(CastType::parse_str("collection"), Some(CastType::Collection));
+        assert_eq!(CastType::parse_str("unknown"), None);
     }
     
     #[test]
