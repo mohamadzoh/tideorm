@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Performance profiler for tracking query execution
@@ -341,9 +341,7 @@ static GLOBAL_TOTAL_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_SLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-lazy_static::lazy_static! {
-    static ref GLOBAL_SLOW_THRESHOLD_MS: RwLock<u64> = RwLock::new(100);
-}
+static GLOBAL_SLOW_THRESHOLD_MS: RwLock<u64> = RwLock::new(100);
 
 /// Global profiling utilities
 pub struct GlobalProfiler;
@@ -370,7 +368,7 @@ impl GlobalProfiler {
             GLOBAL_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
             GLOBAL_TOTAL_TIME_NS.fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
             
-            let threshold_ms = *GLOBAL_SLOW_THRESHOLD_MS.read().unwrap();
+            let threshold_ms = *GLOBAL_SLOW_THRESHOLD_MS.read();
             if duration.as_millis() as u64 >= threshold_ms {
                 GLOBAL_SLOW_COUNT.fetch_add(1, Ordering::SeqCst);
             }
@@ -383,7 +381,7 @@ impl GlobalProfiler {
             total_queries: GLOBAL_QUERY_COUNT.load(Ordering::SeqCst),
             total_time_ns: GLOBAL_TOTAL_TIME_NS.load(Ordering::SeqCst),
             slow_queries: GLOBAL_SLOW_COUNT.load(Ordering::SeqCst),
-            slow_threshold_ms: *GLOBAL_SLOW_THRESHOLD_MS.read().unwrap(),
+            slow_threshold_ms: *GLOBAL_SLOW_THRESHOLD_MS.read(),
         }
     }
     
@@ -396,7 +394,7 @@ impl GlobalProfiler {
     
     /// Set slow query threshold
     pub fn set_slow_threshold(ms: u64) {
-        *GLOBAL_SLOW_THRESHOLD_MS.write().unwrap() = ms;
+        *GLOBAL_SLOW_THRESHOLD_MS.write() = ms;
     }
 }
 

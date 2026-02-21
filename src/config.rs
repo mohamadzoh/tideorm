@@ -30,6 +30,7 @@ use std::time::Duration;
 use crate::database::Database;
 use crate::error::Result;
 use crate::migration::Migration;
+use crate::{tide_info, tide_warn};
 
 /// Global configuration instance
 static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
@@ -339,7 +340,7 @@ impl Config {
     /// ```
     pub fn set_file_url_generator(generator: FileUrlGenerator) {
         if GLOBAL_FILE_URL_GENERATOR.set(generator).is_err() {
-            eprintln!("[TideORM] Warning: file URL generator already set, ignoring subsequent call");
+            tide_warn!("File URL generator already set, ignoring subsequent call");
         }
     }
     
@@ -1190,7 +1191,7 @@ impl TideConfig {
             }
             let result = migrator.run().await?;
             if result.has_applied() {
-                eprintln!("{}", result);
+                tide_info!("{}", result);
             }
         }
         
@@ -1202,7 +1203,7 @@ impl TideConfig {
             }
             let result = seeder.run().await?;
             if result.has_executed() {
-                eprintln!("{}", result);
+                tide_info!("{}", result);
             }
         }
         
@@ -1398,7 +1399,7 @@ impl TideConfig {
 
 /// Trait for registering multiple migrations at once via tuples
 ///
-/// This is implemented for tuples of up to 16 migration types.
+/// This is implemented for tuples of up to 200 migration types.
 /// Used by `TideConfig::migrations::<(Migration1, Migration2, ...)>()`.
 ///
 /// # Example
@@ -1423,145 +1424,60 @@ impl RegisterMigrations for () {
     }
 }
 
-// Implement for single migration
-impl<A: Migration + Default + 'static> RegisterMigrations for (A,) {
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default())]
-    }
+/// Generate `RegisterMigrations` and `RegisterSeeds` for tuples of size 1..N
+macro_rules! impl_register_tuples {
+    // Base case: single type
+    ($first:ident) => {
+        impl<$first: Migration + Default + 'static> RegisterMigrations for ($first,) {
+            fn collect() -> Vec<Box<dyn Migration>> {
+                vec![Box::new($first::default())]
+            }
+        }
+        impl<$first: Seed + Default + 'static> RegisterSeeds for ($first,) {
+            fn collect() -> Vec<Box<dyn Seed>> {
+                vec![Box::new($first::default())]
+            }
+        }
+    };
+    // Recursive case: first + rest
+    ($first:ident, $($rest:ident),+) => {
+        // Recurse for smaller tuples first
+        impl_register_tuples!($($rest),+);
+
+        impl<$first: Migration + Default + 'static, $($rest: Migration + Default + 'static),+>
+            RegisterMigrations for ($first, $($rest),+)
+        {
+            fn collect() -> Vec<Box<dyn Migration>> {
+                vec![Box::new($first::default()), $(Box::new($rest::default())),+]
+            }
+        }
+
+        impl<$first: Seed + Default + 'static, $($rest: Seed + Default + 'static),+>
+            RegisterSeeds for ($first, $($rest),+)
+        {
+            fn collect() -> Vec<Box<dyn Seed>> {
+                vec![Box::new($first::default()), $(Box::new($rest::default())),+]
+            }
+        }
+    };
 }
 
-// Implement for 2 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static> RegisterMigrations for (A, B) {
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default())]
-    }
-}
-
-// Implement for 3 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default())]
-    }
-}
-
-// Implement for 4 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default())]
-    }
-}
-
-// Implement for 5 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default())]
-    }
-}
-
-// Implement for 6 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default())]
-    }
-}
-
-// Implement for 7 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default())]
-    }
-}
-
-// Implement for 8 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default())]
-    }
-}
-
-// Implement for 9 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default())]
-    }
-}
-
-// Implement for 10 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default())]
-    }
-}
-
-// Implement for 11 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default())]
-    }
-}
-
-// Implement for 12 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static, L: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K, L) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default())]
-    }
-}
-
-// Implement for 13 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static, L: Migration + Default + 'static, M: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K, L, M) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M::default())]
-    }
-}
-
-// Implement for 14 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static, L: Migration + Default + 'static, M_: Migration + Default + 'static, N: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default())]
-    }
-}
-
-// Implement for 15 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static, L: Migration + Default + 'static, M_: Migration + Default + 'static, N: Migration + Default + 'static, O: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N, O) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default()), Box::new(O::default())]
-    }
-}
-
-// Implement for 16 migrations
-impl<A: Migration + Default + 'static, B: Migration + Default + 'static, C: Migration + Default + 'static, D: Migration + Default + 'static, E: Migration + Default + 'static, F: Migration + Default + 'static, G: Migration + Default + 'static, H: Migration + Default + 'static, I: Migration + Default + 'static, J: Migration + Default + 'static, K: Migration + Default + 'static, L: Migration + Default + 'static, M_: Migration + Default + 'static, N: Migration + Default + 'static, O: Migration + Default + 'static, P: Migration + Default + 'static> 
-    RegisterMigrations for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N, O, P) 
-{
-    fn collect() -> Vec<Box<dyn Migration>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default()), Box::new(O::default()), Box::new(P::default())]
-    }
-}
+// Generate impls for tuples of 1 through 200 elements
+impl_register_tuples!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17, T18,
+    T19, T20, T21, T22, T23, T24, T25, T26, T27, T28, T29, T30, T31, T32, T33, T34, T35,
+    T36, T37, T38, T39, T40, T41, T42, T43, T44, T45, T46, T47, T48, T49, T50, T51, T52,
+    T53, T54, T55, T56, T57, T58, T59, T60, T61, T62, T63, T64, T65, T66, T67, T68, T69,
+    T70, T71, T72, T73, T74, T75, T76, T77, T78, T79, T80, T81, T82, T83, T84, T85, T86,
+    T87, T88, T89, T90, T91, T92, T93, T94, T95, T96, T97, T98, T99, T100, T101, T102,
+    T103, T104, T105, T106, T107, T108, T109, T110, T111, T112, T113, T114, T115, T116,
+    T117, T118, T119, T120, T121, T122, T123, T124, T125, T126, T127, T128, T129, T130,
+    T131, T132, T133, T134, T135, T136, T137, T138, T139, T140, T141, T142, T143, T144,
+    T145, T146, T147, T148, T149, T150, T151, T152, T153, T154, T155, T156, T157, T158,
+    T159, T160, T161, T162, T163, T164, T165, T166, T167, T168, T169, T170, T171, T172,
+    T173, T174, T175, T176, T177, T178, T179, T180, T181, T182, T183, T184, T185, T186,
+    T187, T188, T189, T190, T191, T192, T193, T194, T195, T196, T197, T198, T199, T200
+);
 
 // ============================================================================
 // REGISTER SEEDS TRAIT
@@ -1571,7 +1487,7 @@ use crate::seeding::Seed;
 
 /// Trait for registering multiple seeds via tuple syntax
 ///
-/// This is implemented for tuples of up to 16 seed types.
+/// This is implemented for tuples of up to 200 seed types.
 /// Used by `TideConfig::seeds::<(Seed1, Seed2, ...)>()`.
 ///
 /// # Example
@@ -1593,146 +1509,6 @@ pub trait RegisterSeeds {
 impl RegisterSeeds for () {
     fn collect() -> Vec<Box<dyn Seed>> {
         Vec::new()
-    }
-}
-
-// Implement for single seed
-impl<A: Seed + Default + 'static> RegisterSeeds for (A,) {
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default())]
-    }
-}
-
-// Implement for 2 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static> RegisterSeeds for (A, B) {
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default())]
-    }
-}
-
-// Implement for 3 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default())]
-    }
-}
-
-// Implement for 4 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default())]
-    }
-}
-
-// Implement for 5 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default())]
-    }
-}
-
-// Implement for 6 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default())]
-    }
-}
-
-// Implement for 7 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default())]
-    }
-}
-
-// Implement for 8 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default())]
-    }
-}
-
-// Implement for 9 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default())]
-    }
-}
-
-// Implement for 10 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default())]
-    }
-}
-
-// Implement for 11 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default())]
-    }
-}
-
-// Implement for 12 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static, L: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K, L) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default())]
-    }
-}
-
-// Implement for 13 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static, L: Seed + Default + 'static, M_: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K, L, M_) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default())]
-    }
-}
-
-// Implement for 14 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static, L: Seed + Default + 'static, M_: Seed + Default + 'static, N: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default())]
-    }
-}
-
-// Implement for 15 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static, L: Seed + Default + 'static, M_: Seed + Default + 'static, N: Seed + Default + 'static, O: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N, O) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default()), Box::new(O::default())]
-    }
-}
-
-// Implement for 16 seeds
-impl<A: Seed + Default + 'static, B: Seed + Default + 'static, C: Seed + Default + 'static, D: Seed + Default + 'static, E: Seed + Default + 'static, F: Seed + Default + 'static, G: Seed + Default + 'static, H: Seed + Default + 'static, I: Seed + Default + 'static, J: Seed + Default + 'static, K: Seed + Default + 'static, L: Seed + Default + 'static, M_: Seed + Default + 'static, N: Seed + Default + 'static, O: Seed + Default + 'static, P: Seed + Default + 'static> 
-    RegisterSeeds for (A, B, C, D, E, F, G, H, I, J, K, L, M_, N, O, P) 
-{
-    fn collect() -> Vec<Box<dyn Seed>> {
-        vec![Box::new(A::default()), Box::new(B::default()), Box::new(C::default()), Box::new(D::default()), Box::new(E::default()), Box::new(F::default()), Box::new(G::default()), Box::new(H::default()), Box::new(I::default()), Box::new(J::default()), Box::new(K::default()), Box::new(L::default()), Box::new(M_::default()), Box::new(N::default()), Box::new(O::default()), Box::new(P::default())]
     }
 }
 

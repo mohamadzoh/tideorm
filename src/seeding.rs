@@ -62,9 +62,10 @@
 use std::fmt;
 
 use crate::config::DatabaseType;
-use crate::database::{db, Database};
+use crate::database::{require_db, Database};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
+use crate::tide_info;
 
 // Re-export async_trait for users
 pub use async_trait::async_trait;
@@ -192,7 +193,7 @@ impl Seeder {
         let executed = self.get_executed_seeds().await?;
         let mut result = SeedResult::new();
 
-        let database = db();
+        let database = require_db()?;
 
         // Sort seeds by priority, then by dependency order
         let sorted_seeds = self.sort_seeds_by_priority_and_deps();
@@ -242,7 +243,7 @@ impl Seeder {
     pub async fn run_seed(&self, seed_name: &str) -> Result<SeedResult> {
         self.ensure_seeds_table().await?;
 
-        let database = db();
+        let database = require_db()?;
         let mut result = SeedResult::new();
 
         for seed in &self.seeds {
@@ -281,9 +282,12 @@ impl Seeder {
         }
 
         // Get the last executed seed name
-        let last_name = executed.last().unwrap();
+        let last_name = match executed.last() {
+            Some(n) => n,
+            None => return Ok(result),
+        };
 
-        let database = db();
+        let database = require_db()?;
 
         // Find the seed
         for seed in &self.seeds {
@@ -310,7 +314,7 @@ impl Seeder {
     pub async fn rollback_seed(&self, seed_name: &str) -> Result<SeedResult> {
         self.ensure_seeds_table().await?;
 
-        let database = db();
+        let database = require_db()?;
         let mut result = SeedResult::new();
 
         for seed in &self.seeds {
@@ -470,7 +474,7 @@ impl Seeder {
 
     /// Ensure the seeds table exists
     async fn ensure_seeds_table(&self) -> Result<()> {
-        let database = db();
+        let database = require_db()?;
         let db_type = detect_database_type(database);
 
         let sql = match db_type {
@@ -514,7 +518,7 @@ impl Seeder {
 
     /// Get list of executed seed names
     async fn get_executed_seeds(&self) -> Result<Vec<String>> {
-        let database = db();
+        let database = require_db()?;
 
         use crate::internal::Statement;
 
@@ -545,7 +549,7 @@ impl Seeder {
 
     /// Record a seed as executed
     async fn record_seed(&self, name: &str) -> Result<()> {
-        let database = db();
+        let database = require_db()?;
         let backend = database.__internal_connection().get_database_backend();
         let q = |id: &str| quote_identifier(id, backend);
 
@@ -565,7 +569,7 @@ impl Seeder {
 
     /// Remove a seed record
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
-        let database = db();
+        let database = require_db()?;
         let backend = database.__internal_connection().get_database_backend();
         let q = |id: &str| quote_identifier(id, backend);
 
@@ -703,21 +707,21 @@ fn quote_identifier(name: &str, backend: crate::internal::DbBackend) -> String {
 /// Log seed start
 fn log_seed_start(name: &str) {
     if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        eprintln!("[Seed] Running: {}", name);
+        tide_info!("Seed running: {}", name);
     }
 }
 
 /// Log seed complete
 fn log_seed_complete(name: &str) {
     if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        eprintln!("[Seed] Completed: {}", name);
+        tide_info!("Seed completed: {}", name);
     }
 }
 
 /// Log seed rollback
 fn log_seed_rollback(name: &str) {
     if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        eprintln!("[Seed] Rolling back: {}", name);
+        tide_info!("Seed rolling back: {}", name);
     }
 }
 

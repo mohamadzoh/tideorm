@@ -5,6 +5,42 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-02-21
+
+### Added
+- **`require_db()` function**: Non-panicking alternative to `db()` — returns `Result<&Database>` instead of panicking when the global connection is not initialized. Exported from `tideorm::require_db`
+- **Batch insert via `QueryExecutor::insert_many`**: New internal method using a single multi-row INSERT statement, reducing database round trips from O(n) to O(1)
+- **Structured logging macros**: `tide_info!`, `tide_warn!`, `tide_debug!` for consistent `[TideORM]`-prefixed log output across all modules
+- **Primary key column in derive macro**: `primary_key_column()` now returns the actual primary key column, enabling proper `last()` ordering by PK descending
+
+### Improved
+- **Tuple registration expanded to 200**: `RegisterMigrations`, `RegisterSeeds`, and `RegisterModels` now support tuples of up to 200 types (previously limited to 12–16). Refactored from hand-written impls to recursive macros
+- **`insert_all()` uses batch insert**: Single multi-row INSERT with automatic fallback to individual inserts if the backend doesn't support `INSERT ... RETURNING`
+- **`last()` orders by primary key DESC**: Previously returned an arbitrary first record; now correctly returns the last record by primary key
+- **`raw_json()` column extraction**: Improved type priority chain (bool before int, nullable-first) for more accurate JSON output
+- **Replaced `lazy_static!` with `parking_lot::RwLock` const init**: In `logging` and `profiling` modules for simpler, zero-overhead static initialization
+- **Better panic message for `db()`**: Now mentions `Database::set_global()` and suggests `try_db()` as alternative
+
+### Changed
+- **All `db()` calls replaced with `require_db()?`**: Throughout `model.rs`, `query.rs`, `migration.rs`, `seeding.rs`, `schema.rs`, `database.rs`, and macro-generated code — these now return descriptive errors instead of panicking
+- **All `eprintln!` replaced with structured logging**: Consistent `[TideORM]`/`[TideORM WARN]`/`[TideORM DEBUG]` prefixed output across sync, migration, seeding, config, and query modules
+- **Derive macro lint suppression narrowed**: From blanket `clippy::all` to specific `clippy::derivable_impls`, `clippy::enum_variant_names`, `clippy::redundant_closure`
+- **Removed blanket `#![allow(dead_code, unused_imports)]`** from `internal/mod.rs` — now uses targeted `#[allow(unused_imports)]` on the specific import block
+
+### Fixed
+- **Attachment detach safety**: Uses `if let Some(first)` instead of `unwrap()` in `detach()` logic
+- **OrBranch single-condition safety**: Uses `if let Some(condition)` instead of `unwrap()` in `OrBranchBuilder`
+- **Migration rollback safety**: `match applied.last()` with early return instead of `unwrap()` when no migrations are applied
+- **Seed rollback safety**: `match executed.last()` with early return instead of `unwrap()` when no seeds are executed
+- **Changelog date typos**: Corrected years from 2026 to 2025 for historical entries (0.1.0, 0.4.3, 0.4.4, 0.4.5)
+
+### Dependencies
+- `sea-orm`: 2.0.0-rc.30 → 2.0.0-rc.32
+- `sea-query`: 1.0.0-rc.30 → 1.0.0-rc.31
+- `uuid`: 1.19.0 → 1.21.0
+- `getrandom`: 0.3.4 → 0.4.1
+- Plus transitive dependency updates
+
 ## [0.5.0] - 2025-07-22
 
 ### Improved
@@ -33,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quote`: 1.0.43 → 1.0.44
 - Plus 40+ transitive dependency updates
 
-## [0.4.5] - 2026-01-17
+## [0.4.5] - 2025-01-17
 
 ### Added
 
@@ -122,7 +158,7 @@ User::query()
     .await?;
 ```
 
-## [0.4.4] - 2026-01-16
+## [0.4.4] - 2025-01-16
 
 ### Added
 
@@ -144,7 +180,7 @@ User::query()
   - Or use field_name: `|field_name, file| match field_name { "thumbnail" => ..., _ => ... }`
   - Benefit: Route URLs based on field type (thumbnails to image CDN, videos to streaming, etc.)
 
-## [0.4.3] - 2026-01-14
+## [0.4.3] - 2025-01-14
 
 ### Added
 
@@ -158,7 +194,7 @@ User::query()
 ### Fixed
 - Fixed critical bug where `or_groups` were not being applied to queries in `get()`, `first()`, `count()`, `delete()`, `count_distinct()`, and `aggregate_f64()` methods
 
-## [0.1.0] - 2026-01-08
+## [0.1.0] - 2025-01-08
 
 ### 🎉 Initial Release
 

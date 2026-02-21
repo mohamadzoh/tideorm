@@ -1043,9 +1043,9 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         .collect();
     
     let base_impl = quote! {
-        // Internal SeaORM entity
+        // Internal SeaORM entity — generated code, targeted lint suppression
         #[doc(hidden)]
-        #[allow(non_snake_case, dead_code, unused_imports, clippy::all)]
+        #[allow(non_snake_case, dead_code, unused_imports, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
         mod #internal_entity_mod {
             // Re-export sea_orm as a local alias so SeaORM derive macros can resolve `sea_orm::` paths
             use ::tideorm::sea_orm as sea_orm;
@@ -1259,6 +1259,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     #(#relation_field_defaults),*
                 }
             }
+            
+            fn primary_key_column() -> Option<<Self::Entity as ::tideorm::sea_orm::EntityTrait>::Column> {
+                Some(#internal_entity_mod::Column::#pk_column_variant)
+            }
         }
         
         impl #struct_name {
@@ -1296,7 +1300,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 use ::tideorm::sea_orm::EntityTrait;
                 use ::tideorm::internal::InternalModel;
                 let result = #internal_entity_mod::Entity::find_by_id(id)
-                    .one(::tideorm::db().__internal_connection())
+                    .one(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.map(|m| <Self as InternalModel>::from_sea_model(m)))
@@ -1305,7 +1309,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
                 use ::tideorm::sea_orm::EntityTrait;
                 let result = #internal_entity_mod::Entity::delete_by_id(id)
-                    .exec(::tideorm::db().__internal_connection())
+                    .exec(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.rows_affected)
@@ -1318,7 +1322,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             async fn delete(self) -> ::tideorm::Result<u64> {
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 let active = self.__into_delete_active_model();
-                let result = active.delete(::tideorm::db().__internal_connection())
+                let result = active.delete(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.rows_affected)
@@ -1328,7 +1332,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 use ::tideorm::internal::InternalModel;
                 let active = <Self as InternalModel>::into_active_model(self);
-                let result = active.insert(::tideorm::db().__internal_connection())
+                let result = active.insert(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(<Self as InternalModel>::from_sea_model(result))
@@ -1338,7 +1342,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 use ::tideorm::internal::InternalModel;
                 let active = self.__into_update_active_model();
-                let result = active.update(::tideorm::db().__internal_connection())
+                let result = active.update(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(<Self as InternalModel>::from_sea_model(result))

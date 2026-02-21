@@ -421,7 +421,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::find_all::<Self>(crate::database::db().__internal_connection()).await
+        crate::internal::QueryExecutor::find_all::<Self>(crate::database::require_db()?.__internal_connection()).await
     }
     
     /// Start a query builder for this model
@@ -451,7 +451,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::count::<Self>(crate::database::db().__internal_connection(), None).await
+        crate::internal::QueryExecutor::count::<Self>(crate::database::require_db()?.__internal_connection(), None).await
     }
     
     /// Check if any records exist
@@ -475,6 +475,10 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     
     /// Insert multiple records at once (efficient batch insert)
     ///
+    /// Uses a single multi-row INSERT statement for efficiency (O(1) round trips).
+    /// Falls back to individual inserts if the batch insert fails (e.g., on backends
+    /// that don't support INSERT ... RETURNING).
+    ///
     /// # Example
     /// ```ignore
     /// let users = vec![
@@ -487,12 +491,28 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>>
     where
         Self: Sized,
+        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
     {
-        let mut results = Vec::with_capacity(models.len());
-        for model in models {
-            results.push(model.save().await?);
+        if models.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(results)
+        
+        let conn = crate::database::require_db()?.__internal_connection();
+        
+        // Try batch insert first (single multi-row INSERT)
+        match crate::internal::QueryExecutor::insert_many::<Self>(conn, models.clone()).await {
+            Ok(results) => Ok(results),
+            Err(_) => {
+                // Fallback to individual inserts for backends that don't support
+                // INSERT ... RETURNING or other batch limitations
+                let mut results = Vec::with_capacity(models.len());
+                for model in models {
+                    results.push(model.save().await?);
+                }
+                Ok(results)
+            }
+        }
     }
     
     /// Insert multiple records and return the inserted models with their IDs
@@ -517,6 +537,8 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn insert_many_returning(models: Vec<Self>) -> Result<Vec<Self>>
     where
         Self: Sized,
+        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
     {
         // Check if empty - return empty Vec without error
         if models.is_empty() {
@@ -548,6 +570,8 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn insert_many(models: Vec<Self>) -> Result<Vec<Self>>
     where
         Self: Sized,
+        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
     {
         if models.is_empty() {
             return Ok(Vec::new());
@@ -650,7 +674,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         Fut: std::future::Future<Output = Result<T>> + Send,
         T: Send,
     {
-        crate::database::db().transaction(f).await
+        crate::database::require_db()?.transaction(f).await
     }
     
     /// Get the first record
@@ -665,7 +689,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::first::<Self>(crate::database::db().__internal_connection()).await
+        crate::internal::QueryExecutor::first::<Self>(crate::database::require_db()?.__internal_connection()).await
     }
     
     /// Get the last record (by primary key descending)
@@ -678,7 +702,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::last::<Self>(crate::database::db().__internal_connection()).await
+        crate::internal::QueryExecutor::last::<Self>(crate::database::require_db()?.__internal_connection()).await
     }
     
     /// Paginate records
@@ -692,7 +716,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         Self: Sized,
     {
         let offset = (page.saturating_sub(1)) * per_page;
-        crate::internal::QueryExecutor::paginate::<Self>(crate::database::db().__internal_connection(), per_page, offset).await
+        crate::internal::QueryExecutor::paginate::<Self>(crate::database::require_db()?.__internal_connection(), per_page, offset).await
     }
     
     // =========================================================================

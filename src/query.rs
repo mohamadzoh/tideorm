@@ -59,6 +59,7 @@ use std::marker::PhantomData;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::model::Model;
+use crate::tide_debug;
 use crate::internal::{
     EntityTrait, QueryFilter, QueryOrder, QuerySelect, Condition, 
     Expr, translate_error, FromQueryResult, Asterisk, ConnectionTrait, Statement, DbBackend,
@@ -1285,7 +1286,9 @@ impl<M: Model> OrBranchBuilder<M> {
             for branch in self.branches {
                 if branch.conditions.len() == 1 {
                     // Single condition - add directly to OR group
-                    or_group.conditions.push(branch.conditions.into_iter().next().unwrap());
+                    if let Some(condition) = branch.conditions.into_iter().next() {
+                        or_group.conditions.push(condition);
+                    }
                 } else {
                     // Multiple conditions - create nested AND group
                     let mut nested = OrGroup::new();
@@ -4107,7 +4110,7 @@ impl<M: Model> QueryBuilder<M> {
             .unwrap_or(DatabaseType::Postgres);
         let col = db_sql::quote_ident(db_type, column.column_name());
         
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         let mut select = M::Entity::find();
         
@@ -4138,7 +4141,7 @@ impl<M: Model> QueryBuilder<M> {
             agg_result: Option<f64>,
         }
         
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         let mut select = M::Entity::find();
         
@@ -5324,7 +5327,7 @@ impl<M: Model> QueryBuilder<M> {
             .map(|v| v.to_lowercase() == "true" || v == "1")
             .unwrap_or(false)
         {
-            eprintln!("[TideORM Query] {}", sql);
+            tide_debug!("Query: {}", sql);
         }
         
         // Also log via QueryLogger if enabled
@@ -5756,7 +5759,7 @@ impl<M: Model> QueryBuilder<M> {
             None
         };
         
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         // If we have JOINs or GROUP BY, use raw SQL
         if !self.joins.is_empty() || !self.group_by.is_empty() {
@@ -6237,7 +6240,7 @@ impl<M: Model> QueryBuilder<M> {
     pub async fn first(self) -> Result<Option<M>> {
         use sea_orm::sea_query::Alias;
         
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         // If we have JOINs or GROUP BY, use raw SQL
         if !self.joins.is_empty() || !self.group_by.is_empty() {
@@ -6310,7 +6313,7 @@ impl<M: Model> QueryBuilder<M> {
             count: i64,
         }
         
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         // Start with Entity::find()
         let mut select = M::Entity::find();
@@ -6370,7 +6373,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn delete(self) -> Result<u64> {
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         
         // Start with Entity::delete_many()
         let mut delete = M::Entity::delete_many();
@@ -6431,7 +6434,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         
         // Execute raw SQL
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             sql,
@@ -6482,7 +6485,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         
         // Execute raw SQL
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             sql,
@@ -6520,7 +6523,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         
         // Execute raw SQL
-        let conn = crate::database::db().__internal_connection();
+        let conn = crate::database::require_db()?.__internal_connection();
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             sql,

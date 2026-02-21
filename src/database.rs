@@ -55,6 +55,7 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::internal::InternalConnection;
+use crate::tide_warn;
 
 // ============================================================================
 // GLOBAL DATABASE CONNECTION
@@ -82,8 +83,22 @@ static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 pub fn db() -> &'static Database {
     GLOBAL_DB.get().expect(
         "Global database connection not initialized. \
-         Call Database::init() first."
+         Call Database::init() or Database::set_global() before using models. \
+         Use try_db() for a non-panicking alternative."
     )
+}
+
+/// Get a reference to the global database, returning an error if not initialized.
+///
+/// Prefer this over `db()` inside functions that already return `Result`.
+pub fn require_db() -> Result<&'static Database> {
+    GLOBAL_DB.get().ok_or_else(|| {
+        Error::connection(
+            "Global database connection not initialized. \
+             Call Database::init() or Database::set_global() before using models."
+            .to_string(),
+        )
+    })
 }
 
 /// Try to get a reference to the global database connection
@@ -348,7 +363,7 @@ impl Database {
     pub async fn raw<T: crate::model::Model>(sql: &str) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, Statement, FromQueryResult};
         
-        let db = crate::database::db();
+        let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
         
@@ -387,7 +402,7 @@ impl Database {
     ) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, Statement, FromQueryResult};
         
-        let db = crate::database::db();
+        let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
         
@@ -418,7 +433,7 @@ impl Database {
     pub async fn execute(sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
         
-        let db = crate::database::db();
+        let db = crate::database::require_db()?;
         let result = db.inner.connection()
             .execute_unprepared(sql)
             .await
@@ -440,7 +455,7 @@ impl Database {
     pub async fn execute_with_params(sql: &str, params: Vec<crate::internal::Value>) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
         
-        let db = crate::database::db();
+        let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
         
@@ -477,7 +492,7 @@ impl Database {
     pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
         
-        let db = crate::database::db();
+        let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
         
@@ -493,27 +508,38 @@ impl Database {
             // Get column names from the result
             let columns = row.column_names();
             for col_name in columns {
-                // Try different types and convert to JSON
-                if let Ok(val) = row.try_get::<i64>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
-                } else if let Ok(val) = row.try_get::<i32>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
-                } else if let Ok(val) = row.try_get::<f64>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
-                } else if let Ok(val) = row.try_get::<String>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
-                } else if let Ok(val) = row.try_get::<bool>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
-                } else if let Ok(val) = row.try_get::<Option<String>>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                // Extract column value as JSON using a prioritized type chain.
+                // We try Option<T> variants first since most DB columns are nullable,
+                // and order types to minimize misrepresentation:
+                // - bool before integers (to avoid 0/1 being returned as int)
+                // - f64 before i64 (to preserve decimal precision)
+                // - String as final fallback (most types can be read as string)
+                let json_val = if let Ok(val) = row.try_get::<Option<bool>>("", &col_name) {
+                    match val {
+                        Some(v) => serde_json::json!(v),
+                        None => serde_json::Value::Null,
+                    }
                 } else if let Ok(val) = row.try_get::<Option<i64>>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                    match val {
+                        Some(v) => serde_json::json!(v),
+                        None => serde_json::Value::Null,
+                    }
                 } else if let Ok(val) = row.try_get::<Option<f64>>("", &col_name) {
-                    obj.insert(col_name.to_string(), serde_json::json!(val));
+                    match val {
+                        Some(v) => serde_json::json!(v),
+                        None => serde_json::Value::Null,
+                    }
+                } else if let Ok(val) = row.try_get::<Option<String>>("", &col_name) {
+                    match val {
+                        Some(v) => serde_json::json!(v),
+                        None => serde_json::Value::Null,
+                    }
                 } else {
-                    // Default to null for unsupported types
-                    obj.insert(col_name.to_string(), serde_json::Value::Null);
-                }
+                    // Unsupported type — null is safer than panicking
+                    serde_json::Value::Null
+                };
+                
+                obj.insert(col_name.to_string(), json_val);
             }
             
             json_results.push(serde_json::Value::Object(obj));
@@ -551,7 +577,7 @@ impl Database {
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
             other => {
-                eprintln!("[TideORM] Warning: unknown database backend {:?}, defaulting to Postgres", other);
+                tide_warn!("Unknown database backend {:?}, defaulting to Postgres", other);
                 crate::config::DatabaseType::Postgres
             }
         }

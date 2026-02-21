@@ -67,7 +67,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Log level for query logging
@@ -350,11 +350,9 @@ static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 static SLOW_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_QUERY_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
-lazy_static::lazy_static! {
-    static ref LOG_LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Off);
-    static ref QUERY_HISTORY: RwLock<Vec<QueryLogEntry>> = RwLock::new(Vec::new());
-    static ref HISTORY_LIMIT: RwLock<usize> = RwLock::new(100);
-}
+static LOG_LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Off);
+static QUERY_HISTORY: RwLock<Vec<QueryLogEntry>> = RwLock::new(Vec::new());
+static HISTORY_LIMIT: RwLock<usize> = RwLock::new(100);
 
 /// Query logger for debugging and performance monitoring
 pub struct QueryLogger;
@@ -382,12 +380,12 @@ impl QueryLogger {
     
     /// Get current log level
     pub fn level() -> LogLevel {
-        *LOG_LEVEL.read().unwrap()
+        *LOG_LEVEL.read()
     }
     
     /// Set log level
     pub fn set_level(level: LogLevel) {
-        *LOG_LEVEL.write().unwrap() = level;
+        *LOG_LEVEL.write() = level;
     }
     
     /// Log a query entry
@@ -415,8 +413,8 @@ impl QueryLogger {
         
         // Store in history
         {
-            let mut history = QUERY_HISTORY.write().unwrap();
-            let limit = *HISTORY_LIMIT.read().unwrap();
+            let mut history = QUERY_HISTORY.write();
+            let limit = *HISTORY_LIMIT.read();
             if history.len() >= limit {
                 history.remove(0);
             }
@@ -485,12 +483,12 @@ impl QueryLogger {
     
     /// Get query history
     pub fn history() -> Vec<QueryLogEntry> {
-        QUERY_HISTORY.read().unwrap().clone()
+        QUERY_HISTORY.read().clone()
     }
     
     /// Clear query history
     pub fn clear_history() {
-        QUERY_HISTORY.write().unwrap().clear();
+        QUERY_HISTORY.write().clear();
     }
     
     /// Get slow queries from history
@@ -498,7 +496,6 @@ impl QueryLogger {
         let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
         QUERY_HISTORY
             .read()
-            .unwrap()
             .iter()
             .filter(|e| e.is_slow(threshold))
             .cloned()
@@ -517,7 +514,7 @@ impl QueryLogger {
         // TIDE_LOG_LEVEL
         if let Ok(val) = std::env::var("TIDE_LOG_LEVEL") {
             let level = LogLevel::parse_str(&val);
-            *LOG_LEVEL.write().unwrap() = level;
+            *LOG_LEVEL.write() = level;
             if level != LogLevel::Off {
                 LOGGER_ENABLED.store(true, Ordering::SeqCst);
             }
@@ -577,7 +574,7 @@ impl QueryLoggerBuilder {
     /// Enable the logger with configured settings
     pub fn enable(self) {
         if let Some(level) = self.level {
-            *LOG_LEVEL.write().unwrap() = level;
+            *LOG_LEVEL.write() = level;
         }
         if let Some(timing) = self.timing {
             LOGGER_TIMING.store(timing, Ordering::SeqCst);
@@ -586,7 +583,7 @@ impl QueryLoggerBuilder {
             SLOW_QUERY_THRESHOLD_MS.store(ms, Ordering::SeqCst);
         }
         if let Some(limit) = self.history_limit {
-            *HISTORY_LIMIT.write().unwrap() = limit;
+            *HISTORY_LIMIT.write() = limit;
         }
         LOGGER_ENABLED.store(true, Ordering::SeqCst);
     }
@@ -872,4 +869,41 @@ mod tests {
         assert!(entry.duration.unwrap() >= Duration::from_millis(10));
         assert_eq!(entry.rows, Some(5));
     }
+}
+
+// ============================================================================
+// Internal structured logging macros
+// ============================================================================
+//
+// These replace raw `eprintln!` usage across the crate with a consistent
+// format: `[TideORM <LEVEL>] message`.
+//
+// Not part of the public API — these are `#[doc(hidden)]` helpers used
+// internally by sync, migration, seeding, and config modules.
+
+/// Internal info-level log (operational status messages)
+#[doc(hidden)]
+#[macro_export]
+macro_rules! tide_info {
+    ($($arg:tt)*) => {
+        eprintln!("[TideORM] {}", format!($($arg)*));
+    };
+}
+
+/// Internal warning-level log (non-fatal issues)
+#[doc(hidden)]
+#[macro_export]
+macro_rules! tide_warn {
+    ($($arg:tt)*) => {
+        eprintln!("[TideORM WARN] {}", format!($($arg)*));
+    };
+}
+
+/// Internal debug-level log (verbose operational detail)
+#[doc(hidden)]
+#[macro_export]
+macro_rules! tide_debug {
+    ($($arg:tt)*) => {
+        eprintln!("[TideORM DEBUG] {}", format!($($arg)*));
+    };
 }

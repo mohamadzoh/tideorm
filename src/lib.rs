@@ -472,6 +472,7 @@
 //! 4. **Type Safety** - Catch errors at compile time when possible
 //! 5. **Performance** - Zero-cost abstractions where possible
 
+#![recursion_limit = "256"]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![deny(unsafe_code)]
@@ -562,7 +563,7 @@ pub mod prelude;
 
 pub use database::Database;
 // Global database access functions
-pub use database::{db, try_db, has_global_db};
+pub use database::{db, try_db, has_global_db, require_db};
 pub use error::{Error, Result};
 pub use model::{Model, ModelMeta};
 pub use query::{QueryBuilder, Order, JoinType, JoinClause, AggregateFunction};

@@ -59,9 +59,10 @@
 use std::fmt;
 
 use crate::config::DatabaseType;
-use crate::database::{db, Database};
+use crate::database::{require_db, Database};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
+use crate::{tide_info, tide_debug};
 
 // Re-export async_trait for users
 pub use async_trait::async_trait;
@@ -326,7 +327,7 @@ impl Schema {
         log_migration_sql(sql);
         self.statements.push(sql.to_string());
 
-        let db = db();
+        let db = require_db()?;
         db.__internal_connection()
             .execute_unprepared(sql)
             .await
@@ -1593,7 +1594,7 @@ impl Migrator {
         let applied = self.get_applied_migrations().await?;
         let mut result = MigrationResult::new();
 
-        let db = db();
+        let db = require_db()?;
         let db_type = detect_database_type(db);
 
         // Sort migrations by version
@@ -1642,9 +1643,12 @@ impl Migrator {
         }
 
         // Get the last applied migration version
-        let last_version = applied.last().unwrap();
+        let last_version = match applied.last() {
+            Some(v) => v,
+            None => return Ok(result),
+        };
 
-        let db = db();
+        let db = require_db()?;
         let db_type = detect_database_type(db);
 
         // Find the migration
@@ -1731,7 +1735,7 @@ impl Migrator {
 
     /// Ensure the migrations table exists
     async fn ensure_migrations_table(&self) -> Result<()> {
-        let db = db();
+        let db = require_db()?;
         let db_type = detect_database_type(db);
 
         let sql = match db_type {
@@ -1777,7 +1781,7 @@ impl Migrator {
 
     /// Get list of applied migration versions
     async fn get_applied_migrations(&self) -> Result<Vec<String>> {
-        let db = db();
+        let db = require_db()?;
 
         use crate::internal::Statement;
 
@@ -1816,7 +1820,7 @@ impl Migrator {
 
     /// Record a migration as applied
     async fn record_migration(&self, version: &str, name: &str) -> Result<()> {
-        let db = db();
+        let db = require_db()?;
         let db_type = detect_database_type(db);
         let q = |id: &str| quote_migration_identifier(id, db_type);
 
@@ -1837,7 +1841,7 @@ impl Migrator {
 
     /// Remove a migration record
     async fn remove_migration_record(&self, version: &str) -> Result<()> {
-        let db = db();
+        let db = require_db()?;
         let db_type = detect_database_type(db);
         let q = |id: &str| quote_migration_identifier(id, db_type);
 
@@ -1971,23 +1975,23 @@ fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> String {
 /// Log migration SQL (respects TIDE_LOG_QUERIES)
 fn log_migration_sql(sql: &str) {
     if std::env::var("TIDE_LOG_QUERIES").is_ok() {
-        eprintln!("[Migration SQL] {}", sql);
+        tide_debug!("Migration SQL: {}", sql);
     }
 }
 
 /// Log migration start
 fn log_migration_start(version: &str, name: &str) {
-    eprintln!("Running migration: {} - {}", version, name);
+    tide_info!("Running migration: {} - {}", version, name);
 }
 
 /// Log migration complete
 fn log_migration_complete(version: &str, name: &str) {
-    eprintln!("Completed migration: {} - {}", version, name);
+    tide_info!("Completed migration: {} - {}", version, name);
 }
 
 /// Log migration rollback
 fn log_migration_rollback(version: &str, name: &str) {
-    eprintln!("Rolling back migration: {} - {}", version, name);
+    tide_info!("Rolling back migration: {} - {}", version, name);
 }
 
 // ============================================================================

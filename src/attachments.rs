@@ -421,7 +421,9 @@ pub trait HasAttachments {
             if attachments.is_empty() {
                 files.remove_one(relation);
             } else {
-                files.set_one(relation, attachments.into_iter().next().unwrap());
+                if let Some(first) = attachments.into_iter().next() {
+                    files.set_one(relation, first);
+                }
             }
         } else {
             files.clear_many(relation);

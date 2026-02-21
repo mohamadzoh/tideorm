@@ -8,12 +8,11 @@
 //! 3. Error translation happens in one place
 //! 4. Query translation is centralized
 
-#![allow(dead_code)]
-#![allow(unused_imports)]
-
 use crate::error::{Error, Result};
 
 // Re-export SeaORM internally (but this module itself is #[doc(hidden)])
+// Allow unused_imports here: we re-export broadly so other modules can import selectively
+#[allow(unused_imports)]
 pub use sea_orm::{
     entity::prelude::*,
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
@@ -116,9 +115,15 @@ impl QueryExecutor {
     where
         M: InternalModel,
     {
-        // SeaORM doesn't have a simple "last" - we just get first for now
-        // In real implementation, we'd order by PK DESC
-        let result = M::Entity::find()
+        // Order by primary key descending to get the actual last record
+        let mut select = M::Entity::find();
+        
+        // Use the primary key column if available, otherwise fall back to unordered
+        if let Some(pk_col) = M::primary_key_column() {
+            select = select.order_by_desc(pk_col);
+        }
+        
+        let result = select
             .one(conn)
             .await
             .map_err(translate_error)?;
@@ -170,5 +175,39 @@ impl QueryExecutor {
         let active = model.into_active_model();
         let result = active.delete(conn).await.map_err(translate_error)?;
         Ok(result.rows_affected)
+    }
+    
+    /// Insert multiple records in a single batch INSERT statement
+    ///
+    /// This constructs a multi-row INSERT instead of individual inserts,
+    /// reducing the number of database round trips from O(n) to O(1).
+    pub async fn insert_many<M>(conn: &DatabaseConnection, models: Vec<M>) -> Result<Vec<M>>
+    where
+        M: InternalModel,
+        <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
+    {
+        if models.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // For single model, use regular insert for simplicity
+        if models.len() == 1 {
+            let active = models.into_iter().next().unwrap().into_active_model();
+            let result = active.insert(conn).await.map_err(translate_error)?;
+            return Ok(vec![M::from_sea_model(result)]);
+        }
+        
+        // Build batch insert using SeaORM's insert_many
+        let active_models: Vec<_> = models
+            .into_iter()
+            .map(|m| m.into_active_model())
+            .collect();
+        
+        let results = M::Entity::insert_many(active_models)
+            .exec_with_returning(conn)
+            .await
+            .map_err(translate_error)?;
+        
+        Ok(results.into_iter().map(M::from_sea_model).collect())
     }
 }

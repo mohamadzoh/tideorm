@@ -786,7 +786,7 @@ impl SchemaWriter {
     async fn introspect_postgres() -> Result<Vec<TableSchema>> {
         use sea_orm::{ConnectionTrait, Statement, DbBackend, TryGetable};
         
-        let conn = crate::db().__internal_connection();
+        let conn = crate::require_db()?.__internal_connection();
         
         // Get all tables
         let table_rows = conn.query_all_raw(Statement::from_string(
@@ -905,7 +905,7 @@ impl SchemaWriter {
     async fn introspect_mysql() -> Result<Vec<TableSchema>> {
         use sea_orm::{ConnectionTrait, Statement, DbBackend};
         
-        let conn = crate::db().__internal_connection();
+        let conn = crate::require_db()?.__internal_connection();
         
         // Get database name from connection (we'll use information_schema)
         let db_name_row = conn.query_one_raw(Statement::from_string(
@@ -1039,7 +1039,7 @@ impl SchemaWriter {
     async fn introspect_sqlite() -> Result<Vec<TableSchema>> {
         use sea_orm::{ConnectionTrait, Statement, DbBackend};
         
-        let conn = crate::db().__internal_connection();
+        let conn = crate::require_db()?.__internal_connection();
         
         // Get all tables
         let table_rows = conn.query_all_raw(Statement::from_string(
