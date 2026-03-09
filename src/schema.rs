@@ -158,7 +158,7 @@ impl SchemaGenerator {
                         def = format!("    {} BIGSERIAL", self.quote_identifier(&col.name));
                     }
                 }
-                DatabaseType::MySQL => {
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
                     def.push_str(" AUTO_INCREMENT");
                 }
                 DatabaseType::SQLite => {
@@ -206,7 +206,7 @@ impl SchemaGenerator {
     fn quote_identifier(&self, name: &str) -> String {
         match self.database_type {
             DatabaseType::Postgres => format!("\"{}\"", name),
-            DatabaseType::MySQL => format!("`{}`", name),
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
             DatabaseType::SQLite => format!("\"{}\"", name),
         }
     }
@@ -401,9 +401,15 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
     // Normalize by removing whitespace first (handles "Option < i64 >" from stringify!)
     let normalized: String = rust_type.chars().filter(|c| !c.is_whitespace()).collect();
     
-    let base_type = normalized
-        .replace("Option<", "")
-        .replace(">", "")
+    // Unwrap Option<T> → T, but preserve inner generics like Vec<i32>
+    let base_type = if normalized.starts_with("Option<") && normalized.ends_with(">") {
+        // Strip "Option<" prefix and last ">"
+        normalized[7..normalized.len() - 1].to_string()
+    } else {
+        normalized
+    };
+    
+    let base_type = base_type
         .replace("&", "")
         .replace("'static", "")
         .trim()
@@ -440,7 +446,7 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
             "Vec<serde_json::Value>" | "JsonArray" => "JSONB[]".to_string(),
             _ => "TEXT".to_string(),
         },
-        DatabaseType::MySQL => match base_type.as_str() {
+        DatabaseType::MySQL | DatabaseType::MariaDB => match base_type.as_str() {
             "i8" | "i16" => "SMALLINT".to_string(),
             "i32" => "INT".to_string(),
             "i64" => "BIGINT".to_string(),
@@ -458,6 +464,13 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
             "Decimal" => "DECIMAL(65,30)".to_string(),
             "Json" | "JsonValue" | "Value" | "serde_json::Value" => "JSON".to_string(),
             "Vec<u8>" => "BLOB".to_string(),
+            // Array types stored as JSON in MySQL/MariaDB
+            "Vec<i32>" | "IntArray" => "JSON".to_string(),
+            "Vec<i64>" | "BigIntArray" => "JSON".to_string(),
+            "Vec<String>" | "TextArray" => "JSON".to_string(),
+            "Vec<bool>" | "BoolArray" => "JSON".to_string(),
+            "Vec<f64>" | "FloatArray" => "JSON".to_string(),
+            "Vec<serde_json::Value>" | "JsonArray" => "JSON".to_string(),
             _ => "TEXT".to_string(),
         },
         DatabaseType::SQLite => match base_type.as_str() {
@@ -567,6 +580,24 @@ mod tests {
     }
     
     #[test]
+    fn test_schema_generator_mariadb() {
+        let mut generator = SchemaGenerator::new(DatabaseType::MariaDB);
+        
+        let table = TableSchemaBuilder::new("products")
+            .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+            .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
+            .build();
+        
+        generator.add_table(table);
+        
+        let sql = generator.generate();
+        
+        // MariaDB uses same syntax as MySQL
+        assert!(sql.contains("`products`"));    // MariaDB uses backticks
+        assert!(sql.contains("AUTO_INCREMENT")); // MariaDB auto-increment syntax
+    }
+    
+    #[test]
     fn test_schema_generator_sqlite() {
         let mut generator = SchemaGenerator::new(DatabaseType::SQLite);
         
@@ -656,6 +687,22 @@ mod tests {
         assert_eq!(rust_type_to_sql("bool", DatabaseType::MySQL), "TINYINT(1)");
         assert_eq!(rust_type_to_sql("f64", DatabaseType::MySQL), "DOUBLE");
         assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MySQL), "CHAR(36)");
+        // MySQL array types map to JSON
+        assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MySQL), "JSON");
+        assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MySQL), "JSON");
+        assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MySQL), "JSON");
+    }
+    
+    #[test]
+    fn test_rust_type_to_sql_mariadb() {
+        assert_eq!(rust_type_to_sql("i64", DatabaseType::MariaDB), "BIGINT");
+        assert_eq!(rust_type_to_sql("bool", DatabaseType::MariaDB), "TINYINT(1)");
+        assert_eq!(rust_type_to_sql("f64", DatabaseType::MariaDB), "DOUBLE");
+        assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MariaDB), "CHAR(36)");
+        // MariaDB array types map to JSON
+        assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MariaDB), "JSON");
+        assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MariaDB), "JSON");
+        assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MariaDB), "JSON");
     }
     
     #[test]
@@ -764,7 +811,7 @@ impl SchemaWriter {
         
         let tables = match db_type {
             DatabaseType::Postgres => Self::introspect_postgres().await?,
-            DatabaseType::MySQL => Self::introspect_mysql().await?,
+            DatabaseType::MySQL | DatabaseType::MariaDB => Self::introspect_mysql().await?,
             DatabaseType::SQLite => Self::introspect_sqlite().await?,
         };
         

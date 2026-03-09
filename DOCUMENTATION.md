@@ -2486,7 +2486,7 @@ TideConfig::init()
 Check which features are supported by the current database:
 
 ```rust
-let db_type = Database::global().backend();
+let db_type = require_db()?.backend();
 
 // Feature checks
 if db_type.supports_json() {

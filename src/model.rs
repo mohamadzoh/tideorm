@@ -388,12 +388,12 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     ///
     /// # Example
     /// ```ignore
-    /// let db = User::db();
+    /// let db = User::db()?;
     /// // or from an instance
-    /// let db = user.database();
+    /// let db = user.database()?;
     /// ```
-    fn db() -> &'static crate::database::Database {
-        crate::database::db()
+    fn db() -> crate::error::Result<&'static crate::database::Database> {
+        crate::database::require_db()
     }
     
     /// Get the global database connection from an instance
@@ -401,10 +401,10 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     /// # Example
     /// ```ignore
     /// let user = User::find(1).await?;
-    /// let db = user.database();
+    /// let db = user.database()?;
     /// ```
-    fn database(&self) -> &'static crate::database::Database {
-        crate::database::db()
+    fn database(&self) -> crate::error::Result<&'static crate::database::Database> {
+        crate::database::require_db()
     }
     
     // =========================================================================
@@ -500,19 +500,8 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         
         let conn = crate::database::require_db()?.__internal_connection();
         
-        // Try batch insert first (single multi-row INSERT)
-        match crate::internal::QueryExecutor::insert_many::<Self>(conn, models.clone()).await {
-            Ok(results) => Ok(results),
-            Err(_) => {
-                // Fallback to individual inserts for backends that don't support
-                // INSERT ... RETURNING or other batch limitations
-                let mut results = Vec::with_capacity(models.len());
-                for model in models {
-                    results.push(model.save().await?);
-                }
-                Ok(results)
-            }
-        }
+        // insert_many handles MySQL/SQLite fallback internally
+        crate::internal::QueryExecutor::insert_many::<Self>(conn, models).await
     }
     
     /// Insert multiple records and return the inserted models with their IDs
@@ -659,19 +648,19 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     ///
     /// # Example
     /// ```ignore
-    /// User::transaction(|tx| async move {
+    /// User::transaction(|tx| Box::pin(async move {
     ///     // All operations in here are in a transaction
-    ///     // Use tx for manual queries if needed
+    ///     // Use tx.connection() for manual queries if needed
     ///     let user = User::create(User { ... }).await?;
     ///     let profile = Profile::create(Profile { user_id: user.id, ... }).await?;
     ///     Ok((user, profile))
-    /// }).await?;
+    /// })).await?;
     /// ```
-    async fn transaction<F, Fut, T>(f: F) -> Result<T>
+    async fn transaction<F, T>(f: F) -> Result<T>
     where
         Self: Sized,
-        F: FnOnce(crate::database::Transaction) -> Fut + Send,
-        Fut: std::future::Future<Output = Result<T>> + Send,
+        F: for<'c> FnOnce(&'c crate::database::Transaction)
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>> + Send,
         T: Send,
     {
         crate::database::require_db()?.transaction(f).await
@@ -1791,9 +1780,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
             return Ok(0);
         }
         
-        let db_type = crate::Database::global().backend();
+        let db_type = crate::database::require_db()?.backend();
         let quote = match db_type {
-            crate::config::DatabaseType::MySQL => '`',
+            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
             _ => '"',
         };
         
@@ -1825,7 +1814,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                             crate::config::DatabaseType::Postgres => {
                                 format!("{} = array_append({}, {})", col, col, Self::format_value(val))
                             }
-                            crate::config::DatabaseType::MySQL => {
+                            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
                                 format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, Self::format_value(val))
                             }
                             crate::config::DatabaseType::SQLite => {
@@ -1838,7 +1827,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                             crate::config::DatabaseType::Postgres => {
                                 format!("{} = array_remove({}, {})", col, col, Self::format_value(val))
                             }
-                            crate::config::DatabaseType::MySQL => {
+                            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
                                 format!("{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))", col, col, col, Self::format_value(val))
                             }
                             crate::config::DatabaseType::SQLite => {
@@ -1852,7 +1841,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                             crate::config::DatabaseType::Postgres => {
                                 format!("{} = jsonb_set({}, '{{{}}}', '{}')", col, col, path.trim_start_matches("$."), Self::format_value(val).trim_matches('\''))
                             }
-                            crate::config::DatabaseType::MySQL => {
+                            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
                                 format!("{} = JSON_SET({}, '{}', {})", col, col, path, Self::format_value(val))
                             }
                             crate::config::DatabaseType::SQLite => {
@@ -1986,9 +1975,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
             }
         }
         
-        // Add LIMIT for MySQL
+        // Add LIMIT for MySQL/MariaDB
         if let Some(limit) = self.limit_value {
-            if db_type == crate::config::DatabaseType::MySQL {
+            if matches!(db_type, crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB) {
                 sql.push_str(&format!(" LIMIT {}", limit));
             }
         }
@@ -2004,14 +1993,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
             return Ok(vec![]);
         }
         
-        let db_type = crate::Database::global().backend();
+        let db_type = crate::database::require_db()?.backend();
         
         if db_type == crate::config::DatabaseType::MySQL {
             return Err(Error::query("MySQL does not support RETURNING clause".to_string()));
         }
         
         let quote = match db_type {
-            crate::config::DatabaseType::MySQL => '`',
+            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
             _ => '"',
         };
         

@@ -248,7 +248,7 @@ impl Schema {
     /// ```
     pub async fn rename_table(&mut self, from: &str, to: &str) -> Result<()> {
         let sql = match self.database_type {
-            DatabaseType::MySQL => format!(
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!(
                 "RENAME TABLE {} TO {}",
                 self.quote_identifier(from),
                 self.quote_identifier(to)
@@ -298,7 +298,7 @@ impl Schema {
     /// ```
     pub async fn drop_index(&mut self, table: &str, name: &str) -> Result<()> {
         let sql = match self.database_type {
-            DatabaseType::MySQL => format!(
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!(
                 "DROP INDEX {} ON {}",
                 self.quote_identifier(name),
                 self.quote_identifier(table)
@@ -343,7 +343,7 @@ impl Schema {
     fn quote_identifier(&self, name: &str) -> String {
         match self.database_type {
             DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL => format!("`{}`", name),
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
         }
     }
 
@@ -814,7 +814,7 @@ impl TableBuilder {
                         ),
                     };
                 }
-                DatabaseType::MySQL => {
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
                     def.push_str(" AUTO_INCREMENT");
                 }
                 DatabaseType::SQLite => {
@@ -889,7 +889,7 @@ impl TableBuilder {
     fn type_to_sql(&self, column_type: &ColumnType) -> String {
         match self.database_type {
             DatabaseType::Postgres => column_type.to_postgres_sql(),
-            DatabaseType::MySQL => column_type.to_mysql_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => column_type.to_mysql_sql(),
             DatabaseType::SQLite => column_type.to_sqlite_sql(),
         }
     }
@@ -898,7 +898,7 @@ impl TableBuilder {
     fn quote_identifier(&self, name: &str) -> String {
         match self.database_type {
             DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL => format!("`{}`", name),
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
         }
     }
 }
@@ -1118,8 +1118,8 @@ impl AlterTableBuilder {
                         self.quote_identifier(to)
                     )
                 }
-                DatabaseType::MySQL => {
-                    // MySQL requires the column type in CHANGE
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
+                    // MySQL/MariaDB requires the column type in CHANGE
                     format!(
                         "ALTER TABLE {} RENAME COLUMN {} TO {}",
                         self.quote_identifier(&self.name),
@@ -1139,7 +1139,7 @@ impl AlterTableBuilder {
                             type_sql
                         )
                     }
-                    DatabaseType::MySQL => {
+                    DatabaseType::MySQL | DatabaseType::MariaDB => {
                         format!(
                             "ALTER TABLE {} MODIFY COLUMN {} {}",
                             self.quote_identifier(&self.name),
@@ -1174,7 +1174,7 @@ impl AlterTableBuilder {
                 )
             }
             AlterOperation::DropIndex(name) => match self.database_type {
-                DatabaseType::MySQL => {
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
                     format!(
                         "DROP INDEX {} ON {}",
                         self.quote_identifier(name),
@@ -1213,7 +1213,7 @@ impl AlterTableBuilder {
     fn type_to_sql(&self, column_type: &ColumnType) -> String {
         match self.database_type {
             DatabaseType::Postgres => column_type.to_postgres_sql(),
-            DatabaseType::MySQL => column_type.to_mysql_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => column_type.to_mysql_sql(),
             DatabaseType::SQLite => column_type.to_sqlite_sql(),
         }
     }
@@ -1221,7 +1221,7 @@ impl AlterTableBuilder {
     fn quote_identifier(&self, name: &str) -> String {
         match self.database_type {
             DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL => format!("`{}`", name),
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
         }
     }
 }
@@ -1749,7 +1749,7 @@ impl Migrator {
                 )
                 "#
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 r#"
                 CREATE TABLE IF NOT EXISTS `_migrations` (
                     `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -1967,7 +1967,7 @@ fn detect_database_type(db: &Database) -> DatabaseType {
 /// Quote an identifier for the given database type (standalone helper for Migrator)
 fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> String {
     match db_type {
-        DatabaseType::MySQL => format!("`{}`", name),
+        DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
         _ => format!(r#""{}""#, name), // Postgres & SQLite use double quotes
     }
 }
@@ -2096,6 +2096,18 @@ mod tests {
             "MySQL should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
         assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
             "MySQL should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+
+        // Test MariaDB timestamps - same as MySQL
+        let mut builder = TableBuilder::new("posts", DatabaseType::MariaDB);
+        builder.id();
+        builder.string("title").not_null();
+        builder.timestamps();
+
+        let sql = builder.build_create();
+        assert!(sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MariaDB should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MariaDB should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
 
         // Test SQLite timestamps
         let mut builder = TableBuilder::new("posts", DatabaseType::SQLite);
@@ -2272,5 +2284,72 @@ mod tests {
         let sql = builder.build_create();
         assert!(sql.contains("COLLATE utf8mb4_unicode_ci"),
             "Should include extra SQL. Got: {}", sql);
+
+        // MariaDB should also support extra SQL
+        let mut builder = TableBuilder::new("logs", DatabaseType::MariaDB);
+        builder.id();
+        builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
+
+        let sql = builder.build_create();
+        assert!(sql.contains("COLLATE utf8mb4_unicode_ci"),
+            "MariaDB should include extra SQL. Got: {}", sql);
+    }
+
+    #[test]
+    fn test_column_type_mariadb() {
+        // MariaDB uses the same SQL dialect as MySQL
+        assert_eq!(ColumnType::Integer.to_mysql_sql(), "INT");
+        assert_eq!(ColumnType::BigInteger.to_mysql_sql(), "BIGINT");
+        assert_eq!(ColumnType::Boolean.to_mysql_sql(), "TINYINT(1)");
+        assert_eq!(ColumnType::Jsonb.to_mysql_sql(), "JSON");
+        assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "TIMESTAMP");
+        assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "TIMESTAMP");
+        assert_eq!(ColumnType::Date.to_mysql_sql(), "DATE");
+        assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME");
+    }
+
+    #[test]
+    fn test_mariadb_table_builder_create() {
+        let mut builder = TableBuilder::new("users", DatabaseType::MariaDB);
+        builder.id();
+        builder.string("email").unique().not_null();
+        builder.string("name").not_null();
+        builder.boolean("active").default(true);
+        builder.timestamps();
+
+        let sql = builder.build_create();
+        assert!(sql.contains("CREATE TABLE"));
+        assert!(sql.contains("`users`"));
+        assert!(sql.contains("`id` BIGINT AUTO_INCREMENT"));
+        assert!(sql.contains("`email`"));
+        assert!(sql.contains("`name`"));
+        assert!(sql.contains("`active`"));
+        assert!(sql.contains("`created_at`"));
+        assert!(sql.contains("`updated_at`"));
+    }
+
+    #[test]
+    fn test_mariadb_alter_table_builder() {
+        let mut builder = AlterTableBuilder::new("users", DatabaseType::MariaDB);
+        builder.add_column("phone", ColumnType::String).nullable();
+        builder.drop_column("legacy");
+        builder.rename_column("name", "full_name");
+
+        let statements = builder.build();
+        assert_eq!(statements.len(), 3);
+        assert!(statements[0].contains("ADD COLUMN"));
+        assert!(statements[0].contains("`phone`"));
+        assert!(statements[1].contains("DROP COLUMN"));
+        assert!(statements[1].contains("`legacy`"));
+        assert!(statements[2].contains("RENAME COLUMN"));
+        assert!(statements[2].contains("`name`"));
+        assert!(statements[2].contains("`full_name`"));
+    }
+
+    #[test]
+    fn test_mariadb_quoting() {
+        let schema = Schema::new(DatabaseType::MariaDB);
+        assert_eq!(schema.quote_identifier("users"), "`users`");
+        assert_eq!(schema.quote_identifier("email"), "`email`");
     }
 }

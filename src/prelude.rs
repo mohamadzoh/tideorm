@@ -10,7 +10,7 @@
 // Core types
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
 // Global database access functions
-pub use crate::database::{db, try_db, has_global_db};
+pub use crate::database::{db, try_db, has_global_db, require_db};
 pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed

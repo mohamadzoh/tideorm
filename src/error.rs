@@ -36,6 +36,30 @@
 
 use thiserror::Error;
 
+// ── From impls for common external error types ─────────────────────
+
+impl From<sea_orm::DbErr> for Error {
+    fn from(err: sea_orm::DbErr) -> Self {
+        crate::internal::translate_error(err)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self::Internal {
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Conversion {
+            message: err.to_string(),
+        }
+    }
+}
+
 /// A specialized Result type for TideORM operations
 /// 
 /// Note: Named `TideResult` to avoid conflicts with `std::result::Result` in derive macros.

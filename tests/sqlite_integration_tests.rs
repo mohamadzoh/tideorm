@@ -103,7 +103,7 @@ async fn sqlite_integration_tests() {
     }
     
     // Verify database type
-    let db_type = Database::global().backend();
+    let db_type = tideorm::require_db().unwrap().backend();
     assert_eq!(db_type, DatabaseType::SQLite, "Expected SQLite database");
     println!(" Connected to SQLite\n");
 
@@ -158,7 +158,7 @@ async fn sqlite_integration_tests() {
     // =========================================================================
     println!("📡 Testing: Database Connection");
     {
-        let db = tideorm::db();
+        let db = tideorm::require_db().unwrap();
         assert!(db.ping().await.is_ok(), "Database ping failed");
         println!("   ✓ Ping successful");
         

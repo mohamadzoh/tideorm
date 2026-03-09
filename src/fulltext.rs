@@ -1,11 +1,11 @@
 //! Full-Text Search Support for TideORM
 //!
-//! This module provides full-text search capabilities across PostgreSQL, MySQL, and SQLite.
+//! This module provides full-text search capabilities across PostgreSQL, MySQL, MariaDB, and SQLite.
 //!
 //! ## Features
 //!
 //! - **PostgreSQL**: Native `tsvector`/`tsquery` support with GIN/GiST indexes
-//! - **MySQL**: FULLTEXT index support with natural language and boolean modes
+//! - **MySQL/MariaDB**: FULLTEXT index support with natural language and boolean modes
 //! - **SQLite**: FTS5 virtual table support
 //! - **Search Ranking**: Result relevance scoring
 //! - **Highlighting**: Mark matching terms in search results
@@ -512,7 +512,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_sql(&self, db_type: DatabaseType) -> Result<String> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_sql(),
-            DatabaseType::MySQL => self.build_mysql_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_sql(),
             DatabaseType::SQLite => self.build_sqlite_sql(),
         }
     }
@@ -521,7 +521,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_ranked_sql(&self, db_type: DatabaseType) -> Result<String> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_ranked_sql(),
-            DatabaseType::MySQL => self.build_mysql_ranked_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_ranked_sql(),
             DatabaseType::SQLite => self.build_sqlite_ranked_sql(),
         }
     }
@@ -530,7 +530,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_count_sql(&self, db_type: DatabaseType) -> Result<String> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_count_sql(),
-            DatabaseType::MySQL => self.build_mysql_count_sql(),
+            DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_count_sql(),
             DatabaseType::SQLite => self.build_sqlite_count_sql(),
         }
     }
@@ -981,7 +981,7 @@ impl FullTextIndex {
     pub fn to_sql(&self, db_type: DatabaseType) -> Vec<String> {
         match db_type {
             DatabaseType::Postgres => vec![self.to_postgres_sql()],
-            DatabaseType::MySQL => vec![self.to_mysql_sql()],
+            DatabaseType::MySQL | DatabaseType::MariaDB => vec![self.to_mysql_sql()],
             DatabaseType::SQLite => self.to_sqlite_sql(),
         }
     }
@@ -1166,6 +1166,17 @@ mod tests {
     fn test_fulltext_index_mysql() {
         let index = FullTextIndex::new("idx_articles_search", "articles", vec!["title".to_string(), "content".to_string()]);
         let sql = index.to_mysql_sql();
+        assert!(sql.contains("CREATE FULLTEXT INDEX"));
+        assert!(sql.contains("`title`, `content`"));
+    }
+    
+    #[test]
+    fn test_fulltext_index_mariadb() {
+        let index = FullTextIndex::new("idx_articles_search", "articles", vec!["title".to_string(), "content".to_string()]);
+        // MariaDB uses the same FULLTEXT syntax as MySQL
+        let sqls = index.to_sql(DatabaseType::MariaDB);
+        assert_eq!(sqls.len(), 1);
+        let sql = &sqls[0];
         assert!(sql.contains("CREATE FULLTEXT INDEX"));
         assert!(sql.contains("`title`, `content`"));
     }

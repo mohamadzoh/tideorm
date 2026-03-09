@@ -62,6 +62,7 @@ static GLOBAL_POOL_CONFIG: OnceLock<PoolConfig> = OnceLock::new();
 /// TideORM supports multiple database backends. Each has its own
 /// specific features and SQL dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DatabaseType {
     /// PostgreSQL database
     /// 
@@ -70,11 +71,21 @@ pub enum DatabaseType {
     #[default]
     Postgres,
     
-    /// MySQL / MariaDB database
+    /// MySQL database
     /// 
     /// Features: JSON, Full-text search, Spatial data
     /// URL format: `mysql://user:pass@host:3306/database`
     MySQL,
+    
+    /// MariaDB database
+    ///
+    /// MariaDB is a MySQL-compatible fork with additional features.
+    /// Notably, MariaDB 10.5+ supports `INSERT ... RETURNING`.
+    /// URL format: `mariadb://user:pass@host:3306/database`
+    ///
+    /// TideORM auto-detects MariaDB when connecting via `mysql://` to a
+    /// MariaDB server, or when using `mariadb://` URLs explicitly.
+    MariaDB,
     
     /// SQLite database (file-based or in-memory)
     /// 
@@ -84,11 +95,19 @@ pub enum DatabaseType {
 }
 
 impl DatabaseType {
+    /// Check if this database type uses the MySQL SQL dialect
+    ///
+    /// Returns `true` for both `MySQL` and `MariaDB`, since MariaDB
+    /// is wire-compatible with MySQL and shares the same SQL dialect.
+    pub fn is_mysql_compatible(&self) -> bool {
+        matches!(self, DatabaseType::MySQL | DatabaseType::MariaDB)
+    }
+    
     /// Get the default port for this database type
     pub fn default_port(&self) -> u16 {
         match self {
             DatabaseType::Postgres => 5432,
-            DatabaseType::MySQL => 3306,
+            DatabaseType::MySQL | DatabaseType::MariaDB => 3306,
             DatabaseType::SQLite => 0, // No port for SQLite
         }
     }
@@ -98,6 +117,7 @@ impl DatabaseType {
         match self {
             DatabaseType::Postgres => "postgres",
             DatabaseType::MySQL => "mysql",
+            DatabaseType::MariaDB => "mariadb",
             DatabaseType::SQLite => "sqlite",
         }
     }
@@ -106,7 +126,7 @@ impl DatabaseType {
     pub fn supports_json(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,
-            DatabaseType::MySQL => true,  // MySQL 5.7+
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,  // MySQL 5.7+ / MariaDB 10.2+
             DatabaseType::SQLite => true, // SQLite JSON1 extension (3.9+)
         }
     }
@@ -115,7 +135,7 @@ impl DatabaseType {
     pub fn supports_native_json_operators(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,  // @>, <@, ?, @?
-            DatabaseType::MySQL => true,     // JSON_CONTAINS, JSON_EXTRACT
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,     // JSON_CONTAINS, JSON_EXTRACT
             DatabaseType::SQLite => true,    // json_extract, json_each
         }
     }
@@ -130,7 +150,8 @@ impl DatabaseType {
         match self {
             DatabaseType::Postgres => true,
             DatabaseType::MySQL => false,
-            DatabaseType::SQLite => true, // SQLite 3.35+
+            DatabaseType::MariaDB => true,   // MariaDB 10.5+
+            DatabaseType::SQLite => true,    // SQLite 3.35+
         }
     }
     
@@ -138,7 +159,7 @@ impl DatabaseType {
     pub fn supports_upsert(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,  // ON CONFLICT
-            DatabaseType::MySQL => true,     // ON DUPLICATE KEY
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,     // ON DUPLICATE KEY
             DatabaseType::SQLite => true,    // ON CONFLICT (3.24+)
         }
     }
@@ -147,7 +168,7 @@ impl DatabaseType {
     pub fn supports_fulltext_search(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,  // tsvector, tsquery
-            DatabaseType::MySQL => true,     // FULLTEXT index
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,     // FULLTEXT index
             DatabaseType::SQLite => true,    // FTS5 extension
         }
     }
@@ -156,7 +177,7 @@ impl DatabaseType {
     pub fn supports_window_functions(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,
-            DatabaseType::MySQL => true,     // MySQL 8.0+
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,     // MySQL 8.0+ / MariaDB 10.2+
             DatabaseType::SQLite => true,    // SQLite 3.25+
         }
     }
@@ -165,7 +186,7 @@ impl DatabaseType {
     pub fn supports_cte(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,
-            DatabaseType::MySQL => true,     // MySQL 8.0+
+            DatabaseType::MySQL | DatabaseType::MariaDB => true,     // MySQL 8.0+ / MariaDB 10.2+
             DatabaseType::SQLite => true,    // SQLite 3.8.3+
         }
     }
@@ -174,7 +195,7 @@ impl DatabaseType {
     pub fn supports_schemas(&self) -> bool {
         match self {
             DatabaseType::Postgres => true,
-            DatabaseType::MySQL => false,    // Uses databases instead
+            DatabaseType::MySQL | DatabaseType::MariaDB => false,    // Uses databases instead
             DatabaseType::SQLite => false,
         }
     }
@@ -183,7 +204,7 @@ impl DatabaseType {
     pub fn optimal_batch_size(&self) -> usize {
         match self {
             DatabaseType::Postgres => 1000,
-            DatabaseType::MySQL => 500,      // Lower due to max_allowed_packet
+            DatabaseType::MySQL | DatabaseType::MariaDB => 500,      // Lower due to max_allowed_packet
             DatabaseType::SQLite => 100,     // Lower for file-based DB
         }
     }
@@ -192,7 +213,7 @@ impl DatabaseType {
     pub fn param_style(&self) -> &'static str {
         match self {
             DatabaseType::Postgres => "$",   // $1, $2, $3
-            DatabaseType::MySQL => "?",
+            DatabaseType::MySQL | DatabaseType::MariaDB => "?",
             DatabaseType::SQLite => "?",
         }
     }
@@ -201,16 +222,22 @@ impl DatabaseType {
     pub fn quote_char(&self) -> char {
         match self {
             DatabaseType::Postgres | DatabaseType::SQLite => '"',
-            DatabaseType::MySQL => '`',
+            DatabaseType::MySQL | DatabaseType::MariaDB => '`',
         }
     }
     
     /// Try to detect database type from URL
+    ///
+    /// Note: `mariadb://` URLs return `MariaDB`. For `mysql://` URLs,
+    /// the type is initially `MySQL` but may be auto-promoted to `MariaDB`
+    /// after connecting if the server identifies as MariaDB.
     pub fn from_url(url: &str) -> Option<Self> {
         let url_lower = url.to_lowercase();
         if url_lower.starts_with("postgres://") || url_lower.starts_with("postgresql://") {
             Some(DatabaseType::Postgres)
-        } else if url_lower.starts_with("mysql://") || url_lower.starts_with("mariadb://") {
+        } else if url_lower.starts_with("mariadb://") {
+            Some(DatabaseType::MariaDB)
+        } else if url_lower.starts_with("mysql://") {
             Some(DatabaseType::MySQL)
         } else if url_lower.starts_with("sqlite:") {
             Some(DatabaseType::SQLite)
@@ -225,6 +252,7 @@ impl std::fmt::Display for DatabaseType {
         match self {
             DatabaseType::Postgres => write!(f, "PostgreSQL"),
             DatabaseType::MySQL => write!(f, "MySQL"),
+            DatabaseType::MariaDB => write!(f, "MariaDB"),
             DatabaseType::SQLite => write!(f, "SQLite"),
         }
     }
@@ -446,7 +474,7 @@ impl Default for PoolConfig {
 /// let user = User::find(1).await?;
 /// 
 /// // Access db if needed
-/// let db = TideConfig::db();
+/// let db = TideConfig::db()?;
 /// ```
 pub struct TideConfig {
     config: Config,
@@ -1153,7 +1181,7 @@ impl TideConfig {
         })?;
         
         // Determine database type (explicit or auto-detect)
-        let db_type = match self.database_type {
+        let mut db_type = match self.database_type {
             Some(t) => t,
             None => DatabaseType::from_url(&url).ok_or_else(|| {
                 crate::error::Error::configuration(
@@ -1163,15 +1191,20 @@ impl TideConfig {
             })?,
         };
         
-        // Store database type globally
-        let _ = GLOBAL_DB_TYPE.set(db_type);
+        // For MariaDB URLs, rewrite to mysql:// for the connection driver
+        // (SeaORM/sqlx only understands mysql:// scheme)
+        let connect_url = if url.to_lowercase().starts_with("mariadb://") {
+            format!("mysql://{}", &url[url.find("://").unwrap() + 3..])
+        } else {
+            url.clone()
+        };
         
         // Store pool config globally
         let _ = GLOBAL_POOL_CONFIG.set(self.pool.clone());
         
         // Build and connect to database with pool settings
         let db = Database::builder()
-            .url(url)
+            .url(connect_url)
             .max_connections(self.pool.max_connections)
             .min_connections(self.pool.min_connections)
             .connect_timeout(self.pool.connect_timeout)
@@ -1179,6 +1212,19 @@ impl TideConfig {
             .max_lifetime(self.pool.max_lifetime)
             .build()
             .await?;
+        
+        // Auto-detect MariaDB when connected via mysql:// to a MariaDB server
+        if db_type == DatabaseType::MySQL {
+            if let Ok(version) = Self::detect_server_version(&db).await {
+                if version.to_lowercase().contains("mariadb") {
+                    db_type = DatabaseType::MariaDB;
+                    tide_info!("Auto-detected MariaDB server: {}", version);
+                }
+            }
+        }
+        
+        // Store database type globally
+        let _ = GLOBAL_DB_TYPE.set(db_type);
         
         // Set as global
         let db_ref = Database::set_global(db)?;
@@ -1253,17 +1299,15 @@ impl TideConfig {
     
     /// Get the global database connection
     ///
-    /// # Panics
-    ///
-    /// Panics if `connect()` has not been called yet.
+    /// Returns an error if `connect()` has not been called yet.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let db = TideConfig::db();
+    /// let db = TideConfig::db()?;
     /// ```
-    pub fn db() -> &'static Database {
-        crate::database::db()
+    pub fn db() -> crate::error::Result<&'static Database> {
+        crate::database::require_db()
     }
     
     /// Try to get the global database connection
@@ -1313,9 +1357,24 @@ impl TideConfig {
         GLOBAL_DB_TYPE.get() == Some(&DatabaseType::Postgres)
     }
     
-    /// Check if the database is MySQL
+    /// Check if the database is MySQL (strict — returns false for MariaDB)
+    ///
+    /// Use `is_mysql_compatible()` to check for both MySQL and MariaDB.
     pub fn is_mysql() -> bool {
         GLOBAL_DB_TYPE.get() == Some(&DatabaseType::MySQL)
+    }
+    
+    /// Check if the database is MariaDB
+    pub fn is_mariadb() -> bool {
+        GLOBAL_DB_TYPE.get() == Some(&DatabaseType::MariaDB)
+    }
+    
+    /// Check if the database is MySQL or MariaDB
+    ///
+    /// Use this when you need to check for MySQL-compatible syntax
+    /// that applies to both MySQL and MariaDB.
+    pub fn is_mysql_compatible() -> bool {
+        matches!(GLOBAL_DB_TYPE.get(), Some(DatabaseType::MySQL) | Some(DatabaseType::MariaDB))
     }
     
     /// Check if the database is SQLite
@@ -1390,6 +1449,35 @@ impl TideConfig {
         
         std::fs::write(path, sql)?;
         Ok(())
+    }
+    
+    /// Detect the server version string by running `SELECT VERSION()`
+    ///
+    /// Used internally to auto-detect MariaDB servers connected via `mysql://`.
+    async fn detect_server_version(db: &Database) -> Result<String> {
+        use crate::internal::{ConnectionTrait, Statement, DbBackend};
+        
+        let conn = db.__internal_connection();
+        let backend = conn.get_database_backend();
+        
+        // Only probe MySQL-type connections
+        if backend != DbBackend::MySql {
+            return Err(crate::error::Error::internal("Not a MySQL-type connection"));
+        }
+        
+        let stmt = Statement::from_string(backend, "SELECT VERSION() AS version".to_string());
+        let result = conn.query_one_raw(stmt)
+            .await
+            .map_err(|e| crate::error::Error::query(e.to_string()))?;
+        
+        match result {
+            Some(row) => {
+                let version: String = row.try_get("", "version")
+                    .map_err(|e| crate::error::Error::query(e.to_string()))?;
+                Ok(version)
+            }
+            None => Err(crate::error::Error::query("Could not retrieve server version")),
+        }
     }
 }
 
@@ -1551,7 +1639,7 @@ mod tests {
         );
         assert_eq!(
             DatabaseType::from_url("mariadb://localhost/test"),
-            Some(DatabaseType::MySQL)
+            Some(DatabaseType::MariaDB)
         );
         assert_eq!(
             DatabaseType::from_url("sqlite:./test.db"),
@@ -1571,6 +1659,7 @@ mod tests {
     fn test_database_type_supports_json() {
         assert!(DatabaseType::Postgres.supports_json());
         assert!(DatabaseType::MySQL.supports_json());
+        assert!(DatabaseType::MariaDB.supports_json());
         assert!(DatabaseType::SQLite.supports_json());
     }
     
@@ -1578,6 +1667,7 @@ mod tests {
     fn test_database_type_supports_arrays() {
         assert!(DatabaseType::Postgres.supports_arrays());
         assert!(!DatabaseType::MySQL.supports_arrays());
+        assert!(!DatabaseType::MariaDB.supports_arrays());
         assert!(!DatabaseType::SQLite.supports_arrays());
     }
     
@@ -1585,6 +1675,7 @@ mod tests {
     fn test_database_type_supports_returning() {
         assert!(DatabaseType::Postgres.supports_returning());
         assert!(!DatabaseType::MySQL.supports_returning());
+        assert!(DatabaseType::MariaDB.supports_returning());  // MariaDB 10.5+
         assert!(DatabaseType::SQLite.supports_returning());
     }
     
@@ -1592,6 +1683,7 @@ mod tests {
     fn test_database_type_supports_upsert() {
         assert!(DatabaseType::Postgres.supports_upsert());
         assert!(DatabaseType::MySQL.supports_upsert());
+        assert!(DatabaseType::MariaDB.supports_upsert());
         assert!(DatabaseType::SQLite.supports_upsert());
     }
     
@@ -1599,6 +1691,7 @@ mod tests {
     fn test_database_type_supports_fulltext_search() {
         assert!(DatabaseType::Postgres.supports_fulltext_search());
         assert!(DatabaseType::MySQL.supports_fulltext_search());
+        assert!(DatabaseType::MariaDB.supports_fulltext_search());
         assert!(DatabaseType::SQLite.supports_fulltext_search());
     }
     
@@ -1606,6 +1699,7 @@ mod tests {
     fn test_database_type_supports_window_functions() {
         assert!(DatabaseType::Postgres.supports_window_functions());
         assert!(DatabaseType::MySQL.supports_window_functions());
+        assert!(DatabaseType::MariaDB.supports_window_functions());
         assert!(DatabaseType::SQLite.supports_window_functions());
     }
     
@@ -1613,6 +1707,7 @@ mod tests {
     fn test_database_type_supports_cte() {
         assert!(DatabaseType::Postgres.supports_cte());
         assert!(DatabaseType::MySQL.supports_cte());
+        assert!(DatabaseType::MariaDB.supports_cte());
         assert!(DatabaseType::SQLite.supports_cte());
     }
     
@@ -1620,6 +1715,7 @@ mod tests {
     fn test_database_type_supports_schemas() {
         assert!(DatabaseType::Postgres.supports_schemas());
         assert!(!DatabaseType::MySQL.supports_schemas());
+        assert!(!DatabaseType::MariaDB.supports_schemas());
         assert!(!DatabaseType::SQLite.supports_schemas());
     }
     
@@ -1627,6 +1723,7 @@ mod tests {
     fn test_database_type_optimal_batch_size() {
         assert_eq!(DatabaseType::Postgres.optimal_batch_size(), 1000);
         assert_eq!(DatabaseType::MySQL.optimal_batch_size(), 500);
+        assert_eq!(DatabaseType::MariaDB.optimal_batch_size(), 500);
         assert_eq!(DatabaseType::SQLite.optimal_batch_size(), 100);
     }
     
@@ -1634,6 +1731,7 @@ mod tests {
     fn test_database_type_param_style() {
         assert_eq!(DatabaseType::Postgres.param_style(), "$");
         assert_eq!(DatabaseType::MySQL.param_style(), "?");
+        assert_eq!(DatabaseType::MariaDB.param_style(), "?");
         assert_eq!(DatabaseType::SQLite.param_style(), "?");
     }
     
@@ -1641,6 +1739,7 @@ mod tests {
     fn test_database_type_quote_char() {
         assert_eq!(DatabaseType::Postgres.quote_char(), '"');
         assert_eq!(DatabaseType::MySQL.quote_char(), '`');
+        assert_eq!(DatabaseType::MariaDB.quote_char(), '`');
         assert_eq!(DatabaseType::SQLite.quote_char(), '"');
     }
     
@@ -1648,6 +1747,7 @@ mod tests {
     fn test_database_type_default_port() {
         assert_eq!(DatabaseType::Postgres.default_port(), 5432);
         assert_eq!(DatabaseType::MySQL.default_port(), 3306);
+        assert_eq!(DatabaseType::MariaDB.default_port(), 3306);
         assert_eq!(DatabaseType::SQLite.default_port(), 0);
     }
     
@@ -1655,6 +1755,7 @@ mod tests {
     fn test_database_type_url_scheme() {
         assert_eq!(DatabaseType::Postgres.url_scheme(), "postgres");
         assert_eq!(DatabaseType::MySQL.url_scheme(), "mysql");
+        assert_eq!(DatabaseType::MariaDB.url_scheme(), "mariadb");
         assert_eq!(DatabaseType::SQLite.url_scheme(), "sqlite");
     }
     
@@ -1662,7 +1763,16 @@ mod tests {
     fn test_database_type_display() {
         assert_eq!(format!("{}", DatabaseType::Postgres), "PostgreSQL");
         assert_eq!(format!("{}", DatabaseType::MySQL), "MySQL");
+        assert_eq!(format!("{}", DatabaseType::MariaDB), "MariaDB");
         assert_eq!(format!("{}", DatabaseType::SQLite), "SQLite");
+    }
+    
+    #[test]
+    fn test_database_type_is_mysql_compatible() {
+        assert!(!DatabaseType::Postgres.is_mysql_compatible());
+        assert!(DatabaseType::MySQL.is_mysql_compatible());
+        assert!(DatabaseType::MariaDB.is_mysql_compatible());
+        assert!(!DatabaseType::SQLite.is_mysql_compatible());
     }
     
     #[test]

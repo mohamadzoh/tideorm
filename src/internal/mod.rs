@@ -181,6 +181,10 @@ impl QueryExecutor {
     ///
     /// This constructs a multi-row INSERT instead of individual inserts,
     /// reducing the number of database round trips from O(n) to O(1).
+    ///
+    /// On PostgreSQL and MariaDB, uses `INSERT ... RETURNING` for efficiency.
+    /// On MySQL and SQLite, falls back to individual inserts since they don't
+    /// support multi-row `INSERT ... RETURNING`.
     pub async fn insert_many<M>(conn: &DatabaseConnection, models: Vec<M>) -> Result<Vec<M>>
     where
         M: InternalModel,
@@ -197,17 +201,33 @@ impl QueryExecutor {
             return Ok(vec![M::from_sea_model(result)]);
         }
         
-        // Build batch insert using SeaORM's insert_many
-        let active_models: Vec<_> = models
-            .into_iter()
-            .map(|m| m.into_active_model())
-            .collect();
+        // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+)
+        let backend = conn.get_database_backend();
+        let supports_returning = matches!(backend, DbBackend::Postgres);
         
-        let results = M::Entity::insert_many(active_models)
-            .exec_with_returning(conn)
-            .await
-            .map_err(translate_error)?;
-        
-        Ok(results.into_iter().map(M::from_sea_model).collect())
+        if supports_returning {
+            // Build batch insert using SeaORM's insert_many with RETURNING
+            let active_models: Vec<_> = models
+                .into_iter()
+                .map(|m| m.into_active_model())
+                .collect();
+            
+            let results = M::Entity::insert_many(active_models)
+                .exec_with_returning(conn)
+                .await
+                .map_err(translate_error)?;
+            
+            Ok(results.into_iter().map(M::from_sea_model).collect())
+        } else {
+            // MySQL/SQLite: fall back to individual inserts
+            // MySQL doesn't support multi-row INSERT ... RETURNING
+            let mut results = Vec::with_capacity(models.len());
+            for model in models {
+                let active = model.into_active_model();
+                let result = active.insert(conn).await.map_err(translate_error)?;
+                results.push(M::from_sea_model(result));
+            }
+            Ok(results)
+        }
     }
 }

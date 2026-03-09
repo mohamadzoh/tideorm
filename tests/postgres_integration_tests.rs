@@ -119,7 +119,7 @@ async fn postgres_integration_tests() {
     // =========================================================================
     println!("📡 Testing: Database Connection");
     {
-        let db = tideorm::db();
+        let db = tideorm::require_db().unwrap();
         assert!(db.ping().await.is_ok(), "Database ping failed");
         println!("   ✓ Ping successful");
         
@@ -539,7 +539,7 @@ async fn postgres_integration_tests() {
         let _ = Database::execute("TRUNCATE TABLE test_users RESTART IDENTITY CASCADE").await;
         
         // Transaction commit
-        let result = TestUser::transaction(|_tx| async move {
+        let result = TestUser::transaction(|_tx| Box::pin(async move {
             let user = TestUser {
                 id: 0,
                 email: "tx_commit@example.com".to_string(),
@@ -549,7 +549,7 @@ async fn postgres_integration_tests() {
             };
             let saved = user.save().await?;
             Ok(saved.id)
-        }).await;
+        })).await;
         
         assert!(result.is_ok(), "Transaction should succeed");
         
@@ -562,20 +562,20 @@ async fn postgres_integration_tests() {
         println!("   ✓ transaction commit");
         
         // Transaction rollback
-        let db = tideorm::db();
-        let result: tideorm::Result<i64> = TestUser::transaction(|_tx| async move {
+        let db = tideorm::require_db().unwrap();
+        let result: tideorm::Result<i64> = TestUser::transaction(|_tx| Box::pin(async move {
             Err(tideorm::Error::query("Intentional rollback"))
-        }).await;
+        })).await;
         assert!(result.is_err(), "Transaction should fail");
         
-        let result2: tideorm::Result<()> = db.transaction(|tx| async move {
+        let result2: tideorm::Result<()> = db.transaction(|tx| Box::pin(async move {
             use sea_orm::ConnectionTrait;
             tx.__internal_transaction()
                 .execute_unprepared("INSERT INTO test_users (email, name, age, active) VALUES ('tx_test@example.com', 'TX User', 30, true)")
                 .await
                 .map_err(|e| tideorm::Error::query(e.to_string()))?;
             Err(tideorm::Error::query("Intentional rollback"))
-        }).await;
+        })).await;
         assert!(result2.is_err(), "Transaction should fail");
         
         let found = TestUser::query()

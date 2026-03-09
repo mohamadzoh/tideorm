@@ -78,7 +78,7 @@ mod db_sql {
     pub fn quote_char(db_type: DatabaseType) -> char {
         match db_type {
             DatabaseType::Postgres | DatabaseType::SQLite => '"',
-            DatabaseType::MySQL => '`',
+            DatabaseType::MySQL | DatabaseType::MariaDB => '`',
         }
     }
     
@@ -99,7 +99,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" @> '{}'", column, escaped_value)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("JSON_CONTAINS(`{}`, '{}')", column, escaped_value)
             }
             DatabaseType::SQLite => {
@@ -124,7 +124,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" <@ '{}'", column, escaped_value)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("JSON_CONTAINS('{}', `{}`)", escaped_value, column)
             }
             DatabaseType::SQLite => {
@@ -148,7 +148,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" ? '{}'", column, escaped_key)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("JSON_CONTAINS_PATH(`{}`, 'one', '$.{}')", column, escaped_key)
             }
             DatabaseType::SQLite => {
@@ -164,7 +164,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("NOT (\"{}\" ? '{}')", column, escaped_key)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("NOT JSON_CONTAINS_PATH(`{}`, 'one', '$.{}')", column, escaped_key)
             }
             DatabaseType::SQLite => {
@@ -184,7 +184,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" @? '{}'", column, escaped_path)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("JSON_CONTAINS_PATH(`{}`, 'one', '{}')", column, escaped_path)
             }
             DatabaseType::SQLite => {
@@ -200,7 +200,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("NOT (\"{}\" @? '{}')", column, escaped_path)
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 format!("NOT JSON_CONTAINS_PATH(`{}`, 'one', '{}')", column, escaped_path)
             }
             DatabaseType::SQLite => {
@@ -219,7 +219,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" @> ARRAY[{}]", column, values.join(","))
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 // MySQL stores arrays as JSON arrays
                 let json_array = format!("[{}]", values.iter()
                     .map(|v| if v.starts_with("'") { v.clone() } else { format!("\"{}\"", v.trim_matches('\'')) })
@@ -249,7 +249,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" <@ ARRAY[{}]", column, values.join(","))
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 let json_array = format!("[{}]", values.iter()
                     .map(|v| if v.starts_with("'") { v.clone() } else { format!("\"{}\"", v.trim_matches('\'')) })
                     .collect::<Vec<_>>()
@@ -276,7 +276,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("\"{}\" && ARRAY[{}]", column, values.join(","))
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 // Check if any value exists in the JSON array
                 let conditions: Vec<String> = values.iter()
                     .map(|v| {
@@ -335,7 +335,7 @@ mod db_sql {
         
         match db_type {
             DatabaseType::Postgres => format!("ARRAY[{}]", elements.join(",")),
-            DatabaseType::MySQL | DatabaseType::SQLite => {
+            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
                 // Store as JSON array
                 format!("'[{}]'", elements.iter()
                     .map(|e| if e.starts_with("'") {
@@ -353,7 +353,7 @@ mod db_sql {
     pub fn cast_to_float(db_type: DatabaseType, expr: &str) -> String {
         match db_type {
             DatabaseType::Postgres => format!("CAST({} AS FLOAT8)", expr),
-            DatabaseType::MySQL => format!("CAST({} AS DOUBLE)", expr),
+            DatabaseType::MySQL | DatabaseType::MariaDB => format!("CAST({} AS DOUBLE)", expr),
             DatabaseType::SQLite => format!("CAST({} AS REAL)", expr),
         }
     }
@@ -368,7 +368,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("{} = ANY(ARRAY[{}])", column, values.join(","))
             }
-            DatabaseType::MySQL | DatabaseType::SQLite => {
+            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
                 // Fall back to standard IN clause
                 format!("{} IN ({})", column, values.join(","))
             }
@@ -384,7 +384,7 @@ mod db_sql {
             DatabaseType::Postgres => {
                 format!("{} <> ALL(ARRAY[{}])", column, values.join(","))
             }
-            DatabaseType::MySQL | DatabaseType::SQLite => {
+            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
                 // Fall back to standard NOT IN clause
                 format!("{} NOT IN ({})", column, values.join(","))
             }
@@ -6584,6 +6584,7 @@ mod tests {
     fn test_quote_char() {
         assert_eq!(db_sql::quote_char(DatabaseType::Postgres), '"');
         assert_eq!(db_sql::quote_char(DatabaseType::MySQL), '`');
+        assert_eq!(db_sql::quote_char(DatabaseType::MariaDB), '`');
         assert_eq!(db_sql::quote_char(DatabaseType::SQLite), '"');
     }
     
@@ -6591,6 +6592,7 @@ mod tests {
     fn test_quote_ident() {
         assert_eq!(db_sql::quote_ident(DatabaseType::Postgres, "column"), "\"column\"");
         assert_eq!(db_sql::quote_ident(DatabaseType::MySQL, "column"), "`column`");
+        assert_eq!(db_sql::quote_ident(DatabaseType::MariaDB, "column"), "`column`");
         assert_eq!(db_sql::quote_ident(DatabaseType::SQLite, "column"), "\"column\"");
     }
     
@@ -6604,6 +6606,10 @@ mod tests {
     #[test]
     fn test_json_contains_mysql() {
         let sql = db_sql::json_contains(DatabaseType::MySQL, "metadata", r#"{"key": "value"}"#);
+        assert!(sql.contains("JSON_CONTAINS"));
+        assert!(sql.contains("`metadata`"));
+
+        let sql = db_sql::json_contains(DatabaseType::MariaDB, "metadata", r#"{"key": "value"}"#);
         assert!(sql.contains("JSON_CONTAINS"));
         assert!(sql.contains("`metadata`"));
     }
@@ -6626,6 +6632,10 @@ mod tests {
         let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "email");
         assert!(sql.contains("JSON_CONTAINS_PATH"));
         assert!(sql.contains("$.email"));
+
+        let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "email");
+        assert!(sql.contains("JSON_CONTAINS_PATH"));
+        assert!(sql.contains("$.email"));
     }
     
     #[test]
@@ -6645,6 +6655,9 @@ mod tests {
     #[test]
     fn test_json_path_exists_mysql() {
         let sql = db_sql::json_path_exists(DatabaseType::MySQL, "data", "$.user.name");
+        assert!(sql.contains("JSON_CONTAINS_PATH"));
+
+        let sql = db_sql::json_path_exists(DatabaseType::MariaDB, "data", "$.user.name");
         assert!(sql.contains("JSON_CONTAINS_PATH"));
     }
     
@@ -6666,6 +6679,9 @@ mod tests {
     fn test_array_contains_mysql() {
         let values = vec!["'admin'".to_string(), "'user'".to_string()];
         let sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
+        assert!(sql.contains("JSON_CONTAINS"));
+
+        let sql = db_sql::array_contains(DatabaseType::MariaDB, "roles", &values);
         assert!(sql.contains("JSON_CONTAINS"));
     }
     
@@ -6690,6 +6706,9 @@ mod tests {
         let sql = db_sql::array_overlaps(DatabaseType::MySQL, "tags", &values);
         // MySQL uses OR conditions for overlaps
         assert!(sql.contains(" OR "));
+
+        let sql = db_sql::array_overlaps(DatabaseType::MariaDB, "tags", &values);
+        assert!(sql.contains(" OR "));
     }
     
     #[test]
@@ -6710,6 +6729,10 @@ mod tests {
             db_sql::format_column(DatabaseType::MySQL, "name"),
             "`name`"
         );
+        assert_eq!(
+            db_sql::format_column(DatabaseType::MariaDB, "name"),
+            "`name`"
+        );
     }
     
     #[test]
@@ -6720,6 +6743,10 @@ mod tests {
         );
         assert_eq!(
             db_sql::format_column(DatabaseType::MySQL, "users.name"),
+            "`users`.`name`"
+        );
+        assert_eq!(
+            db_sql::format_column(DatabaseType::MariaDB, "users.name"),
             "`users`.`name`"
         );
     }
@@ -6744,6 +6771,10 @@ mod tests {
             "CAST(value AS DOUBLE)"
         );
         assert_eq!(
+            db_sql::cast_to_float(DatabaseType::MariaDB, "value"),
+            "CAST(value AS DOUBLE)"
+        );
+        assert_eq!(
             db_sql::cast_to_float(DatabaseType::SQLite, "value"),
             "CAST(value AS REAL)"
         );
@@ -6756,6 +6787,9 @@ mod tests {
         assert!(sql.contains("O''Brien"));
         
         let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "key'; DROP TABLE--");
+        assert!(sql.contains("key''; DROP TABLE--"));
+
+        let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "key'; DROP TABLE--");
         assert!(sql.contains("key''; DROP TABLE--"));
     }
     

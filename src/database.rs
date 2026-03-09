@@ -22,11 +22,10 @@
 //!     .await?;
 //!
 //! // Transactions
-//! db.transaction(|tx| async move {
-//!     let user = User::find(1, &tx).await?;
-//!     user.update().set("name", "New Name").save(&tx).await?;
+//! db.transaction(|tx| Box::pin(async move {
+//!     // tx.connection() gives you the transaction connection
 //!     Ok(())
-//! }).await?;
+//! })).await?;
 //! ```
 //!
 //! ## Global Database Connection
@@ -227,7 +226,10 @@ impl Database {
     ///
     /// Panics if the global connection has not been initialized.
     pub fn global() -> &'static Self {
-        db()
+        require_db().expect(
+            "Global database connection not initialized. \
+             Call Database::init() or Database::set_global() before using models."
+        )
     }
     
     /// Try to get a reference to the global database connection
@@ -257,19 +259,25 @@ impl Database {
     /// The transaction is automatically committed if the closure returns `Ok`,
     /// or rolled back if it returns `Err` or panics.
     ///
-    /// # Example
+    /// # Breaking Change (v0.7)
+    ///
+    /// The closure now receives `&Transaction` (a reference) instead of an owned
+    /// `Transaction`. This ensures the transaction is properly committed on
+    /// success instead of being silently rolled back.
+    ///
+    /// The closure must return a pinned, boxed future to satisfy lifetime bounds:
     ///
     /// ```rust,ignore
-    /// db.transaction(|tx| async move {
-    ///     let user = User::find(1, &tx).await?;
-    ///     user.delete(&tx).await?;
+    /// require_db()?.transaction(|tx| Box::pin(async move {
+    ///     // Use tx.connection() with SeaORM operations
     ///     Ok(())
-    /// }).await?;
+    /// })).await?;
     /// ```
-    pub async fn transaction<F, Fut, T>(&self, f: F) -> Result<T>
+    pub async fn transaction<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(Transaction) -> Fut,
-        Fut: Future<Output = Result<T>>,
+        F: for<'c> FnOnce(&'c Transaction)
+            -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>> + Send,
+        T: Send,
     {
         use crate::internal::TransactionTrait;
         
@@ -280,13 +288,16 @@ impl Database {
         
         let tx = Transaction { inner: txn };
         
-        match f(tx).await {
+        match f(&tx).await {
             Ok(result) => {
-                // Transaction is committed when dropped after success
+                // Commit the transaction — we still own tx since we only lent a reference
+                tx.inner.commit().await
+                    .map_err(|e| Error::transaction(e.to_string()))?;
                 Ok(result)
             }
             Err(e) => {
-                // Transaction is rolled back when dropped after error
+                // Explicitly rollback (also happens on drop, but let's be explicit)
+                let _ = tx.inner.rollback().await;
                 Err(e)
             }
         }
@@ -556,21 +567,28 @@ impl Database {
     
     /// Get the database backend type
     ///
-    /// Returns the type of database (PostgreSQL, MySQL, or SQLite) that
+    /// Returns the type of database (PostgreSQL, MySQL, MariaDB, or SQLite) that
     /// this connection is using. This is useful for writing database-specific
     /// queries or handling database-specific features.
     ///
     /// # Example
     ///
     /// ```rust,ignore
-    /// let backend = Database::global().backend();
+    /// let backend = require_db()?.backend();
     /// match backend {
     ///     crate::config::DatabaseType::Postgres => println!("Using PostgreSQL"),
     ///     crate::config::DatabaseType::MySQL => println!("Using MySQL"),
+    ///     crate::config::DatabaseType::MariaDB => println!("Using MariaDB"),
     ///     crate::config::DatabaseType::SQLite => println!("Using SQLite"),
+    ///     _ => println!("Unknown"),
     /// }
     /// ```
     pub fn backend(&self) -> crate::config::DatabaseType {
+        // Prefer the globally configured type (which accounts for MariaDB auto-detection)
+        if let Some(db_type) = crate::config::TideConfig::get_database_type() {
+            return db_type;
+        }
+        // Fallback to SeaORM backend detection
         use crate::internal::DbBackend;
         match self.inner.connection().get_database_backend() {
             DbBackend::Postgres => crate::config::DatabaseType::Postgres,
@@ -612,6 +630,24 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    /// Get a reference to the underlying connection.
+    ///
+    /// The returned reference implements SeaORM's `ConnectionTrait`,
+    /// so it can be used with any SeaORM query operation.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// require_db()?.transaction(|tx| Box::pin(async move {
+    ///     let conn = tx.connection();
+    ///     // Use conn with SeaORM operations
+    ///     Ok(())
+    /// })).await?;
+    /// ```
+    pub fn connection(&self) -> &crate::internal::DatabaseTransaction {
+        &self.inner
+    }
+    
     /// Get the raw internal transaction (for internal use only)
     #[doc(hidden)]
     pub fn __internal_transaction(&self) -> &crate::internal::DatabaseTransaction {

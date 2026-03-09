@@ -487,7 +487,7 @@ impl Seeder {
                 )
                 "#
             }
-            DatabaseType::MySQL => {
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
                 r#"
                 CREATE TABLE IF NOT EXISTS `_seeds` (
                     `id` INT AUTO_INCREMENT PRIMARY KEY,
