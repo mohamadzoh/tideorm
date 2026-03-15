@@ -65,14 +65,13 @@
 //! // ═══════════════════════════════════════════════════
 //! ```
 
+use parking_lot::RwLock;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Log level for query logging
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum LogLevel {
     /// No logging
     #[default]
@@ -89,7 +88,6 @@ pub enum LogLevel {
     Trace = 5,
 }
 
-
 impl LogLevel {
     /// Parse log level from string
     pub fn parse_str(s: &str) -> Self {
@@ -103,7 +101,7 @@ impl LogLevel {
             _ => Self::Off,
         }
     }
-    
+
     /// Convert to string representation
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -154,13 +152,16 @@ impl QueryOperation {
             Self::Update
         } else if sql_upper.starts_with("DELETE") {
             Self::Delete
-        } else if sql_upper.starts_with("BEGIN") || sql_upper.starts_with("COMMIT") || sql_upper.starts_with("ROLLBACK") {
+        } else if sql_upper.starts_with("BEGIN")
+            || sql_upper.starts_with("COMMIT")
+            || sql_upper.starts_with("ROLLBACK")
+        {
             Self::Transaction
         } else {
             Self::Unknown
         }
     }
-    
+
     /// Get operation name
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -221,74 +222,74 @@ impl QueryLogEntry {
             timestamp: std::time::SystemTime::now(),
         }
     }
-    
+
     /// Set query parameters
     pub fn with_params(mut self, params: Vec<String>) -> Self {
         self.params = params;
         self
     }
-    
+
     /// Set table name
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
-    
+
     /// Set execution duration
     pub fn with_duration(mut self, duration: Duration) -> Self {
         self.duration = Some(duration);
         self
     }
-    
+
     /// Set number of rows
     pub fn with_rows(mut self, rows: u64) -> Self {
         self.rows = Some(rows);
         self
     }
-    
+
     /// Mark as failed with error
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.success = false;
         self.error = Some(error.into());
         self
     }
-    
+
     /// Check if this is a slow query
     pub fn is_slow(&self, threshold_ms: u64) -> bool {
         self.duration
             .map(|d| d.as_millis() as u64 >= threshold_ms)
             .unwrap_or(false)
     }
-    
+
     /// Format for console output
     pub fn format_console(&self) -> String {
         let mut output = format!("[TIDE][{}]", self.operation);
-        
+
         if let Some(ref table) = self.table {
             output.push_str(&format!(" {}", table));
         }
-        
+
         if let Some(duration) = self.duration {
             output.push_str(&format!(" ({}ms)", duration.as_millis()));
         }
-        
+
         if let Some(rows) = self.rows {
             output.push_str(&format!(" [{} rows]", rows));
         }
-        
+
         if !self.success {
             output.push_str(" FAILED");
             if let Some(ref err) = self.error {
                 output.push_str(&format!(": {}", err));
             }
         }
-        
+
         output.push_str(&format!("\n  SQL: {}", self.sql));
-        
+
         if !self.params.is_empty() {
             output.push_str(&format!("\n  Params: {:?}", self.params));
         }
-        
+
         output
     }
 }
@@ -309,18 +310,18 @@ impl QueryTimer {
             table: None,
         }
     }
-    
+
     /// Set table name for the query
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
-    
+
     /// Stop the timer and return duration
     pub fn stop(&self) -> Duration {
         self.start.elapsed()
     }
-    
+
     /// Stop and create a log entry
     pub fn finish(self) -> QueryLogEntry {
         let duration = self.start.elapsed();
@@ -330,12 +331,12 @@ impl QueryTimer {
         }
         entry
     }
-    
+
     /// Stop, create entry with row count
     pub fn finish_with_rows(self, rows: u64) -> QueryLogEntry {
         self.finish().with_rows(rows)
     }
-    
+
     /// Stop, create entry with error
     pub fn finish_with_error(self, error: impl Into<String>) -> QueryLogEntry {
         self.finish().with_error(error)
@@ -362,55 +363,55 @@ impl QueryLogger {
     pub fn global() -> QueryLoggerBuilder {
         QueryLoggerBuilder::new()
     }
-    
+
     /// Enable logging (convenience method)
     pub fn enable() {
         LOGGER_ENABLED.store(true, Ordering::SeqCst);
     }
-    
+
     /// Disable logging (convenience method)
     pub fn disable() {
         LOGGER_ENABLED.store(false, Ordering::SeqCst);
     }
-    
+
     /// Check if logging is enabled
     pub fn is_enabled() -> bool {
         LOGGER_ENABLED.load(Ordering::SeqCst)
     }
-    
+
     /// Get current log level
     pub fn level() -> LogLevel {
         *LOG_LEVEL.read()
     }
-    
+
     /// Set log level
     pub fn set_level(level: LogLevel) {
         *LOG_LEVEL.write() = level;
     }
-    
+
     /// Log a query entry
     pub fn log(entry: QueryLogEntry) {
         if !Self::is_enabled() {
             return;
         }
-        
+
         let level = Self::level();
         if level == LogLevel::Off {
             return;
         }
-        
+
         // Update statistics
         QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
         if let Some(duration) = entry.duration {
             TOTAL_QUERY_TIME_MS.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
         }
-        
+
         let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
         let is_slow = entry.is_slow(threshold);
         if is_slow {
             SLOW_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
         }
-        
+
         // Store in history
         {
             let mut history = QUERY_HISTORY.write();
@@ -420,7 +421,7 @@ impl QueryLogger {
             }
             history.push(entry.clone());
         }
-        
+
         // Determine if we should output
         let should_log = match level {
             LogLevel::Off => false,
@@ -430,7 +431,7 @@ impl QueryLogger {
             LogLevel::Debug => true,
             LogLevel::Trace => true,
         };
-        
+
         if should_log {
             let output = if level == LogLevel::Trace {
                 entry.format_console()
@@ -441,11 +442,11 @@ impl QueryLogger {
             } else {
                 format_error(&entry)
             };
-            
+
             eprintln!("{}", output);
         }
     }
-    
+
     /// Log a query with timing
     pub fn log_timed(sql: impl Into<String>, duration: Duration) {
         if !Self::is_enabled() {
@@ -454,7 +455,7 @@ impl QueryLogger {
         let entry = QueryLogEntry::new(sql).with_duration(duration);
         Self::log(entry);
     }
-    
+
     /// Log a query error
     pub fn log_error(sql: impl Into<String>, error: impl Into<String>) {
         if !Self::is_enabled() {
@@ -463,7 +464,7 @@ impl QueryLogger {
         let entry = QueryLogEntry::new(sql).with_error(error);
         Self::log(entry);
     }
-    
+
     /// Get query statistics
     pub fn stats() -> QueryStats {
         QueryStats {
@@ -473,24 +474,24 @@ impl QueryLogger {
             threshold_ms: SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst),
         }
     }
-    
+
     /// Reset query statistics
     pub fn reset_stats() {
         QUERY_COUNT.store(0, Ordering::SeqCst);
         SLOW_QUERY_COUNT.store(0, Ordering::SeqCst);
         TOTAL_QUERY_TIME_MS.store(0, Ordering::SeqCst);
     }
-    
+
     /// Get query history
     pub fn history() -> Vec<QueryLogEntry> {
         QUERY_HISTORY.read().clone()
     }
-    
+
     /// Clear query history
     pub fn clear_history() {
         QUERY_HISTORY.write().clear();
     }
-    
+
     /// Get slow queries from history
     pub fn slow_queries() -> Vec<QueryLogEntry> {
         let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
@@ -501,7 +502,7 @@ impl QueryLogger {
             .cloned()
             .collect()
     }
-    
+
     /// Initialize from environment variables
     pub fn init_from_env() {
         // TIDE_LOG_QUERIES
@@ -510,7 +511,7 @@ impl QueryLogger {
                 LOGGER_ENABLED.store(true, Ordering::SeqCst);
             }
         }
-        
+
         // TIDE_LOG_LEVEL
         if let Ok(val) = std::env::var("TIDE_LOG_LEVEL") {
             let level = LogLevel::parse_str(&val);
@@ -519,7 +520,7 @@ impl QueryLogger {
                 LOGGER_ENABLED.store(true, Ordering::SeqCst);
             }
         }
-        
+
         // TIDE_SLOW_QUERY_MS
         if let Ok(val) = std::env::var("TIDE_SLOW_QUERY_MS") {
             if let Ok(ms) = val.parse::<u64>() {
@@ -546,31 +547,31 @@ impl QueryLoggerBuilder {
             history_limit: None,
         }
     }
-    
+
     /// Set the log level
     pub fn set_level(mut self, level: LogLevel) -> Self {
         self.level = Some(level);
         self
     }
-    
+
     /// Enable or disable timing
     pub fn enable_timing(mut self, enable: bool) -> Self {
         self.timing = Some(enable);
         self
     }
-    
+
     /// Set slow query threshold in milliseconds
     pub fn set_slow_query_threshold_ms(mut self, ms: u64) -> Self {
         self.threshold_ms = Some(ms);
         self
     }
-    
+
     /// Set query history limit
     pub fn set_history_limit(mut self, limit: usize) -> Self {
         self.history_limit = Some(limit);
         self
     }
-    
+
     /// Enable the logger with configured settings
     pub fn enable(self) {
         if let Some(level) = self.level {
@@ -587,7 +588,7 @@ impl QueryLoggerBuilder {
         }
         LOGGER_ENABLED.store(true, Ordering::SeqCst);
     }
-    
+
     /// Disable the logger
     pub fn disable(self) {
         LOGGER_ENABLED.store(false, Ordering::SeqCst);
@@ -616,7 +617,7 @@ impl QueryStats {
             self.total_time_ms as f64 / self.total_queries as f64
         }
     }
-    
+
     /// Get percentage of slow queries
     pub fn slow_query_percentage(&self) -> f64 {
         if self.total_queries == 0 {
@@ -633,7 +634,12 @@ impl fmt::Display for QueryStats {
         writeln!(f, "TIDEORM QUERY STATISTICS")?;
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "Total Queries:     {}", self.total_queries)?;
-        writeln!(f, "Slow Queries:      {} ({:.1}%)", self.slow_queries, self.slow_query_percentage())?;
+        writeln!(
+            f,
+            "Slow Queries:      {} ({:.1}%)",
+            self.slow_queries,
+            self.slow_query_percentage()
+        )?;
         writeln!(f, "Total Time:        {}ms", self.total_time_ms)?;
         writeln!(f, "Avg Query Time:    {:.2}ms", self.avg_query_time_ms())?;
         writeln!(f, "Slow Threshold:    {}ms", self.threshold_ms)?;
@@ -685,29 +691,29 @@ impl QueryDebugInfo {
             params: Vec::new(),
         }
     }
-    
+
     /// Set operation type
     pub fn with_operation(mut self, op: QueryOperation) -> Self {
         self.operation = op;
         self
     }
-    
+
     /// Add a condition
     pub fn add_condition(&mut self, condition: impl Into<String>) {
         self.conditions.push(condition.into());
     }
-    
+
     /// Add order by clause
     pub fn add_order_by(&mut self, order: impl Into<String>) {
         self.order_by.push(order.into());
     }
-    
+
     /// Set SQL
     pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
         self.sql = sql.into();
         self
     }
-    
+
     /// Set params
     pub fn with_params(mut self, params: Vec<String>) -> Self {
         self.params = params;
@@ -722,33 +728,33 @@ impl fmt::Display for QueryDebugInfo {
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "Table:      {}", self.table)?;
         writeln!(f, "Operation:  {}", self.operation)?;
-        
+
         if !self.select.is_empty() && self.select != vec!["*".to_string()] {
             writeln!(f, "Select:     {}", self.select.join(", "))?;
         }
-        
+
         if !self.conditions.is_empty() {
             writeln!(f, "Conditions:")?;
             for cond in &self.conditions {
                 writeln!(f, "  - {}", cond)?;
             }
         }
-        
+
         if !self.joins.is_empty() {
             writeln!(f, "Joins:")?;
             for join in &self.joins {
                 writeln!(f, "  - {}", join)?;
             }
         }
-        
+
         if !self.order_by.is_empty() {
             writeln!(f, "Order By:   {}", self.order_by.join(", "))?;
         }
-        
+
         if !self.group_by.is_empty() {
             writeln!(f, "Group By:   {}", self.group_by.join(", "))?;
         }
-        
+
         if let Some(limit) = self.limit {
             write!(f, "Limit:      {}", limit)?;
             if let Some(offset) = self.offset {
@@ -756,52 +762,51 @@ impl fmt::Display for QueryDebugInfo {
             }
             writeln!(f)?;
         }
-        
+
         if !self.sql.is_empty() {
             writeln!(f, "───────────────────────────────────────────────────")?;
             writeln!(f, "SQL: {}", self.sql)?;
         }
-        
+
         if !self.params.is_empty() {
             writeln!(f, "Params: {:?}", self.params)?;
         }
-        
+
         write!(f, "═══════════════════════════════════════════════════")
     }
 }
 
 // Helper formatting functions
 fn format_debug(entry: &QueryLogEntry) -> String {
-    let timing = entry.duration
+    let timing = entry
+        .duration
         .map(|d| format!(" ({}ms)", d.as_millis()))
         .unwrap_or_default();
-    
+
     format!("[TIDE][{}]{} {}", entry.operation, timing, entry.sql)
 }
 
 fn format_slow(entry: &QueryLogEntry, threshold: u64) -> String {
-    let duration_ms = entry.duration
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    
+    let duration_ms = entry.duration.map(|d| d.as_millis() as u64).unwrap_or(0);
+
     format!(
         "[TIDE][SLOW QUERY] {} ({}ms > {}ms threshold)\n  SQL: {}",
-        entry.operation,
-        duration_ms,
-        threshold,
-        entry.sql
+        entry.operation, duration_ms, threshold, entry.sql
     )
 }
 
 fn format_error(entry: &QueryLogEntry) -> String {
     let error = entry.error.as_deref().unwrap_or("Unknown error");
-    format!("[TIDE][ERROR] {} failed: {}\n  SQL: {}", entry.operation, error, entry.sql)
+    format!(
+        "[TIDE][ERROR] {} failed: {}\n  SQL: {}",
+        entry.operation, error, entry.sql
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_log_level_parsing() {
         assert_eq!(LogLevel::parse_str("debug"), LogLevel::Debug);
@@ -810,41 +815,54 @@ mod tests {
         assert_eq!(LogLevel::parse_str("4"), LogLevel::Debug);
         assert_eq!(LogLevel::parse_str("invalid"), LogLevel::Off);
     }
-    
+
     #[test]
     fn test_query_operation_detection() {
-        assert_eq!(QueryOperation::from_sql("SELECT * FROM users"), QueryOperation::Select);
-        assert_eq!(QueryOperation::from_sql("INSERT INTO users"), QueryOperation::Insert);
-        assert_eq!(QueryOperation::from_sql("UPDATE users SET"), QueryOperation::Update);
-        assert_eq!(QueryOperation::from_sql("DELETE FROM users"), QueryOperation::Delete);
-        assert_eq!(QueryOperation::from_sql("BEGIN"), QueryOperation::Transaction);
+        assert_eq!(
+            QueryOperation::from_sql("SELECT * FROM users"),
+            QueryOperation::Select
+        );
+        assert_eq!(
+            QueryOperation::from_sql("INSERT INTO users"),
+            QueryOperation::Insert
+        );
+        assert_eq!(
+            QueryOperation::from_sql("UPDATE users SET"),
+            QueryOperation::Update
+        );
+        assert_eq!(
+            QueryOperation::from_sql("DELETE FROM users"),
+            QueryOperation::Delete
+        );
+        assert_eq!(
+            QueryOperation::from_sql("BEGIN"),
+            QueryOperation::Transaction
+        );
     }
-    
+
     #[test]
     fn test_query_log_entry() {
         let entry = QueryLogEntry::new("SELECT * FROM users")
             .with_table("users")
             .with_duration(Duration::from_millis(50))
             .with_rows(10);
-        
+
         assert_eq!(entry.operation, QueryOperation::Select);
         assert_eq!(entry.table, Some("users".to_string()));
         assert_eq!(entry.rows, Some(10));
         assert!(entry.success);
     }
-    
+
     #[test]
     fn test_slow_query_detection() {
-        let fast_entry = QueryLogEntry::new("SELECT 1")
-            .with_duration(Duration::from_millis(10));
-        
-        let slow_entry = QueryLogEntry::new("SELECT 1")
-            .with_duration(Duration::from_millis(200));
-        
+        let fast_entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(10));
+
+        let slow_entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(200));
+
         assert!(!fast_entry.is_slow(100));
         assert!(slow_entry.is_slow(100));
     }
-    
+
     #[test]
     fn test_query_stats() {
         let stats = QueryStats {
@@ -853,19 +871,18 @@ mod tests {
             total_time_ms: 500,
             threshold_ms: 100,
         };
-        
+
         assert_eq!(stats.avg_query_time_ms(), 5.0);
         assert_eq!(stats.slow_query_percentage(), 5.0);
     }
-    
+
     #[test]
     fn test_query_timer() {
-        let timer = QueryTimer::start("SELECT * FROM users")
-            .with_table("users");
-        
+        let timer = QueryTimer::start("SELECT * FROM users").with_table("users");
+
         std::thread::sleep(Duration::from_millis(10));
         let entry = timer.finish_with_rows(5);
-        
+
         assert!(entry.duration.unwrap() >= Duration::from_millis(10));
         assert_eq!(entry.rows, Some(5));
     }

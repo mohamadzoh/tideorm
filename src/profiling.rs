@@ -43,10 +43,10 @@
 //! // 💡 Use User::find_by_email() instead of raw WHERE for type safety
 //! ```
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use parking_lot::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Performance profiler for tracking query execution
@@ -90,19 +90,19 @@ impl ProfiledQuery {
             timestamp: SystemTime::now(),
         }
     }
-    
+
     /// Set table name
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
-    
+
     /// Set row count
     pub fn with_rows(mut self, rows: u64) -> Self {
         self.rows = Some(rows);
         self
     }
-    
+
     /// Mark as cached
     pub fn cached(mut self) -> Self {
         self.cached = true;
@@ -119,33 +119,33 @@ impl Profiler {
             is_active: true,
         }
     }
-    
+
     /// Record a query execution
     pub fn record(&mut self, sql: impl Into<String>, duration: Duration) {
         if self.is_active {
             self.queries.push(ProfiledQuery::new(sql, duration));
         }
     }
-    
+
     /// Record a query with full details
     pub fn record_full(&mut self, query: ProfiledQuery) {
         if self.is_active {
             self.queries.push(query);
         }
     }
-    
+
     /// Stop profiling and generate report
     pub fn stop(mut self) -> ProfileReport {
         self.is_active = false;
         let total_duration = self.start_time.elapsed();
         ProfileReport::from_queries(self.queries, total_duration)
     }
-    
+
     /// Get current query count
     pub fn query_count(&self) -> usize {
         self.queries.len()
     }
-    
+
     /// Get elapsed time since start
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
@@ -172,24 +172,22 @@ pub struct ProfileReport {
 impl ProfileReport {
     /// Create report from queries
     fn from_queries(queries: Vec<ProfiledQuery>, total_duration: Duration) -> Self {
-        let query_duration: Duration = queries.iter()
-            .map(|q| q.duration)
-            .sum();
-        
+        let query_duration: Duration = queries.iter().map(|q| q.duration).sum();
+
         let mut operations: HashMap<String, u64> = HashMap::new();
         let mut tables: HashMap<String, u64> = HashMap::new();
-        
+
         for query in &queries {
             *operations.entry(query.operation.clone()).or_insert(0) += 1;
             if let Some(ref table) = query.table {
                 *tables.entry(table.clone()).or_insert(0) += 1;
             }
         }
-        
+
         let mut slowest: Vec<ProfiledQuery> = queries.clone();
         slowest.sort_by(|a, b| b.duration.cmp(&a.duration));
         slowest.truncate(10);
-        
+
         Self {
             total_duration,
             query_duration,
@@ -199,12 +197,12 @@ impl ProfileReport {
             tables,
         }
     }
-    
+
     /// Get total number of queries
     pub fn query_count(&self) -> usize {
         self.queries.len()
     }
-    
+
     /// Get average query time
     pub fn avg_query_time(&self) -> Duration {
         if self.queries.is_empty() {
@@ -213,7 +211,7 @@ impl ProfileReport {
             self.query_duration / self.queries.len() as u32
         }
     }
-    
+
     /// Get percentage of time spent in queries
     pub fn query_time_percentage(&self) -> f64 {
         if self.total_duration.as_nanos() == 0 {
@@ -222,18 +220,19 @@ impl ProfileReport {
             (self.query_duration.as_nanos() as f64 / self.total_duration.as_nanos() as f64) * 100.0
         }
     }
-    
+
     /// Get queries slower than threshold
     pub fn queries_slower_than(&self, threshold: Duration) -> Vec<&ProfiledQuery> {
-        self.queries.iter()
+        self.queries
+            .iter()
             .filter(|q| q.duration >= threshold)
             .collect()
     }
-    
+
     /// Get optimization suggestions
     pub fn suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
-        
+
         // Check for N+1 query patterns
         let mut table_counts: HashMap<&str, usize> = HashMap::new();
         for query in &self.queries {
@@ -241,7 +240,7 @@ impl ProfileReport {
                 *table_counts.entry(table.as_str()).or_insert(0) += 1;
             }
         }
-        
+
         for (table, count) in table_counts {
             if count > 10 {
                 suggestions.push(format!(
@@ -250,79 +249,131 @@ impl ProfileReport {
                 ));
             }
         }
-        
+
         // Check for slow queries
-        let slow_count = self.queries.iter()
+        let slow_count = self
+            .queries
+            .iter()
             .filter(|q| q.duration > Duration::from_millis(100))
             .count();
-        
+
         if slow_count > 0 {
             suggestions.push(format!(
                 "{} slow queries detected (>100ms). Review these queries and consider adding indexes.",
                 slow_count
             ));
         }
-        
+
         // Check for SELECT * usage
-        let select_star = self.queries.iter()
+        let select_star = self
+            .queries
+            .iter()
             .filter(|q| q.sql.contains("SELECT *") || q.sql.contains("select *"))
             .count();
-        
+
         if select_star > 5 {
             suggestions.push(
                 "Multiple SELECT * queries detected. Use `.select([\"col1\", \"col2\"])` to fetch only needed columns.".to_string()
             );
         }
-        
+
         // Check query time percentage
         if self.query_time_percentage() > 50.0 {
             suggestions.push(
                 "More than 50% of time spent in database queries. Consider caching frequently accessed data.".to_string()
             );
         }
-        
+
         suggestions
     }
 }
 
 impl fmt::Display for ProfileReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "╔═══════════════════════════════════════════════════════════╗")?;
-        writeln!(f, "║           TIDEORM PERFORMANCE PROFILE REPORT              ║")?;
-        writeln!(f, "╠═══════════════════════════════════════════════════════════╣")?;
-        writeln!(f, "║ Total Duration:     {:>10}ms                          ║", self.total_duration.as_millis())?;
-        writeln!(f, "║ Query Duration:     {:>10}ms ({:.1}% of total)        ║", 
-                 self.query_duration.as_millis(), 
-                 self.query_time_percentage())?;
-        writeln!(f, "║ Total Queries:      {:>10}                            ║", self.query_count())?;
-        writeln!(f, "║ Avg Query Time:     {:>10.2}ms                         ║", 
-                 self.avg_query_time().as_secs_f64() * 1000.0)?;
-        writeln!(f, "╠═══════════════════════════════════════════════════════════╣")?;
-        
+        writeln!(
+            f,
+            "╔═══════════════════════════════════════════════════════════╗"
+        )?;
+        writeln!(
+            f,
+            "║           TIDEORM PERFORMANCE PROFILE REPORT              ║"
+        )?;
+        writeln!(
+            f,
+            "╠═══════════════════════════════════════════════════════════╣"
+        )?;
+        writeln!(
+            f,
+            "║ Total Duration:     {:>10}ms                          ║",
+            self.total_duration.as_millis()
+        )?;
+        writeln!(
+            f,
+            "║ Query Duration:     {:>10}ms ({:.1}% of total)        ║",
+            self.query_duration.as_millis(),
+            self.query_time_percentage()
+        )?;
+        writeln!(
+            f,
+            "║ Total Queries:      {:>10}                            ║",
+            self.query_count()
+        )?;
+        writeln!(
+            f,
+            "║ Avg Query Time:     {:>10.2}ms                         ║",
+            self.avg_query_time().as_secs_f64() * 1000.0
+        )?;
+        writeln!(
+            f,
+            "╠═══════════════════════════════════════════════════════════╣"
+        )?;
+
         // Operations breakdown
-        writeln!(f, "║ Operations:                                               ║")?;
+        writeln!(
+            f,
+            "║ Operations:                                               ║"
+        )?;
         for (op, count) in &self.operations {
-            writeln!(f, "║   {:10}: {:>6}                                       ║", op, count)?;
+            writeln!(
+                f,
+                "║   {:10}: {:>6}                                       ║",
+                op, count
+            )?;
         }
-        
+
         // Slowest queries
         if !self.slowest.is_empty() {
-            writeln!(f, "╠═══════════════════════════════════════════════════════════╣")?;
-            writeln!(f, "║ Slowest Queries:                                          ║")?;
+            writeln!(
+                f,
+                "╠═══════════════════════════════════════════════════════════╣"
+            )?;
+            writeln!(
+                f,
+                "║ Slowest Queries:                                          ║"
+            )?;
             for (i, query) in self.slowest.iter().take(5).enumerate() {
                 let sql_preview: String = query.sql.chars().take(40).collect();
-                writeln!(f, "║ {}. {:>6}ms  {}...                                         ║", 
-                         i + 1,
-                         query.duration.as_millis(),
-                         sql_preview.replace('\n', " "))?;
+                writeln!(
+                    f,
+                    "║ {}. {:>6}ms  {}...                                         ║",
+                    i + 1,
+                    query.duration.as_millis(),
+                    sql_preview.replace('\n', " ")
+                )?;
             }
         }
-        
+
         // Suggestions
         let suggestions = self.suggestions();
         if !suggestions.is_empty() {
-            writeln!(f, "╠═══════════════════════════════════════════════════════════╣")?;
-            writeln!(f, "║ 💡 Optimization Suggestions:                              ║")?;
+            writeln!(
+                f,
+                "╠═══════════════════════════════════════════════════════════╣"
+            )?;
+            writeln!(
+                f,
+                "║ 💡 Optimization Suggestions:                              ║"
+            )?;
             for suggestion in suggestions.iter().take(3) {
                 let wrapped = textwrap_simple(suggestion, 55);
                 for line in wrapped {
@@ -330,8 +381,11 @@ impl fmt::Display for ProfileReport {
                 }
             }
         }
-        
-        writeln!(f, "╚═══════════════════════════════════════════════════════════╝")
+
+        writeln!(
+            f,
+            "╚═══════════════════════════════════════════════════════════╝"
+        )
     }
 }
 
@@ -351,30 +405,30 @@ impl GlobalProfiler {
     pub fn enable() {
         GLOBAL_PROFILING_ENABLED.store(true, Ordering::SeqCst);
     }
-    
+
     /// Disable global profiling
     pub fn disable() {
         GLOBAL_PROFILING_ENABLED.store(false, Ordering::SeqCst);
     }
-    
+
     /// Check if global profiling is enabled
     pub fn is_enabled() -> bool {
         GLOBAL_PROFILING_ENABLED.load(Ordering::SeqCst)
     }
-    
+
     /// Record a query execution globally
     pub fn record(duration: Duration) {
         if Self::is_enabled() {
             GLOBAL_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
             GLOBAL_TOTAL_TIME_NS.fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
-            
+
             let threshold_ms = *GLOBAL_SLOW_THRESHOLD_MS.read();
             if duration.as_millis() as u64 >= threshold_ms {
                 GLOBAL_SLOW_COUNT.fetch_add(1, Ordering::SeqCst);
             }
         }
     }
-    
+
     /// Get global statistics
     pub fn stats() -> GlobalStats {
         GlobalStats {
@@ -384,14 +438,14 @@ impl GlobalProfiler {
             slow_threshold_ms: *GLOBAL_SLOW_THRESHOLD_MS.read(),
         }
     }
-    
+
     /// Reset global statistics
     pub fn reset() {
         GLOBAL_QUERY_COUNT.store(0, Ordering::SeqCst);
         GLOBAL_TOTAL_TIME_NS.store(0, Ordering::SeqCst);
         GLOBAL_SLOW_COUNT.store(0, Ordering::SeqCst);
     }
-    
+
     /// Set slow query threshold
     pub fn set_slow_threshold(ms: u64) {
         *GLOBAL_SLOW_THRESHOLD_MS.write() = ms;
@@ -416,7 +470,7 @@ impl GlobalStats {
     pub fn total_time(&self) -> Duration {
         Duration::from_nanos(self.total_time_ns)
     }
-    
+
     /// Get average query time
     pub fn avg_query_time(&self) -> Duration {
         if self.total_queries == 0 {
@@ -425,7 +479,7 @@ impl GlobalStats {
             Duration::from_nanos(self.total_time_ns / self.total_queries)
         }
     }
-    
+
     /// Get slow query percentage
     pub fn slow_percentage(&self) -> f64 {
         if self.total_queries == 0 {
@@ -440,9 +494,22 @@ impl fmt::Display for GlobalStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "TideORM Global Statistics:")?;
         writeln!(f, "  Total Queries:    {}", self.total_queries)?;
-        writeln!(f, "  Total Time:       {:.2}ms", self.total_time().as_secs_f64() * 1000.0)?;
-        writeln!(f, "  Avg Query Time:   {:.2}ms", self.avg_query_time().as_secs_f64() * 1000.0)?;
-        writeln!(f, "  Slow Queries:     {} ({:.1}%)", self.slow_queries, self.slow_percentage())?;
+        writeln!(
+            f,
+            "  Total Time:       {:.2}ms",
+            self.total_time().as_secs_f64() * 1000.0
+        )?;
+        writeln!(
+            f,
+            "  Avg Query Time:   {:.2}ms",
+            self.avg_query_time().as_secs_f64() * 1000.0
+        )?;
+        writeln!(
+            f,
+            "  Slow Queries:     {} ({:.1}%)",
+            self.slow_queries,
+            self.slow_percentage()
+        )?;
         write!(f, "  Slow Threshold:   {}ms", self.slow_threshold_ms)
     }
 }
@@ -455,68 +522,69 @@ impl QueryAnalyzer {
     pub fn analyze(sql: &str) -> Vec<QuerySuggestion> {
         let mut suggestions = Vec::new();
         let sql_upper = sql.to_uppercase();
-        
+
         // Check for SELECT *
         if sql_upper.contains("SELECT *") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Avoid SELECT *",
                 "Specify columns explicitly to reduce data transfer and improve performance.",
-                "Change to: .select([\"id\", \"name\", \"email\"])"
+                "Change to: .select([\"id\", \"name\", \"email\"])",
             ));
         }
-        
+
         // Check for missing WHERE on UPDATE/DELETE
-        if (sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE")) 
-            && !sql_upper.contains("WHERE") {
+        if (sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE"))
+            && !sql_upper.contains("WHERE")
+        {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Critical,
                 "Missing WHERE clause",
                 "UPDATE/DELETE without WHERE will affect all rows!",
-                "Add a WHERE condition: .where_eq(\"id\", value)"
+                "Add a WHERE condition: .where_eq(\"id\", value)",
             ));
         }
-        
+
         // Check for LIKE with leading wildcard
         if sql_upper.contains("LIKE '%") || sql_upper.contains("LIKE '%") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Leading wildcard in LIKE",
                 "LIKE '%pattern' cannot use indexes and will be slow on large tables.",
-                "Consider using full-text search or restructure the query."
+                "Consider using full-text search or restructure the query.",
             ));
         }
-        
+
         // Check for OR conditions
         if sql_upper.contains(" OR ") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "OR conditions detected",
                 "OR conditions may prevent index usage. Consider using UNION or restructuring.",
-                "Use .where_in(\"column\", values) instead of multiple OR conditions."
+                "Use .where_in(\"column\", values) instead of multiple OR conditions.",
             ));
         }
-        
+
         // Check for ORDER BY without LIMIT
         if sql_upper.contains("ORDER BY") && !sql_upper.contains("LIMIT") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "ORDER BY without LIMIT",
                 "Ordering all rows can be expensive. Consider adding a LIMIT.",
-                "Add .limit(100) to restrict result set."
+                "Add .limit(100) to restrict result set.",
             ));
         }
-        
+
         // Check for NOT IN
         if sql_upper.contains("NOT IN") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "NOT IN detected",
                 "NOT IN may have unexpected NULL handling. Consider using NOT EXISTS.",
-                "Use .where_not_exists(subquery) for more predictable behavior."
+                "Use .where_not_exists(subquery) for more predictable behavior.",
             ));
         }
-        
+
         // Check for functions in WHERE
         let function_patterns = ["LOWER(", "UPPER(", "DATE(", "YEAR(", "MONTH("];
         for pattern in function_patterns {
@@ -530,25 +598,26 @@ impl QueryAnalyzer {
                 break;
             }
         }
-        
+
         // Check for implicit type conversion
-        if sql_upper.contains("= '") && (sql_upper.contains("_id =") || sql_upper.contains("id =")) {
+        if sql_upper.contains("= '") && (sql_upper.contains("_id =") || sql_upper.contains("id ="))
+        {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "Possible type mismatch",
                 "Comparing numeric ID with string may cause implicit conversion.",
-                "Ensure parameter types match column types."
+                "Ensure parameter types match column types.",
             ));
         }
-        
+
         suggestions
     }
-    
+
     /// Estimate query complexity
     pub fn estimate_complexity(sql: &str) -> QueryComplexity {
         let sql_upper = sql.to_uppercase();
         let mut score = 0;
-        
+
         // Base complexity by operation
         if sql_upper.starts_with("SELECT") {
             score += 1;
@@ -557,13 +626,13 @@ impl QueryAnalyzer {
         } else if sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE") {
             score += 3;
         }
-        
+
         // Add complexity for joins
         score += sql_upper.matches("JOIN").count() * 2;
-        
+
         // Add complexity for subqueries
         score += sql_upper.matches("SELECT").count().saturating_sub(1) * 3;
-        
+
         // Add complexity for aggregations
         let agg_functions = ["COUNT(", "SUM(", "AVG(", "MAX(", "MIN(", "GROUP BY"];
         for func in agg_functions {
@@ -571,17 +640,17 @@ impl QueryAnalyzer {
                 score += 1;
             }
         }
-        
+
         // Add complexity for ORDER BY
         if sql_upper.contains("ORDER BY") {
             score += 1;
         }
-        
+
         // Add complexity for DISTINCT
         if sql_upper.contains("DISTINCT") {
             score += 1;
         }
-        
+
         QueryComplexity::from_score(score)
     }
 }
@@ -606,7 +675,7 @@ impl SuggestionLevel {
             Self::Critical => "🚨",
         }
     }
-    
+
     /// Get label
     pub fn label(&self) -> &'static str {
         match self {
@@ -649,7 +718,13 @@ impl QuerySuggestion {
 
 impl fmt::Display for QuerySuggestion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{} [{}] {}", self.level.emoji(), self.level.label(), self.title)?;
+        writeln!(
+            f,
+            "{} [{}] {}",
+            self.level.emoji(),
+            self.level.label(),
+            self.title
+        )?;
         writeln!(f, "   {}", self.explanation)?;
         write!(f, "   💡 {}", self.suggestion)
     }
@@ -677,7 +752,7 @@ impl QueryComplexity {
             _ => Self::VeryComplex,
         }
     }
-    
+
     /// Get description
     pub fn description(&self) -> &'static str {
         match self {
@@ -720,7 +795,7 @@ fn detect_operation(sql: &str) -> String {
 fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current_line = String::new();
-    
+
     for word in text.split_whitespace() {
         if current_line.is_empty() {
             current_line = word.to_string();
@@ -732,72 +807,79 @@ fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
             current_line = word.to_string();
         }
     }
-    
+
     if !current_line.is_empty() {
         lines.push(current_line);
     }
-    
+
     if lines.is_empty() {
         lines.push(String::new());
     }
-    
+
     lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_query_analyzer() {
         let suggestions = QueryAnalyzer::analyze("SELECT * FROM users");
         assert!(!suggestions.is_empty());
         assert!(suggestions.iter().any(|s| s.title.contains("SELECT *")));
     }
-    
+
     #[test]
     fn test_query_complexity() {
         let simple = QueryAnalyzer::estimate_complexity("SELECT id FROM users WHERE id = 1");
         assert_eq!(simple, QueryComplexity::Simple);
-        
+
         let complex = QueryAnalyzer::estimate_complexity(
             "SELECT u.*, p.* FROM users u 
              JOIN posts p ON p.user_id = u.id 
              JOIN comments c ON c.post_id = p.id
              WHERE u.active = true
-             ORDER BY p.created_at DESC"
+             ORDER BY p.created_at DESC",
         );
-        assert!(matches!(complex, QueryComplexity::Complex | QueryComplexity::VeryComplex));
+        assert!(matches!(
+            complex,
+            QueryComplexity::Complex | QueryComplexity::VeryComplex
+        ));
     }
-    
+
     #[test]
     fn test_profiler() {
         let mut profiler = Profiler::start();
         profiler.record("SELECT 1", Duration::from_millis(10));
         profiler.record("SELECT 2", Duration::from_millis(20));
-        
+
         let report = profiler.stop();
         assert_eq!(report.query_count(), 2);
     }
-    
+
     #[test]
     fn test_global_stats() {
         GlobalProfiler::enable();
         GlobalProfiler::reset();
-        
+
         GlobalProfiler::record(Duration::from_millis(50));
         GlobalProfiler::record(Duration::from_millis(150)); // slow
-        
+
         let stats = GlobalProfiler::stats();
         assert_eq!(stats.total_queries, 2);
         assert_eq!(stats.slow_queries, 1);
-        
+
         GlobalProfiler::disable();
     }
-    
+
     #[test]
     fn test_missing_where_detection() {
         let suggestions = QueryAnalyzer::analyze("DELETE FROM users");
-        assert!(suggestions.iter().any(|s| s.level == SuggestionLevel::Critical));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.level == SuggestionLevel::Critical)
+        );
     }
 }

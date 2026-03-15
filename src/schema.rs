@@ -42,8 +42,8 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::config::DatabaseType;
-use crate::model::IndexDefinition;
 use crate::error::{Error, Result};
+use crate::model::IndexDefinition;
 
 // Global schema registry for auto-generation
 static SCHEMA_REGISTRY: RwLock<Vec<TableSchema>> = RwLock::new(Vec::new());
@@ -92,27 +92,30 @@ impl SchemaGenerator {
             tables: Vec::new(),
         }
     }
-    
+
     /// Add a table schema
     pub fn add_table(&mut self, schema: TableSchema) {
         self.tables.push(schema);
     }
-    
+
     /// Generate complete SQL schema
     pub fn generate(&self) -> String {
         let mut sql = String::new();
-        
+
         // Header comment
         sql.push_str("-- TideORM Generated Schema\n");
         sql.push_str(&format!("-- Database: {:?}\n", self.database_type));
-        sql.push_str(&format!("-- Generated at: {}\n\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
-        
+        sql.push_str(&format!(
+            "-- Generated at: {}\n\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
         // Generate CREATE TABLE statements
         for table in &self.tables {
             sql.push_str(&self.generate_create_table(table));
             sql.push('\n');
         }
-        
+
         // Generate CREATE INDEX statements
         for table in &self.tables {
             let indexes = self.generate_indexes(table);
@@ -121,34 +124,42 @@ impl SchemaGenerator {
                 sql.push('\n');
             }
         }
-        
+
         sql
     }
-    
+
     /// Generate CREATE TABLE statement
     fn generate_create_table(&self, table: &TableSchema) -> String {
-        let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (\n", self.quote_identifier(&table.name));
-        
-        let column_defs: Vec<String> = table.columns.iter()
+        let mut sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} (\n",
+            self.quote_identifier(&table.name)
+        );
+
+        let column_defs: Vec<String> = table
+            .columns
+            .iter()
             .map(|col| self.generate_column_def(col))
             .collect();
-        
+
         sql.push_str(&column_defs.join(",\n"));
-        
+
         // Add primary key constraint if not inline
         if !table.primary_key.is_empty() {
             sql.push_str(",\n");
-            sql.push_str(&format!("    PRIMARY KEY ({})", self.quote_identifier(&table.primary_key)));
+            sql.push_str(&format!(
+                "    PRIMARY KEY ({})",
+                self.quote_identifier(&table.primary_key)
+            ));
         }
-        
+
         sql.push_str("\n);\n");
         sql
     }
-    
+
     /// Generate column definition
     fn generate_column_def(&self, col: &ColumnSchema) -> String {
         let mut def = format!("    {} {}", self.quote_identifier(&col.name), col.sql_type);
-        
+
         // Auto increment handling
         if col.auto_increment {
             match self.database_type {
@@ -166,30 +177,36 @@ impl SchemaGenerator {
                 }
             }
         }
-        
+
         // Nullable
         if !col.nullable && !col.primary_key {
             def.push_str(" NOT NULL");
         }
-        
+
         // Default value
         if let Some(default) = &col.default {
             def.push_str(&format!(" DEFAULT {}", default));
         }
-        
+
         def
     }
-    
+
     /// Generate CREATE INDEX statements
     fn generate_indexes(&self, table: &TableSchema) -> String {
         let mut sql = String::new();
-        
+
         for index in &table.indexes {
-            let index_type = if index.unique { "UNIQUE INDEX" } else { "INDEX" };
-            let columns: Vec<String> = index.columns.iter()
+            let index_type = if index.unique {
+                "UNIQUE INDEX"
+            } else {
+                "INDEX"
+            };
+            let columns: Vec<String> = index
+                .columns
+                .iter()
                 .map(|c| self.quote_identifier(c))
                 .collect();
-            
+
             sql.push_str(&format!(
                 "CREATE {} IF NOT EXISTS {} ON {} ({});\n",
                 index_type,
@@ -198,10 +215,10 @@ impl SchemaGenerator {
                 columns.join(", ")
             ));
         }
-        
+
         sql
     }
-    
+
     /// Quote identifier based on database type
     fn quote_identifier(&self, name: &str) -> String {
         match self.database_type {
@@ -230,7 +247,7 @@ impl TableSchemaBuilder {
             primary_key: String::new(),
         }
     }
-    
+
     /// Add a column
     pub fn column(mut self, schema: ColumnSchema) -> Self {
         if schema.primary_key {
@@ -239,113 +256,121 @@ impl TableSchemaBuilder {
         self.columns.push(schema);
         self
     }
-    
+
     // ========================================================================
     // Convenience methods for common column types
     // ========================================================================
-    
+
     /// Add a BIGINT column
     pub fn bigint(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "BIGINT"))
     }
-    
+
     /// Add an INTEGER column
     pub fn integer(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "INTEGER"))
     }
-    
+
     /// Add a SMALLINT column
     pub fn smallint(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "SMALLINT"))
     }
-    
+
     /// Add a TEXT column
     pub fn text(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "TEXT"))
     }
-    
+
     /// Add a VARCHAR column with specified length
     pub fn varchar(self, name: impl Into<String>, length: u32) -> Self {
         self.column(ColumnSchema::new(name, format!("VARCHAR({})", length)))
     }
-    
+
     /// Add a BOOLEAN column
     pub fn boolean(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "BOOLEAN"))
     }
-    
+
     /// Add a TIMESTAMP column (without time zone)
     pub fn timestamp(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "TIMESTAMP"))
     }
-    
+
     /// Add a TIMESTAMPTZ column (timestamp with time zone) - use for DateTime<Utc>
     pub fn timestamptz(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "TIMESTAMPTZ"))
     }
-    
+
     /// Add a DATE column
     pub fn date(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "DATE"))
     }
-    
+
     /// Add a TIME column
     pub fn time(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "TIME"))
     }
-    
+
     /// Add a UUID column
     pub fn uuid(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "UUID"))
     }
-    
+
     /// Add a DECIMAL column
     pub fn decimal(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "DECIMAL"))
     }
-    
+
     /// Add a DECIMAL column with precision and scale
-    pub fn decimal_with_precision(self, name: impl Into<String>, precision: u32, scale: u32) -> Self {
-        self.column(ColumnSchema::new(name, format!("DECIMAL({},{})", precision, scale)))
+    pub fn decimal_with_precision(
+        self,
+        name: impl Into<String>,
+        precision: u32,
+        scale: u32,
+    ) -> Self {
+        self.column(ColumnSchema::new(
+            name,
+            format!("DECIMAL({},{})", precision, scale),
+        ))
     }
-    
+
     /// Add a JSONB column (PostgreSQL)
     pub fn jsonb(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "JSONB"))
     }
-    
+
     /// Add a JSON column
     pub fn json(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "JSON"))
     }
-    
+
     /// Add a BYTEA column (PostgreSQL binary)
     pub fn bytea(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "BYTEA"))
     }
-    
+
     /// Add an REAL (single precision float) column
     pub fn real(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "REAL"))
     }
-    
+
     /// Add a DOUBLE PRECISION column
     pub fn double(self, name: impl Into<String>) -> Self {
         self.column(ColumnSchema::new(name, "DOUBLE PRECISION"))
     }
-    
+
     /// Add an index
     pub fn index(mut self, index: IndexDefinition) -> Self {
         self.indexes.push(index);
         self
     }
-    
+
     /// Add multiple indexes
     pub fn indexes(mut self, indexes: Vec<IndexDefinition>) -> Self {
         self.indexes.extend(indexes);
         self
     }
-    
+
     /// Build the table schema
     pub fn build(self) -> TableSchema {
         TableSchema {
@@ -369,26 +394,26 @@ impl ColumnSchema {
             auto_increment: false,
         }
     }
-    
+
     /// Mark as primary key
     pub fn primary_key(mut self) -> Self {
         self.primary_key = true;
         self.nullable = false;
         self
     }
-    
+
     /// Mark as auto increment
     pub fn auto_increment(mut self) -> Self {
         self.auto_increment = true;
         self
     }
-    
+
     /// Mark as not nullable
     pub fn not_null(mut self) -> Self {
         self.nullable = false;
         self
     }
-    
+
     /// Set default value
     pub fn default(mut self, value: impl Into<String>) -> Self {
         self.default = Some(value.into());
@@ -400,7 +425,7 @@ impl ColumnSchema {
 pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
     // Normalize by removing whitespace first (handles "Option < i64 >" from stringify!)
     let normalized: String = rust_type.chars().filter(|c| !c.is_whitespace()).collect();
-    
+
     // Unwrap Option<T> → T, but preserve inner generics like Vec<i32>
     let base_type = if normalized.starts_with("Option<") && normalized.ends_with(">") {
         // Strip "Option<" prefix and last ">"
@@ -408,13 +433,13 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
     } else {
         normalized
     };
-    
+
     let base_type = base_type
         .replace("&", "")
         .replace("'static", "")
         .trim()
         .to_string();
-    
+
     match db_type {
         DatabaseType::Postgres => match base_type.as_str() {
             "i8" | "i16" => "SMALLINT".to_string(),
@@ -429,7 +454,9 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
             "String" | "str" => "TEXT".to_string(),
             "Uuid" => "UUID".to_string(),
             // DateTime<Utc> uses TIMESTAMPTZ (timestamp with time zone)
-            "DateTime<Utc>" | "chrono::DateTime<Utc>" | "chrono::DateTime<chrono::Utc>" => "TIMESTAMPTZ".to_string(),
+            "DateTime<Utc>" | "chrono::DateTime<Utc>" | "chrono::DateTime<chrono::Utc>" => {
+                "TIMESTAMPTZ".to_string()
+            }
             // NaiveDateTime uses TIMESTAMP (without time zone)
             "DateTime" | "NaiveDateTime" => "TIMESTAMP".to_string(),
             "NaiveDate" => "DATE".to_string(),
@@ -480,7 +507,9 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
             "bool" => "INTEGER".to_string(),
             "String" | "str" => "TEXT".to_string(),
             "Uuid" => "TEXT".to_string(),
-            "DateTime<Utc>" | "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => "TEXT".to_string(),
+            "DateTime<Utc>" | "DateTime" | "NaiveDateTime" | "NaiveDate" | "NaiveTime" => {
+                "TEXT".to_string()
+            }
             "Decimal" => "TEXT".to_string(),
             "Json" | "JsonValue" | "Value" | "serde_json::Value" => "TEXT".to_string(),
             "Vec<u8>" => "BLOB".to_string(),
@@ -493,7 +522,7 @@ pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_index_definition_parse() {
         // Single field
@@ -501,126 +530,162 @@ mod tests {
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].columns, vec!["email"]);
         assert!(!indexes[0].unique);
-        
+
         // Multiple fields
         let indexes = IndexDefinition::parse("users", "first_name,last_name", false);
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].columns, vec!["first_name", "last_name"]);
-        
+
         // Named index
         let indexes = IndexDefinition::parse("users", "my_idx:email", false);
         assert_eq!(indexes.len(), 1);
         assert_eq!(indexes[0].name, "my_idx");
         assert_eq!(indexes[0].columns, vec!["email"]);
-        
+
         // Multiple indexes
         let indexes = IndexDefinition::parse("users", "email;name:first_name,last_name", false);
         assert_eq!(indexes.len(), 2);
     }
-    
+
     #[test]
     fn test_schema_generation() {
         let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
-        
+
         let table = TableSchemaBuilder::new("users")
-            .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
             .column(ColumnSchema::new("email", "TEXT").not_null())
             .column(ColumnSchema::new("name", "TEXT"))
-            .index(IndexDefinition::new("idx_users_email", vec!["email".to_string()], false))
-            .index(IndexDefinition::new("uidx_users_email", vec!["email".to_string()], true))
+            .index(IndexDefinition::new(
+                "idx_users_email",
+                vec!["email".to_string()],
+                false,
+            ))
+            .index(IndexDefinition::new(
+                "uidx_users_email",
+                vec!["email".to_string()],
+                true,
+            ))
             .build();
-        
+
         generator.add_table(table);
-        
+
         let sql = generator.generate();
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS"));
         assert!(sql.contains("CREATE INDEX IF NOT EXISTS"));
         assert!(sql.contains("CREATE UNIQUE INDEX IF NOT EXISTS"));
     }
-    
+
     #[test]
     fn test_schema_generator_postgres() {
         let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
-        
+
         let table = TableSchemaBuilder::new("products")
-            .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
             .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
-            .column(ColumnSchema::new("price", "DECIMAL(10,2)").not_null().default("0.00"))
+            .column(
+                ColumnSchema::new("price", "DECIMAL(10,2)")
+                    .not_null()
+                    .default("0.00"),
+            )
             .column(ColumnSchema::new("description", "TEXT"))
-            .column(ColumnSchema::new("created_at", "TIMESTAMPTZ").not_null().default("NOW()"))
+            .column(
+                ColumnSchema::new("created_at", "TIMESTAMPTZ")
+                    .not_null()
+                    .default("NOW()"),
+            )
             .build();
-        
+
         generator.add_table(table);
-        
+
         let sql = generator.generate();
-        
+
         // Check PostgreSQL-specific syntax
-        assert!(sql.contains("\"products\""));  // Postgres uses double quotes
-        assert!(sql.contains("BIGSERIAL"));     // Postgres auto-increment
+        assert!(sql.contains("\"products\"")); // Postgres uses double quotes
+        assert!(sql.contains("BIGSERIAL")); // Postgres auto-increment
         assert!(sql.contains("NOT NULL"));
         assert!(sql.contains("DEFAULT"));
     }
-    
+
     #[test]
     fn test_schema_generator_mysql() {
         let mut generator = SchemaGenerator::new(DatabaseType::MySQL);
-        
+
         let table = TableSchemaBuilder::new("products")
-            .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
             .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
             .build();
-        
+
         generator.add_table(table);
-        
+
         let sql = generator.generate();
-        
+
         // Check MySQL-specific syntax
-        assert!(sql.contains("`products`"));    // MySQL uses backticks
+        assert!(sql.contains("`products`")); // MySQL uses backticks
         assert!(sql.contains("AUTO_INCREMENT")); // MySQL auto-increment syntax
     }
-    
+
     #[test]
     fn test_schema_generator_mariadb() {
         let mut generator = SchemaGenerator::new(DatabaseType::MariaDB);
-        
+
         let table = TableSchemaBuilder::new("products")
-            .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
             .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
             .build();
-        
+
         generator.add_table(table);
-        
+
         let sql = generator.generate();
-        
+
         // MariaDB uses same syntax as MySQL
-        assert!(sql.contains("`products`"));    // MariaDB uses backticks
+        assert!(sql.contains("`products`")); // MariaDB uses backticks
         assert!(sql.contains("AUTO_INCREMENT")); // MariaDB auto-increment syntax
     }
-    
+
     #[test]
     fn test_schema_generator_sqlite() {
         let mut generator = SchemaGenerator::new(DatabaseType::SQLite);
-        
+
         let table = TableSchemaBuilder::new("products")
-            .column(ColumnSchema::new("id", "INTEGER").primary_key().auto_increment())
+            .column(
+                ColumnSchema::new("id", "INTEGER")
+                    .primary_key()
+                    .auto_increment(),
+            )
             .column(ColumnSchema::new("name", "TEXT").not_null())
             .build();
-        
+
         generator.add_table(table);
-        
+
         let sql = generator.generate();
-        
+
         // Check SQLite-specific syntax
-        assert!(sql.contains("\"products\""));  // SQLite uses double quotes
+        assert!(sql.contains("\"products\"")); // SQLite uses double quotes
         assert!(sql.contains("INTEGER"));
     }
-    
+
     #[test]
     fn test_column_schema_builder() {
         let col = ColumnSchema::new("email", "VARCHAR(255)")
             .not_null()
             .default("''");
-        
+
         assert_eq!(col.name, "email");
         assert_eq!(col.sql_type, "VARCHAR(255)");
         assert!(!col.nullable);
@@ -628,59 +693,76 @@ mod tests {
         assert!(!col.primary_key);
         assert!(!col.auto_increment);
     }
-    
+
     #[test]
     fn test_column_schema_primary_key() {
         let col = ColumnSchema::new("id", "BIGINT")
             .primary_key()
             .auto_increment();
-        
+
         assert!(col.primary_key);
         assert!(col.auto_increment);
-        assert!(!col.nullable);  // primary_key sets nullable to false
+        assert!(!col.nullable); // primary_key sets nullable to false
     }
-    
+
     #[test]
     fn test_table_schema_builder() {
         let table = TableSchemaBuilder::new("users")
             .column(ColumnSchema::new("id", "BIGINT").primary_key())
             .column(ColumnSchema::new("email", "TEXT").not_null())
-            .index(IndexDefinition::new("idx_email", vec!["email".to_string()], false))
+            .index(IndexDefinition::new(
+                "idx_email",
+                vec!["email".to_string()],
+                false,
+            ))
             .build();
-        
+
         assert_eq!(table.name, "users");
         assert_eq!(table.columns.len(), 2);
         assert_eq!(table.indexes.len(), 1);
         assert_eq!(table.primary_key, "id");
     }
-    
+
     #[test]
     fn test_table_schema_multiple_indexes() {
         let indexes = vec![
             IndexDefinition::new("idx_email", vec!["email".to_string()], false),
-            IndexDefinition::new("idx_name", vec!["first_name".to_string(), "last_name".to_string()], false),
+            IndexDefinition::new(
+                "idx_name",
+                vec!["first_name".to_string(), "last_name".to_string()],
+                false,
+            ),
             IndexDefinition::new("uidx_email", vec!["email".to_string()], true),
         ];
-        
+
         let table = TableSchemaBuilder::new("users")
             .column(ColumnSchema::new("id", "BIGINT").primary_key())
             .indexes(indexes)
             .build();
-        
+
         assert_eq!(table.indexes.len(), 3);
     }
-    
+
     #[test]
     fn test_rust_type_to_sql_postgres() {
         assert_eq!(rust_type_to_sql("i64", DatabaseType::Postgres), "BIGINT");
         assert_eq!(rust_type_to_sql("i32", DatabaseType::Postgres), "INTEGER");
         assert_eq!(rust_type_to_sql("String", DatabaseType::Postgres), "TEXT");
         assert_eq!(rust_type_to_sql("bool", DatabaseType::Postgres), "BOOLEAN");
-        assert_eq!(rust_type_to_sql("f64", DatabaseType::Postgres), "DOUBLE PRECISION");
-        assert_eq!(rust_type_to_sql("Option<i64>", DatabaseType::Postgres), "BIGINT");
-        assert_eq!(rust_type_to_sql("serde_json::Value", DatabaseType::Postgres), "JSONB");
+        assert_eq!(
+            rust_type_to_sql("f64", DatabaseType::Postgres),
+            "DOUBLE PRECISION"
+        );
+        assert_eq!(
+            rust_type_to_sql("Option<i64>", DatabaseType::Postgres),
+            "BIGINT"
+        );
+        assert_eq!(
+            rust_type_to_sql("serde_json::Value", DatabaseType::Postgres),
+            "JSONB"
+        );
     }
-    
+
     #[test]
     fn test_rust_type_to_sql_mysql() {
         assert_eq!(rust_type_to_sql("i64", DatabaseType::MySQL), "BIGINT");
@@ -692,19 +774,25 @@ mod tests {
         assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MySQL), "JSON");
         assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MySQL), "JSON");
     }
-    
+
     #[test]
     fn test_rust_type_to_sql_mariadb() {
         assert_eq!(rust_type_to_sql("i64", DatabaseType::MariaDB), "BIGINT");
-        assert_eq!(rust_type_to_sql("bool", DatabaseType::MariaDB), "TINYINT(1)");
+        assert_eq!(
+            rust_type_to_sql("bool", DatabaseType::MariaDB),
+            "TINYINT(1)"
+        );
         assert_eq!(rust_type_to_sql("f64", DatabaseType::MariaDB), "DOUBLE");
         assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MariaDB), "CHAR(36)");
         // MariaDB array types map to JSON
         assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MariaDB), "JSON");
         assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MariaDB), "JSON");
-        assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MariaDB), "JSON");
+        assert_eq!(
+            rust_type_to_sql("Vec<String>", DatabaseType::MariaDB),
+            "JSON"
+        );
     }
-    
+
     #[test]
     fn test_rust_type_to_sql_sqlite() {
         assert_eq!(rust_type_to_sql("i64", DatabaseType::SQLite), "INTEGER");
@@ -713,38 +801,38 @@ mod tests {
         assert_eq!(rust_type_to_sql("f64", DatabaseType::SQLite), "REAL");
         assert_eq!(rust_type_to_sql("String", DatabaseType::SQLite), "TEXT");
     }
-    
+
     #[test]
     fn test_schema_generator_header() {
         let generator = SchemaGenerator::new(DatabaseType::Postgres);
         let sql = generator.generate();
-        
+
         assert!(sql.contains("-- TideORM Generated Schema"));
         assert!(sql.contains("-- Database:"));
         assert!(sql.contains("-- Generated at:"));
     }
-    
+
     #[test]
     fn test_schema_writer_registry() {
         // Clear any existing registrations
         SchemaWriter::clear_registry();
-        
+
         // Register a schema
         let table = TableSchemaBuilder::new("test_table")
             .column(ColumnSchema::new("id", "BIGINT").primary_key())
             .build();
-        
+
         SchemaWriter::register_schema(table.clone());
-        
+
         let schemas = SchemaWriter::get_registered_schemas();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "test_table");
-        
+
         // Register same table again (should not duplicate)
         SchemaWriter::register_schema(table);
         let schemas = SchemaWriter::get_registered_schemas();
         assert_eq!(schemas.len(), 1);
-        
+
         // Clear registry
         SchemaWriter::clear_registry();
         let schemas = SchemaWriter::get_registered_schemas();
@@ -771,7 +859,7 @@ impl SchemaWriter {
             }
         }
     }
-    
+
     /// Generate and write schema to file
     ///
     /// # Example
@@ -779,109 +867,120 @@ impl SchemaWriter {
     /// SchemaWriter::write_schema("schema.sql").await?;
     /// ```
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
-        let db_type = crate::config::TideConfig::get_database_type()
-            .unwrap_or(DatabaseType::Postgres);
-        let schemas = SCHEMA_REGISTRY.read()
+        let db_type =
+            crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);
+        let schemas = SCHEMA_REGISTRY
+            .read()
             .map_err(|e| Error::internal(format!("Failed to read schema registry: {}", e)))?
             .clone();
-        
+
         if schemas.is_empty() {
             // No schemas registered, generate from database introspection
             return Self::write_schema_from_db(path).await;
         }
-        
+
         let mut generator = SchemaGenerator::new(db_type);
         for schema in schemas {
             generator.add_table(schema);
         }
-        
+
         let sql = generator.generate();
-        
+
         tokio::fs::write(path.as_ref(), sql)
             .await
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
-        
+
         Ok(())
     }
-    
+
     /// Generate schema from current database state (introspection)
     pub async fn write_schema_from_db<P: AsRef<Path>>(path: P) -> Result<()> {
-        let db_type = crate::config::TideConfig::get_database_type()
-            .unwrap_or(DatabaseType::Postgres);
-        
+        let db_type =
+            crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);
+
         let tables = match db_type {
             DatabaseType::Postgres => Self::introspect_postgres().await?,
             DatabaseType::MySQL | DatabaseType::MariaDB => Self::introspect_mysql().await?,
             DatabaseType::SQLite => Self::introspect_sqlite().await?,
         };
-        
+
         let mut generator = SchemaGenerator::new(db_type);
         for table in tables {
             generator.add_table(table);
         }
-        
+
         let sql = generator.generate();
-        
+
         tokio::fs::write(path.as_ref(), sql)
             .await
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
-        
+
         Ok(())
     }
-    
+
     /// Introspect PostgreSQL database
     async fn introspect_postgres() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, Statement, DbBackend, TryGetable};
-        
+        use sea_orm::{ConnectionTrait, DbBackend, Statement, TryGetable};
+
         let conn = crate::require_db()?.__internal_connection();
-        
+
         // Get all tables
-        let table_rows = conn.query_all_raw(Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT table_name FROM information_schema.tables 
-             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-             ORDER BY table_name"
-        )).await.map_err(|e| Error::query(e.to_string()))?;
-        
-        let mut schemas = Vec::new();
-        
-        for row in table_rows {
-            let table_name: String = row.try_get("", "table_name")
-                .map_err(|e| Error::query(e.to_string()))?;
-            
-            // Get columns
-            let col_rows = conn.query_all_raw(Statement::from_sql_and_values(
+        let table_rows = conn
+            .query_all_raw(Statement::from_string(
                 DbBackend::Postgres,
-                "SELECT column_name, data_type, is_nullable, column_default
+                "SELECT table_name FROM information_schema.tables 
+             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+             ORDER BY table_name",
+            ))
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+
+        let mut schemas = Vec::new();
+
+        for row in table_rows {
+            let table_name: String = row
+                .try_get("", "table_name")
+                .map_err(|e| Error::query(e.to_string()))?;
+
+            // Get columns
+            let col_rows = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT column_name, data_type, is_nullable, column_default
                  FROM information_schema.columns
                  WHERE table_schema = 'public' AND table_name = $1
                  ORDER BY ordinal_position",
-                vec![table_name.clone().into()]
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+                    vec![table_name.clone().into()],
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
             // Get primary key
-            let pk_rows = conn.query_all_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT c.column_name
+            let pk_rows = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT c.column_name
                  FROM information_schema.table_constraints tc
                  JOIN information_schema.constraint_column_usage AS ccu 
                      ON ccu.constraint_name = tc.constraint_name
                  JOIN information_schema.columns AS c 
                      ON c.table_name = tc.table_name AND ccu.column_name = c.column_name
                  WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1",
-                vec![table_name.clone().into()]
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
-            let pk_column = pk_rows.first()
-                .and_then(|r| {
-                    String::try_get(r, "", "column_name").ok()
-                })
+                    vec![table_name.clone().into()],
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
+            let pk_column = pk_rows
+                .first()
+                .and_then(|r| String::try_get(r, "", "column_name").ok())
                 .unwrap_or_default();
-            
+
             // Get indexes
-            let index_rows = conn.query_all_raw(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
+            let index_rows = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
                  FROM pg_class t
                  JOIN pg_index ix ON t.oid = ix.indrelid
                  JOIN pg_class i ON i.oid = ix.indexrelid
@@ -889,101 +988,118 @@ impl SchemaWriter {
                  WHERE t.relkind = 'r' AND t.relname = $1
                  AND NOT ix.indisprimary
                  ORDER BY i.relname, a.attnum",
-                vec![table_name.clone().into()]
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+                    vec![table_name.clone().into()],
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
             // Group index columns
-            let mut index_map: std::collections::HashMap<String, (bool, Vec<String>)> = std::collections::HashMap::new();
+            let mut index_map: std::collections::HashMap<String, (bool, Vec<String>)> =
+                std::collections::HashMap::new();
             for row in index_rows {
                 let idx_name: String = row.try_get("", "index_name").unwrap_or_default();
                 let is_unique: bool = row.try_get("", "indisunique").unwrap_or(false);
                 let col_name: String = row.try_get("", "column_name").unwrap_or_default();
-                
-                index_map.entry(idx_name)
+
+                index_map
+                    .entry(idx_name)
                     .or_insert((is_unique, Vec::new()))
-                    .1.push(col_name);
+                    .1
+                    .push(col_name);
             }
-            
+
             let indexes: Vec<IndexDefinition> = index_map
                 .into_iter()
                 .map(|(name, (unique, cols))| IndexDefinition::new(name, cols, unique))
                 .collect();
-            
+
             // Build table schema
             let mut builder = TableSchemaBuilder::new(&table_name);
-            
+
             for row in col_rows {
                 let col_name: String = row.try_get("", "column_name").unwrap_or_default();
                 let data_type: String = row.try_get("", "data_type").unwrap_or_default();
                 let is_nullable: String = row.try_get("", "is_nullable").unwrap_or_default();
                 let default: Option<String> = row.try_get("", "column_default").ok();
-                
+
                 let sql_type = data_type.to_uppercase();
                 let mut col = ColumnSchema::new(&col_name, &sql_type);
-                
+
                 if col_name == pk_column {
                     col = col.primary_key();
-                    if sql_type.contains("SERIAL") || default.as_ref().map(|d| d.contains("nextval")).unwrap_or(false) {
+                    if sql_type.contains("SERIAL")
+                        || default
+                            .as_ref()
+                            .map(|d| d.contains("nextval"))
+                            .unwrap_or(false)
+                    {
                         col = col.auto_increment();
                     }
                 }
-                
+
                 if is_nullable == "NO" {
                     col = col.not_null();
                 }
-                
+
                 if let Some(def) = default {
                     if !def.contains("nextval") {
                         col = col.default(def);
                     }
                 }
-                
+
                 builder = builder.column(col);
             }
-            
+
             builder = builder.indexes(indexes);
             schemas.push(builder.build());
         }
-        
+
         Ok(schemas)
     }
-    
+
     /// Introspect MySQL database
     async fn introspect_mysql() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, Statement, DbBackend};
-        
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
         let conn = crate::require_db()?.__internal_connection();
-        
+
         // Get database name from connection (we'll use information_schema)
-        let db_name_row = conn.query_one_raw(Statement::from_string(
-            DbBackend::MySql,
-            "SELECT DATABASE() as db_name"
-        )).await.map_err(|e| Error::query(e.to_string()))?;
-        
+        let db_name_row = conn
+            .query_one_raw(Statement::from_string(
+                DbBackend::MySql,
+                "SELECT DATABASE() as db_name",
+            ))
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+
         let db_name: String = db_name_row
             .and_then(|r| r.try_get("", "db_name").ok())
             .unwrap_or_default();
-        
+
         if db_name.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // Get all tables
-        let table_rows = conn.query_all_raw(Statement::from_sql_and_values(
-            DbBackend::MySql,
-            "SELECT table_name FROM information_schema.tables 
+        let table_rows = conn
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::MySql,
+                "SELECT table_name FROM information_schema.tables 
              WHERE table_schema = ? AND table_type = 'BASE TABLE'
              ORDER BY table_name",
-            vec![db_name.clone().into()]
-        )).await.map_err(|e| Error::query(e.to_string()))?;
-        
+                vec![db_name.clone().into()],
+            ))
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+
         let mut schemas = Vec::new();
-        
+
         for row in table_rows {
-            let table_name: String = row.try_get("", "table_name")
+            let table_name: String = row
+                .try_get("", "table_name")
                 .or_else(|_| row.try_get("", "TABLE_NAME"))
                 .map_err(|e| Error::query(e.to_string()))?;
-            
+
             // Get columns
             let col_rows = conn.query_all_raw(Statement::from_sql_and_values(
                 DbBackend::MySql,
@@ -993,68 +1109,83 @@ impl SchemaWriter {
                  ORDER BY ordinal_position",
                 vec![db_name.clone().into(), table_name.clone().into()]
             )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+
             // Get indexes
-            let index_rows = conn.query_all_raw(Statement::from_sql_and_values(
-                DbBackend::MySql,
-                "SELECT index_name, non_unique, column_name
+            let index_rows = conn
+                .query_all_raw(Statement::from_sql_and_values(
+                    DbBackend::MySql,
+                    "SELECT index_name, non_unique, column_name
                  FROM information_schema.statistics
                  WHERE table_schema = ? AND table_name = ?
                  AND index_name != 'PRIMARY'
                  ORDER BY index_name, seq_in_index",
-                vec![db_name.clone().into(), table_name.clone().into()]
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+                    vec![db_name.clone().into(), table_name.clone().into()],
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
             // Group index columns
-            let mut index_map: std::collections::HashMap<String, (bool, Vec<String>)> = std::collections::HashMap::new();
+            let mut index_map: std::collections::HashMap<String, (bool, Vec<String>)> =
+                std::collections::HashMap::new();
             for row in index_rows {
-                let idx_name: String = row.try_get("", "index_name")
+                let idx_name: String = row
+                    .try_get("", "index_name")
                     .or_else(|_| row.try_get("", "INDEX_NAME"))
                     .unwrap_or_default();
-                let non_unique: i32 = row.try_get("", "non_unique")
+                let non_unique: i32 = row
+                    .try_get("", "non_unique")
                     .or_else(|_| row.try_get("", "NON_UNIQUE"))
                     .unwrap_or(1);
-                let col_name: String = row.try_get("", "column_name")
+                let col_name: String = row
+                    .try_get("", "column_name")
                     .or_else(|_| row.try_get("", "COLUMN_NAME"))
                     .unwrap_or_default();
-                
-                index_map.entry(idx_name)
+
+                index_map
+                    .entry(idx_name)
                     .or_insert((non_unique == 0, Vec::new()))
-                    .1.push(col_name);
+                    .1
+                    .push(col_name);
             }
-            
+
             let indexes: Vec<IndexDefinition> = index_map
                 .into_iter()
                 .map(|(name, (unique, cols))| IndexDefinition::new(name, cols, unique))
                 .collect();
-            
+
             // Build table schema
             let mut builder = TableSchemaBuilder::new(&table_name);
             let mut pk_column = String::new();
-            
+
             for row in col_rows {
-                let col_name: String = row.try_get("", "column_name")
+                let col_name: String = row
+                    .try_get("", "column_name")
                     .or_else(|_| row.try_get("", "COLUMN_NAME"))
                     .unwrap_or_default();
-                let col_type: String = row.try_get("", "column_type")
+                let col_type: String = row
+                    .try_get("", "column_type")
                     .or_else(|_| row.try_get("", "COLUMN_TYPE"))
                     .unwrap_or_default();
-                let is_nullable: String = row.try_get("", "is_nullable")
+                let is_nullable: String = row
+                    .try_get("", "is_nullable")
                     .or_else(|_| row.try_get("", "IS_NULLABLE"))
                     .unwrap_or_default();
-                let default: Option<String> = row.try_get("", "column_default")
+                let default: Option<String> = row
+                    .try_get("", "column_default")
                     .or_else(|_| row.try_get("", "COLUMN_DEFAULT"))
                     .ok();
-                let col_key: String = row.try_get("", "column_key")
+                let col_key: String = row
+                    .try_get("", "column_key")
                     .or_else(|_| row.try_get("", "COLUMN_KEY"))
                     .unwrap_or_default();
-                let extra: String = row.try_get("", "extra")
+                let extra: String = row
+                    .try_get("", "extra")
                     .or_else(|_| row.try_get("", "EXTRA"))
                     .unwrap_or_default();
-                
+
                 let sql_type = col_type.to_uppercase();
                 let mut col = ColumnSchema::new(&col_name, &sql_type);
-                
+
                 if col_key == "PRI" {
                     col = col.primary_key();
                     pk_column = col_name.clone();
@@ -1062,97 +1193,111 @@ impl SchemaWriter {
                         col = col.auto_increment();
                     }
                 }
-                
+
                 if is_nullable == "NO" {
                     col = col.not_null();
                 }
-                
+
                 if let Some(def) = default {
                     col = col.default(def);
                 }
-                
+
                 builder = builder.column(col);
             }
-            
+
             let _ = pk_column; // Used implicitly via primary_key() call
             builder = builder.indexes(indexes);
             schemas.push(builder.build());
         }
-        
+
         Ok(schemas)
     }
-    
+
     /// Introspect SQLite database
     async fn introspect_sqlite() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, Statement, DbBackend};
-        
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
         let conn = crate::require_db()?.__internal_connection();
-        
+
         // Get all tables
-        let table_rows = conn.query_all_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "SELECT name FROM sqlite_master 
+        let table_rows = conn
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT name FROM sqlite_master 
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name"
-        )).await.map_err(|e| Error::query(e.to_string()))?;
-        
+             ORDER BY name",
+            ))
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+
         let mut schemas = Vec::new();
-        
+
         for row in table_rows {
-            let table_name: String = row.try_get("", "name")
+            let table_name: String = row
+                .try_get("", "name")
                 .map_err(|e| Error::query(e.to_string()))?;
-            
+
             // Get table info (columns)
-            let col_rows = conn.query_all_raw(Statement::from_string(
-                DbBackend::Sqlite,
-                format!("PRAGMA table_info(\"{}\")", table_name)
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+            let col_rows = conn
+                .query_all_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("PRAGMA table_info(\"{}\")", table_name),
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
             // Get indexes
-            let index_list = conn.query_all_raw(Statement::from_string(
-                DbBackend::Sqlite,
-                format!("PRAGMA index_list(\"{}\")", table_name)
-            )).await.map_err(|e| Error::query(e.to_string()))?;
-            
+            let index_list = conn
+                .query_all_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    format!("PRAGMA index_list(\"{}\")", table_name),
+                ))
+                .await
+                .map_err(|e| Error::query(e.to_string()))?;
+
             let mut indexes = Vec::new();
             for idx_row in index_list {
                 let idx_name: String = idx_row.try_get("", "name").unwrap_or_default();
                 let is_unique: i32 = idx_row.try_get("", "unique").unwrap_or(0);
                 let origin: String = idx_row.try_get("", "origin").unwrap_or_default();
-                
+
                 // Skip auto-created indexes (primary key)
                 if origin == "pk" {
                     continue;
                 }
-                
+
                 // Get columns for this index
-                let idx_info = conn.query_all_raw(Statement::from_string(
-                    DbBackend::Sqlite,
-                    format!("PRAGMA index_info(\"{}\")", idx_name)
-                )).await.map_err(|e| Error::query(e.to_string()))?;
-                
-                let columns: Vec<String> = idx_info.iter()
+                let idx_info = conn
+                    .query_all_raw(Statement::from_string(
+                        DbBackend::Sqlite,
+                        format!("PRAGMA index_info(\"{}\")", idx_name),
+                    ))
+                    .await
+                    .map_err(|e| Error::query(e.to_string()))?;
+
+                let columns: Vec<String> = idx_info
+                    .iter()
                     .filter_map(|r| r.try_get("", "name").ok())
                     .collect();
-                
+
                 if !columns.is_empty() {
                     indexes.push(IndexDefinition::new(idx_name, columns, is_unique == 1));
                 }
             }
-            
+
             // Build table schema
             let mut builder = TableSchemaBuilder::new(&table_name);
-            
+
             for row in col_rows {
                 let col_name: String = row.try_get("", "name").unwrap_or_default();
                 let col_type: String = row.try_get("", "type").unwrap_or_default();
                 let notnull: i32 = row.try_get("", "notnull").unwrap_or(0);
                 let default: Option<String> = row.try_get("", "dflt_value").ok();
                 let pk: i32 = row.try_get("", "pk").unwrap_or(0);
-                
+
                 let sql_type = col_type.to_uppercase();
                 let mut col = ColumnSchema::new(&col_name, &sql_type);
-                
+
                 if pk > 0 {
                     col = col.primary_key();
                     // SQLite INTEGER PRIMARY KEY is auto-increment by default
@@ -1160,32 +1305,33 @@ impl SchemaWriter {
                         col = col.auto_increment();
                     }
                 }
-                
+
                 if notnull == 1 {
                     col = col.not_null();
                 }
-                
+
                 if let Some(def) = default {
                     col = col.default(def);
                 }
-                
+
                 builder = builder.column(col);
             }
-            
+
             builder = builder.indexes(indexes);
             schemas.push(builder.build());
         }
-        
+
         Ok(schemas)
     }
-    
+
     /// Get the currently registered schemas
     pub fn get_registered_schemas() -> Vec<TableSchema> {
-        SCHEMA_REGISTRY.read()
+        SCHEMA_REGISTRY
+            .read()
             .map(|r| r.clone())
             .unwrap_or_default()
     }
-    
+
     /// Clear the schema registry
     pub fn clear_registry() {
         if let Ok(mut registry) = SCHEMA_REGISTRY.write() {

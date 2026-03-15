@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -47,7 +47,7 @@ rust_decimal = { version = "1.40.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.7.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.7.2", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
@@ -97,10 +97,6 @@ harness = false
 
 [[bench]]
 name = "or_clause_benchmarks"
-harness = false
-
-[[bench]]
-name = "attachment_url_benchmarks"
 harness = false
 
 [[bench]]

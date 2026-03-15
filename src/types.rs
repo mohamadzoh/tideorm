@@ -1,15 +1,15 @@
 //! Attribute types and casting
 //!
 //! This module provides type definitions and casting utilities for model attributes.
-//! 
+//!
 //! ## Attribute Casting
-//! 
+//!
 //! TideORM supports automatic casting of attribute values when reading from and writing
 //! to the database. This is useful for complex types like encrypted strings, JSON objects,
 //! enums, dates, and more.
-//! 
+//!
 //! ### Built-in Casters
-//! 
+//!
 //! - `StringCaster` - Basic string type
 //! - `IntCaster` - Integer types (i32, i64)
 //! - `FloatCaster` - Floating point types (f32, f64)
@@ -23,13 +23,13 @@
 //! - `EnumCaster` - Database enum types
 //! - `ArrayCaster` - Array columns (PostgreSQL)
 //! - `CommaSeparatedCaster` - Store arrays as comma-separated strings
-//! 
+//!
 //! ### Example
-//! 
+//!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //! use tideorm::types::{Encrypted, Hashed, CommaSeparated};
-//! 
+//!
 //! #[derive(Model)]
 //! #[tide(table = "users")]
 //! pub struct User {
@@ -117,32 +117,32 @@ impl UnixTimestamp {
     pub fn new(seconds: i64) -> Self {
         Self(seconds)
     }
-    
+
     /// Get the current time as a Unix timestamp
     pub fn now() -> Self {
         Self(chrono::Utc::now().timestamp())
     }
-    
+
     /// Create from a chrono DateTime
     pub fn from_datetime(dt: DateTime<Utc>) -> Self {
         Self(dt.timestamp())
     }
-    
+
     /// Convert to a chrono DateTime
     pub fn to_datetime(self) -> Option<DateTime<Utc>> {
         chrono::DateTime::from_timestamp(self.0, 0)
     }
-    
+
     /// Get the raw seconds value
     pub fn as_seconds(&self) -> i64 {
         self.0
     }
-    
+
     /// Check if this timestamp is in the past
     pub fn is_past(&self) -> bool {
         self.0 < chrono::Utc::now().timestamp()
     }
-    
+
     /// Check if this timestamp is in the future
     pub fn is_future(&self) -> bool {
         self.0 > chrono::Utc::now().timestamp()
@@ -214,42 +214,42 @@ impl UnixTimestampMillis {
     pub fn new(millis: i64) -> Self {
         Self(millis)
     }
-    
+
     /// Get the current time as a Unix timestamp in milliseconds
     pub fn now() -> Self {
         Self(chrono::Utc::now().timestamp_millis())
     }
-    
+
     /// Create from a chrono DateTime
     pub fn from_datetime(dt: DateTime<Utc>) -> Self {
         Self(dt.timestamp_millis())
     }
-    
+
     /// Convert to a chrono DateTime
     pub fn to_datetime(self) -> Option<DateTime<Utc>> {
         chrono::DateTime::from_timestamp_millis(self.0)
     }
-    
+
     /// Get the raw milliseconds value
     pub fn as_millis(&self) -> i64 {
         self.0
     }
-    
+
     /// Get as seconds (losing millisecond precision)
     pub fn as_seconds(&self) -> i64 {
         self.0 / 1000
     }
-    
+
     /// Convert to UnixTimestamp (seconds)
     pub fn to_unix_timestamp(self) -> UnixTimestamp {
         UnixTimestamp(self.0 / 1000)
     }
-    
+
     /// Check if this timestamp is in the past
     pub fn is_past(&self) -> bool {
         self.0 < chrono::Utc::now().timestamp_millis()
     }
-    
+
     /// Check if this timestamp is in the future
     pub fn is_future(&self) -> bool {
         self.0 > chrono::Utc::now().timestamp_millis()
@@ -356,7 +356,7 @@ impl<E> DbEnum<E> {
     pub fn into_inner(self) -> E {
         self.0
     }
-    
+
     /// Get a reference to the inner value
     pub fn inner(&self) -> &E {
         &self.0
@@ -371,7 +371,7 @@ impl<E> DbEnum<E> {
 pub trait Castable: Sized {
     /// Cast from a serde_json::Value
     fn from_json(value: &serde_json::Value) -> Result<Self, String>;
-    
+
     /// Cast to a serde_json::Value
     fn to_json(&self) -> serde_json::Value;
 }
@@ -379,9 +379,12 @@ pub trait Castable: Sized {
 // Implement Castable for common types
 impl Castable for String {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value.as_str().map(|s| s.to_string()).ok_or_else(|| "Expected string".to_string())
+        value
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "Expected string".to_string())
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::String(self.clone())
     }
@@ -389,9 +392,12 @@ impl Castable for String {
 
 impl Castable for i32 {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value.as_i64().map(|n| n as i32).ok_or_else(|| "Expected integer".to_string())
+        value
+            .as_i64()
+            .map(|n| n as i32)
+            .ok_or_else(|| "Expected integer".to_string())
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Number((*self).into())
     }
@@ -401,7 +407,7 @@ impl Castable for i64 {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         value.as_i64().ok_or_else(|| "Expected integer".to_string())
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Number((*self).into())
     }
@@ -411,7 +417,7 @@ impl Castable for f64 {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
         value.as_f64().ok_or_else(|| "Expected float".to_string())
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::json!(*self)
     }
@@ -419,9 +425,11 @@ impl Castable for f64 {
 
 impl Castable for bool {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value.as_bool().ok_or_else(|| "Expected boolean".to_string())
+        value
+            .as_bool()
+            .ok_or_else(|| "Expected boolean".to_string())
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Bool(*self)
     }
@@ -429,11 +437,12 @@ impl Castable for bool {
 
 impl Castable for Uuid {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value.as_str()
+        value
+            .as_str()
             .ok_or_else(|| "Expected string".to_string())
             .and_then(|s| Uuid::parse_str(s).map_err(|e| e.to_string()))
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::String(self.to_string())
     }
@@ -447,7 +456,7 @@ impl<T: Castable> Castable for Option<T> {
             T::from_json(value).map(Some)
         }
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         match self {
             Some(v) => v.to_json(),
@@ -458,7 +467,8 @@ impl<T: Castable> Castable for Option<T> {
 
 impl<T: Castable> Castable for Vec<T> {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value.as_array()
+        value
+            .as_array()
             .ok_or_else(|| "Expected array".to_string())
             .and_then(|arr| {
                 arr.iter()
@@ -466,7 +476,7 @@ impl<T: Castable> Castable for Vec<T> {
                     .collect::<Result<Vec<_>, _>>()
             })
     }
-    
+
     fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Array(self.iter().map(|v| v.to_json()).collect())
     }
@@ -477,12 +487,12 @@ impl<T: Castable> Castable for Vec<T> {
 // =============================================================================
 
 /// Trait for attribute casters that transform values when reading/writing
-/// 
+///
 /// Implement this trait to create custom casting logic for model attributes.
 pub trait AttributeCaster<T>: Sized {
     /// Cast from database value to Rust type
     fn get(value: serde_json::Value) -> Result<T, String>;
-    
+
     /// Cast from Rust type to database value
     fn set(value: &T) -> serde_json::Value;
 }
@@ -492,14 +502,14 @@ pub trait AttributeCaster<T>: Sized {
 // =============================================================================
 
 /// Encrypted string wrapper
-/// 
+///
 /// Values are encrypted when stored in the database and decrypted when read.
 /// Uses AES-256-GCM encryption by default.
-/// 
+///
 /// **Note**: You must configure an encryption key in TideConfig for this to work.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
@@ -517,12 +527,12 @@ impl<T> Encrypted<T> {
     pub fn new(value: T) -> Self {
         Self { value }
     }
-    
+
     /// Get the inner value
     pub fn into_inner(self) -> T {
         self.value
     }
-    
+
     /// Get a reference to the inner value
     pub fn inner(&self) -> &T {
         &self.value
@@ -569,7 +579,9 @@ impl<T> From<T> for Encrypted<T> {
 
 impl<T: Default> Default for Encrypted<T> {
     fn default() -> Self {
-        Self { value: T::default() }
+        Self {
+            value: T::default(),
+        }
     }
 }
 
@@ -578,30 +590,29 @@ impl<T: Default> Default for Encrypted<T> {
 // =============================================================================
 
 /// Hashed string wrapper (one-way hash, e.g., for passwords)
-/// 
+///
 /// Values are hashed when stored in the database. Provides verify method
 /// for checking against plain text values.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
 ///     #[tide(cast = "hashed")]
 ///     pub password: Hashed,
 /// }
-/// 
+///
 /// // Usage
 /// let user = User { password: Hashed::from("secret123") };
 /// user.save().await?;
-/// 
+///
 /// // Verify
 /// if user.password.verify("secret123") {
 ///     println!("Password matches!");
 /// }
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Hashed {
     /// The hashed value (stored)
     hash: String,
@@ -615,28 +626,28 @@ impl Hashed {
             hash: Self::compute_hash(plain_text),
         }
     }
-    
+
     /// Create from an existing hash (when reading from DB)
     pub fn from_hash(hash: String) -> Self {
         Self { hash }
     }
-    
+
     /// Get the hash value
     pub fn hash(&self) -> &str {
         &self.hash
     }
-    
+
     /// Verify a plain text value against the hash
     pub fn verify(&self, plain_text: &str) -> bool {
         // Simple comparison - in production use bcrypt_verify/argon2_verify
         Self::compute_hash(plain_text) == self.hash
     }
-    
+
     /// Compute hash of a string (placeholder - use proper hashing in production)
     fn compute_hash(input: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher = DefaultHasher::new();
         input.hash(&mut hasher);
         format!("{:x}", hasher.finish())
@@ -679,25 +690,24 @@ impl<'de> Deserialize<'de> for Hashed {
     }
 }
 
-
 // =============================================================================
 // COMMA SEPARATED TYPE
 // =============================================================================
 
 /// Comma-separated string wrapper
-/// 
+///
 /// Stores arrays as comma-separated strings in the database.
 /// Useful for databases without native array support.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
 ///     #[tide(cast = "comma_separated")]
 ///     pub tags: CommaSeparated<String>,
 /// }
-/// 
+///
 /// // Usage
 /// let user = User { tags: vec!["admin", "user"].into() };
 /// user.save().await?; // Stored as "admin,user"
@@ -712,37 +722,37 @@ impl<T> CommaSeparated<T> {
     pub fn new(values: Vec<T>) -> Self {
         Self { values }
     }
-    
+
     /// Get the values
     pub fn values(&self) -> &[T] {
         &self.values
     }
-    
+
     /// Get mutable values
     pub fn values_mut(&mut self) -> &mut Vec<T> {
         &mut self.values
     }
-    
+
     /// Into inner values
     pub fn into_inner(self) -> Vec<T> {
         self.values
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
-    
+
     /// Get length
     pub fn len(&self) -> usize {
         self.values.len()
     }
-    
+
     /// Add a value
     pub fn push(&mut self, value: T) {
         self.values.push(value);
     }
-    
+
     /// Check if contains a value
     pub fn contains(&self, value: &T) -> bool
     where
@@ -752,15 +762,14 @@ impl<T> CommaSeparated<T> {
     }
 }
 
-
-
 impl<T: FromStr> CommaSeparated<T>
 where
     T::Err: fmt::Debug,
 {
     /// Parse from comma-separated string
     pub fn from_string(s: &str) -> Self {
-        let values = s.split(',')
+        let values = s
+            .split(',')
             .filter(|s| !s.is_empty())
             .filter_map(|s| s.trim().parse().ok())
             .collect();
@@ -776,14 +785,16 @@ impl<T> From<Vec<T>> for CommaSeparated<T> {
 
 impl<T> FromIterator<T> for CommaSeparated<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self { values: iter.into_iter().collect() }
+        Self {
+            values: iter.into_iter().collect(),
+        }
     }
 }
 
 impl<T> IntoIterator for CommaSeparated<T> {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.values.into_iter()
     }
@@ -792,7 +803,7 @@ impl<T> IntoIterator for CommaSeparated<T> {
 impl<'a, T> IntoIterator for &'a CommaSeparated<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.values.iter()
     }
@@ -824,7 +835,9 @@ impl<T: Default> Default for CommaSeparated<T> {
 
 impl<T: fmt::Display> fmt::Display for CommaSeparated<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = self.values.iter()
+        let s = self
+            .values
+            .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(",");
@@ -837,11 +850,11 @@ impl<T: fmt::Display> fmt::Display for CommaSeparated<T> {
 // =============================================================================
 
 /// Collection wrapper for JSON array columns
-/// 
+///
 /// Provides a convenient interface for working with JSON arrays in the database.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
@@ -858,42 +871,42 @@ impl<T> Collection<T> {
     pub fn new() -> Self {
         Self { items: Vec::new() }
     }
-    
+
     /// Create from a vector
     pub fn from_vec(items: Vec<T>) -> Self {
         Self { items }
     }
-    
+
     /// Get all items
     pub fn all(&self) -> &[T] {
         &self.items
     }
-    
+
     /// Get first item
     pub fn first(&self) -> Option<&T> {
         self.items.first()
     }
-    
+
     /// Get last item
     pub fn last(&self) -> Option<&T> {
         self.items.last()
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-    
+
     /// Get count
     pub fn count(&self) -> usize {
         self.items.len()
     }
-    
+
     /// Add an item
     pub fn add(&mut self, item: T) {
         self.items.push(item);
     }
-    
+
     /// Remove item at index
     pub fn remove(&mut self, index: usize) -> Option<T> {
         if index < self.items.len() {
@@ -902,44 +915,49 @@ impl<T> Collection<T> {
             None
         }
     }
-    
+
     /// Filter items
     pub fn filter<F: Fn(&T) -> bool>(&self, predicate: F) -> Self
     where
         T: Clone,
     {
         Self {
-            items: self.items.iter().filter(|i| predicate(i)).cloned().collect()
+            items: self
+                .items
+                .iter()
+                .filter(|i| predicate(i))
+                .cloned()
+                .collect(),
         }
     }
-    
+
     /// Map items
     pub fn map<U, F: Fn(&T) -> U>(&self, mapper: F) -> Collection<U> {
         Collection {
-            items: self.items.iter().map(mapper).collect()
+            items: self.items.iter().map(mapper).collect(),
         }
     }
-    
+
     /// Find item
     pub fn find<F: Fn(&T) -> bool>(&self, predicate: F) -> Option<&T> {
         self.items.iter().find(|i| predicate(i))
     }
-    
+
     /// Check if any matches
     pub fn any<F: Fn(&T) -> bool>(&self, predicate: F) -> bool {
         self.items.iter().any(predicate)
     }
-    
+
     /// Check if all match
     pub fn every<F: Fn(&T) -> bool>(&self, predicate: F) -> bool {
         self.items.iter().all(predicate)
     }
-    
+
     /// Pluck values (for collections of objects)
     pub fn pluck<U, F: Fn(&T) -> U>(&self, extractor: F) -> Vec<U> {
         self.items.iter().map(extractor).collect()
     }
-    
+
     /// Sort items (returns new collection)
     pub fn sorted<F: FnMut(&T, &T) -> std::cmp::Ordering>(&self, compare: F) -> Self
     where
@@ -949,27 +967,27 @@ impl<T> Collection<T> {
         items.sort_by(compare);
         Self { items }
     }
-    
+
     /// Take first n items
     pub fn take(&self, n: usize) -> Self
     where
         T: Clone,
     {
         Self {
-            items: self.items.iter().take(n).cloned().collect()
+            items: self.items.iter().take(n).cloned().collect(),
         }
     }
-    
+
     /// Skip first n items
     pub fn skip(&self, n: usize) -> Self
     where
         T: Clone,
     {
         Self {
-            items: self.items.iter().skip(n).cloned().collect()
+            items: self.items.iter().skip(n).cloned().collect(),
         }
     }
-    
+
     /// Convert to vector
     pub fn to_vec(&self) -> Vec<T>
     where
@@ -977,7 +995,7 @@ impl<T> Collection<T> {
     {
         self.items.clone()
     }
-    
+
     /// Into inner vector
     pub fn into_inner(self) -> Vec<T> {
         self.items
@@ -998,14 +1016,16 @@ impl<T> Default for Collection<T> {
 
 impl<T> FromIterator<T> for Collection<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self { items: iter.into_iter().collect() }
+        Self {
+            items: iter.into_iter().collect(),
+        }
     }
 }
 
 impl<T> IntoIterator for Collection<T> {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.items.into_iter()
     }
@@ -1014,7 +1034,7 @@ impl<T> IntoIterator for Collection<T> {
 impl<'a, T> IntoIterator for &'a Collection<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.items.iter()
     }
@@ -1135,77 +1155,70 @@ pub struct CastValue;
 
 impl CastValue {
     /// Cast a JSON value based on cast type
-    pub fn cast(value: &serde_json::Value, cast_type: CastType) -> Result<serde_json::Value, String> {
+    pub fn cast(
+        value: &serde_json::Value,
+        cast_type: CastType,
+    ) -> Result<serde_json::Value, String> {
         match cast_type {
-            CastType::String => {
-                match value {
-                    serde_json::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
-                    serde_json::Value::Number(n) => Ok(serde_json::Value::String(n.to_string())),
-                    serde_json::Value::Bool(b) => Ok(serde_json::Value::String(b.to_string())),
-                    serde_json::Value::Null => Ok(serde_json::Value::Null),
-                    _ => Ok(serde_json::Value::String(value.to_string())),
+            CastType::String => match value {
+                serde_json::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+                serde_json::Value::Number(n) => Ok(serde_json::Value::String(n.to_string())),
+                serde_json::Value::Bool(b) => Ok(serde_json::Value::String(b.to_string())),
+                serde_json::Value::Null => Ok(serde_json::Value::Null),
+                _ => Ok(serde_json::Value::String(value.to_string())),
+            },
+            CastType::Integer => match value {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        Ok(serde_json::json!(i))
+                    } else if let Some(f) = n.as_f64() {
+                        Ok(serde_json::json!(f as i64))
+                    } else {
+                        Err("Invalid number".to_string())
+                    }
                 }
-            }
-            CastType::Integer => {
-                match value {
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            Ok(serde_json::json!(i))
-                        } else if let Some(f) = n.as_f64() {
-                            Ok(serde_json::json!(f as i64))
-                        } else {
-                            Err("Invalid number".to_string())
-                        }
+                serde_json::Value::String(s) => s
+                    .parse::<i64>()
+                    .map(|i| serde_json::json!(i))
+                    .map_err(|_| "Failed to parse integer".to_string()),
+                serde_json::Value::Bool(b) => Ok(serde_json::json!(if *b { 1 } else { 0 })),
+                serde_json::Value::Null => Ok(serde_json::Value::Null),
+                _ => Err("Cannot cast to integer".to_string()),
+            },
+            CastType::Float => match value {
+                serde_json::Value::Number(n) => {
+                    if let Some(f) = n.as_f64() {
+                        Ok(serde_json::json!(f))
+                    } else {
+                        Err("Invalid number".to_string())
                     }
-                    serde_json::Value::String(s) => {
-                        s.parse::<i64>()
-                            .map(|i| serde_json::json!(i))
-                            .map_err(|_| "Failed to parse integer".to_string())
-                    }
-                    serde_json::Value::Bool(b) => Ok(serde_json::json!(if *b { 1 } else { 0 })),
-                    serde_json::Value::Null => Ok(serde_json::Value::Null),
-                    _ => Err("Cannot cast to integer".to_string()),
                 }
-            }
-            CastType::Float => {
-                match value {
-                    serde_json::Value::Number(n) => {
-                        if let Some(f) = n.as_f64() {
-                            Ok(serde_json::json!(f))
-                        } else {
-                            Err("Invalid number".to_string())
-                        }
+                serde_json::Value::String(s) => s
+                    .parse::<f64>()
+                    .map(|f| serde_json::json!(f))
+                    .map_err(|_| "Failed to parse float".to_string()),
+                serde_json::Value::Bool(b) => Ok(serde_json::json!(if *b { 1.0 } else { 0.0 })),
+                serde_json::Value::Null => Ok(serde_json::Value::Null),
+                _ => Err("Cannot cast to float".to_string()),
+            },
+            CastType::Boolean => match value {
+                serde_json::Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        Ok(serde_json::Value::Bool(i != 0))
+                    } else {
+                        Ok(serde_json::Value::Bool(true))
                     }
-                    serde_json::Value::String(s) => {
-                        s.parse::<f64>()
-                            .map(|f| serde_json::json!(f))
-                            .map_err(|_| "Failed to parse float".to_string())
-                    }
-                    serde_json::Value::Bool(b) => Ok(serde_json::json!(if *b { 1.0 } else { 0.0 })),
-                    serde_json::Value::Null => Ok(serde_json::Value::Null),
-                    _ => Err("Cannot cast to float".to_string()),
                 }
-            }
-            CastType::Boolean => {
-                match value {
-                    serde_json::Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
-                    serde_json::Value::Number(n) => {
-                        if let Some(i) = n.as_i64() {
-                            Ok(serde_json::Value::Bool(i != 0))
-                        } else {
-                            Ok(serde_json::Value::Bool(true))
-                        }
-                    }
-                    serde_json::Value::String(s) => {
-                        let lower = s.to_lowercase();
-                        Ok(serde_json::Value::Bool(
-                            lower == "true" || lower == "1" || lower == "yes" || lower == "on"
-                        ))
-                    }
-                    serde_json::Value::Null => Ok(serde_json::Value::Bool(false)),
-                    _ => Err("Cannot cast to boolean".to_string()),
+                serde_json::Value::String(s) => {
+                    let lower = s.to_lowercase();
+                    Ok(serde_json::Value::Bool(
+                        lower == "true" || lower == "1" || lower == "yes" || lower == "on",
+                    ))
                 }
-            }
+                serde_json::Value::Null => Ok(serde_json::Value::Bool(false)),
+                _ => Err("Cannot cast to boolean".to_string()),
+            },
             CastType::Json => {
                 // JSON cast - value is already JSON
                 Ok(value.clone())
@@ -1215,15 +1228,14 @@ impl CastValue {
                     serde_json::Value::Array(_) => Ok(value.clone()),
                     serde_json::Value::String(s) => {
                         // Try to parse as JSON array
-                        serde_json::from_str(s)
-                            .or_else(|_| {
-                                // Fallback to comma-separated
-                                Ok(serde_json::Value::Array(
-                                    s.split(',')
-                                        .map(|v| serde_json::Value::String(v.trim().to_string()))
-                                        .collect()
-                                ))
-                            })
+                        serde_json::from_str(s).or_else(|_| {
+                            // Fallback to comma-separated
+                            Ok(serde_json::Value::Array(
+                                s.split(',')
+                                    .map(|v| serde_json::Value::String(v.trim().to_string()))
+                                    .collect(),
+                            ))
+                        })
                     }
                     serde_json::Value::Null => Ok(serde_json::Value::Array(vec![])),
                     _ => Err("Cannot cast to array".to_string()),
@@ -1261,8 +1273,9 @@ impl CastValue {
                 match value {
                     serde_json::Value::String(s) => {
                         // Validate it's a valid time string
-                        if chrono::NaiveTime::parse_from_str(s, "%H:%M:%S").is_ok() ||
-                           chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok() {
+                        if chrono::NaiveTime::parse_from_str(s, "%H:%M:%S").is_ok()
+                            || chrono::NaiveTime::parse_from_str(s, "%H:%M").is_ok()
+                        {
                             Ok(value.clone())
                         } else {
                             Err("Invalid time format".to_string())
@@ -1272,53 +1285,45 @@ impl CastValue {
                     _ => Err("Cannot cast to time".to_string()),
                 }
             }
-            CastType::Uuid => {
-                match value {
-                    serde_json::Value::String(s) => {
-                        Uuid::parse_str(s)
-                            .map(|_| value.clone())
-                            .map_err(|e| format!("Invalid UUID: {}", e))
-                    }
-                    serde_json::Value::Null => Ok(serde_json::Value::Null),
-                    _ => Err("Cannot cast to UUID".to_string()),
-                }
-            }
-            CastType::Decimal => {
-                match value {
-                    serde_json::Value::Number(_) => Ok(value.clone()),
-                    serde_json::Value::String(s) => {
-                        s.parse::<f64>()
-                            .map(|f| serde_json::json!(f))
-                            .map_err(|_| "Failed to parse decimal".to_string())
-                    }
-                    serde_json::Value::Null => Ok(serde_json::Value::Null),
-                    _ => Err("Cannot cast to decimal".to_string()),
-                }
-            }
+            CastType::Uuid => match value {
+                serde_json::Value::String(s) => Uuid::parse_str(s)
+                    .map(|_| value.clone())
+                    .map_err(|e| format!("Invalid UUID: {}", e)),
+                serde_json::Value::Null => Ok(serde_json::Value::Null),
+                _ => Err("Cannot cast to UUID".to_string()),
+            },
+            CastType::Decimal => match value {
+                serde_json::Value::Number(_) => Ok(value.clone()),
+                serde_json::Value::String(s) => s
+                    .parse::<f64>()
+                    .map(|f| serde_json::json!(f))
+                    .map_err(|_| "Failed to parse decimal".to_string()),
+                serde_json::Value::Null => Ok(serde_json::Value::Null),
+                _ => Err("Cannot cast to decimal".to_string()),
+            },
             CastType::Encrypted | CastType::Hashed => {
                 // These require special handling - pass through for now
                 Ok(value.clone())
             }
-            CastType::CommaSeparated => {
-                match value {
-                    serde_json::Value::Array(arr) => {
-                        let strings: Vec<String> = arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect();
-                        Ok(serde_json::Value::String(strings.join(",")))
-                    }
-                    serde_json::Value::String(_) => Ok(value.clone()),
-                    serde_json::Value::Null => Ok(serde_json::Value::String(String::new())),
-                    _ => Err("Cannot cast to comma-separated".to_string()),
+            CastType::CommaSeparated => match value {
+                serde_json::Value::Array(arr) => {
+                    let strings: Vec<String> = arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    Ok(serde_json::Value::String(strings.join(",")))
                 }
-            }
+                serde_json::Value::String(_) => Ok(value.clone()),
+                serde_json::Value::Null => Ok(serde_json::Value::String(String::new())),
+                _ => Err("Cannot cast to comma-separated".to_string()),
+            },
             CastType::Custom => {
                 // Custom casts pass through unchanged
                 Ok(value.clone())
             }
         }
     }
-    
+
     /// Parse comma-separated to array
     pub fn parse_comma_separated(s: &str) -> Vec<String> {
         s.split(',')
@@ -1326,10 +1331,11 @@ impl CastValue {
             .filter(|v| !v.is_empty())
             .collect()
     }
-    
+
     /// Format array as comma-separated string
     pub fn format_comma_separated<T: fmt::Display>(values: &[T]) -> String {
-        values.iter()
+        values
+            .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(",")
@@ -1341,11 +1347,11 @@ impl CastValue {
 // =============================================================================
 
 /// Trait for models with computed/accessor attributes
-/// 
+///
 /// Implement this to add computed properties that are calculated on the fly.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// impl Accessor for User {
 ///     fn get_accessor(&self, key: &str) -> Option<serde_json::Value> {
@@ -1364,7 +1370,7 @@ impl CastValue {
 pub trait Accessor {
     /// Get a computed attribute value
     fn get_accessor(&self, key: &str) -> Option<serde_json::Value>;
-    
+
     /// List all accessor keys
     fn accessor_keys() -> Vec<&'static str> {
         vec![]
@@ -1372,11 +1378,11 @@ pub trait Accessor {
 }
 
 /// Trait for models with mutator attributes
-/// 
+///
 /// Implement this to transform values before they are stored.
-/// 
+///
 /// # Example
-/// 
+///
 /// ```rust,ignore
 /// impl Mutator for User {
 ///     fn set_mutator(&mut self, key: &str, value: serde_json::Value) -> bool {
@@ -1401,7 +1407,7 @@ pub trait Accessor {
 pub trait Mutator {
     /// Transform and set a value
     fn set_mutator(&mut self, key: &str, value: serde_json::Value) -> bool;
-    
+
     /// List all mutator keys
     fn mutator_keys() -> Vec<&'static str> {
         vec![]
@@ -1413,7 +1419,7 @@ pub trait Mutator {
 // =============================================================================
 
 /// Wrapper for fields with default values
-/// 
+///
 /// Allows defining default values that are applied when the field is not set.
 #[derive(Clone, Debug)]
 pub struct WithDefault<T> {
@@ -1429,7 +1435,7 @@ impl<T: Clone> WithDefault<T> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Create with a value
     pub fn some(value: T) -> Self {
         Self {
@@ -1437,27 +1443,27 @@ impl<T: Clone> WithDefault<T> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Get the value or the provided default
     pub fn unwrap_or(&self, default: T) -> T {
         self.value.clone().unwrap_or(default)
     }
-    
+
     /// Get the value or call a function for the default
     pub fn unwrap_or_else<F: FnOnce() -> T>(&self, f: F) -> T {
         self.value.clone().unwrap_or_else(f)
     }
-    
+
     /// Check if value is set
     pub fn is_some(&self) -> bool {
         self.value.is_some()
     }
-    
+
     /// Check if value is not set
     pub fn is_none(&self) -> bool {
         self.value.is_none()
     }
-    
+
     /// Get the inner Option
     pub fn into_option(self) -> Option<T> {
         self.value
@@ -1484,6 +1490,9 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for WithDefault<T> {
     where
         D: serde::Deserializer<'de>,
     {
-        Option::<T>::deserialize(deserializer).map(|v| Self { value: v, _marker: PhantomData })
+        Option::<T>::deserialize(deserializer).map(|v| Self {
+            value: v,
+            _marker: PhantomData,
+        })
     }
 }

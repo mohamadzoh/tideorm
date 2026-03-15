@@ -518,6 +518,8 @@ pub mod schema;
 /// Model relations (belongs_to, has_one, has_many)
 pub mod relations;
 
+extern crate self as tideorm;
+
 /// File attachments system (attach, detach, sync)
 pub mod attachments;
 
@@ -563,33 +565,47 @@ pub mod prelude;
 
 pub use database::Database;
 // Global database access functions
-pub use database::{db, try_db, has_global_db, require_db};
+pub use attachments::{AttachmentError, FileAttachment, FilesData, HasAttachments};
+pub use callbacks::{CallbackRunner, Callbacks};
+pub use config::{Config, TideConfig};
+pub use database::{db, has_global_db, require_db, try_db};
 pub use error::{Error, Result};
+pub use migration::{ColumnType, Migration, Migrator, Schema};
 pub use model::{Model, ModelMeta};
-pub use query::{QueryBuilder, Order, JoinType, JoinClause, AggregateFunction};
-pub use soft_delete::SoftDelete;
-pub use config::{TideConfig, Config};
-pub use callbacks::{Callbacks, CallbackRunner};
-pub use relations::{BelongsTo, HasOne, HasMany, RelationExt, EagerLoadExt, WithRelations};
-pub use attachments::{HasAttachments, FileAttachment, FilesData, AttachmentError};
-pub use translations::{HasTranslations, TranslationsData, FieldTranslations, TranslationInput, TranslationError, ApplyTranslations};
+pub use query::{AggregateFunction, JoinClause, JoinType, Order, QueryBuilder};
+pub use relations::{BelongsTo, EagerLoadExt, HasMany, HasOne, RelationExt, WithRelations};
 pub use schema::SchemaWriter;
-pub use migration::{Migration, Migrator, Schema, ColumnType};
+pub use soft_delete::SoftDelete;
+pub use translations::{
+    ApplyTranslations, FieldTranslations, HasTranslations, TranslationError, TranslationInput,
+    TranslationsData,
+};
 
 // Query logging and debugging
-pub use logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, QueryStats, QueryDebugInfo, QueryOperation};
+pub use logging::{
+    LogLevel, QueryDebugInfo, QueryLogEntry, QueryLogger, QueryOperation, QueryStats, QueryTimer,
+};
 
 // Performance profiling
-pub use profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
+pub use profiling::{
+    GlobalProfiler, GlobalStats, ProfileReport, ProfiledQuery, Profiler, QueryAnalyzer,
+    QueryComplexity, QuerySuggestion, SuggestionLevel,
+};
 
 // Query and statement caching
-pub use cache::{QueryCache, PreparedStatementCache, CacheConfig, CacheStrategy, CacheStats, PreparedStatementStats, PreparedStatementConfig, CacheKeyBuilder, CacheOptions, CachedStatementInfo, CacheWarmer};
+pub use cache::{
+    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CacheWarmer,
+    CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
+    QueryCache,
+};
 
 // Validation
-pub use validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
+pub use validation::{
+    ValidatableValue, Validate, ValidationBuilder, ValidationErrors, ValidationRule, Validator,
+};
 
 // Tokenization
-pub use tokenization::{TokenConfig, TokenEncoder, TokenDecoder, Tokenizable};
+pub use tokenization::{TokenConfig, TokenDecoder, TokenEncoder, Tokenizable};
 
 // Re-export the derive macro
 pub use tideorm_macros::Model;
@@ -598,7 +614,7 @@ pub use tideorm_macros::Model;
 pub use tideorm_macros::model;
 
 // Re-export relation attribute macros
-pub use tideorm_macros::{belongs_to, has_one, has_many};
+pub use tideorm_macros::{belongs_to, has_many, has_one};
 
 // Re-export async_trait for macro use
 pub use async_trait;
@@ -607,8 +623,7 @@ pub use async_trait;
 pub use chrono;
 
 // Re-export common types that users need
-pub use serde::{Deserialize, Serialize};
 pub use chrono::{DateTime, NaiveDateTime, Utc};
-pub use uuid::Uuid;
 pub use rust_decimal::Decimal;
-
+pub use serde::{Deserialize, Serialize};
+pub use uuid::Uuid;

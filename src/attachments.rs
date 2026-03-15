@@ -86,25 +86,25 @@ use std::collections::HashMap;
 pub struct FileAttachment {
     /// The file key/path (e.g., "uploads/2024/01/image.jpg")
     pub key: String,
-    
+
     /// The filename (extracted from key)
     pub filename: String,
-    
+
     /// When the file was attached
     pub created_at: String,
-    
+
     /// Original filename (if different from key)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
-    
+
     /// File size in bytes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    
+
     /// MIME type
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
-    
+
     /// Custom metadata
     #[serde(flatten, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -124,7 +124,7 @@ impl FileAttachment {
             metadata: HashMap::new(),
         }
     }
-    
+
     /// Create with additional metadata
     pub fn with_metadata(
         key: &str,
@@ -138,23 +138,23 @@ impl FileAttachment {
         attachment.mime_type = mime_type.map(|s| s.to_string());
         attachment
     }
-    
+
     /// Add custom metadata
     pub fn add_metadata(mut self, key: &str, value: impl Into<serde_json::Value>) -> Self {
         self.metadata.insert(key.to_string(), value.into());
         self
     }
-    
+
     /// Get the full URL for this file attachment using the global URL generator
-    /// 
+    ///
     /// This uses the global file URL generator configured via `TideConfig`.
     /// For model-specific URL generation, use the model's `generate_file_url` method.
-    /// 
+    ///
     /// # Arguments
     /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,ignore
     /// let attachment = FileAttachment::new("uploads/2024/image.jpg");
     /// let url = attachment.url("thumbnail");
@@ -164,15 +164,15 @@ impl FileAttachment {
     pub fn url(&self, field_name: &str) -> String {
         crate::config::Config::generate_file_url(field_name, self)
     }
-    
+
     /// Get the full URL for this file attachment using a specific URL generator
-    /// 
+    ///
     /// # Arguments
     /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
     /// * `generator` - Custom URL generator function
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,ignore
     /// let attachment = FileAttachment::with_metadata(
     ///     "uploads/2024/image.jpg",
@@ -189,10 +189,14 @@ impl FileAttachment {
     /// });
     /// ```
     #[inline]
-    pub fn url_with_generator(&self, field_name: &str, generator: crate::config::FileUrlGenerator) -> String {
+    pub fn url_with_generator(
+        &self,
+        field_name: &str,
+        generator: crate::config::FileUrlGenerator,
+    ) -> String {
         generator(field_name, self)
     }
-    
+
     /// Convert to JSON value
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::json!({}))
@@ -206,37 +210,37 @@ impl FileAttachment {
 pub trait HasAttachments {
     /// Get the list of hasOne file relations
     fn has_one_files() -> Vec<&'static str>;
-    
+
     /// Get the list of hasMany file relations
     fn has_many_files() -> Vec<&'static str>;
-    
+
     /// Get all file relation names
     fn all_file_relations() -> Vec<&'static str> {
         let mut relations = Self::has_one_files();
         relations.extend(Self::has_many_files());
         relations
     }
-    
+
     /// Check if a relation is hasOne
     fn is_has_one_relation(relation: &str) -> bool {
         Self::has_one_files().contains(&relation)
     }
-    
+
     /// Check if a relation is hasMany
     fn is_has_many_relation(relation: &str) -> bool {
         Self::has_many_files().contains(&relation)
     }
-    
+
     /// Get the current files data from the model
     fn get_files_data(&self) -> Result<FilesData, AttachmentError>;
-    
+
     /// Set the files data on the model
     fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError>;
-    
+
     // =========================================================================
     // ATTACH METHODS
     // =========================================================================
-    
+
     /// Attach a file to a relation
     ///
     /// For hasOne relations, this replaces any existing attachment.
@@ -253,7 +257,7 @@ pub trait HasAttachments {
     fn attach(&mut self, relation: &str, file_key: &str) -> Result<(), AttachmentError> {
         self.attach_with_metadata(relation, FileAttachment::new(file_key))
     }
-    
+
     /// Attach a file with custom metadata
     ///
     /// # Example
@@ -266,20 +270,24 @@ pub trait HasAttachments {
     /// );
     /// product.attach_with_metadata("documents", attachment)?;
     /// ```
-    fn attach_with_metadata(&mut self, relation: &str, attachment: FileAttachment) -> Result<(), AttachmentError> {
+    fn attach_with_metadata(
+        &mut self,
+        relation: &str,
+        attachment: FileAttachment,
+    ) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-        
+
         let mut files = self.get_files_data()?;
-        
+
         if Self::is_has_one_relation(relation) {
             files.set_one(relation, attachment);
         } else {
             files.add_many(relation, attachment);
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     /// Attach multiple files at once (hasMany only)
     ///
     /// # Example
@@ -288,24 +296,25 @@ pub trait HasAttachments {
     /// ```
     fn attach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         if !Self::is_has_many_relation(relation) {
-            return Err(AttachmentError::InvalidRelation(
-                format!("'{}' is not a hasMany relation, use attach() instead", relation)
-            ));
+            return Err(AttachmentError::InvalidRelation(format!(
+                "'{}' is not a hasMany relation, use attach() instead",
+                relation
+            )));
         }
-        
+
         let mut files = self.get_files_data()?;
-        
+
         for key in file_keys {
             files.add_many(relation, FileAttachment::new(key));
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     // =========================================================================
     // DETACH METHODS
     // =========================================================================
-    
+
     /// Detach a file from a relation
     ///
     /// For hasOne, pass `None` as `file_key` to remove the attachment.
@@ -324,9 +333,9 @@ pub trait HasAttachments {
     /// ```
     fn detach(&mut self, relation: &str, file_key: Option<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-        
+
         let mut files = self.get_files_data()?;
-        
+
         if Self::is_has_one_relation(relation) {
             files.remove_one(relation);
         } else if let Some(key) = file_key {
@@ -334,10 +343,10 @@ pub trait HasAttachments {
         } else {
             files.clear_many(relation);
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     /// Detach multiple files at once (hasMany only)
     ///
     /// # Example
@@ -346,24 +355,25 @@ pub trait HasAttachments {
     /// ```
     fn detach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         if !Self::is_has_many_relation(relation) {
-            return Err(AttachmentError::InvalidRelation(
-                format!("'{}' is not a hasMany relation", relation)
-            ));
+            return Err(AttachmentError::InvalidRelation(format!(
+                "'{}' is not a hasMany relation",
+                relation
+            )));
         }
-        
+
         let mut files = self.get_files_data()?;
-        
+
         for key in file_keys {
             files.remove_from_many(relation, key);
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     // =========================================================================
     // SYNC METHODS
     // =========================================================================
-    
+
     /// Sync files for a relation (replace all existing with new ones)
     ///
     /// This is useful when you have a form with file inputs and want to
@@ -382,9 +392,9 @@ pub trait HasAttachments {
     /// ```
     fn sync(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-        
+
         let mut files = self.get_files_data()?;
-        
+
         if Self::is_has_one_relation(relation) {
             if file_keys.is_empty() {
                 files.remove_one(relation);
@@ -398,10 +408,10 @@ pub trait HasAttachments {
                 files.add_many(relation, FileAttachment::new(key));
             }
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     /// Sync files with custom metadata
     ///
     /// # Example
@@ -412,11 +422,15 @@ pub trait HasAttachments {
     /// ];
     /// product.sync_with_metadata("images", attachments)?;
     /// ```
-    fn sync_with_metadata(&mut self, relation: &str, attachments: Vec<FileAttachment>) -> Result<(), AttachmentError> {
+    fn sync_with_metadata(
+        &mut self,
+        relation: &str,
+        attachments: Vec<FileAttachment>,
+    ) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-        
+
         let mut files = self.get_files_data()?;
-        
+
         if Self::is_has_one_relation(relation) {
             if attachments.is_empty() {
                 files.remove_one(relation);
@@ -431,14 +445,14 @@ pub trait HasAttachments {
                 files.add_many(relation, attachment);
             }
         }
-        
+
         self.set_files_data(files)
     }
-    
+
     // =========================================================================
     // GETTER METHODS
     // =========================================================================
-    
+
     /// Get a single file attachment (hasOne)
     ///
     /// # Example
@@ -451,7 +465,7 @@ pub trait HasAttachments {
         let files = self.get_files_data()?;
         Ok(files.get_one(relation))
     }
-    
+
     /// Get multiple file attachments (hasMany)
     ///
     /// # Example
@@ -465,29 +479,31 @@ pub trait HasAttachments {
         let files = self.get_files_data()?;
         Ok(files.get_many(relation))
     }
-    
+
     /// Check if a relation has any files
     fn has_files(&self, relation: &str) -> Result<bool, AttachmentError> {
         let files = self.get_files_data()?;
         Ok(files.has_files(relation))
     }
-    
+
     /// Count files in a relation
     fn count_files(&self, relation: &str) -> Result<usize, AttachmentError> {
         let files = self.get_files_data()?;
         Ok(files.count_files(relation))
     }
-    
+
     // =========================================================================
     // HELPER METHODS
     // =========================================================================
-    
+
     /// Validate that a relation exists
     fn validate_relation(&self, relation: &str) -> Result<(), AttachmentError> {
         if !Self::all_file_relations().contains(&relation) {
-            return Err(AttachmentError::InvalidRelation(
-                format!("Unknown file relation: '{}'. Available: {:?}", relation, Self::all_file_relations())
-            ));
+            return Err(AttachmentError::InvalidRelation(format!(
+                "Unknown file relation: '{}'. Available: {:?}",
+                relation,
+                Self::all_file_relations()
+            )));
         }
         Ok(())
     }
@@ -504,68 +520,72 @@ pub struct FilesData {
 impl FilesData {
     /// Create empty files data
     pub fn new() -> Self {
-        Self { data: HashMap::new() }
+        Self {
+            data: HashMap::new(),
+        }
     }
-    
+
     /// Create from JSON value
     pub fn from_json(value: &serde_json::Value) -> Self {
         match value {
             serde_json::Value::Object(map) => {
-                let data: HashMap<String, serde_json::Value> = map
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
+                let data: HashMap<String, serde_json::Value> =
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 Self { data }
             }
             _ => Self::new(),
         }
     }
-    
+
     /// Convert to JSON value
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(&self.data).unwrap_or(serde_json::json!({}))
     }
-    
+
     /// Set a single file (hasOne)
     pub fn set_one(&mut self, relation: &str, attachment: FileAttachment) {
         self.data.insert(relation.to_string(), attachment.to_json());
     }
-    
+
     /// Remove a single file (hasOne)
     pub fn remove_one(&mut self, relation: &str) {
-        self.data.insert(relation.to_string(), serde_json::Value::Null);
+        self.data
+            .insert(relation.to_string(), serde_json::Value::Null);
     }
-    
+
     /// Get a single file (hasOne)
     pub fn get_one(&self, relation: &str) -> Option<FileAttachment> {
-        self.data.get(relation)
+        self.data
+            .get(relation)
             .filter(|v| !v.is_null())
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
-    
+
     /// Add to file array (hasMany)
     pub fn add_many(&mut self, relation: &str, attachment: FileAttachment) {
         let mut array = self.get_many_raw(relation);
         array.push(attachment.to_json());
-        self.data.insert(relation.to_string(), serde_json::Value::Array(array));
+        self.data
+            .insert(relation.to_string(), serde_json::Value::Array(array));
     }
-    
+
     /// Remove from file array (hasMany)
     pub fn remove_from_many(&mut self, relation: &str, file_key: &str) {
-        let array: Vec<serde_json::Value> = self.get_many_raw(relation)
+        let array: Vec<serde_json::Value> = self
+            .get_many_raw(relation)
             .into_iter()
-            .filter(|item| {
-                item.get("key").and_then(|k| k.as_str()) != Some(file_key)
-            })
+            .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(file_key))
             .collect();
-        self.data.insert(relation.to_string(), serde_json::Value::Array(array));
+        self.data
+            .insert(relation.to_string(), serde_json::Value::Array(array));
     }
-    
+
     /// Clear all files from array (hasMany)
     pub fn clear_many(&mut self, relation: &str) {
-        self.data.insert(relation.to_string(), serde_json::Value::Array(vec![]));
+        self.data
+            .insert(relation.to_string(), serde_json::Value::Array(vec![]));
     }
-    
+
     /// Get all files from array (hasMany)
     pub fn get_many(&self, relation: &str) -> Vec<FileAttachment> {
         self.get_many_raw(relation)
@@ -573,14 +593,15 @@ impl FilesData {
             .filter_map(|v| serde_json::from_value(v).ok())
             .collect()
     }
-    
+
     fn get_many_raw(&self, relation: &str) -> Vec<serde_json::Value> {
-        self.data.get(relation)
+        self.data
+            .get(relation)
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default()
     }
-    
+
     /// Check if relation has files
     pub fn has_files(&self, relation: &str) -> bool {
         match self.data.get(relation) {
@@ -590,7 +611,7 @@ impl FilesData {
             _ => false,
         }
     }
-    
+
     /// Count files in relation
     pub fn count_files(&self, relation: &str) -> usize {
         match self.data.get(relation) {
@@ -634,14 +655,14 @@ impl From<AttachmentError> for crate::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_file_attachment_creation() {
         let attachment = FileAttachment::new("uploads/2024/01/image.jpg");
         assert_eq!(attachment.key, "uploads/2024/01/image.jpg");
         assert_eq!(attachment.filename, "image.jpg");
     }
-    
+
     #[test]
     fn test_file_attachment_with_metadata() {
         let attachment = FileAttachment::with_metadata(
@@ -650,41 +671,44 @@ mod tests {
             Some(1024),
             Some("application/pdf"),
         );
-        assert_eq!(attachment.original_filename, Some("My Document.pdf".to_string()));
+        assert_eq!(
+            attachment.original_filename,
+            Some("My Document.pdf".to_string())
+        );
         assert_eq!(attachment.size, Some(1024));
         assert_eq!(attachment.mime_type, Some("application/pdf".to_string()));
     }
-    
+
     #[test]
     fn test_files_data_has_one() {
         let mut files = FilesData::new();
         files.set_one("thumbnail", FileAttachment::new("thumb.jpg"));
-        
+
         assert!(files.has_files("thumbnail"));
         assert_eq!(files.count_files("thumbnail"), 1);
-        
+
         let thumb = files.get_one("thumbnail").unwrap();
         assert_eq!(thumb.key, "thumb.jpg");
-        
+
         files.remove_one("thumbnail");
         assert!(!files.has_files("thumbnail"));
     }
-    
+
     #[test]
     fn test_files_data_has_many() {
         let mut files = FilesData::new();
         files.add_many("images", FileAttachment::new("img1.jpg"));
         files.add_many("images", FileAttachment::new("img2.jpg"));
-        
+
         assert!(files.has_files("images"));
         assert_eq!(files.count_files("images"), 2);
-        
+
         let images = files.get_many("images");
         assert_eq!(images.len(), 2);
-        
+
         files.remove_from_many("images", "img1.jpg");
         assert_eq!(files.count_files("images"), 1);
-        
+
         files.clear_many("images");
         assert!(!files.has_files("images"));
     }

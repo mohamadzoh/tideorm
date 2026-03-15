@@ -4,11 +4,9 @@
 //!
 //! Run with: `cargo bench --bench cache_benchmarks`
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-use tideorm::cache::{
-    QueryCache, PreparedStatementCache, CacheStrategy, CacheKeyBuilder,
-};
+use tideorm::cache::{CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache};
 
 // =============================================================================
 // QUERY CACHE BENCHMARKS
@@ -16,50 +14,52 @@ use tideorm::cache::{
 
 fn benchmark_query_cache_set(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_cache_set");
-    
+
     for size in [10, 100, 1000].iter() {
         group.throughput(Throughput::Elements(*size as u64));
-        
+
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let cache = QueryCache::new();
             cache.enable();
             cache.set_max_entries(10000);
             cache.set_strategy(CacheStrategy::LRU);
-            
+
             b.iter(|| {
                 for i in 0..size {
                     let key = format!("key_{}", i);
-                    cache.set(black_box(&key), black_box(&i), None, "bench").ok();
+                    cache
+                        .set(black_box(&key), black_box(&i), None, "bench")
+                        .ok();
                 }
             });
-            
+
             cache.clear();
         });
     }
-    
+
     group.finish();
 }
 
 fn benchmark_query_cache_get_hit(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_cache_get_hit");
-    
+
     let cache = QueryCache::new();
     cache.enable();
     cache.set_max_entries(10000);
     cache.set_strategy(CacheStrategy::LRU);
-    
+
     // Pre-populate cache
     for i in 0..1000 {
         let key = format!("key_{}", i);
         cache.set(&key, &i, None, "bench").ok();
     }
-    
+
     group.bench_function("single_hit", |b| {
         b.iter(|| {
             let _: Option<i32> = cache.get(black_box("key_500"));
         });
     });
-    
+
     group.bench_function("1000_hits", |b| {
         b.iter(|| {
             for i in 0..1000 {
@@ -68,25 +68,25 @@ fn benchmark_query_cache_get_hit(c: &mut Criterion) {
             }
         });
     });
-    
+
     cache.clear();
     group.finish();
 }
 
 fn benchmark_query_cache_get_miss(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_cache_get_miss");
-    
+
     let cache = QueryCache::new();
     cache.enable();
     cache.set_max_entries(10000);
     cache.set_strategy(CacheStrategy::LRU);
-    
+
     group.bench_function("single_miss", |b| {
         b.iter(|| {
             let _: Option<i32> = cache.get(black_box("nonexistent_key"));
         });
     });
-    
+
     group.bench_function("1000_misses", |b| {
         b.iter(|| {
             for i in 0..1000 {
@@ -95,69 +95,75 @@ fn benchmark_query_cache_get_miss(c: &mut Criterion) {
             }
         });
     });
-    
+
     cache.clear();
     group.finish();
 }
 
 fn benchmark_query_cache_strategies(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_cache_strategies");
-    
+
     for strategy in [CacheStrategy::LRU, CacheStrategy::FIFO, CacheStrategy::TTL].iter() {
         let strategy_name = match strategy {
             CacheStrategy::LRU => "LRU",
             CacheStrategy::FIFO => "FIFO",
             CacheStrategy::TTL => "TTL",
         };
-        
-        group.bench_with_input(BenchmarkId::from_parameter(strategy_name), strategy, |b, strategy| {
-            let cache = QueryCache::new();
-            cache.enable();
-            cache.set_max_entries(100); // Small cache to trigger evictions
-            cache.set_strategy(*strategy);
-            
-            b.iter(|| {
-                // Write 200 entries to a cache that holds 100
-                for i in 0..200 {
-                    let key = format!("key_{}", i);
-                    cache.set(black_box(&key), black_box(&i), None, "bench").ok();
-                }
-            });
-            
-            cache.clear();
-        });
+
+        group.bench_with_input(
+            BenchmarkId::from_parameter(strategy_name),
+            strategy,
+            |b, strategy| {
+                let cache = QueryCache::new();
+                cache.enable();
+                cache.set_max_entries(100); // Small cache to trigger evictions
+                cache.set_strategy(*strategy);
+
+                b.iter(|| {
+                    // Write 200 entries to a cache that holds 100
+                    for i in 0..200 {
+                        let key = format!("key_{}", i);
+                        cache
+                            .set(black_box(&key), black_box(&i), None, "bench")
+                            .ok();
+                    }
+                });
+
+                cache.clear();
+            },
+        );
     }
-    
+
     group.finish();
 }
 
 fn benchmark_query_cache_invalidation(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_cache_invalidation");
-    
+
     group.bench_function("invalidate_single", |b| {
         let cache = QueryCache::new();
         cache.enable();
-        
+
         // Pre-populate
         for i in 0..1000 {
             let key = format!("key_{}", i);
             cache.set(&key, &i, None, "bench").ok();
         }
-        
+
         let mut idx = 0;
         b.iter(|| {
             let key = format!("key_{}", idx % 1000);
             cache.invalidate(black_box(&key));
             idx += 1;
         });
-        
+
         cache.clear();
     });
-    
+
     group.bench_function("invalidate_model", |b| {
         let cache = QueryCache::new();
         cache.enable();
-        
+
         b.iter(|| {
             // Pre-populate with different models
             for i in 0..100 {
@@ -165,30 +171,30 @@ fn benchmark_query_cache_invalidation(c: &mut Criterion) {
                 let model = if i % 2 == 0 { "model_a" } else { "model_b" };
                 cache.set(&key, &i, None, model).ok();
             }
-            
+
             // Invalidate one model
             cache.invalidate_model(black_box("model_a"));
         });
-        
+
         cache.clear();
     });
-    
+
     group.bench_function("clear_all", |b| {
         let cache = QueryCache::new();
         cache.enable();
-        
+
         b.iter(|| {
             // Pre-populate
             for i in 0..1000 {
                 let key = format!("key_{}", i);
                 cache.set(&key, &i, None, "bench").ok();
             }
-            
+
             // Clear all
             cache.clear();
         });
     });
-    
+
     group.finish();
 }
 
@@ -198,24 +204,24 @@ fn benchmark_query_cache_invalidation(c: &mut Criterion) {
 
 fn benchmark_prepared_statement_cache_hit(c: &mut Criterion) {
     let mut group = c.benchmark_group("prepared_statement_cache");
-    
+
     let cache = PreparedStatementCache::new();
     cache.enable();
     cache.set_max_statements(1000);
     cache.clear();
-    
+
     // Pre-populate with some statements
     for i in 0..100 {
         let sql = format!("SELECT * FROM table_{} WHERE id = $1", i);
         cache.get_or_prepare(&sql);
     }
-    
+
     group.bench_function("single_hit", |b| {
         b.iter(|| {
             cache.get_or_prepare(black_box("SELECT * FROM table_50 WHERE id = $1"));
         });
     });
-    
+
     group.bench_function("single_miss", |b| {
         let mut idx = 1000;
         b.iter(|| {
@@ -224,28 +230,28 @@ fn benchmark_prepared_statement_cache_hit(c: &mut Criterion) {
             idx += 1;
         });
     });
-    
+
     cache.clear();
     group.finish();
 }
 
 fn benchmark_prepared_statement_record_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("prepared_statement_execution");
-    
+
     let cache = PreparedStatementCache::new();
     cache.enable();
     cache.set_max_statements(1000);
     cache.clear();
-    
+
     let sql = "SELECT * FROM users WHERE id = $1";
     cache.get_or_prepare(sql);
-    
+
     group.bench_function("record_execution", |b| {
         b.iter(|| {
             cache.record_execution(black_box(sql), black_box(100));
         });
     });
-    
+
     cache.clear();
     group.finish();
 }
@@ -256,15 +262,11 @@ fn benchmark_prepared_statement_record_execution(c: &mut Criterion) {
 
 fn benchmark_cache_key_builder(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_key_builder");
-    
+
     group.bench_function("simple_key", |b| {
-        b.iter(|| {
-            CacheKeyBuilder::new()
-                .table(black_box("users"))
-                .build()
-        });
+        b.iter(|| CacheKeyBuilder::new().table(black_box("users")).build());
     });
-    
+
     group.bench_function("complex_key", |b| {
         b.iter(|| {
             CacheKeyBuilder::new()
@@ -278,7 +280,7 @@ fn benchmark_cache_key_builder(c: &mut Criterion) {
                 .build()
         });
     });
-    
+
     group.bench_function("key_hash", |b| {
         b.iter(|| {
             CacheKeyBuilder::new()
@@ -287,7 +289,7 @@ fn benchmark_cache_key_builder(c: &mut Criterion) {
                 .build_hash()
         });
     });
-    
+
     group.finish();
 }
 
@@ -297,19 +299,19 @@ fn benchmark_cache_key_builder(c: &mut Criterion) {
 
 fn benchmark_realistic_workload(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic_workload");
-    
+
     group.bench_function("mixed_read_write_80_20", |b| {
         let cache = QueryCache::new();
         cache.enable();
         cache.set_max_entries(1000);
         cache.set_strategy(CacheStrategy::LRU);
-        
+
         // Pre-populate
         for i in 0..500 {
             let key = format!("key_{}", i);
             cache.set(&key, &i, None, "bench").ok();
         }
-        
+
         let mut idx = 0;
         b.iter(|| {
             // 80% reads, 20% writes
@@ -320,49 +322,53 @@ fn benchmark_realistic_workload(c: &mut Criterion) {
             }
             for _ in 0..20 {
                 let key = format!("key_{}", idx);
-                cache.set(black_box(&key), black_box(&idx), None, "bench").ok();
+                cache
+                    .set(black_box(&key), black_box(&idx), None, "bench")
+                    .ok();
                 idx += 1;
             }
         });
-        
+
         cache.clear();
     });
-    
+
     group.bench_function("high_contention", |b| {
         use std::sync::Arc;
         use std::thread;
-        
+
         let cache = Arc::new(QueryCache::new());
         cache.enable();
         cache.set_max_entries(1000);
         cache.set_strategy(CacheStrategy::LRU);
-        
+
         b.iter(|| {
-            let handles: Vec<_> = (0..4).map(|thread_id| {
-                let cache = Arc::clone(&cache);
-                thread::spawn(move || {
-                    for i in 0..100 {
-                        let key = format!("key_{}_{}", thread_id, i);
-                        cache.set(&key, &i, None, "bench").ok();
-                        let _: Option<i32> = cache.get(&key);
-                    }
+            let handles: Vec<_> = (0..4)
+                .map(|thread_id| {
+                    let cache = Arc::clone(&cache);
+                    thread::spawn(move || {
+                        for i in 0..100 {
+                            let key = format!("key_{}_{}", thread_id, i);
+                            cache.set(&key, &i, None, "bench").ok();
+                            let _: Option<i32> = cache.get(&key);
+                        }
+                    })
                 })
-            }).collect();
-            
+                .collect();
+
             for handle in handles {
                 handle.join().unwrap();
             }
         });
-        
+
         cache.clear();
     });
-    
+
     group.finish();
 }
 
 fn benchmark_cache_with_serialization(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_serialization");
-    
+
     #[derive(serde::Serialize, serde::Deserialize, Clone)]
     struct ComplexData {
         id: i64,
@@ -371,7 +377,7 @@ fn benchmark_cache_with_serialization(c: &mut Criterion) {
         tags: Vec<String>,
         metadata: std::collections::HashMap<String, String>,
     }
-    
+
     let complex_data = ComplexData {
         id: 1,
         name: "Test User".to_string(),
@@ -384,54 +390,60 @@ fn benchmark_cache_with_serialization(c: &mut Criterion) {
             m
         },
     };
-    
+
     let cache = QueryCache::new();
     cache.enable();
-    
+
     group.bench_function("cache_complex_struct", |b| {
         let mut idx = 0;
         b.iter(|| {
             let key = format!("complex_{}", idx);
-            cache.set(black_box(&key), black_box(&complex_data), None, "bench").ok();
+            cache
+                .set(black_box(&key), black_box(&complex_data), None, "bench")
+                .ok();
             idx += 1;
         });
     });
-    
+
     // Pre-populate for read test
     cache.set("complex_read", &complex_data, None, "bench").ok();
-    
+
     group.bench_function("retrieve_complex_struct", |b| {
         b.iter(|| {
             let _: Option<ComplexData> = cache.get(black_box("complex_read"));
         });
     });
-    
+
     // Benchmark Vec of complex structs
-    let vec_data: Vec<ComplexData> = (0..100).map(|i| ComplexData {
-        id: i,
-        name: format!("User {}", i),
-        email: format!("user{}@example.com", i),
-        tags: vec!["tag1".to_string()],
-        metadata: std::collections::HashMap::new(),
-    }).collect();
-    
+    let vec_data: Vec<ComplexData> = (0..100)
+        .map(|i| ComplexData {
+            id: i,
+            name: format!("User {}", i),
+            email: format!("user{}@example.com", i),
+            tags: vec!["tag1".to_string()],
+            metadata: std::collections::HashMap::new(),
+        })
+        .collect();
+
     group.bench_function("cache_vec_100_structs", |b| {
         let mut idx = 0;
         b.iter(|| {
             let key = format!("vec_{}", idx);
-            cache.set(black_box(&key), black_box(&vec_data), None, "bench").ok();
+            cache
+                .set(black_box(&key), black_box(&vec_data), None, "bench")
+                .ok();
             idx += 1;
         });
     });
-    
+
     cache.set("vec_read", &vec_data, None, "bench").ok();
-    
+
     group.bench_function("retrieve_vec_100_structs", |b| {
         b.iter(|| {
             let _: Option<Vec<ComplexData>> = cache.get(black_box("vec_read"));
         });
     });
-    
+
     cache.clear();
     group.finish();
 }
@@ -455,10 +467,7 @@ criterion_group!(
     benchmark_prepared_statement_record_execution,
 );
 
-criterion_group!(
-    key_builder_benches,
-    benchmark_cache_key_builder,
-);
+criterion_group!(key_builder_benches, benchmark_cache_key_builder,);
 
 criterion_group!(
     complex_benches,

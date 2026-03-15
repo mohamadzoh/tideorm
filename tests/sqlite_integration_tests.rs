@@ -6,10 +6,11 @@
 //! Run with: cargo test --test sqlite_integration_tests --features sqlite --no-default-features
 
 use tideorm::prelude::*;
-use tideorm::{TideConfig, Database};
+use tideorm::{Database, TideConfig};
 
+#[path = "support/sqlite_test_config.rs"]
 mod test_config;
-use test_config::{sqlite_database_url, should_run_sqlite_tests};
+use test_config::{should_run_sqlite_tests, sqlite_database_url};
 
 // =============================================================================
 // TEST MODELS
@@ -62,7 +63,7 @@ impl SoftDelete for TestSoftDelete {
     fn deleted_at(&self) -> Option<DateTime<Utc>> {
         self.deleted_at
     }
-    
+
     fn set_deleted_at(&mut self, timestamp: Option<DateTime<Utc>>) {
         self.deleted_at = timestamp;
     }
@@ -80,7 +81,7 @@ async fn sqlite_integration_tests() {
     }
 
     println!("🪶 Starting SQLite Integration Tests...\n");
-    
+
     // Use in-memory database for tests
     let db_url = if sqlite_database_url().contains("mode=memory") {
         sqlite_database_url().to_string()
@@ -88,20 +89,20 @@ async fn sqlite_integration_tests() {
         // Use in-memory for faster tests
         "sqlite::memory:".to_string()
     };
-    
+
     let connect_result = TideConfig::init()
         .database_type(DatabaseType::SQLite)
         .database(&db_url)
         .max_connections(1) // SQLite works best with single connection for tests
         .connect()
         .await;
-        
+
     if let Err(e) = connect_result {
         println!("⚠️  SQLite connection failed: {}", e);
         println!("   This is expected if SQLite feature is not enabled");
         return;
     }
-    
+
     // Verify database type
     let db_type = tideorm::require_db().unwrap().backend();
     assert_eq!(db_type, DatabaseType::SQLite, "Expected SQLite database");
@@ -112,8 +113,9 @@ async fn sqlite_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_posts").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_products").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_users").await;
-    
-    Database::execute(r#"
+
+    Database::execute(
+        r#"
         CREATE TABLE test_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
@@ -121,9 +123,13 @@ async fn sqlite_integration_tests() {
             age INTEGER NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
         )
-    "#).await.expect("Failed to create test_users table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_users table");
+
+    Database::execute(
+        r#"
         CREATE TABLE test_posts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -131,9 +137,13 @@ async fn sqlite_integration_tests() {
             content TEXT NOT NULL,
             published INTEGER NOT NULL DEFAULT 0
         )
-    "#).await.expect("Failed to create test_posts table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_posts table");
+
+    Database::execute(
+        r#"
         CREATE TABLE test_products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -141,16 +151,23 @@ async fn sqlite_integration_tests() {
             price INTEGER NOT NULL,
             metadata TEXT
         )
-    "#).await.expect("Failed to create test_products table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_products table");
+
+    Database::execute(
+        r#"
         CREATE TABLE test_soft_deletes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             deleted_at TEXT
         )
-    "#).await.expect("Failed to create test_soft_deletes table");
-    
+    "#,
+    )
+    .await
+    .expect("Failed to create test_soft_deletes table");
+
     println!(" Database setup complete\n");
 
     // =========================================================================
@@ -161,11 +178,11 @@ async fn sqlite_integration_tests() {
         let db = tideorm::require_db().unwrap();
         assert!(db.ping().await.is_ok(), "Database ping failed");
         println!("   ✓ Ping successful");
-        
+
         let result = Database::execute("SELECT 1").await;
         assert!(result.is_ok(), "Raw SQL execution failed");
         println!("   ✓ Raw SQL execution works");
-        
+
         // Verify it's SQLite
         assert_eq!(db.backend(), DatabaseType::SQLite);
         println!("   ✓ Database type is SQLite");
@@ -176,7 +193,7 @@ async fn sqlite_integration_tests() {
     // CRUD TESTS
     // =========================================================================
     println!("📝 Testing: CRUD Operations");
-    
+
     // Create and Find
     {
         let user = TestUser {
@@ -186,17 +203,17 @@ async fn sqlite_integration_tests() {
             age: 25,
             active: true,
         };
-        
+
         let saved_user = user.save().await.expect("Failed to save user");
         assert!(saved_user.id > 0, "User ID should be auto-generated");
         println!("   ✓ Create works (id: {})", saved_user.id);
-        
+
         let found_user = TestUser::find(saved_user.id).await.expect("Find failed");
         assert!(found_user.is_some(), "User should be found");
         assert_eq!(found_user.unwrap().email, "test@example.com");
         println!("   ✓ Find by ID works");
     }
-    
+
     // Update
     {
         let user = TestUser {
@@ -207,16 +224,16 @@ async fn sqlite_integration_tests() {
             active: true,
         };
         let mut saved_user = user.save().await.expect("Failed to save");
-        
+
         saved_user.name = "Updated Name".to_string();
         saved_user.age = 31;
         let updated = saved_user.update().await.expect("Update failed");
-        
+
         assert_eq!(updated.name, "Updated Name");
         assert_eq!(updated.age, 31);
         println!("   ✓ Update works");
     }
-    
+
     // Delete
     {
         let user = TestUser {
@@ -228,9 +245,9 @@ async fn sqlite_integration_tests() {
         };
         let saved_user = user.save().await.expect("Failed to save");
         let user_id = saved_user.id;
-        
+
         saved_user.delete().await.expect("Delete failed");
-        
+
         let found = TestUser::find(user_id).await.expect("Find failed");
         assert!(found.is_none(), "User should be deleted");
         println!("   ✓ Delete works");
@@ -241,10 +258,10 @@ async fn sqlite_integration_tests() {
     // QUERY BUILDER TESTS
     // =========================================================================
     println!("🔍 Testing: Query Builder");
-    
+
     // Clear and seed data
     let _ = Database::execute("DELETE FROM test_users").await;
-    
+
     for i in 1..=10 {
         TestUser {
             id: 0,
@@ -252,9 +269,12 @@ async fn sqlite_integration_tests() {
             name: format!("User {}", i),
             age: 20 + i,
             active: i % 2 == 0,
-        }.save().await.expect("Failed to seed user");
+        }
+        .save()
+        .await
+        .expect("Failed to seed user");
     }
-    
+
     // WHERE conditions
     {
         let active_users = TestUser::query()
@@ -264,7 +284,7 @@ async fn sqlite_integration_tests() {
             .expect("Query failed");
         assert_eq!(active_users.len(), 5, "Should have 5 active users");
         println!("   ✓ where_eq works");
-        
+
         let young_users = TestUser::query()
             .where_lt("age", 25)
             .get()
@@ -272,7 +292,7 @@ async fn sqlite_integration_tests() {
             .expect("Query failed");
         assert_eq!(young_users.len(), 4);
         println!("   ✓ where_lt works");
-        
+
         let range_users = TestUser::query()
             .where_between("age", 23, 27)
             .get()
@@ -281,7 +301,7 @@ async fn sqlite_integration_tests() {
         assert_eq!(range_users.len(), 5);
         println!("   ✓ where_between works");
     }
-    
+
     // Ordering
     {
         let ordered = TestUser::query()
@@ -294,7 +314,7 @@ async fn sqlite_integration_tests() {
         assert_eq!(ordered[0].age, 30);
         println!("   ✓ order_by works");
     }
-    
+
     // Pagination
     {
         let page1 = TestUser::query()
@@ -304,7 +324,7 @@ async fn sqlite_integration_tests() {
             .await
             .expect("Query failed");
         assert_eq!(page1.len(), 3);
-        
+
         let page2 = TestUser::query()
             .order_by("id", Order::Asc)
             .page(2, 3)
@@ -315,12 +335,12 @@ async fn sqlite_integration_tests() {
         assert_ne!(page1[0].id, page2[0].id);
         println!("   ✓ Pagination works");
     }
-    
+
     // Count
     {
         let count = TestUser::query().count().await.expect("Count failed");
         assert_eq!(count, 10);
-        
+
         let active_count = TestUser::query()
             .where_eq("active", true)
             .count()
@@ -329,7 +349,7 @@ async fn sqlite_integration_tests() {
         assert_eq!(active_count, 5);
         println!("   ✓ count works");
     }
-    
+
     // Exists
     {
         let exists = TestUser::query()
@@ -338,7 +358,7 @@ async fn sqlite_integration_tests() {
             .await
             .expect("Exists failed");
         assert!(exists);
-        
+
         let not_exists = TestUser::query()
             .where_eq("email", "nonexistent@example.com")
             .exists()
@@ -347,7 +367,7 @@ async fn sqlite_integration_tests() {
         assert!(!not_exists);
         println!("   ✓ exists works");
     }
-    
+
     // Pattern matching
     {
         let like_users = TestUser::query()
@@ -358,7 +378,7 @@ async fn sqlite_integration_tests() {
         assert_eq!(like_users.len(), 10);
         println!("   ✓ where_like works");
     }
-    
+
     // IN clause
     {
         let in_users = TestUser::query()
@@ -380,15 +400,15 @@ async fn sqlite_integration_tests() {
         // Ages: 21+22+23+24+25+26+27+28+29+30 = 255
         assert_eq!(sum as i64, 255);
         println!("   ✓ sum works");
-        
+
         let avg = TestUser::query().avg("age").await.expect("Avg failed");
         assert!((avg - 25.5).abs() < 0.01);
         println!("   ✓ avg works");
-        
+
         let min = TestUser::query().min("age").await.expect("Min failed");
         assert_eq!(min as i64, 21);
         println!("   ✓ min works");
-        
+
         let max = TestUser::query().max("age").await.expect("Max failed");
         assert_eq!(max as i64, 30);
         println!("   ✓ max works");
@@ -406,7 +426,7 @@ async fn sqlite_integration_tests() {
             .await
             .expect("Bulk delete failed");
         assert_eq!(deleted, 5);
-        
+
         let remaining = TestUser::query().count().await.expect("Count failed");
         assert_eq!(remaining, 5);
         println!("   ✓ Bulk delete works");
@@ -419,16 +439,19 @@ async fn sqlite_integration_tests() {
     println!("🗄️  Testing: Soft Deletes");
     {
         let _ = Database::execute("DELETE FROM test_soft_deletes").await;
-        
+
         // Create records
         for i in 1..=5 {
             TestSoftDelete {
                 id: 0,
                 name: format!("Item {}", i),
                 deleted_at: None,
-            }.save().await.expect("Failed to create");
+            }
+            .save()
+            .await
+            .expect("Failed to create");
         }
-        
+
         // Soft delete some
         let item = TestSoftDelete::query()
             .where_eq("name", "Item 1")
@@ -437,7 +460,7 @@ async fn sqlite_integration_tests() {
             .expect("Query failed")
             .expect("Item not found");
         item.soft_delete().await.expect("Soft delete failed");
-        
+
         let item2 = TestSoftDelete::query()
             .where_eq("name", "Item 2")
             .first()
@@ -445,15 +468,12 @@ async fn sqlite_integration_tests() {
             .expect("Query failed")
             .expect("Item not found");
         item2.soft_delete().await.expect("Soft delete failed");
-        
+
         // Query without trashed
-        let active = TestSoftDelete::query()
-            .get()
-            .await
-            .expect("Query failed");
+        let active = TestSoftDelete::query().get().await.expect("Query failed");
         assert_eq!(active.len(), 3);
         println!("   ✓ Default excludes soft deleted");
-        
+
         // Query with trashed
         let all = TestSoftDelete::query()
             .with_trashed()
@@ -462,7 +482,7 @@ async fn sqlite_integration_tests() {
             .expect("Query failed");
         assert_eq!(all.len(), 5);
         println!("   ✓ with_trashed includes all");
-        
+
         // Query only trashed
         let trashed = TestSoftDelete::query()
             .only_trashed()
@@ -480,7 +500,7 @@ async fn sqlite_integration_tests() {
     println!(" Testing: JSON Operations (JSON1 Extension)");
     {
         let _ = Database::execute("DELETE FROM test_products").await;
-        
+
         // Create products with JSON metadata
         let product = TestProduct {
             id: 0,
@@ -493,7 +513,7 @@ async fn sqlite_integration_tests() {
             })),
         };
         product.save().await.expect("Failed to save product");
-        
+
         let product2 = TestProduct {
             id: 0,
             name: "Phone".to_string(),
@@ -505,7 +525,7 @@ async fn sqlite_integration_tests() {
             })),
         };
         product2.save().await.expect("Failed to save product");
-        
+
         // Test that JSON was stored
         let products = TestProduct::query()
             .where_eq("category", "Electronics")
@@ -515,7 +535,7 @@ async fn sqlite_integration_tests() {
         assert_eq!(products.len(), 2);
         assert!(products[0].metadata.is_some());
         println!("   ✓ JSON storage works");
-        
+
         // Note: Full JSON query operators depend on JSON1 extension
         println!("   ℹ JSON query operators require JSON1 extension");
     }
@@ -527,26 +547,29 @@ async fn sqlite_integration_tests() {
     println!("🎯 Testing: First Methods");
     {
         let _ = Database::execute("DELETE FROM test_users").await;
-        
+
         TestUser {
             id: 0,
             email: "first@example.com".to_string(),
             name: "First".to_string(),
             age: 25,
             active: true,
-        }.save().await.unwrap();
-        
+        }
+        .save()
+        .await
+        .unwrap();
+
         let first = TestUser::query().first().await.expect("First failed");
         assert!(first.is_some());
         println!("   ✓ first works");
-        
+
         let first_or_fail = TestUser::query()
             .where_eq("email", "first@example.com")
             .first_or_fail()
             .await;
         assert!(first_or_fail.is_ok());
         println!("   ✓ first_or_fail works for existing");
-        
+
         let not_found = TestUser::query()
             .where_eq("email", "nonexistent@example.com")
             .first_or_fail()
@@ -565,6 +588,6 @@ async fn sqlite_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_products").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_users").await;
     println!("   ✓ Tables dropped");
-    
+
     println!("\n All SQLite integration tests passed!");
 }

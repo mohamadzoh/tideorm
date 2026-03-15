@@ -10,106 +10,149 @@
 // Core types
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
 // Global database access functions
-pub use crate::database::{db, try_db, has_global_db, require_db};
+pub use crate::database::{db, has_global_db, require_db, try_db};
 pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
-pub use crate::model::{Model, ModelMeta, CreateBuilder, UpdateBuilder, IndexDefinition, OnConflictBuilder, BatchUpdateBuilder, UpdateValue, NestedSave, NestedSaveBuilder};
+pub use crate::callbacks::{CallbackRunner, Callbacks};
+pub use crate::config::{
+    Config, DatabaseType, FileUrlGenerator, PoolConfig, RegisterMigrations, RegisterSeeds,
+    TideConfig,
+};
+pub use crate::model::{
+    BatchUpdateBuilder, CreateBuilder, IndexDefinition, Model, ModelMeta, NestedSave,
+    NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,
+};
 pub use crate::query::{
-    QueryBuilder, Order, JoinType,
-    // OR clause types
-    OrGroup, LogicalOp, OrBranch, OrBranchBuilder,
-    // UNION types
-    UnionType, UnionClause,
-    // Window function types
-    WindowFunction, WindowFunctionType, FrameBound, FrameType,
     // CTE types
     CTE,
-    // Query fragment for consolidate()
-    QueryFragment,
+    FrameBound,
+    FrameType,
     // Join result consolidation
     JoinResultConsolidator,
+    JoinType,
+    LogicalOp,
+    OrBranch,
+    OrBranchBuilder,
+    // OR clause types
+    OrGroup,
+    Order,
+    QueryBuilder,
+    // Query fragment for consolidate()
+    QueryFragment,
+    UnionClause,
+    // UNION types
+    UnionType,
+    // Window function types
+    WindowFunction,
+    WindowFunctionType,
+};
+pub use crate::schema::{
+    ColumnSchema, SchemaGenerator, SchemaWriter, TableSchema, TableSchemaBuilder,
 };
 pub use crate::soft_delete::SoftDelete;
-pub use crate::callbacks::{Callbacks, CallbackRunner};
-pub use crate::config::{TideConfig, Config, PoolConfig, DatabaseType, RegisterMigrations, RegisterSeeds, FileUrlGenerator};
-pub use crate::schema::{SchemaGenerator, TableSchema, ColumnSchema, TableSchemaBuilder, SchemaWriter};
-pub use crate::sync::{SyncModel, RegisterModels};
+pub use crate::sync::{RegisterModels, SyncModel};
 
 // Migrations
 pub use crate::migration::{
-    Migration, Migrator, Schema, ColumnType, DefaultValue,
-    MigrationResult, MigrationInfo, MigrationStatus,
-    async_trait,
+    ColumnType,
+    CompositePrimaryKey,
+    DefaultValue,
+    Migration,
+    MigrationInfo,
+    MigrationResult,
+    MigrationStatus,
+    Migrator,
+    Schema,
     // Multi-column constraint types
-    UniqueConstraint, CompositePrimaryKey,
+    UniqueConstraint,
+    async_trait,
 };
 
 // Relations
 pub use crate::relations::{
     // Basic relations
-    BelongsTo, HasOne, HasMany, 
+    BelongsTo,
+    EagerLoadExt,
+    EagerQueryBuilder,
+    HasMany,
     // Many-to-many relations
-    HasManyThrough, WithPivot,
-    // Self-referencing relations
-    SelfRef, SelfRefMany,
+    HasManyThrough,
+    HasOne,
+    MorphMany,
+    MorphOne,
+    MorphResult,
+    MorphResult3,
+    MorphResult4,
     // Polymorphic relations
-    MorphTo, MorphOne, MorphMany, MorphResult, MorphResult3, MorphResult4,
-    // Extension traits
-    RelationExt, EagerLoadExt, 
-    // Eager loading
-    WithRelations, EagerQueryBuilder, RelationTree, RelationPath,
+    MorphTo,
     // Constraints
     RelationConstraints,
+    // Extension traits
+    RelationExt,
     // Metadata
-    RelationInfo, RelationType,
+    RelationInfo,
     RelationLoader,
+    RelationPath,
+    RelationTree,
+    RelationType,
+    // Self-referencing relations
+    SelfRef,
+    SelfRefMany,
+    WithPivot,
+    // Eager loading
+    WithRelations,
 };
 
 // File Attachments
-pub use crate::attachments::{HasAttachments, FileAttachment, FilesData, AttachmentError};
+pub use crate::attachments::{AttachmentError, FileAttachment, FilesData, HasAttachments};
 
 // Translations
-pub use crate::translations::{HasTranslations, TranslationsData, FieldTranslations, TranslationInput, TranslationError, ApplyTranslations};
+pub use crate::translations::{
+    ApplyTranslations, FieldTranslations, HasTranslations, TranslationError, TranslationInput,
+    TranslationsData,
+};
 
 // Query logging and debugging
-pub use crate::logging::{QueryLogger, LogLevel, QueryLogEntry, QueryTimer, QueryStats, QueryDebugInfo, QueryOperation};
+pub use crate::logging::{
+    LogLevel, QueryDebugInfo, QueryLogEntry, QueryLogger, QueryOperation, QueryStats, QueryTimer,
+};
 
 // Performance profiling
-pub use crate::profiling::{Profiler, ProfileReport, ProfiledQuery, GlobalProfiler, GlobalStats, QueryAnalyzer, QuerySuggestion, QueryComplexity, SuggestionLevel};
+pub use crate::profiling::{
+    GlobalProfiler, GlobalStats, ProfileReport, ProfiledQuery, Profiler, QueryAnalyzer,
+    QueryComplexity, QuerySuggestion, SuggestionLevel,
+};
 
 // Query and statement caching
 pub use crate::cache::{
-    QueryCache, PreparedStatementCache, 
-    CacheConfig, CacheStrategy, CacheStats,
-    PreparedStatementStats, PreparedStatementConfig,
-    CacheKeyBuilder, CacheOptions, CachedStatementInfo, CacheWarmer,
+    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CacheWarmer,
+    CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
+    QueryCache,
 };
 
 // Database seeding
-pub use crate::seeding::{
-    Seed, Seeder, SeedResult, SeedInfo, SeedStatus,
-};
+pub use crate::seeding::{Seed, SeedInfo, SeedResult, SeedStatus, Seeder};
 
 // Validation
-pub use crate::validation::{Validate, ValidationErrors, ValidationRule, ValidationBuilder, Validator, ValidatableValue};
+pub use crate::validation::{
+    ValidatableValue, Validate, ValidationBuilder, ValidationErrors, ValidationRule, Validator,
+};
 
 // Tokenization
-pub use crate::tokenization::{TokenConfig, TokenEncoder, TokenDecoder, Tokenizable};
+pub use crate::tokenization::{TokenConfig, TokenDecoder, TokenEncoder, Tokenizable};
 
 // Full-text search
 pub use crate::fulltext::{
-    FullTextSearch, FullTextSearchBuilder, FullTextConfig, FullTextIndex,
-    SearchMode, SearchResult, HighlightedField, SearchWeights,
-    FullTextIndexConfig, PgFullTextIndexType, HighlightConfig,
-    highlight_text, generate_snippet, pg_headline_sql,
+    FullTextConfig, FullTextIndex, FullTextIndexConfig, FullTextSearch, FullTextSearchBuilder,
+    HighlightConfig, HighlightedField, PgFullTextIndexType, SearchMode, SearchResult,
+    SearchWeights, generate_snippet, highlight_text, pg_headline_sql,
 };
 
 // Strongly-typed columns
 pub use crate::columns::{
-    Column, ColumnCondition, ColumnOperator,
-    ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn,
-    IntoColumnName,
+    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOperator,
+    ColumnOrd, IntoColumnName,
 };
 
 // Derive macro
@@ -119,27 +162,45 @@ pub use tideorm_macros::Model;
 pub use tideorm_macros::model;
 
 // Relation attribute macros
-pub use tideorm_macros::{belongs_to, has_one, has_many};
+pub use tideorm_macros::{belongs_to, has_many, has_one};
 
 // Common external types users will need
 pub use serde::{Deserialize, Serialize};
-pub use serde_json::{json, Value as JsonValue};
+pub use serde_json::{Value as JsonValue, json};
 
 // Date/time types
 pub use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 
 // Other common types
-pub use uuid::Uuid;
 pub use rust_decimal::Decimal;
+pub use uuid::Uuid;
 
 // Type aliases and casting
 pub use crate::types::{
-    Json, Jsonb, Text, DbEnum, Castable,
+    Accessor,
+    AttributeCaster,
+    BigIntArray,
+    BoolArray,
+    CastType,
+    CastValue,
+    Castable,
+    Collection,
+    CommaSeparated,
+    DbEnum,
     // Casting types
-    Encrypted, Hashed, CommaSeparated, Collection, CastType, CastValue,
-    WithDefault, AttributeCaster, Accessor, Mutator,
+    Encrypted,
+    FloatArray,
+    Hashed,
     // Array types
-    IntArray, BigIntArray, TextArray, BoolArray, FloatArray, JsonArray,
+    IntArray,
+    Json,
+    JsonArray,
+    Jsonb,
+    Mutator,
+    Text,
+    TextArray,
     // Unix timestamp types
-    UnixTimestamp, UnixTimestampMillis,
+    UnixTimestamp,
+    UnixTimestampMillis,
+    WithDefault,
 };

@@ -330,7 +330,7 @@ fn generate_iv(key: &[u8], model_name: &str) -> [u8; 16] {
     model_name.hash(&mut hasher);
     // Add some entropy from the record
     let hash1 = hasher.finish();
-    
+
     let mut hasher2 = DefaultHasher::new();
     hash1.hash(&mut hasher2);
     key.iter().rev().collect::<Vec<_>>().hash(&mut hasher2);
@@ -345,7 +345,7 @@ fn generate_iv(key: &[u8], model_name: &str) -> [u8; 16] {
 /// Base64-URL safe encoding (no padding)
 fn base64_url_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    
+
     let mut result = String::new();
     let mut bits = 0u32;
     let mut bit_count = 0;
@@ -554,11 +554,12 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// ```
     fn to_token(&self) -> Result<String> {
         if !Self::tokenization_enabled() {
-            return Err(Error::tokenization("Tokenization is not enabled for this model"));
+            return Err(Error::tokenization(
+                "Tokenization is not enabled for this model",
+            ));
         }
 
-        let encoder = Self::token_encoder()
-            .unwrap_or_else(TokenConfig::get_encoder);
+        let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
         encoder(self.token_primary_key(), Self::token_model_name())
     }
@@ -584,11 +585,12 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// ```
     fn tokenize_id(id: i64) -> Result<String> {
         if !Self::tokenization_enabled() {
-            return Err(Error::tokenization("Tokenization is not enabled for this model"));
+            return Err(Error::tokenization(
+                "Tokenization is not enabled for this model",
+            ));
         }
 
-        let encoder = Self::token_encoder()
-            .unwrap_or_else(TokenConfig::get_encoder);
+        let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
         encoder(id, Self::token_model_name())
     }
@@ -628,11 +630,12 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// ```
     fn decode_token(token: &str) -> Result<i64> {
         if !Self::tokenization_enabled() {
-            return Err(Error::tokenization("Tokenization is not enabled for this model"));
+            return Err(Error::tokenization(
+                "Tokenization is not enabled for this model",
+            ));
         }
 
-        let decoder = Self::token_decoder()
-            .unwrap_or_else(TokenConfig::get_decoder);
+        let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
 
         decoder(token, Self::token_model_name())
             .ok_or_else(|| Error::invalid_token("Failed to decode token"))
@@ -640,8 +643,8 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Regenerate a new token for this record
     ///
-    /// Creates a fresh token. Note: With the default encoder, 
-    /// tokens for the same record will be identical unless the 
+    /// Creates a fresh token. Note: With the default encoder,
+    /// tokens for the same record will be identical unless the
     /// key or encoder changes.
     ///
     /// # Example
@@ -731,7 +734,7 @@ mod tests {
     fn test_wrong_model_fails() {
         let record_id = 42i64;
         let token = default_encode(record_id, "User").unwrap();
-        
+
         // Trying to decode with different model should fail
         let decoded = default_decode(&token, "Product");
         assert_eq!(decoded, None);
@@ -741,14 +744,14 @@ mod tests {
     fn test_tampered_token_fails() {
         let record_id = 42i64;
         let token = default_encode(record_id, "User").unwrap();
-        
+
         // Tamper with the token
         let mut chars: Vec<char> = token.chars().collect();
         if let Some(c) = chars.get_mut(10) {
             *c = if *c == 'A' { 'B' } else { 'A' };
         }
         let tampered: String = chars.into_iter().collect();
-        
+
         // Should fail to decode
         let decoded = default_decode(&tampered, "User");
         assert_eq!(decoded, None);
@@ -770,18 +773,20 @@ mod tests {
     fn test_token_is_url_safe() {
         let record_id = 999999999i64;
         let token = default_encode(record_id, "User").unwrap();
-        
+
         // Should only contain URL-safe characters
-        assert!(token.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '-' || c == '_'
-        }));
+        assert!(
+            token
+                .chars()
+                .all(|c| { c.is_ascii_alphanumeric() || c == '-' || c == '_' })
+        );
     }
 
     #[test]
     fn test_different_ids_different_tokens() {
         let token1 = default_encode(1, "User").unwrap();
         let token2 = default_encode(2, "User").unwrap();
-        
+
         assert_ne!(token1, token2);
     }
 
@@ -789,7 +794,7 @@ mod tests {
     fn test_same_id_same_token() {
         let token1 = default_encode(42, "User").unwrap();
         let token2 = default_encode(42, "User").unwrap();
-        
+
         assert_eq!(token1, token2);
     }
 
@@ -797,10 +802,10 @@ mod tests {
     fn test_xor_encrypt_decrypt() {
         let data = b"test data";
         let key = b"secret key";
-        
+
         let encrypted = xor_encrypt(data, key);
         let decrypted = xor_encrypt(&encrypted, key);
-        
+
         assert_eq!(data.to_vec(), decrypted);
     }
 
@@ -808,7 +813,7 @@ mod tests {
     fn test_token_config_encode_decode() {
         let token = TokenConfig::encode(123, "TestModel").unwrap();
         let decoded = TokenConfig::decode(&token, "TestModel");
-        
+
         assert_eq!(decoded, Some(123));
     }
 }

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 // =============================================================================
@@ -100,16 +100,12 @@ fn bench_json_operations(c: &mut Criterion) {
             "age": 30,
             "items": [1, 2, 3, 4, 5]
         });
-        b.iter(|| {
-            serde_json::to_string(&obj).unwrap()
-        });
+        b.iter(|| serde_json::to_string(&obj).unwrap());
     });
 
     c.bench_function("json_deserialization", |b| {
         let json_str = r#"{"name":"test","age":30,"items":[1,2,3,4,5]}"#;
-        b.iter(|| {
-            serde_json::from_str::<serde_json::Value>(black_box(json_str)).unwrap()
-        });
+        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(json_str)).unwrap());
     });
 }
 
@@ -147,22 +143,18 @@ fn bench_numeric_operations(c: &mut Criterion) {
     });
 
     c.bench_function("decimal_creation", |b| {
-        b.iter(|| {
-            Decimal::from(black_box(123456789i64))
-        });
+        b.iter(|| Decimal::from(black_box(123456789i64)));
     });
 
     c.bench_function("decimal_to_string", |b| {
         let dec = Decimal::from(123456789i64);
-        b.iter(|| {
-            dec.to_string()
-        });
+        b.iter(|| dec.to_string());
     });
 }
 
 fn bench_iteration_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("iteration");
-    
+
     for size in [10, 100, 1000].iter() {
         group.bench_with_input(BenchmarkId::new("simple_loop", size), size, |b, &size| {
             b.iter(|| {
@@ -258,9 +250,7 @@ fn bench_hash_operations(c: &mut Criterion) {
         for i in 0..100 {
             map.insert(i, i * 2);
         }
-        b.iter(|| {
-            map.get(&black_box(50))
-        });
+        b.iter(|| map.get(&black_box(50)));
     });
 
     c.bench_function("hashmap_contains", |b| {
@@ -268,9 +258,7 @@ fn bench_hash_operations(c: &mut Criterion) {
         for i in 0..100 {
             map.insert(i, i * 2);
         }
-        b.iter(|| {
-            map.contains_key(&black_box(50))
-        });
+        b.iter(|| map.contains_key(&black_box(50)));
     });
 }
 
@@ -278,24 +266,18 @@ fn bench_timestamp_operations(c: &mut Criterion) {
     use chrono::Utc;
 
     c.bench_function("utc_now", |b| {
-        b.iter(|| {
-            Utc::now()
-        });
+        b.iter(|| Utc::now());
     });
 
     c.bench_function("timestamp_comparison", |b| {
         let time1 = Utc::now();
         let time2 = Utc::now();
-        b.iter(|| {
-            black_box(time1) < black_box(time2)
-        });
+        b.iter(|| black_box(time1) < black_box(time2));
     });
 
     c.bench_function("timestamp_format", |b| {
         let now = Utc::now();
-        b.iter(|| {
-            now.to_rfc3339()
-        });
+        b.iter(|| now.to_rfc3339());
     });
 }
 

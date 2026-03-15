@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 /// Index definition for database schema generation
-/// 
+///
 /// Supports both regular and unique indexes with optional custom names.
-/// 
+///
 /// # Example (in macro)
 /// ```ignore
 /// #[derive(Model)]
@@ -46,16 +46,16 @@ impl IndexDefinition {
             unique,
         }
     }
-    
+
     /// Parse index definitions from the macro format
-    /// 
+    ///
     /// Format: "field1", "field1,field2", or "name:field1,field2"
     /// Multiple indexes separated by semicolons: "email;name:first_name,last_name"
     pub fn parse(_table_name: &str, input: &str, unique: bool) -> Vec<Self> {
         if input.is_empty() {
             return vec![];
         }
-        
+
         input
             .split(';')
             .filter(|s| !s.trim().is_empty())
@@ -70,13 +70,13 @@ impl IndexDefinition {
                     let col_part = cols.replace(',', "_").replace(' ', "");
                     (format!("{}_{}", prefix, col_part), cols)
                 };
-                
+
                 let columns: Vec<String> = columns
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
-                
+
                 IndexDefinition::new(name, columns, unique)
             })
             .collect()
@@ -93,109 +93,109 @@ use crate::query::QueryBuilder;
 pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// The type of the primary key
     type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + std::fmt::Display + 'static;
-    
+
     /// Returns the table name for this model
     fn table_name() -> &'static str;
-    
+
     /// Returns the primary key column name
     fn primary_key_name() -> &'static str;
-    
+
     /// Returns all column names in the database
     fn column_names() -> &'static [&'static str];
-    
+
     /// Returns all field names in the struct
     fn field_names() -> &'static [&'static str];
-    
+
     // =========================================================================
     // CONFIGURATION METHODS (can be overridden via macro attributes)
     // =========================================================================
-    
+
     /// Returns hidden attributes that should not be exposed in API responses
     /// This applies to both model fields and file attachment fields
     fn hidden_attributes() -> Vec<&'static str> {
         vec!["deleted_at"]
     }
-    
+
     /// Returns the default presenter name
     fn default_presenter() -> &'static str {
         "default"
     }
-    
+
     /// Returns searchable fields for full-text search
     fn searchable_fields() -> Vec<&'static str> {
         vec![]
     }
-    
+
     /// Returns the default order for queries
     fn default_order() -> Vec<(&'static str, &'static str)> {
         vec![("id", "DESC")]
     }
-    
+
     /// Returns fields for option set label
     fn option_set_label() -> &'static str {
         "id"
     }
-    
+
     /// Returns fields to search in option sets
     fn option_set_search_fields() -> Vec<&'static str> {
         vec![]
     }
-    
+
     /// Returns translatable fields (for models with translations JSONB column)
     fn translatable_fields() -> Vec<&'static str> {
         vec![]
     }
-    
+
     /// Returns allowed languages for translations
-    /// 
+    ///
     /// By default, returns languages from global TideConfig.
     /// Override in your model to specify model-specific languages.
     fn allowed_languages() -> Vec<String> {
         crate::config::Config::get_languages()
     }
-    
+
     /// Returns the fallback language
-    /// 
+    ///
     /// By default, returns fallback from global TideConfig.
     /// Override in your model to specify a model-specific fallback.
     fn fallback_language() -> String {
         crate::config::Config::get_fallback_language()
     }
-    
+
     /// Check if model has translations support
     fn has_translations() -> bool {
         !Self::translatable_fields().is_empty()
     }
-    
+
     /// Returns single file attachment relations (hasOne)
     fn has_one_attached_file() -> Vec<&'static str> {
         vec![]
     }
-    
+
     /// Returns multiple file attachment relations (hasMany)
     fn has_many_attached_files() -> Vec<&'static str> {
         vec![]
     }
-    
+
     /// Returns all file relation names
     fn files_relations() -> Vec<&'static str> {
         let mut relations = Self::has_one_attached_file();
         relations.extend(Self::has_many_attached_files());
         relations
     }
-    
+
     /// Check if model has file attachments support
     fn has_file_attachments() -> bool {
         !Self::files_relations().is_empty()
     }
-    
+
     /// Returns the file URL generator for this model
-    /// 
+    ///
     /// Override this method to customize URL generation for a specific model.
     /// By default, uses the global file URL generator from TideConfig.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,ignore
     /// impl ModelMeta for Product {
     ///     // ... other implementations ...
@@ -215,17 +215,17 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn file_url_generator() -> crate::config::FileUrlGenerator {
         crate::config::Config::get_file_url_generator()
     }
-    
+
     /// Generate a URL for a file attachment using this model's URL generator
-    /// 
+    ///
     /// This is a convenience method that uses the model's `file_url_generator()`.
-    /// 
+    ///
     /// # Arguments
     /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
     /// * `file` - The file attachment with metadata
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```rust,ignore
     /// let file = FileAttachment::new("products/123/image.jpg");
     /// let url = Product::generate_file_url("thumbnail", &file);
@@ -235,27 +235,27 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn generate_file_url(field_name: &str, file: &crate::attachments::FileAttachment) -> String {
         Self::file_url_generator()(field_name, file)
     }
-    
+
     /// Check if model supports soft deletes
     fn soft_delete_enabled() -> bool {
         false
     }
-    
+
     /// Check if model has timestamps (created_at, updated_at)
-    /// 
+    ///
     /// When true, automatically:
     /// - Sets `created_at` to now on save()
     /// - Sets `updated_at` to now on save() and update()
     fn has_timestamps() -> bool {
         false
     }
-    
+
     // =========================================================================
     // INDEX DEFINITIONS
     // =========================================================================
-    
+
     /// Returns regular index definitions for this model
-    /// 
+    ///
     /// Override this in the macro to define indexes:
     /// ```ignore
     /// #[tide(index = "email;name:first_name,last_name")]
@@ -263,9 +263,9 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn indexes() -> Vec<IndexDefinition> {
         vec![]
     }
-    
+
     /// Returns unique index definitions for this model
-    /// 
+    ///
     /// Override this in the macro to define unique indexes:
     /// ```ignore
     /// #[tide(unique_index = "tenant_id,email")]
@@ -273,23 +273,23 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn unique_indexes() -> Vec<IndexDefinition> {
         vec![]
     }
-    
+
     /// Returns all index definitions (both regular and unique)
     fn all_indexes() -> Vec<IndexDefinition> {
         let mut all = Self::indexes();
         all.extend(Self::unique_indexes());
         all
     }
-    
+
     /// Check if model has any index definitions
     fn has_indexes() -> bool {
         !Self::indexes().is_empty() || !Self::unique_indexes().is_empty()
     }
-    
+
     // =========================================================================
     // TOKENIZATION
     // =========================================================================
-    
+
     /// Check if tokenization is enabled for this model
     ///
     /// Override this to enable tokenization via `#[tide(tokenize)]` attribute.
@@ -309,7 +309,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn tokenization_enabled() -> bool {
         false
     }
-    
+
     /// Returns the token encoder for this model
     ///
     /// Override to provide model-specific token encoding logic.
@@ -330,7 +330,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn token_encoder() -> Option<crate::tokenization::TokenEncoder> {
         None
     }
-    
+
     /// Returns the token decoder for this model
     ///
     /// Override to provide model-specific token decoding logic.
@@ -378,10 +378,12 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 /// user.delete().await?;
 /// ```
 #[async_trait]
-pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize + for<'de> serde::Deserialize<'de> {
+pub trait Model:
+    ModelMeta + crate::internal::InternalModel + serde::Serialize + for<'de> serde::Deserialize<'de>
+{
     /// Get the primary key value of this instance
     fn primary_key(&self) -> Self::PrimaryKey;
-    
+
     /// Get the global database connection
     ///
     /// This is a convenience method to access the database from within model code.
@@ -395,7 +397,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     fn db() -> crate::error::Result<&'static crate::database::Database> {
         crate::database::require_db()
     }
-    
+
     /// Get the global database connection from an instance
     ///
     /// # Example
@@ -406,11 +408,11 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     fn database(&self) -> crate::error::Result<&'static crate::database::Database> {
         crate::database::require_db()
     }
-    
+
     // =========================================================================
     // STATIC METHODS (Class-level operations) - Use global connection
     // =========================================================================
-    
+
     /// Get all records from the table
     ///
     /// # Example
@@ -421,9 +423,12 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::find_all::<Self>(crate::database::require_db()?.__internal_connection()).await
+        crate::internal::QueryExecutor::find_all::<Self>(
+            crate::database::require_db()?.__internal_connection(),
+        )
+        .await
     }
-    
+
     /// Start a query builder for this model
     ///
     /// # Example
@@ -440,7 +445,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         QueryBuilder::new()
     }
-    
+
     /// Count all records (uses efficient SQL COUNT)
     ///
     /// # Example
@@ -451,9 +456,13 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::count::<Self>(crate::database::require_db()?.__internal_connection(), None).await
+        crate::internal::QueryExecutor::count::<Self>(
+            crate::database::require_db()?.__internal_connection(),
+            None,
+        )
+        .await
     }
-    
+
     /// Check if any records exist
     ///
     /// # Example
@@ -468,11 +477,11 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         Ok(Self::count().await? > 0)
     }
-    
+
     // =========================================================================
     // BATCH OPERATIONS
     // =========================================================================
-    
+
     /// Insert multiple records at once (efficient batch insert)
     ///
     /// Uses a single multi-row INSERT statement for efficiency (O(1) round trips).
@@ -497,13 +506,13 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         if models.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         let conn = crate::database::require_db()?.__internal_connection();
-        
+
         // insert_many handles MySQL/SQLite fallback internally
         crate::internal::QueryExecutor::insert_many::<Self>(conn, models).await
     }
-    
+
     /// Insert multiple records and return the inserted models with their IDs
     ///
     /// Uses INSERT ... RETURNING on PostgreSQL and SQLite 3.35+.
@@ -533,14 +542,14 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         if models.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // For now, use the regular insert_all
         // When RETURNING support is needed, the database can be checked:
         // let db = crate::database::db();
         // if db.backend().supports_returning() { ... }
         Self::insert_all(models).await
     }
-    
+
     /// Insert multiple records efficiently
     ///
     /// This is an alias for `insert_all` with improved empty-array handling.
@@ -567,7 +576,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         }
         Self::insert_all(models).await
     }
-    
+
     /// Insert or update a record (upsert)
     ///
     /// If a conflict occurs on the specified column(s), the record will be updated.
@@ -587,13 +596,10 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     /// let config = Config { tenant_id: 1, key: "theme".into(), value: "dark".into() };
     /// let config = Config::insert_or_update(config, vec!["tenant_id", "key"]).await?;
     /// ```
-    async fn insert_or_update(
-        model: Self,
-        conflict_columns: Vec<&str>,
-    ) -> Result<Self>
+    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>
     where
         Self: Sized;
-    
+
     /// Create an on-conflict builder for advanced upsert scenarios
     ///
     /// This provides more control over the upsert behavior, allowing you to
@@ -617,9 +623,14 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        OnConflictBuilder::new(conflict_columns.into_iter().map(|s| s.to_string()).collect())
+        OnConflictBuilder::new(
+            conflict_columns
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
     }
-    
+
     /// Update multiple records matching conditions
     ///
     /// Returns the number of rows affected.
@@ -639,7 +650,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         BatchUpdateBuilder::new()
     }
-    
+
     /// Execute a closure within a database transaction
     ///
     /// This provides a model-centric way to run transactions.
@@ -659,13 +670,16 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn transaction<F, T>(f: F) -> Result<T>
     where
         Self: Sized,
-        F: for<'c> FnOnce(&'c crate::database::Transaction)
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>> + Send,
+        F: for<'c> FnOnce(
+                &'c crate::database::Transaction,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>,
+            > + Send,
         T: Send,
     {
         crate::database::require_db()?.transaction(f).await
     }
-    
+
     /// Get the first record
     ///
     /// # Example
@@ -678,9 +692,12 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::first::<Self>(crate::database::require_db()?.__internal_connection()).await
+        crate::internal::QueryExecutor::first::<Self>(
+            crate::database::require_db()?.__internal_connection(),
+        )
+        .await
     }
-    
+
     /// Get the last record (by primary key descending)
     ///
     /// # Example
@@ -691,9 +708,12 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     where
         Self: Sized,
     {
-        crate::internal::QueryExecutor::last::<Self>(crate::database::require_db()?.__internal_connection()).await
+        crate::internal::QueryExecutor::last::<Self>(
+            crate::database::require_db()?.__internal_connection(),
+        )
+        .await
     }
-    
+
     /// Paginate records
     ///
     /// # Example
@@ -705,20 +725,25 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         Self: Sized,
     {
         let offset = (page.saturating_sub(1)) * per_page;
-        crate::internal::QueryExecutor::paginate::<Self>(crate::database::require_db()?.__internal_connection(), per_page, offset).await
+        crate::internal::QueryExecutor::paginate::<Self>(
+            crate::database::require_db()?.__internal_connection(),
+            per_page,
+            offset,
+        )
+        .await
     }
-    
+
     // =========================================================================
     // METHODS IMPLEMENTED BY MACRO (need access to primary key type)
     // These are declared here but implemented by the derive macro
     // =========================================================================
-    
+
     /// Find record by primary key
     /// Implemented by the derive macro
     async fn find(id: Self::PrimaryKey) -> Result<Option<Self>>
     where
         Self: Sized;
-    
+
     /// Find record by primary key or fail with NotFound error
     async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self>
     where
@@ -726,10 +751,15 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         let id_display = format!("{}", id);
         Self::find(id).await?.ok_or_else(|| {
-            Error::not_found(format!("{} with {} = {} not found", Self::table_name(), Self::primary_key_name(), id_display))
+            Error::not_found(format!(
+                "{} with {} = {} not found",
+                Self::table_name(),
+                Self::primary_key_name(),
+                id_display
+            ))
         })
     }
-    
+
     /// Check if record exists by ID
     async fn exists(id: Self::PrimaryKey) -> Result<bool>
     where
@@ -737,23 +767,23 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         Ok(Self::find(id).await?.is_some())
     }
-    
+
     /// Create a new record from model instance
     /// Implemented by the derive macro
     async fn create(model: Self) -> Result<Self>
     where
         Self: Sized;
-    
+
     /// Delete record by ID
     /// Implemented by the derive macro
     async fn destroy(id: Self::PrimaryKey) -> Result<u64>
     where
         Self: Sized;
-    
+
     // =========================================================================
     // INSTANCE METHODS (Record-level operations) - Use global connection
     // =========================================================================
-    
+
     /// Save this record to the database (insert)
     ///
     /// # Example
@@ -764,7 +794,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn save(self) -> Result<Self>
     where
         Self: Sized;
-    
+
     /// Update this record in the database
     ///
     /// # Example
@@ -775,7 +805,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn update(self) -> Result<Self>
     where
         Self: Sized;
-    
+
     /// Delete this instance from the database
     ///
     /// # Example
@@ -786,14 +816,14 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     async fn delete(self) -> Result<u64>
     where
         Self: Sized;
-    
+
     /// Internal method for insert with conflict handling
     /// This is implemented by the derive macro and should not be called directly
     #[doc(hidden)]
     async fn __insert_with_conflict(model: Self, builder: OnConflictBuilder<Self>) -> Result<Self>
     where
         Self: Sized;
-    
+
     /// Reload the instance from database
     ///
     /// # Example
@@ -806,7 +836,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         Self::find_or_fail(self.primary_key()).await
     }
-    
+
     /// Check if this record is new (not yet saved)
     fn is_new(&self) -> bool {
         if self.primary_key().to_string().is_empty() {
@@ -814,11 +844,11 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         }
         false
     }
-    
+
     // =========================================================================
     // JSON SERIALIZATION
     // =========================================================================
-    
+
     /// Convert model to JSON with options
     ///
     /// This method provides a comprehensive JSON representation that:
@@ -848,28 +878,30 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         let opts = options.unwrap_or_default();
         let fallback = Self::fallback_language();
-        let current_language = opts.get("language")
+        let current_language = opts
+            .get("language")
             .map(|s| s.as_str())
             .unwrap_or(&fallback);
-        let _current_presenter = opts.get("presenter")
+        let _current_presenter = opts
+            .get("presenter")
             .map(|s| s.as_str())
             .unwrap_or(Self::default_presenter());
-        
+
         let hidden = Self::hidden_attributes();
         let translatable = Self::translatable_fields();
         let file_relations = Self::files_relations();
-        
+
         // Serialize the model to JSON
         let mut json = match serde_json::to_value(self) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => return serde_json::json!({}),
         };
-        
+
         // Remove hidden attributes
         for attr in &hidden {
             json.remove(*attr);
         }
-        
+
         // Apply translations if model has translations support
         if Self::has_translations() {
             if let Some(translations) = json.get("translations").cloned() {
@@ -878,7 +910,8 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                         if let Some(field_trans) = trans_obj.get(*field) {
                             if let Some(field_obj) = field_trans.as_object() {
                                 // Try to get the current language, fallback if not found
-                                if let Some(value) = field_obj.get(current_language)
+                                if let Some(value) = field_obj
+                                    .get(current_language)
                                     .or_else(|| field_obj.get(&fallback))
                                 {
                                     json.insert(field.to_string(), value.clone());
@@ -891,7 +924,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                 json.remove("translations");
             }
         }
-        
+
         // Flatten file attachments to root level
         if Self::has_file_attachments() {
             let url_generator = Self::file_url_generator();
@@ -900,23 +933,28 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                     for relation in &file_relations {
                         if let Some(file_data) = files_obj.get(*relation) {
                             // Process file data to remove hidden attributes and add URLs
-                            let processed = Self::process_file_for_json(relation, file_data, &hidden, url_generator);
+                            let processed = Self::process_file_for_json(
+                                relation,
+                                file_data,
+                                &hidden,
+                                url_generator,
+                            );
                             json.insert(relation.to_string(), processed);
                         }
                     }
                 }
             }
         }
-        
+
         serde_json::Value::Object(json)
     }
-    
+
     /// Process file data for JSON output, removing hidden attributes and adding URLs
-    /// 
+    ///
     /// This method:
     /// - Removes hidden attributes from file data
     /// - Adds a `url` field with the full URL generated from the file attachment
-    /// 
+    ///
     /// # Arguments
     /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
     /// * `file_data` - The JSON value containing file data
@@ -938,7 +976,11 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                     }
                 }
                 // Add URL field by deserializing the file attachment
-                if let Ok(file_attachment) = serde_json::from_value::<crate::attachments::FileAttachment>(serde_json::Value::Object(obj.clone())) {
+                if let Ok(file_attachment) =
+                    serde_json::from_value::<crate::attachments::FileAttachment>(
+                        serde_json::Value::Object(obj.clone()),
+                    )
+                {
                     let url = url_generator(field_name, &file_attachment);
                     cleaned.insert("url".to_string(), serde_json::Value::String(url));
                 }
@@ -947,20 +989,25 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
             serde_json::Value::Array(arr) => {
                 let cleaned: Vec<serde_json::Value> = arr
                     .iter()
-                    .map(|item| Self::process_file_for_json(field_name, item, hidden_attrs, url_generator))
+                    .map(|item| {
+                        Self::process_file_for_json(field_name, item, hidden_attrs, url_generator)
+                    })
                     .collect();
                 serde_json::Value::Array(cleaned)
             }
             other => other.clone(),
         }
     }
-    
+
     /// Convert a collection of models to JSON array
     ///
     /// # Arguments
     /// * `models` - Vector of models to convert
     /// * `options` - Optional HashMap with "language" and "presenter" keys
-    fn collection_to_json(models: Vec<Self>, options: Option<HashMap<String, String>>) -> serde_json::Value
+    fn collection_to_json(
+        models: Vec<Self>,
+        options: Option<HashMap<String, String>>,
+    ) -> serde_json::Value
     where
         Self: serde::Serialize,
     {
@@ -970,7 +1017,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
             .collect();
         serde_json::Value::Array(items)
     }
-    
+
     /// Convert model to HashMap (legacy support)
     fn to_hash_map(&self) -> HashMap<String, String>
     where
@@ -978,7 +1025,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
     {
         let json = self.to_json(None);
         let mut map = HashMap::new();
-        
+
         if let Some(obj) = json.as_object() {
             for (key, value) in obj {
                 if key != "params" {
@@ -993,14 +1040,14 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                 }
             }
         }
-        
+
         map
     }
-    
+
     // =========================================================================
     // TRANSLATION METHODS (for models with 'translations' JSONB column)
     // =========================================================================
-    
+
     /// Load translations for a specific language into model fields
     fn load_language_translations(&mut self, _language: &str) -> std::result::Result<(), String> {
         if !Self::has_translations() {
@@ -1009,7 +1056,7 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         // Default implementation - override in models with translations
         Ok(())
     }
-    
+
     /// Load all translations for all languages into model fields
     fn load_all_translations(&mut self) -> std::result::Result<(), String> {
         if !Self::has_translations() {
@@ -1018,16 +1065,18 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         // Default implementation - override in models with translations
         Ok(())
     }
-    
+
     /// Extract translations from data HashMap for saving
-    fn extract_translations(data: &mut HashMap<String, serde_json::Value>) -> std::result::Result<serde_json::Value, String> {
+    fn extract_translations(
+        data: &mut HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, String> {
         if !Self::has_translations() {
             return Ok(serde_json::json!({}));
         }
-        
+
         let mut translations = serde_json::Map::new();
         let translatable = Self::translatable_fields();
-        
+
         for field in translatable {
             if let Some(value) = data.get(field) {
                 if value.is_object() {
@@ -1036,54 +1085,64 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                 }
             }
         }
-        
+
         Ok(serde_json::Value::Object(translations))
     }
-    
+
     // =========================================================================
     // FILE ATTACHMENT METHODS (for models with 'files' JSONB column)
     // =========================================================================
-    
+
     /// Get files from the JSONB 'files' column
-    fn get_files_attribute(&self) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
+    fn get_files_attribute(
+        &self,
+    ) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
         if !Self::has_file_attachments() {
             return Ok(HashMap::new());
         }
         // Default implementation - override in models with files JSONB column
         Ok(HashMap::new())
     }
-    
+
     /// Set files to the JSONB 'files' column
-    fn set_files_attribute(&mut self, _files: HashMap<String, serde_json::Value>) -> std::result::Result<(), String> {
+    fn set_files_attribute(
+        &mut self,
+        _files: HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<(), String> {
         if !Self::has_file_attachments() {
             return Ok(());
         }
         // Default implementation - override in models with files JSONB column
         Ok(())
     }
-    
+
     /// Attach a file to a specific relation type
     ///
     /// # Arguments
     /// * `relation_type` - The relation type (e.g., "thumbnail", "images")
     /// * `file_key` - The file key/path to attach
-    fn attach_file(&mut self, relation_type: &str, file_key: &str) -> std::result::Result<(), String> {
+    fn attach_file(
+        &mut self,
+        relation_type: &str,
+        file_key: &str,
+    ) -> std::result::Result<(), String> {
         if !Self::has_file_attachments() {
             return Err("Model does not support file attachments".to_string());
         }
-        
+
         let mut files = self.get_files_attribute()?;
-        
+
         let file_metadata = serde_json::json!({
             "key": file_key,
             "filename": file_key.split('/').next_back().unwrap_or(file_key),
             "created_at": chrono::Utc::now().to_rfc3339(),
         });
-        
+
         if Self::has_one_attached_file().contains(&relation_type) {
             files.insert(relation_type.to_string(), file_metadata);
         } else if Self::has_many_attached_files().contains(&relation_type) {
-            let mut array = files.get(relation_type)
+            let mut array = files
+                .get(relation_type)
                 .and_then(|v| v.as_array().cloned())
                 .unwrap_or_default();
             array.push(file_metadata);
@@ -1091,36 +1150,47 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         } else {
             return Err(format!("Unknown file relation: {}", relation_type));
         }
-        
+
         self.set_files_attribute(files)?;
         Ok(())
     }
-    
+
     /// Attach multiple files to a relation type (hasMany only)
-    fn attach_files(&mut self, relation_type: &str, file_keys: Vec<&str>) -> std::result::Result<(), String> {
+    fn attach_files(
+        &mut self,
+        relation_type: &str,
+        file_keys: Vec<&str>,
+    ) -> std::result::Result<(), String> {
         if !Self::has_file_attachments() {
             return Err("Model does not support file attachments".to_string());
         }
-        
+
         if !Self::has_many_attached_files().contains(&relation_type) {
-            return Err(format!("Relation '{}' is not a hasMany relation", relation_type));
+            return Err(format!(
+                "Relation '{}' is not a hasMany relation",
+                relation_type
+            ));
         }
-        
+
         for file_key in file_keys {
             self.attach_file(relation_type, file_key)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Detach a file from a relation type
-    fn detach_file(&mut self, relation_type: &str, file_key: Option<&str>) -> std::result::Result<(), String> {
+    fn detach_file(
+        &mut self,
+        relation_type: &str,
+        file_key: Option<&str>,
+    ) -> std::result::Result<(), String> {
         if !Self::has_file_attachments() {
             return Err("Model does not support file attachments".to_string());
         }
-        
+
         let mut files = self.get_files_attribute()?;
-        
+
         if let Some(key) = file_key {
             if Self::has_one_attached_file().contains(&relation_type) {
                 if let Some(current) = files.get(relation_type) {
@@ -1130,11 +1200,15 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
                 }
             } else if Self::has_many_attached_files().contains(&relation_type) {
                 if let Some(array) = files.get(relation_type).and_then(|v| v.as_array()) {
-                    let filtered: Vec<serde_json::Value> = array.iter()
+                    let filtered: Vec<serde_json::Value> = array
+                        .iter()
                         .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(key))
                         .cloned()
                         .collect();
-                    files.insert(relation_type.to_string(), serde_json::Value::Array(filtered));
+                    files.insert(
+                        relation_type.to_string(),
+                        serde_json::Value::Array(filtered),
+                    );
                 }
             }
         } else if Self::has_one_attached_file().contains(&relation_type) {
@@ -1142,19 +1216,23 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
         } else if Self::has_many_attached_files().contains(&relation_type) {
             files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
         }
-        
+
         self.set_files_attribute(files)?;
         Ok(())
     }
-    
+
     /// Sync files for a relation type (replaces all existing files)
-    fn sync_files(&mut self, relation_type: &str, file_keys: Vec<&str>) -> std::result::Result<(), String> {
+    fn sync_files(
+        &mut self,
+        relation_type: &str,
+        file_keys: Vec<&str>,
+    ) -> std::result::Result<(), String> {
         if !Self::has_file_attachments() {
             return Err("Model does not support file attachments".to_string());
         }
-        
+
         let mut files = self.get_files_attribute()?;
-        
+
         if file_keys.is_empty() {
             if Self::has_one_attached_file().contains(&relation_type) {
                 files.insert(relation_type.to_string(), serde_json::Value::Null);
@@ -1169,37 +1247,45 @@ pub trait Model: ModelMeta + crate::internal::InternalModel + serde::Serialize +
             });
             files.insert(relation_type.to_string(), file_metadata);
         } else if Self::has_many_attached_files().contains(&relation_type) {
-            let file_array: Vec<serde_json::Value> = file_keys.iter().map(|key| {
-                serde_json::json!({
-                    "key": key,
-                    "filename": key.split('/').next_back().unwrap_or(key),
-                    "created_at": chrono::Utc::now().to_rfc3339(),
+            let file_array: Vec<serde_json::Value> = file_keys
+                .iter()
+                .map(|key| {
+                    serde_json::json!({
+                        "key": key,
+                        "filename": key.split('/').next_back().unwrap_or(key),
+                        "created_at": chrono::Utc::now().to_rfc3339(),
+                    })
                 })
-            }).collect();
-            files.insert(relation_type.to_string(), serde_json::Value::Array(file_array));
+                .collect();
+            files.insert(
+                relation_type.to_string(),
+                serde_json::Value::Array(file_array),
+            );
         } else {
             return Err(format!("Unknown file relation: {}", relation_type));
         }
-        
+
         self.set_files_attribute(files)?;
         Ok(())
     }
-    
+
     /// Extract files from data HashMap for saving
-    fn extract_files(data: &mut HashMap<String, serde_json::Value>) -> std::result::Result<serde_json::Value, String> {
+    fn extract_files(
+        data: &mut HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, String> {
         if !Self::has_file_attachments() {
             return Ok(serde_json::json!({}));
         }
-        
+
         let mut files = serde_json::Map::new();
         let file_relations = Self::files_relations();
-        
+
         for relation in file_relations {
             if let Some(value) = data.remove(relation) {
                 files.insert(relation.to_string(), value);
             }
         }
-        
+
         Ok(serde_json::Value::Object(files))
     }
 }
@@ -1218,7 +1304,7 @@ impl<M: ModelMeta> CreateBuilder<M> {
             values: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Set a field value
     pub fn set(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
         self.values.insert(field.to_string(), value.into());
@@ -1246,13 +1332,13 @@ impl<M: Model> UpdateBuilder<M> {
             changes: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Set a field to a new value
     pub fn set(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
         self.changes.insert(field.to_string(), value.into());
         self
     }
-    
+
     /// Save the changes to the database
     pub async fn save(self) -> Result<M> {
         self.model.update().await
@@ -1260,7 +1346,7 @@ impl<M: Model> UpdateBuilder<M> {
 }
 
 /// Builder for on-conflict (upsert) operations
-/// 
+///
 /// Provides fine-grained control over what happens when a conflict occurs during insert.
 ///
 /// # Example
@@ -1295,23 +1381,23 @@ impl<M: Model> OnConflictBuilder<M> {
             exclude_columns: None,
         }
     }
-    
+
     /// Specify which columns to update on conflict
-    /// 
+    ///
     /// Only these columns will be updated when a conflict occurs.
     pub fn update_columns(mut self, columns: Vec<&str>) -> Self {
         self.update_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
         self
     }
-    
+
     /// Update all columns except the specified ones
-    /// 
+    ///
     /// Useful when you want to update most fields but exclude primary keys, timestamps, etc.
     pub fn update_all_except(mut self, columns: Vec<&str>) -> Self {
         self.exclude_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
         self
     }
-    
+
     /// Execute the insert with on-conflict handling
     pub async fn insert(self, model: M) -> Result<M>
     where
@@ -1322,7 +1408,7 @@ impl<M: Model> OnConflictBuilder<M> {
 }
 
 /// Builder for batch update operations
-/// 
+///
 /// Allows updating multiple records matching conditions with advanced features.
 ///
 /// # Example
@@ -1392,7 +1478,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             limit_value: None,
         }
     }
-    
+
     /// Set a field to a new value
     ///
     /// # Example
@@ -1404,10 +1490,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn set(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Value(value.into()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Value(value.into()));
         self
     }
-    
+
     /// Set a field to a raw SQL expression
     ///
     /// # Example
@@ -1419,10 +1506,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn set_raw(mut self, field: &str, expression: &str) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Raw(expression.to_string()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Raw(expression.to_string()));
         self
     }
-    
+
     /// Conditionally set a field based on a closure
     ///
     /// # Example
@@ -1432,14 +1520,20 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .execute()
     ///     .await?;
     /// ```
-    pub fn set_if<F>(mut self, field: &str, value: impl Into<serde_json::Value>, condition: F) -> Self
+    pub fn set_if<F>(
+        mut self,
+        field: &str,
+        value: impl Into<serde_json::Value>,
+        condition: F,
+    ) -> Self
     where
         F: FnOnce(Self) -> Self,
     {
-        self.updates.insert(field.to_string(), UpdateValue::Value(value.into()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Value(value.into()));
         condition(self)
     }
-    
+
     /// Increment a numeric field by value
     ///
     /// # Example
@@ -1450,10 +1544,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn increment(mut self, field: &str, by: i64) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Increment(by));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Increment(by));
         self
     }
-    
+
     /// Decrement a numeric field by value
     ///
     /// # Example
@@ -1465,10 +1560,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn decrement(mut self, field: &str, by: i64) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Decrement(by));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Decrement(by));
         self
     }
-    
+
     /// Multiply a numeric field by value
     ///
     /// # Example
@@ -1480,16 +1576,18 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn multiply(mut self, field: &str, by: f64) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Multiply(by));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Multiply(by));
         self
     }
-    
+
     /// Divide a numeric field by value
     pub fn divide(mut self, field: &str, by: f64) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Divide(by));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Divide(by));
         self
     }
-    
+
     /// Append value to an array column (PostgreSQL)
     ///
     /// # Example
@@ -1501,16 +1599,18 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn array_append(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::ArrayAppend(value.into()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::ArrayAppend(value.into()));
         self
     }
-    
+
     /// Remove value from an array column (PostgreSQL)
     pub fn array_remove(mut self, field: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::ArrayRemove(value.into()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::ArrayRemove(value.into()));
         self
     }
-    
+
     /// Set a value at a JSON path
     ///
     /// # Example
@@ -1520,11 +1620,19 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .execute()
     ///     .await?;
     /// ```
-    pub fn json_set(mut self, field: &str, path: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::JsonSet(path.to_string(), value.into()));
+    pub fn json_set(
+        mut self,
+        field: &str,
+        path: &str,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.updates.insert(
+            field.to_string(),
+            UpdateValue::JsonSet(path.to_string(), value.into()),
+        );
         self
     }
-    
+
     /// Set value only if current value is NULL
     ///
     /// # Example
@@ -1535,10 +1643,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///     .await?;
     /// ```
     pub fn coalesce(mut self, field: &str, default: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(field.to_string(), UpdateValue::Coalesce(default.into()));
+        self.updates
+            .insert(field.to_string(), UpdateValue::Coalesce(default.into()));
         self
     }
-    
+
     /// Limit the number of rows to update (MySQL/MariaDB)
     ///
     /// Note: PostgreSQL requires a subquery for limited updates
@@ -1546,7 +1655,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self.limit_value = Some(n);
         self
     }
-    
+
     /// Return updated rows (PostgreSQL, SQLite 3.35+)
     ///
     /// Note: Not all databases support RETURNING
@@ -1554,7 +1663,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self.returning = true;
         self
     }
-    
+
     /// Add a where equals condition
     pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1564,7 +1673,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where not equals condition
     pub fn where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1574,7 +1683,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where greater than condition
     pub fn where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1584,7 +1693,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where greater than or equal condition
     pub fn where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1594,7 +1703,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where less than condition
     pub fn where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1604,7 +1713,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where less than or equal condition
     pub fn where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1614,27 +1723,35 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where IN condition
     pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: column.to_string(),
             operator: crate::query::Operator::In,
-            value: crate::query::ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+            value: crate::query::ConditionValue::List(
+                values.into_iter().map(|v| v.into()).collect(),
+            ),
         });
         self
     }
-    
+
     /// Add a where NOT IN condition
-    pub fn where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+    pub fn where_not_in<V: Into<serde_json::Value>>(
+        mut self,
+        column: &str,
+        values: Vec<V>,
+    ) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: column.to_string(),
             operator: crate::query::Operator::NotIn,
-            value: crate::query::ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+            value: crate::query::ConditionValue::List(
+                values.into_iter().map(|v| v.into()).collect(),
+            ),
         });
         self
     }
-    
+
     /// Add a where IS NULL condition
     pub fn where_null(mut self, column: &str) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1644,7 +1761,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where IS NOT NULL condition
     pub fn where_not_null(mut self, column: &str) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1654,9 +1771,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where BETWEEN condition
-    pub fn where_between(mut self, column: &str, min: impl Into<serde_json::Value>, max: impl Into<serde_json::Value>) -> Self {
+    pub fn where_between(
+        mut self,
+        column: &str,
+        min: impl Into<serde_json::Value>,
+        max: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: column.to_string(),
             operator: crate::query::Operator::Between,
@@ -1664,21 +1786,23 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add a where LIKE condition
     pub fn where_like(mut self, column: &str, pattern: &str) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: column.to_string(),
             operator: crate::query::Operator::Like,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(
+                pattern.to_string(),
+            )),
         });
         self
     }
-    
+
     // =========================================================================
     // OR CLAUSE METHODS FOR BATCH UPDATE
     // =========================================================================
-    
+
     /// Add an OR equals condition
     ///
     /// # Example
@@ -1702,7 +1826,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add an OR not equals condition
     pub fn or_where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1712,7 +1836,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add an OR greater than condition
     pub fn or_where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1722,7 +1846,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add an OR less than condition
     pub fn or_where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1732,17 +1856,19 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add an OR IN condition
     pub fn or_where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: format!("__OR__{}", column),
             operator: crate::query::Operator::In,
-            value: crate::query::ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
+            value: crate::query::ConditionValue::List(
+                values.into_iter().map(|v| v.into()).collect(),
+            ),
         });
         self
     }
-    
+
     /// Add an OR IS NULL condition
     pub fn or_where_null(mut self, column: &str) -> Self {
         self.conditions.push(crate::query::WhereCondition {
@@ -1752,17 +1878,19 @@ impl<M: Model> BatchUpdateBuilder<M> {
         });
         self
     }
-    
+
     /// Add an OR LIKE condition
     pub fn or_where_like(mut self, column: &str, pattern: &str) -> Self {
         self.conditions.push(crate::query::WhereCondition {
             column: format!("__OR__{}", column),
             operator: crate::query::Operator::Like,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(
+                pattern.to_string(),
+            )),
         });
         self
     }
-    
+
     /// Format a value for SQL
     fn format_value(v: &serde_json::Value) -> String {
         match v {
@@ -1773,19 +1901,19 @@ impl<M: Model> BatchUpdateBuilder<M> {
             _ => format!("'{}'", v.to_string().replace('\'', "''")),
         }
     }
-    
+
     /// Execute the batch update and return rows affected
     pub async fn execute(self) -> Result<u64> {
         if self.updates.is_empty() {
             return Ok(0);
         }
-        
+
         let db_type = crate::database::require_db()?.backend();
         let quote = match db_type {
             crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
             _ => '"',
         };
-        
+
         // Build SET clause with different update types
         let set_parts: Vec<String> = self.updates.iter()
             .map(|(k, v)| {
@@ -1855,79 +1983,115 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 }
             })
             .collect();
-        
+
         // Build WHERE clause - separate AND and OR conditions
         let mut and_parts: Vec<String> = Vec::new();
         let mut or_parts: Vec<String> = Vec::new();
-        
+
         for cond in &self.conditions {
             // Check if this is an OR condition (marked with __OR__ prefix)
             let (is_or, actual_column) = if cond.column.starts_with("__OR__") {
-                (true, cond.column.strip_prefix("__OR__").unwrap_or(&cond.column))
+                (
+                    true,
+                    cond.column.strip_prefix("__OR__").unwrap_or(&cond.column),
+                )
             } else {
                 (false, cond.column.as_str())
             };
-            
+
             let col = format!("{0}{1}{0}", quote, actual_column);
-            
+
             let part = match &cond.operator {
                 crate::query::Operator::Eq => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} = {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::NotEq => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} != {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::Gt => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} > {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::Gte => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} >= {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::Lt => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} < {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::Lte => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} <= {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::In => {
                     if let crate::query::ConditionValue::List(vals) = &cond.value {
-                        let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                        let list = vals
+                            .iter()
+                            .map(Self::format_value)
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         Some(format!("{} IN ({})", col, list))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::NotIn => {
                     if let crate::query::ConditionValue::List(vals) = &cond.value {
-                        let list = vals.iter().map(Self::format_value).collect::<Vec<_>>().join(", ");
+                        let list = vals
+                            .iter()
+                            .map(Self::format_value)
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         Some(format!("{} NOT IN ({})", col, list))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::IsNull => Some(format!("{} IS NULL", col)),
                 crate::query::Operator::IsNotNull => Some(format!("{} IS NOT NULL", col)),
                 crate::query::Operator::Between => {
                     if let crate::query::ConditionValue::Range(min, max) = &cond.value {
-                        Some(format!("{} BETWEEN {} AND {}", col, Self::format_value(min), Self::format_value(max)))
-                    } else { None }
+                        Some(format!(
+                            "{} BETWEEN {} AND {}",
+                            col,
+                            Self::format_value(min),
+                            Self::format_value(max)
+                        ))
+                    } else {
+                        None
+                    }
                 }
                 crate::query::Operator::Like => {
                     if let crate::query::ConditionValue::Single(v) = &cond.value {
                         Some(format!("{} LIKE {}", col, Self::format_value(v)))
-                    } else { None }
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
-            
+
             if let Some(part) = part {
                 if is_or {
                     or_parts.push(part);
@@ -1936,24 +2100,20 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 }
             }
         }
-        
+
         let table = format!("{0}{1}{0}", quote, M::table_name());
-        let mut sql = format!(
-            "UPDATE {} SET {}",
-            table,
-            set_parts.join(", ")
-        );
-        
+        let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
+
         // Build final WHERE clause with AND and OR parts
         if !and_parts.is_empty() || !or_parts.is_empty() {
             sql.push_str(" WHERE ");
-            
+
             let mut where_parts: Vec<String> = Vec::new();
-            
+
             if !and_parts.is_empty() {
                 where_parts.push(and_parts.join(" AND "));
             }
-            
+
             if !or_parts.is_empty() {
                 // OR conditions are grouped together
                 let or_clause = if or_parts.len() == 1 {
@@ -1963,7 +2123,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 };
                 where_parts.push(or_clause);
             }
-            
+
             // Combine AND and OR groups with OR
             if and_parts.is_empty() {
                 sql.push_str(&or_parts.join(" OR "));
@@ -1971,20 +2131,27 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 sql.push_str(&and_parts.join(" AND "));
             } else {
                 // AND conditions AND (OR conditions)
-                sql.push_str(&format!("{} AND ({})", and_parts.join(" AND "), or_parts.join(" OR ")));
+                sql.push_str(&format!(
+                    "{} AND ({})",
+                    and_parts.join(" AND "),
+                    or_parts.join(" OR ")
+                ));
             }
         }
-        
+
         // Add LIMIT for MySQL/MariaDB
         if let Some(limit) = self.limit_value {
-            if matches!(db_type, crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB) {
+            if matches!(
+                db_type,
+                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB
+            ) {
                 sql.push_str(&format!(" LIMIT {}", limit));
             }
         }
-        
+
         crate::Database::execute(&sql).await
     }
-    
+
     /// Execute and return the updated rows (requires RETURNING support)
     ///
     /// Works with PostgreSQL and SQLite 3.35+
@@ -1992,20 +2159,24 @@ impl<M: Model> BatchUpdateBuilder<M> {
         if self.updates.is_empty() {
             return Ok(vec![]);
         }
-        
+
         let db_type = crate::database::require_db()?.backend();
-        
+
         if db_type == crate::config::DatabaseType::MySQL {
-            return Err(Error::query("MySQL does not support RETURNING clause".to_string()));
+            return Err(Error::query(
+                "MySQL does not support RETURNING clause".to_string(),
+            ));
         }
-        
+
         let quote = match db_type {
             crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
             _ => '"',
         };
-        
+
         // Build SET clause
-        let set_parts: Vec<String> = self.updates.iter()
+        let set_parts: Vec<String> = self
+            .updates
+            .iter()
             .map(|(k, v)| {
                 let col = format!("{0}{1}{0}", quote, k);
                 match v {
@@ -2019,37 +2190,43 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 }
             })
             .collect();
-        
+
         // Build WHERE clause
-        let where_parts: Vec<String> = self.conditions.iter()
+        let where_parts: Vec<String> = self
+            .conditions
+            .iter()
             .filter_map(|cond| {
                 let col = format!("{0}{1}{0}", quote, cond.column);
                 match &cond.operator {
                     crate::query::Operator::Eq => {
                         if let crate::query::ConditionValue::Single(v) = &cond.value {
                             Some(format!("{} = {}", col, Self::format_value(v)))
-                        } else { None }
+                        } else {
+                            None
+                        }
                     }
                     crate::query::Operator::NotEq => {
                         if let crate::query::ConditionValue::Single(v) = &cond.value {
                             Some(format!("{} != {}", col, Self::format_value(v)))
-                        } else { None }
+                        } else {
+                            None
+                        }
                     }
                     _ => None,
                 }
             })
             .collect();
-        
+
         let table = format!("{0}{1}{0}", quote, M::table_name());
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
-        
+
         if !where_parts.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_parts.join(" AND "));
         }
-        
+
         sql.push_str(" RETURNING *");
-        
+
         crate::Database::raw::<M>(&sql).await
     }
 }
@@ -2061,14 +2238,14 @@ impl<M: Model> Default for BatchUpdateBuilder<M> {
 }
 
 // =============================================================================
-// NESTED ACTIVE MODEL 
+// NESTED ACTIVE MODEL
 // =============================================================================
 // Provides cascade save operations for related models
 //
 // This feature allows saving a model along with its related models in a single
 // operation, maintaining referential integrity.
 
-/// Extension trait for cascade save operations 
+/// Extension trait for cascade save operations
 ///
 /// This trait provides methods to save a model along with its related models
 /// in a single transaction-like operation.
@@ -2125,27 +2302,23 @@ pub trait NestedSave: Model {
     /// # Returns
     ///
     /// A tuple of (self, related) with both models saved
-    async fn save_with_one<R: Model>(
-        self,
-        related: R,
-        foreign_key: &str,
-    ) -> Result<(Self, R)>
+    async fn save_with_one<R: Model>(self, related: R, foreign_key: &str) -> Result<(Self, R)>
     where
         Self: Sized,
     {
         // First save the parent model
         let parent = self.save().await?;
-        
+
         // Get the parent's primary key as JSON to set on child
         let pk_value = {
             let pk = parent.primary_key();
             serde_json::Value::String(format!("{}", pk))
         };
-        
+
         // Update the foreign key in the related model via JSON round-trip
         let mut related_json = serde_json::to_value(&related)
             .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
-        
+
         if let serde_json::Value::Object(ref mut map) = related_json {
             // Try to convert the PK to the appropriate type
             let pk_str = pk_value.as_str().unwrap_or_default();
@@ -2155,16 +2328,17 @@ pub trait NestedSave: Model {
                 map.insert(foreign_key.to_string(), pk_value);
             }
         }
-        
-        let related: R = serde_json::from_value(related_json)
-            .map_err(|e| Error::conversion(format!("Failed to deserialize related model: {}", e)))?;
-        
+
+        let related: R = serde_json::from_value(related_json).map_err(|e| {
+            Error::conversion(format!("Failed to deserialize related model: {}", e))
+        })?;
+
         // Save the related model
         let related = related.save().await?;
-        
+
         Ok((parent, related))
     }
-    
+
     /// Save this model along with multiple related models
     ///
     /// All related models' foreign keys will be set to this model's primary key
@@ -2188,19 +2362,20 @@ pub trait NestedSave: Model {
     {
         // First save the parent model
         let parent = self.save().await?;
-        
+
         // Get the parent's primary key
         let pk_value = {
             let pk = parent.primary_key();
             serde_json::Value::String(format!("{}", pk))
         };
-        
+
         // Update each related model's foreign key and save
         let mut saved_related = Vec::with_capacity(related.len());
         for item in related {
-            let mut item_json = serde_json::to_value(&item)
-                .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
-            
+            let mut item_json = serde_json::to_value(&item).map_err(|e| {
+                Error::conversion(format!("Failed to serialize related model: {}", e))
+            })?;
+
             if let serde_json::Value::Object(ref mut map) = item_json {
                 let pk_str = pk_value.as_str().unwrap_or_default();
                 if let Ok(pk_i64) = pk_str.parse::<i64>() {
@@ -2209,24 +2384,22 @@ pub trait NestedSave: Model {
                     map.insert(foreign_key.to_string(), pk_value.clone());
                 }
             }
-            
-            let item: R = serde_json::from_value(item_json)
-                .map_err(|e| Error::conversion(format!("Failed to deserialize related model: {}", e)))?;
-            
+
+            let item: R = serde_json::from_value(item_json).map_err(|e| {
+                Error::conversion(format!("Failed to deserialize related model: {}", e))
+            })?;
+
             let saved = item.save().await?;
             saved_related.push(saved);
         }
-        
+
         Ok((parent, saved_related))
     }
-    
+
     /// Update this model and cascade update to related models
     ///
     /// Updates this model and optionally updates the related model as well.
-    async fn update_with_one<R: Model>(
-        self,
-        related: R,
-    ) -> Result<(Self, R)>
+    async fn update_with_one<R: Model>(self, related: R) -> Result<(Self, R)>
     where
         Self: Sized,
     {
@@ -2234,12 +2407,9 @@ pub trait NestedSave: Model {
         let related = related.update().await?;
         Ok((parent, related))
     }
-    
+
     /// Update this model and cascade update to multiple related models
-    async fn update_with_many<R: Model>(
-        self,
-        related: Vec<R>,
-    ) -> Result<(Self, Vec<R>)>
+    async fn update_with_many<R: Model>(self, related: Vec<R>) -> Result<(Self, Vec<R>)>
     where
         Self: Sized,
     {
@@ -2250,27 +2420,24 @@ pub trait NestedSave: Model {
         }
         Ok((parent, updated))
     }
-    
+
     /// Delete this model and cascade delete to related models
     ///
     /// Deletes the related models first, then this model.
-    async fn delete_with_many<R: Model>(
-        self,
-        related: Vec<R>,
-    ) -> Result<u64>
+    async fn delete_with_many<R: Model>(self, related: Vec<R>) -> Result<u64>
     where
         Self: Sized,
     {
         let mut total = 0u64;
-        
+
         // Delete related first to maintain referential integrity
         for item in related {
             total += item.delete().await?;
         }
-        
+
         // Delete parent
         total += self.delete().await?;
-        
+
         Ok(total)
     }
 }
@@ -2278,7 +2445,7 @@ pub trait NestedSave: Model {
 // Blanket implementation for all Models
 impl<M: Model> NestedSave for M {}
 
-/// Builder for nested/cascade saves 
+/// Builder for nested/cascade saves
 ///
 /// Provides a fluent API for building complex nested save operations.
 ///
@@ -2306,7 +2473,7 @@ impl<M: Model> NestedSaveBuilder<M> {
             many_relations: Vec::new(),
         }
     }
-    
+
     /// Add a single related model to be saved
     pub fn with_one<R: Model>(mut self, related: R, foreign_key: &str) -> Self {
         if let Ok(json) = serde_json::to_value(&related) {
@@ -2314,31 +2481,33 @@ impl<M: Model> NestedSaveBuilder<M> {
         }
         self
     }
-    
+
     /// Add multiple related models to be saved
     pub fn with_many<R: Model>(mut self, related: Vec<R>, foreign_key: &str) -> Self {
-        let json_values: Vec<serde_json::Value> = related.into_iter()
+        let json_values: Vec<serde_json::Value> = related
+            .into_iter()
             .filter_map(|r| serde_json::to_value(&r).ok())
             .collect();
-        self.many_relations.push((json_values, foreign_key.to_string()));
+        self.many_relations
+            .push((json_values, foreign_key.to_string()));
         self
     }
-    
+
     /// Execute the nested save operation
     ///
     /// Returns the saved parent model along with all related models as JSON.
     pub async fn save(self) -> Result<(M, Vec<serde_json::Value>)> {
         // Save the parent first
         let parent = self.parent.save().await?;
-        
+
         // Get the parent's primary key
         let pk_value = {
             let pk = parent.primary_key();
             serde_json::Value::String(format!("{}", pk))
         };
-        
+
         let mut saved_json = Vec::new();
-        
+
         // Save all one-relations
         for (mut json, fk) in self.one_relations {
             if let serde_json::Value::Object(ref mut map) = json {
@@ -2353,7 +2522,7 @@ impl<M: Model> NestedSaveBuilder<M> {
             // For now, store the JSON with updated FK
             saved_json.push(json);
         }
-        
+
         // Save all many-relations
         for (items, fk) in self.many_relations {
             for mut json in items {
@@ -2368,8 +2537,7 @@ impl<M: Model> NestedSaveBuilder<M> {
                 saved_json.push(json);
             }
         }
-        
+
         Ok((parent, saved_json))
     }
 }
-

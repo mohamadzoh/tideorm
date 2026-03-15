@@ -13,8 +13,9 @@
 //! cargo test --test mysql_integration_tests --features mysql --no-default-features
 
 use tideorm::prelude::*;
-use tideorm::{TideConfig, Database};
+use tideorm::{Database, TideConfig};
 
+#[path = "support/mysql_test_config.rs"]
 mod test_config;
 use test_config::{mysql_database_url, should_run_mysql_tests};
 
@@ -69,7 +70,7 @@ impl SoftDelete for TestSoftDelete {
     fn deleted_at(&self) -> Option<DateTime<Utc>> {
         self.deleted_at
     }
-    
+
     fn set_deleted_at(&mut self, timestamp: Option<DateTime<Utc>>) {
         self.deleted_at = timestamp;
     }
@@ -82,28 +83,30 @@ impl SoftDelete for TestSoftDelete {
 #[tokio::test]
 async fn mysql_integration_tests() {
     if !should_run_mysql_tests() {
-        println!("⏭️  Skipping MySQL tests (MYSQL_DATABASE_URL not set or SKIP_MYSQL_TESTS is set)");
+        println!(
+            "⏭️  Skipping MySQL tests (MYSQL_DATABASE_URL not set or SKIP_MYSQL_TESTS is set)"
+        );
         return;
     }
 
     println!("🐬 Starting MySQL Integration Tests...\n");
-    
+
     let db_url = mysql_database_url();
-    
+
     let connect_result = TideConfig::init()
         .database_type(DatabaseType::MySQL)
         .database(db_url)
         .max_connections(5)
         .connect()
         .await;
-        
+
     if let Err(e) = connect_result {
         println!("⚠️  MySQL connection failed: {}", e);
         println!("   Make sure MySQL is running and MYSQL_DATABASE_URL is set correctly");
         println!("   Example: mysql://user:password@localhost:3306/tideorm_test");
         return;
     }
-    
+
     // Verify database type
     let db_type = tideorm::require_db().unwrap().backend();
     assert_eq!(db_type, DatabaseType::MySQL, "Expected MySQL database");
@@ -114,8 +117,9 @@ async fn mysql_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS `test_posts`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_products`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_users`").await;
-    
-    Database::execute(r#"
+
+    Database::execute(
+        r#"
         CREATE TABLE `test_users` (
             `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
             `email` VARCHAR(255) NOT NULL,
@@ -123,9 +127,13 @@ async fn mysql_integration_tests() {
             `age` INT NOT NULL,
             `active` BOOLEAN NOT NULL DEFAULT TRUE
         ) ENGINE=InnoDB
-    "#).await.expect("Failed to create test_users table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_users table");
+
+    Database::execute(
+        r#"
         CREATE TABLE `test_posts` (
             `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
             `user_id` BIGINT NOT NULL,
@@ -133,9 +141,13 @@ async fn mysql_integration_tests() {
             `content` TEXT NOT NULL,
             `published` BOOLEAN NOT NULL DEFAULT FALSE
         ) ENGINE=InnoDB
-    "#).await.expect("Failed to create test_posts table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_posts table");
+
+    Database::execute(
+        r#"
         CREATE TABLE `test_products` (
             `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
             `name` VARCHAR(255) NOT NULL,
@@ -143,16 +155,23 @@ async fn mysql_integration_tests() {
             `price` BIGINT NOT NULL,
             `metadata` JSON
         ) ENGINE=InnoDB
-    "#).await.expect("Failed to create test_products table");
-    
-    Database::execute(r#"
+    "#,
+    )
+    .await
+    .expect("Failed to create test_products table");
+
+    Database::execute(
+        r#"
         CREATE TABLE `test_soft_deletes` (
             `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
             `name` VARCHAR(255) NOT NULL,
             `deleted_at` DATETIME
         ) ENGINE=InnoDB
-    "#).await.expect("Failed to create test_soft_deletes table");
-    
+    "#,
+    )
+    .await
+    .expect("Failed to create test_soft_deletes table");
+
     println!(" Database setup complete\n");
 
     // =========================================================================
@@ -163,11 +182,11 @@ async fn mysql_integration_tests() {
         let db = tideorm::require_db().unwrap();
         assert!(db.ping().await.is_ok(), "Database ping failed");
         println!("   ✓ Ping successful");
-        
+
         let result = Database::execute("SELECT 1").await;
         assert!(result.is_ok(), "Raw SQL execution failed");
         println!("   ✓ Raw SQL execution works");
-        
+
         // Verify it's MySQL
         assert_eq!(db.backend(), DatabaseType::MySQL);
         println!("   ✓ Database type is MySQL");
@@ -178,7 +197,7 @@ async fn mysql_integration_tests() {
     // CRUD TESTS
     // =========================================================================
     println!("📝 Testing: CRUD Operations");
-    
+
     // Create and Find
     {
         let user = TestUser {
@@ -188,17 +207,17 @@ async fn mysql_integration_tests() {
             age: 25,
             active: true,
         };
-        
+
         let saved_user = user.save().await.expect("Failed to save user");
         assert!(saved_user.id > 0, "User ID should be auto-generated");
         println!("   ✓ Create works (id: {})", saved_user.id);
-        
+
         let found_user = TestUser::find(saved_user.id).await.expect("Find failed");
         assert!(found_user.is_some(), "User should be found");
         assert_eq!(found_user.unwrap().email, "test@example.com");
         println!("   ✓ Find by ID works");
     }
-    
+
     // Update
     {
         let user = TestUser {
@@ -209,16 +228,16 @@ async fn mysql_integration_tests() {
             active: true,
         };
         let mut saved_user = user.save().await.expect("Failed to save");
-        
+
         saved_user.name = "Updated Name".to_string();
         saved_user.age = 31;
         let updated = saved_user.update().await.expect("Update failed");
-        
+
         assert_eq!(updated.name, "Updated Name");
         assert_eq!(updated.age, 31);
         println!("   ✓ Update works");
     }
-    
+
     // Delete
     {
         let user = TestUser {
@@ -230,9 +249,9 @@ async fn mysql_integration_tests() {
         };
         let saved_user = user.save().await.expect("Failed to save");
         let user_id = saved_user.id;
-        
+
         saved_user.delete().await.expect("Delete failed");
-        
+
         let found = TestUser::find(user_id).await.expect("Find failed");
         assert!(found.is_none(), "User should be deleted");
         println!("   ✓ Delete works");
@@ -243,10 +262,10 @@ async fn mysql_integration_tests() {
     // QUERY BUILDER TESTS
     // =========================================================================
     println!("🔍 Testing: Query Builder");
-    
+
     // Clear and seed data
     let _ = Database::execute("DELETE FROM `test_users`").await;
-    
+
     for i in 1..=10 {
         TestUser {
             id: 0,
@@ -254,9 +273,12 @@ async fn mysql_integration_tests() {
             name: format!("User {}", i),
             age: 20 + i,
             active: i % 2 == 0,
-        }.save().await.expect("Failed to seed user");
+        }
+        .save()
+        .await
+        .expect("Failed to seed user");
     }
-    
+
     // WHERE conditions
     {
         let active_users = TestUser::query()
@@ -266,7 +288,7 @@ async fn mysql_integration_tests() {
             .expect("Query failed");
         assert_eq!(active_users.len(), 5, "Should have 5 active users");
         println!("   ✓ where_eq works");
-        
+
         let young_users = TestUser::query()
             .where_lt("age", 25)
             .get()
@@ -274,7 +296,7 @@ async fn mysql_integration_tests() {
             .expect("Query failed");
         assert_eq!(young_users.len(), 4);
         println!("   ✓ where_lt works");
-        
+
         let range_users = TestUser::query()
             .where_between("age", 23, 27)
             .get()
@@ -283,7 +305,7 @@ async fn mysql_integration_tests() {
         assert_eq!(range_users.len(), 5);
         println!("   ✓ where_between works");
     }
-    
+
     // Ordering
     {
         let ordered = TestUser::query()
@@ -296,7 +318,7 @@ async fn mysql_integration_tests() {
         assert_eq!(ordered[0].age, 30);
         println!("   ✓ order_by works");
     }
-    
+
     // Pagination
     {
         let page1 = TestUser::query()
@@ -306,7 +328,7 @@ async fn mysql_integration_tests() {
             .await
             .expect("Query failed");
         assert_eq!(page1.len(), 3);
-        
+
         let page2 = TestUser::query()
             .order_by("id", Order::Asc)
             .page(2, 3)
@@ -317,12 +339,12 @@ async fn mysql_integration_tests() {
         assert_ne!(page1[0].id, page2[0].id);
         println!("   ✓ Pagination works");
     }
-    
+
     // Count
     {
         let count = TestUser::query().count().await.expect("Count failed");
         assert_eq!(count, 10);
-        
+
         let active_count = TestUser::query()
             .where_eq("active", true)
             .count()
@@ -331,7 +353,7 @@ async fn mysql_integration_tests() {
         assert_eq!(active_count, 5);
         println!("   ✓ count works");
     }
-    
+
     // Exists
     {
         let exists = TestUser::query()
@@ -340,7 +362,7 @@ async fn mysql_integration_tests() {
             .await
             .expect("Exists failed");
         assert!(exists);
-        
+
         let not_exists = TestUser::query()
             .where_eq("email", "nonexistent@example.com")
             .exists()
@@ -349,7 +371,7 @@ async fn mysql_integration_tests() {
         assert!(!not_exists);
         println!("   ✓ exists works");
     }
-    
+
     // Pattern matching
     {
         let like_users = TestUser::query()
@@ -360,7 +382,7 @@ async fn mysql_integration_tests() {
         assert_eq!(like_users.len(), 10);
         println!("   ✓ where_like works");
     }
-    
+
     // IN clause
     {
         let in_users = TestUser::query()
@@ -382,15 +404,15 @@ async fn mysql_integration_tests() {
         // Ages: 21+22+23+24+25+26+27+28+29+30 = 255
         assert_eq!(sum as i64, 255);
         println!("   ✓ sum works");
-        
+
         let avg = TestUser::query().avg("age").await.expect("Avg failed");
         assert!((avg - 25.5).abs() < 0.01);
         println!("   ✓ avg works");
-        
+
         let min = TestUser::query().min("age").await.expect("Min failed");
         assert_eq!(min as i64, 21);
         println!("   ✓ min works");
-        
+
         let max = TestUser::query().max("age").await.expect("Max failed");
         assert_eq!(max as i64, 30);
         println!("   ✓ max works");
@@ -408,7 +430,7 @@ async fn mysql_integration_tests() {
             .await
             .expect("Bulk delete failed");
         assert_eq!(deleted, 5);
-        
+
         let remaining = TestUser::query().count().await.expect("Count failed");
         assert_eq!(remaining, 5);
         println!("   ✓ Bulk delete works");
@@ -421,16 +443,19 @@ async fn mysql_integration_tests() {
     println!("🗄️  Testing: Soft Deletes");
     {
         let _ = Database::execute("DELETE FROM `test_soft_deletes`").await;
-        
+
         // Create records
         for i in 1..=5 {
             TestSoftDelete {
                 id: 0,
                 name: format!("Item {}", i),
                 deleted_at: None,
-            }.save().await.expect("Failed to create");
+            }
+            .save()
+            .await
+            .expect("Failed to create");
         }
-        
+
         // Soft delete some
         let item = TestSoftDelete::query()
             .where_eq("name", "Item 1")
@@ -439,7 +464,7 @@ async fn mysql_integration_tests() {
             .expect("Query failed")
             .expect("Item not found");
         item.soft_delete().await.expect("Soft delete failed");
-        
+
         let item2 = TestSoftDelete::query()
             .where_eq("name", "Item 2")
             .first()
@@ -447,15 +472,12 @@ async fn mysql_integration_tests() {
             .expect("Query failed")
             .expect("Item not found");
         item2.soft_delete().await.expect("Soft delete failed");
-        
+
         // Query without trashed
-        let active = TestSoftDelete::query()
-            .get()
-            .await
-            .expect("Query failed");
+        let active = TestSoftDelete::query().get().await.expect("Query failed");
         assert_eq!(active.len(), 3);
         println!("   ✓ Default excludes soft deleted");
-        
+
         // Query with trashed
         let all = TestSoftDelete::query()
             .with_trashed()
@@ -464,7 +486,7 @@ async fn mysql_integration_tests() {
             .expect("Query failed");
         assert_eq!(all.len(), 5);
         println!("   ✓ with_trashed includes all");
-        
+
         // Query only trashed
         let trashed = TestSoftDelete::query()
             .only_trashed()
@@ -482,7 +504,7 @@ async fn mysql_integration_tests() {
     println!(" Testing: JSON Operations");
     {
         let _ = Database::execute("DELETE FROM `test_products`").await;
-        
+
         // Create products with JSON metadata
         let product = TestProduct {
             id: 0,
@@ -499,7 +521,7 @@ async fn mysql_integration_tests() {
             })),
         };
         product.save().await.expect("Failed to save product");
-        
+
         let product2 = TestProduct {
             id: 0,
             name: "Phone".to_string(),
@@ -511,7 +533,7 @@ async fn mysql_integration_tests() {
             })),
         };
         product2.save().await.expect("Failed to save product");
-        
+
         // Test that JSON was stored and retrieved correctly
         let products = TestProduct::query()
             .where_eq("category", "Electronics")
@@ -519,12 +541,12 @@ async fn mysql_integration_tests() {
             .await
             .expect("Query failed");
         assert_eq!(products.len(), 2);
-        
+
         let laptop = &products.iter().find(|p| p.name == "Laptop").unwrap();
         let metadata = laptop.metadata.as_ref().unwrap();
         assert_eq!(metadata["brand"], "TechCorp");
         println!("   ✓ JSON storage and retrieval works");
-        
+
         // MySQL native JSON query (using raw SQL for now)
         // MySQL supports JSON_EXTRACT and ->> operators
         let result = Database::raw_json(
@@ -541,26 +563,29 @@ async fn mysql_integration_tests() {
     println!("🎯 Testing: First Methods");
     {
         let _ = Database::execute("DELETE FROM `test_users`").await;
-        
+
         TestUser {
             id: 0,
             email: "first@example.com".to_string(),
             name: "First".to_string(),
             age: 25,
             active: true,
-        }.save().await.unwrap();
-        
+        }
+        .save()
+        .await
+        .unwrap();
+
         let first = TestUser::query().first().await.expect("First failed");
         assert!(first.is_some());
         println!("   ✓ first works");
-        
+
         let first_or_fail = TestUser::query()
             .where_eq("email", "first@example.com")
             .first_or_fail()
             .await;
         assert!(first_or_fail.is_ok());
         println!("   ✓ first_or_fail works for existing");
-        
+
         let not_found = TestUser::query()
             .where_eq("email", "nonexistent@example.com")
             .first_or_fail()
@@ -577,13 +602,13 @@ async fn mysql_integration_tests() {
     {
         // Test ON DUPLICATE KEY UPDATE (upsert)
         let _ = Database::execute("DELETE FROM `test_users`").await;
-        
+
         // Create unique index on email
         let _ = Database::execute("DROP INDEX `idx_users_email` ON `test_users`").await;
-        let _ = Database::execute(
-            "CREATE UNIQUE INDEX `idx_users_email` ON `test_users` (`email`)"
-        ).await;
-        
+        let _ =
+            Database::execute("CREATE UNIQUE INDEX `idx_users_email` ON `test_users` (`email`)")
+                .await;
+
         // Insert
         let user = TestUser {
             id: 0,
@@ -593,7 +618,7 @@ async fn mysql_integration_tests() {
             active: true,
         };
         user.save().await.expect("Failed to save");
-        
+
         // Verify insert
         let found = TestUser::query()
             .where_eq("email", "upsert@example.com")
@@ -603,7 +628,7 @@ async fn mysql_integration_tests() {
             .unwrap();
         assert_eq!(found.name, "Initial");
         println!("   ✓ Unique index works");
-        
+
         // Test LIMIT with ORDER BY
         let _ = Database::execute("DELETE FROM `test_users`").await;
         for i in 1..=5 {
@@ -613,9 +638,12 @@ async fn mysql_integration_tests() {
                 name: format!("User {}", i),
                 age: 30 - i,
                 active: true,
-            }.save().await.unwrap();
+            }
+            .save()
+            .await
+            .unwrap();
         }
-        
+
         let top3 = TestUser::query()
             .order_by("age", Order::Desc)
             .limit(3)
@@ -637,6 +665,6 @@ async fn mysql_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS `test_products`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_users`").await;
     println!("   ✓ Tables dropped");
-    
+
     println!("\n All MySQL integration tests passed!");
 }

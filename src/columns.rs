@@ -50,7 +50,7 @@ use std::marker::PhantomData;
 // =============================================================================
 
 /// Trait for types that can be used as column names in queries.
-/// 
+///
 /// This allows both string literals and typed `Column<T>` to be used
 /// interchangeably in query methods like `where_eq`.
 pub trait IntoColumnName {
@@ -100,7 +100,7 @@ impl<T> Column<T> {
             _phantom: PhantomData,
         }
     }
-    
+
     /// Get the column name
     pub const fn name(&self) -> &'static str {
         self.name
@@ -248,7 +248,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn ne(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -257,7 +257,7 @@ macro_rules! impl_column_numeric {
                     }
                 }
             }
-            
+
             impl ColumnOrd<$t> for Column<$t> {
                 fn gt(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
@@ -266,7 +266,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn gte(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -274,7 +274,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn lt(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -282,7 +282,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn lte(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -290,7 +290,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn between(self, low: $t, high: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -299,7 +299,7 @@ macro_rules! impl_column_numeric {
                     }
                 }
             }
-            
+
             impl ColumnIn<$t> for Column<$t> {
                 fn is_in(self, values: Vec<$t>) -> ColumnCondition {
                     ColumnCondition {
@@ -308,7 +308,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(values),
                     }
                 }
-                
+
                 fn not_in(self, values: Vec<$t>) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -317,7 +317,7 @@ macro_rules! impl_column_numeric {
                     }
                 }
             }
-            
+
             // Optional versions
             impl ColumnEq<$t> for Column<Option<$t>> {
                 fn eq(self, value: $t) -> ColumnCondition {
@@ -327,7 +327,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn ne(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -336,7 +336,7 @@ macro_rules! impl_column_numeric {
                     }
                 }
             }
-            
+
             impl ColumnOrd<$t> for Column<Option<$t>> {
                 fn gt(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
@@ -345,7 +345,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn gte(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -353,7 +353,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn lt(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -361,7 +361,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn lte(self, value: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -369,7 +369,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::json!(value),
                     }
                 }
-                
+
                 fn between(self, low: $t, high: $t) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -378,7 +378,7 @@ macro_rules! impl_column_numeric {
                     }
                 }
             }
-            
+
             impl ColumnNullable for Column<Option<$t>> {
                 fn is_null(self) -> ColumnCondition {
                     ColumnCondition {
@@ -387,7 +387,7 @@ macro_rules! impl_column_numeric {
                         value: serde_json::Value::Null,
                     }
                 }
-                
+
                 fn is_not_null(self) -> ColumnCondition {
                     ColumnCondition {
                         column: self.name.to_string(),
@@ -411,7 +411,7 @@ impl ColumnEq<&str> for Column<String> {
             value: serde_json::json!(value),
         }
     }
-    
+
     fn ne(self, value: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -429,7 +429,7 @@ impl ColumnEq<String> for Column<String> {
             value: serde_json::json!(value),
         }
     }
-    
+
     fn ne(self, value: String) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -447,7 +447,7 @@ impl ColumnLike for Column<String> {
             value: serde_json::json!(pattern),
         }
     }
-    
+
     fn not_like(self, pattern: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -455,7 +455,7 @@ impl ColumnLike for Column<String> {
             value: serde_json::json!(pattern),
         }
     }
-    
+
     fn contains(self, substr: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -463,7 +463,7 @@ impl ColumnLike for Column<String> {
             value: serde_json::json!(format!("%{}%", substr)),
         }
     }
-    
+
     fn starts_with(self, prefix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -471,7 +471,7 @@ impl ColumnLike for Column<String> {
             value: serde_json::json!(format!("{}%", prefix)),
         }
     }
-    
+
     fn ends_with(self, suffix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -489,7 +489,7 @@ impl ColumnIn<&str> for Column<String> {
             value: serde_json::json!(values),
         }
     }
-    
+
     fn not_in(self, values: Vec<&str>) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -507,7 +507,7 @@ impl ColumnIn<String> for Column<String> {
             value: serde_json::json!(values),
         }
     }
-    
+
     fn not_in(self, values: Vec<String>) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -526,7 +526,7 @@ impl ColumnEq<&str> for Column<Option<String>> {
             value: serde_json::json!(value),
         }
     }
-    
+
     fn ne(self, value: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -544,7 +544,7 @@ impl ColumnLike for Column<Option<String>> {
             value: serde_json::json!(pattern),
         }
     }
-    
+
     fn not_like(self, pattern: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -552,7 +552,7 @@ impl ColumnLike for Column<Option<String>> {
             value: serde_json::json!(pattern),
         }
     }
-    
+
     fn contains(self, substr: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -560,7 +560,7 @@ impl ColumnLike for Column<Option<String>> {
             value: serde_json::json!(format!("%{}%", substr)),
         }
     }
-    
+
     fn starts_with(self, prefix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -568,7 +568,7 @@ impl ColumnLike for Column<Option<String>> {
             value: serde_json::json!(format!("{}%", prefix)),
         }
     }
-    
+
     fn ends_with(self, suffix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -586,7 +586,7 @@ impl ColumnNullable for Column<Option<String>> {
             value: serde_json::Value::Null,
         }
     }
-    
+
     fn is_not_null(self) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -605,7 +605,7 @@ impl ColumnEq<bool> for Column<bool> {
             value: serde_json::json!(value),
         }
     }
-    
+
     fn ne(self, value: bool) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -623,7 +623,7 @@ impl ColumnEq<bool> for Column<Option<bool>> {
             value: serde_json::json!(value),
         }
     }
-    
+
     fn ne(self, value: bool) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -641,7 +641,7 @@ impl ColumnNullable for Column<Option<bool>> {
             value: serde_json::Value::Null,
         }
     }
-    
+
     fn is_not_null(self) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
@@ -654,13 +654,13 @@ impl ColumnNullable for Column<Option<bool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_typed_column_creation() {
         let col: Column<i64> = Column::new("id");
         assert_eq!(col.name(), "id");
     }
-    
+
     #[test]
     fn test_typed_column_eq() {
         let col: Column<i64> = Column::new("id");
@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(cond.operator, ColumnOperator::Eq);
         assert_eq!(cond.value, serde_json::json!(42));
     }
-    
+
     #[test]
     fn test_typed_column_string_like() {
         let col: Column<String> = Column::new("name");
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(cond.operator, ColumnOperator::Like);
         assert_eq!(cond.value, serde_json::json!("%test%"));
     }
-    
+
     #[test]
     fn test_typed_column_nullable() {
         let col: Column<Option<i32>> = Column::new("age");
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(cond.column, "age");
         assert_eq!(cond.operator, ColumnOperator::IsNull);
     }
-    
+
     #[test]
     fn test_typed_column_between() {
         let col: Column<i32> = Column::new("score");
@@ -695,7 +695,7 @@ mod tests {
         assert_eq!(cond.operator, ColumnOperator::Between);
         assert_eq!(cond.value, serde_json::json!([10, 100]));
     }
-    
+
     #[test]
     fn test_typed_column_in() {
         let col: Column<String> = Column::new("status");

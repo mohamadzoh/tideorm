@@ -14,15 +14,14 @@ use crate::error::{Error, Result};
 // Allow unused_imports here: we re-export broadly so other modules can import selectively
 #[allow(unused_imports)]
 pub use sea_orm::{
-    entity::prelude::*,
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
-    ConnectionTrait, Database as SeaDatabase, DatabaseConnection, DatabaseTransaction,
-    DbBackend, DbErr, EntityTrait, FromQueryResult, Iden, IntoActiveModel, ModelTrait, Iterable,
-    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    Statement, TransactionTrait, Value, ExecResult, TryGetable,
-    DeriveEntityModel, EnumIter, DeriveRelation, DeleteMany,
-    sea_query::{Expr, Asterisk, Alias, ExprTrait},
-    ConnectOptions,
+    ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
+    DatabaseTransaction, DbBackend, DbErr, DeleteMany, DeriveEntityModel, DeriveRelation,
+    EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden, IntoActiveModel, Iterable,
+    ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, Statement,
+    TransactionTrait, TryGetable, Value,
+    entity::prelude::*,
+    sea_query::{Alias, Asterisk, Expr, ExprTrait},
 };
 
 /// Internal trait that maps TideORM models to SeaORM entities
@@ -31,13 +30,13 @@ pub use sea_orm::{
 pub trait InternalModel: Sized + Send + Sync + Clone {
     type Entity: EntityTrait;
     type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + ActiveModelBehavior + Send;
-    
+
     /// Convert TideORM model to SeaORM ActiveModel
     fn into_active_model(self) -> Self::ActiveModel;
-    
+
     /// Convert SeaORM Model to TideORM model
     fn from_sea_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
-    
+
     /// Get SeaORM primary key column (optional, for find_by_id)
     fn primary_key_column() -> Option<<Self::Entity as EntityTrait>::Column> {
         None
@@ -57,7 +56,7 @@ impl InternalConnection {
             .map_err(|e| Error::connection(e.to_string()))?;
         Ok(Self { conn })
     }
-    
+
     pub fn connection(&self) -> &DatabaseConnection {
         &self.conn
     }
@@ -73,7 +72,9 @@ pub(crate) fn translate_error(err: DbErr) -> Error {
         DbErr::Query(e) => Error::query(e.to_string()),
         DbErr::ConvertFromU64(msg) => Error::conversion(msg),
         DbErr::UnpackInsertId => Error::query("Failed to get insert ID".to_string()),
-        DbErr::UpdateGetPrimaryKey => Error::query("Failed to get primary key after update".to_string()),
+        DbErr::UpdateGetPrimaryKey => {
+            Error::query("Failed to get primary key after update".to_string())
+        }
         DbErr::Custom(msg) => Error::internal(msg),
         _ => Error::internal(err.to_string()),
     }
@@ -89,27 +90,21 @@ impl QueryExecutor {
     where
         M: InternalModel,
     {
-        let results = M::Entity::find()
-            .all(conn)
-            .await
-            .map_err(translate_error)?;
-        
+        let results = M::Entity::find().all(conn).await.map_err(translate_error)?;
+
         Ok(results.into_iter().map(M::from_sea_model).collect())
     }
-    
+
     /// Get first record
     pub async fn first<M>(conn: &DatabaseConnection) -> Result<Option<M>>
     where
         M: InternalModel,
     {
-        let result = M::Entity::find()
-            .one(conn)
-            .await
-            .map_err(translate_error)?;
-        
+        let result = M::Entity::find().one(conn).await.map_err(translate_error)?;
+
         Ok(result.map(M::from_sea_model))
     }
-    
+
     /// Get last record (by primary key descending)
     pub async fn last<M>(conn: &DatabaseConnection) -> Result<Option<M>>
     where
@@ -117,20 +112,17 @@ impl QueryExecutor {
     {
         // Order by primary key descending to get the actual last record
         let mut select = M::Entity::find();
-        
+
         // Use the primary key column if available, otherwise fall back to unordered
         if let Some(pk_col) = M::primary_key_column() {
             select = select.order_by_desc(pk_col);
         }
-        
-        let result = select
-            .one(conn)
-            .await
-            .map_err(translate_error)?;
-        
+
+        let result = select.one(conn).await.map_err(translate_error)?;
+
         Ok(result.map(M::from_sea_model))
     }
-    
+
     /// Count records
     pub async fn count<M>(conn: &DatabaseConnection, _condition: Option<Condition>) -> Result<u64>
     where
@@ -140,7 +132,7 @@ impl QueryExecutor {
         struct CountResult {
             count: i64,
         }
-        
+
         let result: Option<CountResult> = M::Entity::find()
             .select_only()
             .column_as(Expr::col(Asterisk).count(), "count")
@@ -148,10 +140,10 @@ impl QueryExecutor {
             .one(conn)
             .await
             .map_err(translate_error)?;
-        
+
         Ok(result.map(|r| r.count as u64).unwrap_or(0))
     }
-    
+
     /// Paginate records
     pub async fn paginate<M>(conn: &DatabaseConnection, limit: u64, offset: u64) -> Result<Vec<M>>
     where
@@ -163,10 +155,10 @@ impl QueryExecutor {
             .all(conn)
             .await
             .map_err(translate_error)?;
-        
+
         Ok(results.into_iter().map(M::from_sea_model).collect())
     }
-    
+
     /// Delete a record
     pub async fn delete<M>(conn: &DatabaseConnection, model: M) -> Result<u64>
     where
@@ -176,7 +168,7 @@ impl QueryExecutor {
         let result = active.delete(conn).await.map_err(translate_error)?;
         Ok(result.rows_affected)
     }
-    
+
     /// Insert multiple records in a single batch INSERT statement
     ///
     /// This constructs a multi-row INSERT instead of individual inserts,
@@ -193,30 +185,27 @@ impl QueryExecutor {
         if models.is_empty() {
             return Ok(Vec::new());
         }
-        
+
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
             let active = models.into_iter().next().unwrap().into_active_model();
             let result = active.insert(conn).await.map_err(translate_error)?;
             return Ok(vec![M::from_sea_model(result)]);
         }
-        
+
         // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+)
         let backend = conn.get_database_backend();
         let supports_returning = matches!(backend, DbBackend::Postgres);
-        
+
         if supports_returning {
             // Build batch insert using SeaORM's insert_many with RETURNING
-            let active_models: Vec<_> = models
-                .into_iter()
-                .map(|m| m.into_active_model())
-                .collect();
-            
+            let active_models: Vec<_> = models.into_iter().map(|m| m.into_active_model()).collect();
+
             let results = M::Entity::insert_many(active_models)
                 .exec_with_returning(conn)
                 .await
                 .map_err(translate_error)?;
-            
+
             Ok(results.into_iter().map(M::from_sea_model).collect())
         } else {
             // MySQL/SQLite: fall back to individual inserts

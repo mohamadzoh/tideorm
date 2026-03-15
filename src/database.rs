@@ -43,7 +43,7 @@
 //!     email: "john@example.com".to_string(),
 //!     name: "John".to_string(),
 //! };
-//! 
+//!
 //! // No need to pass &db - uses global connection automatically
 //! let user = user.save().await?;
 //! ```
@@ -83,7 +83,7 @@ pub fn db() -> &'static Database {
     GLOBAL_DB.get().expect(
         "Global database connection not initialized. \
          Call Database::init() or Database::set_global() before using models. \
-         Use try_db() for a non-panicking alternative."
+         Use try_db() for a non-panicking alternative.",
     )
 }
 
@@ -95,7 +95,7 @@ pub fn require_db() -> Result<&'static Database> {
         Error::connection(
             "Global database connection not initialized. \
              Call Database::init() or Database::set_global() before using models."
-            .to_string(),
+                .to_string(),
         )
     })
 }
@@ -162,7 +162,7 @@ impl Database {
             inner: Arc::new(inner),
         })
     }
-    
+
     /// Initialize the global database connection
     ///
     /// This is the recommended way to initialize TideORM in your application.
@@ -192,7 +192,7 @@ impl Database {
         let db = Self::connect(url).await?;
         Self::set_global(db)
     }
-    
+
     /// Set an existing database connection as the global connection
     ///
     /// Use this when you have an existing `Database` instance and want to
@@ -214,12 +214,12 @@ impl Database {
     ///
     /// Returns an error if a global connection has already been initialized.
     pub fn set_global(db: Self) -> Result<&'static Self> {
-        GLOBAL_DB.set(db).map_err(|_| {
-            Error::configuration("Global database connection already initialized")
-        })?;
+        GLOBAL_DB
+            .set(db)
+            .map_err(|_| Error::configuration("Global database connection already initialized"))?;
         Ok(GLOBAL_DB.get().unwrap())
     }
-    
+
     /// Get a reference to the global database connection
     ///
     /// # Panics
@@ -228,17 +228,17 @@ impl Database {
     pub fn global() -> &'static Self {
         require_db().expect(
             "Global database connection not initialized. \
-             Call Database::init() or Database::set_global() before using models."
+             Call Database::init() or Database::set_global() before using models.",
         )
     }
-    
+
     /// Try to get a reference to the global database connection
     ///
     /// Returns `None` if the global connection has not been initialized.
     pub fn try_global() -> Option<&'static Self> {
         try_db()
     }
-    
+
     /// Create a new database builder for advanced configuration
     ///
     /// # Example
@@ -253,7 +253,7 @@ impl Database {
     pub fn builder() -> DatabaseBuilder {
         DatabaseBuilder::new()
     }
-    
+
     /// Execute a closure within a database transaction
     ///
     /// The transaction is automatically committed if the closure returns `Ok`,
@@ -275,23 +275,30 @@ impl Database {
     /// ```
     pub async fn transaction<F, T>(&self, f: F) -> Result<T>
     where
-        F: for<'c> FnOnce(&'c Transaction)
-            -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>> + Send,
+        F: for<'c> FnOnce(
+                &'c Transaction,
+            )
+                -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
+            + Send,
         T: Send,
     {
         use crate::internal::TransactionTrait;
-        
-        let txn = self.inner.connection()
+
+        let txn = self
+            .inner
+            .connection()
             .begin()
             .await
             .map_err(|e| Error::transaction(e.to_string()))?;
-        
+
         let tx = Transaction { inner: txn };
-        
+
         match f(&tx).await {
             Ok(result) => {
                 // Commit the transaction — we still own tx since we only lent a reference
-                tx.inner.commit().await
+                tx.inner
+                    .commit()
+                    .await
                     .map_err(|e| Error::transaction(e.to_string()))?;
                 Ok(result)
             }
@@ -302,7 +309,7 @@ impl Database {
             }
         }
     }
-    
+
     /// Check if the database connection is healthy
     ///
     /// # Example
@@ -314,14 +321,15 @@ impl Database {
     /// ```
     pub async fn ping(&self) -> Result<bool> {
         use crate::internal::ConnectionTrait;
-        
-        self.inner.connection()
+
+        self.inner
+            .connection()
             .execute_unprepared("SELECT 1")
             .await
             .map(|_| true)
             .map_err(|e| Error::connection(e.to_string()))
     }
-    
+
     /// Synchronize database schema with registered models
     ///
     /// This will create missing tables and add missing columns.
@@ -349,11 +357,11 @@ impl Database {
     pub async fn sync(&self) -> Result<()> {
         crate::sync::sync_database(self).await
     }
-    
+
     // =========================================================================
     // RAW SQL QUERIES
     // =========================================================================
-    
+
     /// Execute a raw SQL query and return all results
     ///
     /// # Example
@@ -372,28 +380,31 @@ impl Database {
     /// ).await?;
     /// ```
     pub async fn raw<T: crate::model::Model>(sql: &str) -> Result<Vec<T>> {
-        use crate::internal::{ConnectionTrait, Statement, FromQueryResult};
-        
+        use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
+
         let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
-        
-        let results = db.inner.connection()
+
+        let results = db
+            .inner
+            .connection()
             .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
-        
+
         let mut models = Vec::new();
         for row in results {
             // Convert QueryResult to model
-            let model = <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
-                .map_err(|e| Error::query(e.to_string()))?;
+            let model =
+                <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
+                    .map_err(|e| Error::query(e.to_string()))?;
             models.push(T::from_sea_model(model));
         }
-        
+
         Ok(models)
     }
-    
+
     /// Execute a raw SQL query with parameters
     ///
     /// Parameters are passed as a vector of values. Use `$1`, `$2`, etc. for PostgreSQL
@@ -411,27 +422,30 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<T>> {
-        use crate::internal::{ConnectionTrait, Statement, FromQueryResult};
-        
+        use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
+
         let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
-        
-        let results = db.inner.connection()
+
+        let results = db
+            .inner
+            .connection()
             .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
-        
+
         let mut models = Vec::new();
         for row in results {
-            let model = <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
-                .map_err(|e| Error::query(e.to_string()))?;
+            let model =
+                <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
+                    .map_err(|e| Error::query(e.to_string()))?;
             models.push(T::from_sea_model(model));
         }
-        
+
         Ok(models)
     }
-    
+
     /// Execute a raw SQL statement (INSERT, UPDATE, DELETE) and return rows affected
     ///
     /// # Example
@@ -443,16 +457,18 @@ impl Database {
     /// ```
     pub async fn execute(sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
-        
+
         let db = crate::database::require_db()?;
-        let result = db.inner.connection()
+        let result = db
+            .inner
+            .connection()
             .execute_unprepared(sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
-        
+
         Ok(result.rows_affected())
     }
-    
+
     /// Execute a raw SQL statement with parameters
     ///
     /// # Example
@@ -463,21 +479,26 @@ impl Database {
     ///     vec!["banned".into()]
     /// ).await?;
     /// ```
-    pub async fn execute_with_params(sql: &str, params: Vec<crate::internal::Value>) -> Result<u64> {
+    pub async fn execute_with_params(
+        sql: &str,
+        params: Vec<crate::internal::Value>,
+    ) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
-        
+
         let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
-        
-        let result = db.inner.connection()
+
+        let result = db
+            .inner
+            .connection()
             .execute_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
-        
+
         Ok(result.rows_affected())
     }
-    
+
     /// Execute a raw SQL query and return results as JSON
     ///
     /// This is useful when executing queries with raw select expressions
@@ -502,29 +523,50 @@ impl Database {
     /// ```
     pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
-        
+
         let db = crate::database::require_db()?;
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
-        
-        let results = db.inner.connection()
+
+        let results = db
+            .inner
+            .connection()
             .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
-        
+
+        Self::query_rows_to_json(results)
+    }
+
+    /// Execute a raw SQL query with parameters and return results as JSON
+    pub async fn raw_json_with_params(
+        sql: &str,
+        params: Vec<crate::internal::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        use crate::internal::{ConnectionTrait, Statement};
+
+        let db = crate::database::require_db()?;
+        let backend = db.inner.connection().get_database_backend();
+        let stmt = Statement::from_sql_and_values(backend, sql, params);
+
+        let results = db
+            .inner
+            .connection()
+            .query_all_raw(stmt)
+            .await
+            .map_err(|e| Error::query(e.to_string()))?;
+
+        Self::query_rows_to_json(results)
+    }
+
+    fn query_rows_to_json(
+        results: Vec<crate::internal::QueryResult>,
+    ) -> Result<Vec<serde_json::Value>> {
         let mut json_results = Vec::new();
         for row in results {
             let mut obj = serde_json::Map::new();
-            
-            // Get column names from the result
-            let columns = row.column_names();
-            for col_name in columns {
-                // Extract column value as JSON using a prioritized type chain.
-                // We try Option<T> variants first since most DB columns are nullable,
-                // and order types to minimize misrepresentation:
-                // - bool before integers (to avoid 0/1 being returned as int)
-                // - f64 before i64 (to preserve decimal precision)
-                // - String as final fallback (most types can be read as string)
+
+            for col_name in row.column_names() {
                 let json_val = if let Ok(val) = row.try_get::<Option<bool>>("", &col_name) {
                     match val {
                         Some(v) => serde_json::json!(v),
@@ -546,16 +588,15 @@ impl Database {
                         None => serde_json::Value::Null,
                     }
                 } else {
-                    // Unsupported type — null is safer than panicking
                     serde_json::Value::Null
                 };
-                
+
                 obj.insert(col_name.to_string(), json_val);
             }
-            
+
             json_results.push(serde_json::Value::Object(obj));
         }
-        
+
         Ok(json_results)
     }
 
@@ -564,7 +605,7 @@ impl Database {
     pub fn __internal_connection(&self) -> &crate::internal::DatabaseConnection {
         self.inner.connection()
     }
-    
+
     /// Get the database backend type
     ///
     /// Returns the type of database (PostgreSQL, MySQL, MariaDB, or SQLite) that
@@ -595,12 +636,15 @@ impl Database {
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
             other => {
-                tide_warn!("Unknown database backend {:?}, defaulting to Postgres", other);
+                tide_warn!(
+                    "Unknown database backend {:?}, defaulting to Postgres",
+                    other
+                );
                 crate::config::DatabaseType::Postgres
             }
         }
     }
-    
+
     /// Get the raw SeaORM database backend (for internal use only)
     #[doc(hidden)]
     pub fn __internal_backend(&self) -> crate::internal::DbBackend {
@@ -647,7 +691,7 @@ impl Transaction {
     pub fn connection(&self) -> &crate::internal::DatabaseTransaction {
         &self.inner
     }
-    
+
     /// Get the raw internal transaction (for internal use only)
     #[doc(hidden)]
     pub fn __internal_transaction(&self) -> &crate::internal::DatabaseTransaction {
@@ -691,52 +735,52 @@ impl DatabaseBuilder {
             max_lifetime: None,
         }
     }
-    
+
     /// Set the database connection URL
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
     }
-    
+
     /// Set the maximum number of connections in the pool
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = Some(n);
         self
     }
-    
+
     /// Set the minimum number of connections in the pool
     pub fn min_connections(mut self, n: u32) -> Self {
         self.min_connections = Some(n);
         self
     }
-    
+
     /// Set the connection timeout
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.connect_timeout = Some(duration);
         self
     }
-    
+
     /// Set the idle connection timeout
     pub fn idle_timeout(mut self, duration: Duration) -> Self {
         self.idle_timeout = Some(duration);
         self
     }
-    
+
     /// Set the maximum connection lifetime
     pub fn max_lifetime(mut self, duration: Duration) -> Self {
         self.max_lifetime = Some(duration);
         self
     }
-    
+
     /// Build and connect to the database with pool configuration
     pub async fn build(self) -> Result<Database> {
-        let url = self.url.ok_or_else(|| {
-            Error::configuration("Database URL is required")
-        })?;
-        
+        let url = self
+            .url
+            .ok_or_else(|| Error::configuration("Database URL is required"))?;
+
         // Build ConnectOptions with pool settings
         let mut opts = crate::internal::ConnectOptions::new(url);
-        
+
         // Apply pool settings (methods return &mut self)
         if let Some(max) = self.max_connections {
             opts.max_connections(max);
@@ -753,12 +797,12 @@ impl DatabaseBuilder {
         if let Some(lifetime) = self.max_lifetime {
             opts.max_lifetime(lifetime);
         }
-        
+
         // Connect with options
         let conn = crate::internal::SeaDatabase::connect(opts)
             .await
             .map_err(|e| Error::connection(e.to_string()))?;
-        
+
         Ok(Database {
             inner: Arc::new(InternalConnection { conn }),
         })

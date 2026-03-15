@@ -2,11 +2,11 @@
 //!
 //! This crate provides derive macros for TideORM models.
 
-use darling::{ast::Data, FromDeriveInput, FromField};
+use convert_case::{Case, Casing};
+use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, DeriveInput, Ident, Type, Attribute, Meta};
-use convert_case::{Case, Casing};
+use syn::{Attribute, DeriveInput, Ident, Meta, Type, parse_macro_input};
 
 /// Field-level attributes for model fields
 #[derive(Debug, FromField)]
@@ -16,72 +16,72 @@ struct ModelField {
     ident: Option<Ident>,
     ty: Type,
     attrs: Vec<syn::Attribute>,
-    
+
     /// Mark as primary key
     #[darling(default)]
     primary_key: bool,
-    
+
     /// Auto-increment (for primary keys)
     #[darling(default)]
     auto_increment: bool,
-    
+
     /// Column name override
     #[darling(default)]
     column: Option<String>,
-    
+
     /// Nullable field
     #[darling(default)]
     nullable: bool,
-    
+
     /// Default value expression
     #[darling(default)]
     default: Option<String>,
-    
+
     /// Skip this field in queries
     #[darling(default)]
     skip: bool,
-    
+
     /// This field is a timestamp (created_at, updated_at)
     #[darling(default)]
     timestamp: bool,
-    
+
     // Relation attributes (SeaORM-style, defined inside struct)
     /// HasOne relation: #[tide(has_one = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     has_one: Option<String>,
-    
+
     /// HasMany relation: #[tide(has_many = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     has_many: Option<String>,
-    
+
     /// BelongsTo relation: #[tide(belongs_to = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     belongs_to: Option<String>,
-    
+
     /// HasManyThrough relation
     #[darling(default)]
     has_many_through: Option<String>,
-    
+
     /// Foreign key for relations
     #[darling(default)]
     foreign_key: Option<String>,
-    
+
     /// Owner/local key for relations
     #[darling(default)]
     owner_key: Option<String>,
-    
+
     /// Local key for relations
     #[darling(default)]
     local_key: Option<String>,
-    
+
     /// Pivot table for has_many_through
     #[darling(default)]
     pivot: Option<String>,
-    
+
     /// Related key for has_many_through
     #[darling(default)]
     related_key: Option<String>,
-    
+
     /// Morph name for polymorphic relations
     #[darling(default)]
     morph_name: Option<String>,
@@ -90,30 +90,30 @@ struct ModelField {
 impl ModelField {
     /// Check if this field is a relation field
     fn is_relation(&self) -> bool {
-        self.has_one.is_some() || 
-        self.has_many.is_some() || 
-        self.belongs_to.is_some() ||
-        self.has_many_through.is_some()
+        self.has_one.is_some()
+            || self.has_many.is_some()
+            || self.belongs_to.is_some()
+            || self.has_many_through.is_some()
     }
-    
+
     /// Check if field type looks like a relation type
     fn is_relation_type(&self) -> bool {
         let ty_str = quote!(#(&self.ty)).to_string();
-        ty_str.contains("HasOne") || 
-        ty_str.contains("HasMany") || 
-        ty_str.contains("BelongsTo") ||
-        ty_str.contains("MorphOne") ||
-        ty_str.contains("MorphMany") ||
-        ty_str.contains("MorphTo")
+        ty_str.contains("HasOne")
+            || ty_str.contains("HasMany")
+            || ty_str.contains("BelongsTo")
+            || ty_str.contains("MorphOne")
+            || ty_str.contains("MorphMany")
+            || ty_str.contains("MorphTo")
     }
-    
+
     /// Get the SeaORM ColumnType for this field's type
     fn column_type_expr(&self) -> proc_macro2::TokenStream {
         let ty = &self.ty;
         let ty_str = quote!(#ty).to_string();
         // Normalize whitespace
         let ty_str: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
-        
+
         // Check if nullable (wrapped in Option)
         let is_nullable = ty_str.starts_with("Option<");
         let base_type = if is_nullable {
@@ -124,7 +124,7 @@ impl ModelField {
         } else {
             &ty_str
         };
-        
+
         let column_type = match base_type {
             // Integer types
             "i8" | "i16" => quote!(ColumnType::SmallInteger),
@@ -133,48 +133,62 @@ impl ModelField {
             "u8" | "u16" => quote!(ColumnType::SmallInteger),
             "u32" => quote!(ColumnType::Integer),
             "u64" => quote!(ColumnType::BigInteger),
-            
+
             // Float types
             "f32" => quote!(ColumnType::Float),
             "f64" => quote!(ColumnType::Double),
-            
+
             // Boolean
             "bool" => quote!(ColumnType::Boolean),
-            
+
             // String types
             "String" | "&str" | "str" => quote!(ColumnType::Text),
-            
+
             // UUID
             "Uuid" | "uuid::Uuid" => quote!(ColumnType::Uuid),
-            
+
             // Date/Time types - Use TimestampWithTimeZone for DateTime<Utc>
-            s if s.contains("DateTime<Utc>") || s.contains("DateTime<chrono::Utc>") || s.contains("chrono::DateTime<Utc>") || s.contains("chrono::DateTime<chrono::Utc>") => {
+            s if s.contains("DateTime<Utc>")
+                || s.contains("DateTime<chrono::Utc>")
+                || s.contains("chrono::DateTime<Utc>")
+                || s.contains("chrono::DateTime<chrono::Utc>") =>
+            {
                 quote!(ColumnType::TimestampWithTimeZone)
             }
             "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => quote!(ColumnType::DateTime),
             "NaiveDate" | "chrono::NaiveDate" => quote!(ColumnType::Date),
             "NaiveTime" | "chrono::NaiveTime" => quote!(ColumnType::Time),
-            
+
             // Decimal
             "Decimal" | "rust_decimal::Decimal" => quote!(ColumnType::Decimal(None)),
-            
+
             // JSON types
             "Json" | "JsonValue" | "Value" | "serde_json::Value" => quote!(ColumnType::Json),
-            
+
             // Binary
             "Vec<u8>" => quote!(ColumnType::Binary(sea_orm::sea_query::BlobSize::Blob(None))),
-            
+
             // Array types (PostgreSQL)
-            "Vec<i32>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Integer))),
-            "Vec<i64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::BigInteger))),
-            "Vec<String>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Text))),
-            "Vec<bool>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Boolean))),
-            "Vec<f64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Double))),
-            
+            "Vec<i32>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(
+                ColumnType::Integer
+            ))),
+            "Vec<i64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(
+                ColumnType::BigInteger
+            ))),
+            "Vec<String>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(
+                ColumnType::Text
+            ))),
+            "Vec<bool>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(
+                ColumnType::Boolean
+            ))),
+            "Vec<f64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(
+                ColumnType::Double
+            ))),
+
             // Default to Text for unknown types
             _ => quote!(ColumnType::Text),
         };
-        
+
         if is_nullable || self.nullable {
             quote!(#column_type.def().nullable())
         } else {
@@ -199,7 +213,7 @@ impl IndexDef {
             unique,
         }
     }
-    
+
     fn from_named(name: String, columns: &str, unique: bool) -> Self {
         Self {
             name: Some(name),
@@ -207,7 +221,7 @@ impl IndexDef {
             unique,
         }
     }
-    
+
     fn get_name(&self, table_name: &str) -> String {
         if let Some(ref name) = self.name {
             name.clone()
@@ -223,24 +237,24 @@ impl IndexDef {
 fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>) {
     let mut indexes = Vec::new();
     let mut unique_indexes = Vec::new();
-    
+
     for attr in attrs {
         let is_index = attr.path().is_ident("index");
         let is_unique_index = attr.path().is_ident("unique_index");
-        
+
         if !is_index && !is_unique_index {
             continue;
         }
-        
+
         let unique = is_unique_index;
-        
+
         if let Meta::List(list) = &attr.meta {
             let tokens = list.tokens.to_string();
-            
+
             if tokens.contains("name") && tokens.contains("columns") {
                 let mut name = None;
                 let mut columns = None;
-                
+
                 let _ = attr.parse_nested_meta(|nested| {
                     if nested.path.is_ident("name") {
                         let value: syn::LitStr = nested.value()?.parse()?;
@@ -251,7 +265,7 @@ fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>)
                     }
                     Ok(())
                 });
-                
+
                 if let Some(cols) = columns {
                     let idx = if let Some(n) = name {
                         IndexDef::from_named(n, &cols, unique)
@@ -277,25 +291,28 @@ fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>)
             }
         }
     }
-    
+
     (indexes, unique_indexes)
 }
 
 /// Parse #[validate(...)] attributes from field attributes
-fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<proc_macro2::TokenStream> {
+fn parse_validation_attributes(
+    _field_name: &str,
+    attrs: &[Attribute],
+) -> Vec<proc_macro2::TokenStream> {
     let mut rules = Vec::new();
-    
+
     for attr in attrs {
         if !attr.path().is_ident("validate") {
             continue;
         }
-        
+
         if let Meta::List(list) = &attr.meta {
             let tokens = list.tokens.to_string();
-            
+
             for part in tokens.split(',') {
                 let part = part.trim();
-                
+
                 if part == "required" {
                     rules.push(quote! { ::tideorm::validation::ValidationRule::Required });
                 } else if part == "email" {
@@ -313,19 +330,27 @@ fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<pr
                 } else if part.starts_with("min_length") {
                     if let Some(val) = extract_value(part, "min_length") {
                         if let Ok(n) = val.parse::<usize>() {
-                            rules.push(quote! { ::tideorm::validation::ValidationRule::MinLength(#n) });
+                            rules.push(
+                                quote! { ::tideorm::validation::ValidationRule::MinLength(#n) },
+                            );
                         }
                     }
                 } else if part.starts_with("max_length") {
                     if let Some(val) = extract_value(part, "max_length") {
                         if let Ok(n) = val.parse::<usize>() {
-                            rules.push(quote! { ::tideorm::validation::ValidationRule::MaxLength(#n) });
+                            rules.push(
+                                quote! { ::tideorm::validation::ValidationRule::MaxLength(#n) },
+                            );
                         }
                     }
-                } else if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") {
+                } else if part.starts_with("length")
+                    && !part.contains("min_")
+                    && !part.contains("max_")
+                {
                     if let Some(val) = extract_value(part, "length") {
                         if let Ok(n) = val.parse::<usize>() {
-                            rules.push(quote! { ::tideorm::validation::ValidationRule::Length(#n) });
+                            rules
+                                .push(quote! { ::tideorm::validation::ValidationRule::Length(#n) });
                         }
                     }
                 } else if part.starts_with("min") && !part.contains("length") {
@@ -346,7 +371,9 @@ fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<pr
                         if val.contains("..") {
                             let parts: Vec<&str> = val.split("..").collect();
                             if parts.len() == 2 {
-                                if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                if let (Ok(min), Ok(max)) =
+                                    (parts[0].parse::<f64>(), parts[1].parse::<f64>())
+                                {
                                     rules.push(quote! { ::tideorm::validation::ValidationRule::Range(#min, #max) });
                                 }
                             }
@@ -366,27 +393,27 @@ fn parse_validation_attributes(_field_name: &str, attrs: &[Attribute]) -> Vec<pr
             }
         }
     }
-    
+
     rules
 }
 
 /// Extract value from "key = value" or "key(value)" format
 fn extract_value(input: &str, key: &str) -> Option<String> {
     let input = input.trim();
-    
+
     if let Some(pos) = input.find('=') {
         let k = input[..pos].trim();
         if k == key {
             return Some(input[pos + 1..].trim().to_string());
         }
     }
-    
+
     if input.starts_with(key) && input.contains('(') && input.ends_with(')') {
         let start = input.find('(').unwrap() + 1;
         let end = input.len() - 1;
         return Some(input[start..end].trim().to_string());
     }
-    
+
     None
 }
 
@@ -397,102 +424,102 @@ fn extract_value(input: &str, key: &str) -> Option<String> {
 struct ModelInput {
     ident: Ident,
     data: Data<(), ModelField>,
-    
+
     /// Table name override
     #[darling(default)]
     table: Option<String>,
-    
+
     /// Schema name (for postgres)
     #[darling(default)]
     schema: Option<String>,
-    
+
     /// Enable soft deletes
     #[darling(default)]
     soft_delete: bool,
-    
+
     /// Enable timestamps
     #[darling(default)]
     timestamps: bool,
-    
+
     /// Hidden attributes
     #[darling(default)]
     hidden: Option<String>,
-    
+
     /// Translatable fields
     #[darling(default)]
     translatable: Option<String>,
-    
+
     /// Allowed languages
     #[darling(default)]
     languages: Option<String>,
-    
+
     /// Fallback language
     #[darling(default)]
     fallback_language: Option<String>,
-    
+
     /// HasOne file attachments
     #[darling(default)]
     has_one_files: Option<String>,
-    
+
     /// HasMany file attachments
     #[darling(default)]
     has_many_files: Option<String>,
-    
+
     /// Searchable fields
     #[darling(default)]
     searchable: Option<String>,
-    
+
     // Auto-derive control options
     /// Skip auto-generating Debug impl (use when manually deriving Debug)
     #[darling(default)]
     skip_debug: bool,
-    
+
     /// Skip auto-generating Clone impl (use when manually deriving Clone)
     #[darling(default)]
     skip_clone: bool,
-    
+
     /// Skip auto-generating Default impl (use when manually deriving Default)
     #[darling(default)]
     skip_default: bool,
-    
+
     /// Skip auto-generating Serialize impl (use when manually deriving Serialize)
     #[darling(default)]
     skip_serialize: bool,
-    
+
     /// Skip auto-generating Deserialize impl (use when manually deriving Deserialize)
     #[darling(default)]
     skip_deserialize: bool,
-    
+
     /// Skip all auto-derives (Debug, Clone, Default, Serialize, Deserialize)
     #[darling(default)]
     skip_derives: bool,
-    
+
     /// Enable auto-derives - automatically implement Debug, Clone, Default, Serialize, Deserialize
     /// Use this when you want the Model macro to generate all common traits automatically.
     /// Example: #[tide(table = "users", auto_derives)]
     #[darling(default)]
     auto_derives: bool,
-    
+
     /// Enable auto Debug impl
     #[darling(default)]
     auto_debug: bool,
-    
+
     /// Enable auto Clone impl
     #[darling(default)]
     auto_clone: bool,
-    
+
     /// Enable auto Default impl  
     #[darling(default)]
     auto_default: bool,
-    
+
     /// Enable auto Serialize impl
     #[darling(default)]
     auto_serialize: bool,
-    
+
     /// Enable auto Deserialize impl
     #[darling(default)]
     auto_deserialize: bool,
-    
+
     /// Enable tokenization for this model
     /// When enabled, generates `Tokenizable` trait implementation
     /// allowing conversion between record IDs and encrypted tokens.
@@ -578,17 +605,17 @@ struct ModelInput {
 #[proc_macro_derive(Model, attributes(tide, index, unique_index, validate))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    
+
     // Detect derives from remaining attributes (other #[derive(...)] attributes that haven't been processed yet)
     let existing_derives = detect_existing_derives(&input.attrs);
-    
+
     let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
-    
+
     let model_input = match ModelInput::from_derive_input(&input) {
         Ok(v) => v,
         Err(e) => return e.write_errors().into(),
     };
-    
+
     let expanded = generate_model_impl(&model_input, indexes, unique_indexes, &existing_derives);
     TokenStream::from(expanded)
 }
@@ -604,24 +631,24 @@ struct ExistingDerives {
 }
 
 /// Detect existing derive macros by examining the struct definition for derive attributes.
-/// 
+///
 /// IMPORTANT: When multiple derives are in the same #[derive(...)] list like:
 /// `#[derive(Debug, Clone, Model, Serialize)]`
-/// 
+///
 /// Rust processes each derive independently and removes them from the attribute list.
 /// By the time Model runs, Debug and Clone have already been processed and removed.
-/// 
+///
 /// However, if derives are on SEPARATE lines like:
 /// ```
 /// #[derive(Debug, Clone)]
 /// #[derive(Model)]
 /// ```
 /// Then we CAN detect them because the first #[derive(...)] attribute is still present.
-/// 
+///
 /// This function checks for traits in any remaining #[derive(...)] attributes.
 fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
     let mut existing = ExistingDerives::default();
-    
+
     for attr in attrs {
         if attr.path().is_ident("derive") {
             if let Meta::List(list) = &attr.meta {
@@ -643,34 +670,44 @@ fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
                 if tokens_str.contains("Deserialize") {
                     existing.has_deserialize = true;
                     // Deserialize contains "Serialize" so check both
-                    if tokens_str.matches("Serialize").count() > tokens_str.matches("Deserialize").count() {
+                    if tokens_str.matches("Serialize").count()
+                        > tokens_str.matches("Deserialize").count()
+                    {
                         existing.has_serialize = true;
                     }
                 }
                 // More robust check for Serialize
                 for part in tokens_str.split(',') {
                     let part = part.trim();
-                    if part == "Serialize" || part.ends_with("::Serialize") || part.starts_with("serde::Serialize") {
+                    if part == "Serialize"
+                        || part.ends_with("::Serialize")
+                        || part.starts_with("serde::Serialize")
+                    {
                         existing.has_serialize = true;
                     }
                 }
             }
         }
     }
-    
+
     existing
 }
 
-fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexes: Vec<IndexDef>, existing_derives: &ExistingDerives) -> proc_macro2::TokenStream {
+fn generate_model_impl(
+    input: &ModelInput,
+    indexes: Vec<IndexDef>,
+    unique_indexes: Vec<IndexDef>,
+    existing_derives: &ExistingDerives,
+) -> proc_macro2::TokenStream {
     let struct_name = &input.ident;
     let table_name = input.table.clone().unwrap_or_else(|| {
         let name = struct_name.to_string().to_case(Case::Snake);
         pluralize(&name)
     });
-    
+
     let schema_name = input.schema.clone().unwrap_or_else(|| "public".to_string());
     let soft_delete_enabled = input.soft_delete;
-    
+
     // Auto-derive control flags
     // By default, ALL common traits are auto-generated to simplify model definitions.
     // Users only need #[derive(Model)] - no need for Debug, Clone, Serialize, Deserialize.
@@ -681,87 +718,113 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     // Generated by default (unless already derived or explicitly skipped):
     // - Default (required for internal operations)
     // - Debug
-    // - Clone  
+    // - Clone
     // - Serialize
     // - Deserialize
-    
+
     let should_gen_debug = !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
     let should_gen_clone = !input.skip_derives && !input.skip_clone && !existing_derives.has_clone;
     let should_gen_default = !existing_derives.has_default;
-    let should_gen_serialize = !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
-    let should_gen_deserialize = !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
-    
-    let hidden_attrs: Vec<String> = input.hidden.as_ref()
+    let should_gen_serialize =
+        !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
+    let should_gen_deserialize =
+        !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
+
+    let hidden_attrs: Vec<String> = input
+        .hidden
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_else(|| vec!["deleted_at".to_string()]);
-    
-    let translatable_fields: Vec<String> = input.translatable.as_ref()
+
+    let translatable_fields: Vec<String> = input
+        .translatable
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_default();
-    
+
     let has_custom_languages = input.languages.is_some();
-    let allowed_languages: Vec<String> = input.languages.as_ref()
+    let allowed_languages: Vec<String> = input
+        .languages
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_default();
-    
+
     let has_custom_fallback = input.fallback_language.is_some();
     let fallback_language = input.fallback_language.clone().unwrap_or_default();
-    
-    let has_one_files: Vec<String> = input.has_one_files.as_ref()
+
+    let has_one_files: Vec<String> = input
+        .has_one_files
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_default();
-    
-    let has_many_files: Vec<String> = input.has_many_files.as_ref()
+
+    let has_many_files: Vec<String> = input
+        .has_many_files
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_default();
-    
-    let searchable_fields: Vec<String> = input.searchable.as_ref()
+
+    let searchable_fields: Vec<String> = input
+        .searchable
+        .as_ref()
         .map(|s| s.split(',').map(|v| v.trim().to_string()).collect())
         .unwrap_or_default();
-    
-    let index_impls: Vec<_> = indexes.iter().map(|idx| {
-        let name = idx.get_name(&table_name);
-        let columns = &idx.columns;
-        quote! {
-            ::tideorm::model::IndexDefinition::new(
-                #name,
-                vec![#(#columns.to_string()),*],
-                false
-            )
-        }
-    }).collect();
-    
-    let unique_index_impls: Vec<_> = unique_indexes.iter().map(|idx| {
-        let name = idx.get_name(&table_name);
-        let columns = &idx.columns;
-        quote! {
-            ::tideorm::model::IndexDefinition::new(
-                #name,
-                vec![#(#columns.to_string()),*],
-                true
-            )
-        }
-    }).collect();
-    
+
+    let index_impls: Vec<_> = indexes
+        .iter()
+        .map(|idx| {
+            let name = idx.get_name(&table_name);
+            let columns = &idx.columns;
+            quote! {
+                ::tideorm::model::IndexDefinition::new(
+                    #name,
+                    vec![#(#columns.to_string()),*],
+                    false
+                )
+            }
+        })
+        .collect();
+
+    let unique_index_impls: Vec<_> = unique_indexes
+        .iter()
+        .map(|idx| {
+            let name = idx.get_name(&table_name);
+            let columns = &idx.columns;
+            quote! {
+                ::tideorm::model::IndexDefinition::new(
+                    #name,
+                    vec![#(#columns.to_string()),*],
+                    true
+                )
+            }
+        })
+        .collect();
+
     let fields = match &input.data {
         Data::Struct(fields) => fields,
-        _ => return syn::Error::new_spanned(
-            &input.ident,
-            "Model can only be derived for structs with named fields"
-        ).to_compile_error(),
+        _ => {
+            return syn::Error::new_spanned(
+                &input.ident,
+                "Model can only be derived for structs with named fields",
+            )
+            .to_compile_error();
+        }
     };
-    
+
     // Separate relation fields from database fields
-    let db_fields: Vec<_> = fields.iter()
+    let db_fields: Vec<_> = fields
+        .iter()
         .filter(|f| !f.skip && !f.is_relation() && !f.is_relation_type())
         .collect();
-    
-    let relation_fields: Vec<_> = fields.iter()
+
+    let relation_fields: Vec<_> = fields
+        .iter()
         .filter(|f| f.is_relation() || f.is_relation_type())
         .collect();
-    
+
     // Parse validation rules
-    let validation_rules: Vec<_> = db_fields.iter()
+    let validation_rules: Vec<_> = db_fields
+        .iter()
         .filter_map(|f| {
             let field_name = f.ident.as_ref()?.to_string();
             let rules = parse_validation_attributes(&field_name, &f.attrs);
@@ -772,7 +835,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             }
         })
         .collect();
-    
+
     // Find primary key field
     let pk_field = db_fields.iter().find(|f| f.primary_key);
     let pk_ident = pk_field
@@ -783,17 +846,14 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         .map(|f| &f.ty)
         .cloned()
         .unwrap_or_else(|| syn::parse_quote!(i64));
-    
+
     // Generate column names and field mappings (only for DB fields)
-    let field_names: Vec<_> = db_fields.iter()
-        .filter_map(|f| f.ident.as_ref())
-        .collect();
-    
-    let field_types: Vec<_> = db_fields.iter()
-        .map(|f| &f.ty)
-        .collect();
-    
-    let column_names: Vec<_> = db_fields.iter()
+    let field_names: Vec<_> = db_fields.iter().filter_map(|f| f.ident.as_ref()).collect();
+
+    let field_types: Vec<_> = db_fields.iter().map(|f| &f.ty).collect();
+
+    let column_names: Vec<_> = db_fields
+        .iter()
         .map(|f| {
             f.column.clone().unwrap_or_else(|| {
                 f.ident
@@ -803,43 +863,52 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             })
         })
         .collect();
-    
+
     // Generate column enum variants
-    let column_variants: Vec<_> = db_fields.iter()
+    let column_variants: Vec<_> = db_fields
+        .iter()
         .filter_map(|f| f.ident.as_ref())
         .map(|i| format_ident!("{}", i.to_string().to_case(Case::Pascal)))
         .collect();
-    
+
     // Generate column type definitions for ColumnTrait impl
-    let column_type_defs: Vec<_> = db_fields.iter()
+    let column_type_defs: Vec<_> = db_fields
+        .iter()
         .filter_map(|f| {
             let variant = format_ident!("{}", f.ident.as_ref()?.to_string().to_case(Case::Pascal));
             let col_type_expr = f.column_type_expr();
             Some(quote!(Self::#variant => #col_type_expr))
         })
         .collect();
-    
+
     // Primary key info
     let pk_column_variant = format_ident!("{}", pk_ident.to_string().to_case(Case::Pascal));
     let pk_column_name = pk_field
         .and_then(|f| f.column.clone())
         .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
     let pk_auto_increment = pk_field.map(|f| f.auto_increment).unwrap_or(false);
-    
+
     // Detect timestamp fields
     let has_created_at = db_fields.iter().any(|f| {
-        f.ident.as_ref().map(|i| *i == "created_at").unwrap_or(false)
+        f.ident
+            .as_ref()
+            .map(|i| *i == "created_at")
+            .unwrap_or(false)
     });
     let has_updated_at = db_fields.iter().any(|f| {
-        f.ident.as_ref().map(|i| *i == "updated_at").unwrap_or(false)
+        f.ident
+            .as_ref()
+            .map(|i| *i == "updated_at")
+            .unwrap_or(false)
     });
     let timestamps_enabled = input.timestamps || (has_created_at && has_updated_at);
-    
+
     // Generate sync column attributes
-    let sync_column_attrs: Vec<_> = db_fields.iter()
+    let sync_column_attrs: Vec<_> = db_fields
+        .iter()
         .map(|f| {
             let mut attrs = Vec::new();
-            
+
             if f.primary_key {
                 attrs.push(quote! { col = col.primary_key(); });
             }
@@ -853,13 +922,14 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             if let Some(ref default) = f.default {
                 attrs.push(quote! { col = col.default(#default); });
             }
-            
+
             quote! { #(#attrs)* }
         })
         .collect();
-    
+
     // Generate active model field setters for INSERT (only DB fields)
-    let insert_active_model_setters: Vec<_> = db_fields.iter()
+    let insert_active_model_setters: Vec<_> = db_fields
+        .iter()
         .map(|f| {
             let ident = f.ident.as_ref().unwrap();
             let field_name = ident.to_string();
@@ -878,9 +948,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             }
         })
         .collect();
-    
+
     // Generate active model field setters for UPDATE (only DB fields)
-    let update_active_model_setters: Vec<_> = db_fields.iter()
+    let update_active_model_setters: Vec<_> = db_fields
+        .iter()
         .map(|f| {
             let ident = f.ident.as_ref().unwrap();
             let field_name = ident.to_string();
@@ -899,14 +970,15 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             }
         })
         .collect();
-    
+
     // Generate relation initialization code (currently relation fields use Default::default())
     // This is kept for future enhancement to auto-wire relation contexts
-    let _relation_inits: Vec<_> = relation_fields.iter()
+    let _relation_inits: Vec<_> = relation_fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
             let _ty = &f.ty;
-            
+
             // For has_one relations
             if let Some(ref _related) = f.has_one {
                 let fk = f.foreign_key.as_deref().unwrap_or("id");
@@ -916,7 +988,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         .with_parent_pk(::serde_json::json!(self.#pk_ident))
                 });
             }
-            
+
             // For has_many relations
             if let Some(ref _related) = f.has_many {
                 let fk = f.foreign_key.as_deref().unwrap_or("id");
@@ -926,7 +998,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         .with_parent_pk(::serde_json::json!(self.#pk_ident))
                 });
             }
-            
+
             // For belongs_to relations
             if let Some(ref _related) = f.belongs_to {
                 let fk = f.foreign_key.as_deref().unwrap_or("id");
@@ -938,28 +1010,33 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         .with_fk_value(::serde_json::json!(self.#fk_ident))
                 });
             }
-            
+
             // Default: use Default::default()
             Some(quote! {
                 #ident: Default::default()
             })
         })
         .collect();
-    
+
     // Generate internal SeaORM entity module name
-    let internal_entity_mod = format_ident!("__tideorm_internal_{}", struct_name.to_string().to_lowercase());
-    
+    let internal_entity_mod = format_ident!(
+        "__tideorm_internal_{}",
+        struct_name.to_string().to_lowercase()
+    );
+
     // Generate SeaORM field definitions (only DB fields)
-    let sea_orm_field_defs: Vec<_> = db_fields.iter()
+    let sea_orm_field_defs: Vec<_> = db_fields
+        .iter()
         .map(|f| {
             let ident = f.ident.as_ref().unwrap();
             let ty = &f.ty;
-            let column_name = f.column.clone().unwrap_or_else(|| {
-                ident.to_string().to_case(Case::Snake)
-            });
-            
+            let column_name = f
+                .column
+                .clone()
+                .unwrap_or_else(|| ident.to_string().to_case(Case::Snake));
+
             let mut attrs = vec![];
-            
+
             if f.primary_key {
                 attrs.push(quote!(primary_key));
             }
@@ -967,23 +1044,22 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 attrs.push(quote!(auto_increment));
             }
             attrs.push(quote!(column_name = #column_name));
-            
+
             let sea_orm_attr = quote!(#[sea_orm(#(#attrs),*)]);
-            
+
             quote! {
                 #sea_orm_attr
                 pub #ident: #ty
             }
         })
         .collect();
-    
+
     // All field names for struct conversion (DB fields only)
-    let all_field_names: Vec<_> = db_fields.iter()
-        .filter_map(|f| f.ident.as_ref())
-        .collect();
-    
+    let all_field_names: Vec<_> = db_fields.iter().filter_map(|f| f.ident.as_ref()).collect();
+
     // Generate default initializers for relation fields only (avoids needless_update clippy warning)
-    let relation_field_defaults: Vec<_> = relation_fields.iter()
+    let relation_field_defaults: Vec<_> = relation_fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
             Some(quote! {
@@ -991,9 +1067,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             })
         })
         .collect();
-    
+
     // Generate Default impl field initializers for ALL fields (both DB and relation fields)
-    let default_field_inits: Vec<_> = fields.iter()
+    let default_field_inits: Vec<_> = fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
             Some(quote! {
@@ -1001,25 +1078,30 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             })
         })
         .collect();
-    
+
     // Collect ALL field names and types for auto-derive implementations
-    let all_fields_for_derives: Vec<_> = fields.iter()
+    let all_fields_for_derives: Vec<_> = fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
             let ty = &f.ty;
             Some((ident.clone(), ty.clone()))
         })
         .collect();
-    
-    let derive_field_names: Vec<_> = all_fields_for_derives.iter().map(|(i, _)| i.clone()).collect();
+
+    let derive_field_names: Vec<_> = all_fields_for_derives
+        .iter()
+        .map(|(i, _)| i.clone())
+        .collect();
     let derive_field_names_str: Vec<_> = derive_field_names.iter().map(|i| i.to_string()).collect();
-    
+
     // Generate typed column struct and instance for User::columns.name access
     // This allows usage like: User::columns.name.eq("Alice")
     let columns_struct_name = format_ident!("{}Columns", struct_name);
-    
+
     // Generate struct fields for the Columns struct
-    let columns_struct_fields: Vec<_> = db_fields.iter()
+    let columns_struct_fields: Vec<_> = db_fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
             let ty = &f.ty;
@@ -1028,20 +1110,22 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             })
         })
         .collect();
-    
+
     // Generate field initializers for the columns constant
-    let columns_field_inits: Vec<_> = db_fields.iter()
+    let columns_field_inits: Vec<_> = db_fields
+        .iter()
         .filter_map(|f| {
             let ident = f.ident.as_ref()?;
-            let column_name = f.column.clone().unwrap_or_else(|| {
-                ident.to_string().to_case(Case::Snake)
-            });
+            let column_name = f
+                .column
+                .clone()
+                .unwrap_or_else(|| ident.to_string().to_case(Case::Snake));
             Some(quote! {
                 #ident: ::tideorm::columns::Column::new(#column_name)
             })
         })
         .collect();
-    
+
     let base_impl = quote! {
         // Internal SeaORM entity — generated code, targeted lint suppression
         #[doc(hidden)]
@@ -1051,113 +1135,113 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             use ::tideorm::sea_orm as sea_orm;
             use ::tideorm::sea_orm::entity::prelude::*;
             use ::tideorm::sea_orm::{ActiveValue, DeriveEntity, DeriveModel, DeriveActiveModel};
-            
+
             #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
             pub struct Entity;
-            
+
             impl EntityName for Entity {
                 fn table_name(&self) -> &'static str {
                     #table_name
                 }
             }
-            
+
             #[derive(Clone, Debug, PartialEq, DeriveModel, DeriveActiveModel)]
             pub struct Model {
                 #(#sea_orm_field_defs),*
             }
-            
+
             #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
             pub enum Column {
                 #(#column_variants),*
             }
-            
+
             #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
             pub enum PrimaryKey {
                 #pk_column_variant
             }
-            
+
             impl PrimaryKeyTrait for PrimaryKey {
                 type ValueType = #pk_type;
-                
+
                 fn auto_increment() -> bool {
                     #pk_auto_increment
                 }
             }
-            
+
             impl ColumnTrait for Column {
                 type EntityName = Entity;
-                
+
                 fn def(&self) -> ColumnDef {
                     match self {
                         #(#column_type_defs),*
                     }
                 }
             }
-            
+
             // Empty relation enum - relations are handled by TideORM directly
             #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
             pub enum Relation {}
-            
+
             impl ActiveModelBehavior for ActiveModel {}
         }
-        
+
         impl ::tideorm::model::ModelMeta for #struct_name {
             type PrimaryKey = #pk_type;
-            
+
             fn table_name() -> &'static str {
                 #table_name
             }
-            
+
             fn primary_key_name() -> &'static str {
                 stringify!(#pk_ident)
             }
-            
+
             fn column_names() -> &'static [&'static str] {
                 &[#(#column_names),*]
             }
-            
+
             fn field_names() -> &'static [&'static str] {
                 &[#(stringify!(#field_names)),*]
             }
-            
+
             fn hidden_attributes() -> Vec<&'static str> {
                 vec![#(#hidden_attrs),*]
             }
-            
+
             fn searchable_fields() -> Vec<&'static str> {
                 vec![#(#searchable_fields),*]
             }
-            
+
             fn translatable_fields() -> Vec<&'static str> {
                 vec![#(#translatable_fields),*]
             }
-            
+
             fn has_one_attached_file() -> Vec<&'static str> {
                 vec![#(#has_one_files),*]
             }
-            
+
             fn has_many_attached_files() -> Vec<&'static str> {
                 vec![#(#has_many_files),*]
             }
-            
+
             fn soft_delete_enabled() -> bool {
                 #soft_delete_enabled
             }
-            
+
             fn has_timestamps() -> bool {
                 #timestamps_enabled
             }
-            
+
             fn indexes() -> Vec<::tideorm::model::IndexDefinition> {
                 vec![#(#index_impls),*]
             }
-            
+
             fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> {
                 vec![#(#unique_index_impls),*]
             }
         }
     };
-    
+
     // Generate optional language overrides
     let language_override = if has_custom_languages {
         quote! {
@@ -1170,7 +1254,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     let fallback_override = if has_custom_fallback {
         quote! {
             impl #struct_name {
@@ -1182,7 +1266,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Generate validation implementation
     let validation_impl = if !validation_rules.is_empty() {
         let validation_checks: Vec<_> = validation_rules.iter().map(|(field_name, rules)| {
@@ -1198,28 +1282,31 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 }
             }
         }).collect();
-        
-        let rules_list: Vec<_> = validation_rules.iter().map(|(field_name, rules)| {
-            quote! {
-                (#field_name, vec![#(#rules),*])
-            }
-        }).collect();
-        
+
+        let rules_list: Vec<_> = validation_rules
+            .iter()
+            .map(|(field_name, rules)| {
+                quote! {
+                    (#field_name, vec![#(#rules),*])
+                }
+            })
+            .collect();
+
         quote! {
             impl ::tideorm::validation::Validate for #struct_name {
                 fn validation_rules() -> Vec<(&'static str, Vec<::tideorm::validation::ValidationRule>)> {
                     vec![#(#rules_list),*]
                 }
-                
+
                 fn validate(&self) -> Result<(), ::tideorm::validation::ValidationErrors> {
                     let mut errors = ::tideorm::validation::ValidationErrors::new();
-                    
+
                     #(#validation_checks)*
-                    
+
                     if let Err(custom_errors) = self.custom_validations() {
                         errors.merge(custom_errors);
                     }
-                    
+
                     errors.to_result()
                 }
             }
@@ -1233,38 +1320,38 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             }
         }
     };
-    
+
     let base_output = quote! {
         #base_impl
-        
+
         #language_override
         #fallback_override
-        
+
         // Internal adapter implementation
         #[doc(hidden)]
         impl ::tideorm::internal::InternalModel for #struct_name {
             type Entity = #internal_entity_mod::Entity;
             type ActiveModel = #internal_entity_mod::ActiveModel;
-            
+
             fn into_active_model(self) -> Self::ActiveModel {
                 use ::tideorm::sea_orm::ActiveValue;
                 #internal_entity_mod::ActiveModel {
                     #(#insert_active_model_setters),*
                 }
             }
-            
+
             fn from_sea_model(model: #internal_entity_mod::Model) -> Self {
                 Self {
                     #(#all_field_names: model.#all_field_names),*,
                     #(#relation_field_defaults),*
                 }
             }
-            
+
             fn primary_key_column() -> Option<<Self::Entity as ::tideorm::sea_orm::EntityTrait>::Column> {
                 Some(#internal_entity_mod::Column::#pk_column_variant)
             }
         }
-        
+
         impl #struct_name {
             #[doc(hidden)]
             fn __into_update_active_model(self) -> #internal_entity_mod::ActiveModel {
@@ -1273,7 +1360,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     #(#update_active_model_setters),*
                 }
             }
-            
+
             #[doc(hidden)]
             fn __into_delete_active_model(self) -> #internal_entity_mod::ActiveModel {
                 use ::tideorm::sea_orm::ActiveValue;
@@ -1282,20 +1369,20 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     ..Default::default()
                 }
             }
-            
+
             /// Initialize relation fields with parent context
             pub fn with_relations(mut self) -> Self {
                 // This would be called after loading from DB to set up relation contexts
                 self
             }
         }
-        
+
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::model::Model for #struct_name {
             fn primary_key(&self) -> Self::PrimaryKey {
                 self.#pk_ident.clone()
             }
-            
+
             async fn find(id: Self::PrimaryKey) -> ::tideorm::Result<Option<Self>> {
                 use ::tideorm::sea_orm::EntityTrait;
                 use ::tideorm::internal::InternalModel;
@@ -1305,7 +1392,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.map(|m| <Self as InternalModel>::from_sea_model(m)))
             }
-            
+
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
                 use ::tideorm::sea_orm::EntityTrait;
                 let result = #internal_entity_mod::Entity::delete_by_id(id)
@@ -1314,11 +1401,11 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.rows_affected)
             }
-            
+
             async fn create(model: Self) -> ::tideorm::Result<Self> {
                 model.save().await
             }
-            
+
             async fn delete(self) -> ::tideorm::Result<u64> {
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 let active = self.__into_delete_active_model();
@@ -1327,7 +1414,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(result.rows_affected)
             }
-            
+
             async fn save(self) -> ::tideorm::Result<Self> {
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 use ::tideorm::internal::InternalModel;
@@ -1337,7 +1424,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(<Self as InternalModel>::from_sea_model(result))
             }
-            
+
             async fn update(self) -> ::tideorm::Result<Self> {
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 use ::tideorm::internal::InternalModel;
@@ -1347,7 +1434,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     .map_err(|e| ::tideorm::Error::query(e.to_string()))?;
                 Ok(<Self as InternalModel>::from_sea_model(result))
             }
-            
+
             async fn insert_or_update(
                 model: Self,
                 conflict_columns: Vec<&str>,
@@ -1356,7 +1443,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 let builder = ::tideorm::model::OnConflictBuilder::new(cols);
                 Self::__insert_with_conflict(model, builder).await
             }
-            
+
             async fn __insert_with_conflict(
                 model: Self,
                 builder: ::tideorm::model::OnConflictBuilder<Self>,
@@ -1364,22 +1451,22 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 use ::tideorm::Database;
                 use ::tideorm::internal::InternalModel;
                 use serde_json::json;
-                
+
                 let table = #table_name;
                 let pk_col_name = #pk_column_name;
                 let pk_is_auto_increment = #pk_auto_increment;
-                
+
                 // All columns and values
                 let all_columns: Vec<&str> = vec![#(#column_names),*];
                 let model_clone = model.clone();
                 let all_values: Vec<serde_json::Value> = vec![
                     #(json!(model_clone.#field_names)),*
                 ];
-                
+
                 // Determine if we should include the PK column
                 // Include PK if: it's in conflict columns, OR it's not auto-increment
                 let include_pk = builder.conflict_columns.contains(&pk_col_name.to_string()) || !pk_is_auto_increment;
-                
+
                 // Filter columns and values based on whether to include PK
                 let (columns, values): (Vec<&str>, Vec<serde_json::Value>) = all_columns.iter()
                     .zip(all_values.into_iter())
@@ -1392,12 +1479,12 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     })
                     .map(|(col, val)| (*col, val))
                     .unzip();
-                
+
                 let column_list = columns.iter()
                     .map(|c| format!("\"{}\"", c))
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 let value_list = values.iter()
                     .map(|v| match v {
                         serde_json::Value::Null => "NULL".to_string(),
@@ -1408,13 +1495,13 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 let conflict_cols = builder.conflict_columns;
                 let conflict_list = conflict_cols.iter()
                     .map(|c| format!("\"{}\"", c))
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 let update_cols: Vec<String> = if let Some(cols) = builder.update_columns {
                     cols
                 } else if let Some(exclude) = builder.exclude_columns {
@@ -1432,33 +1519,33 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         .map(|c| c.to_string())
                         .collect()
                 };
-                
+
                 let update_list = update_cols.iter()
                     .map(|c| format!("\"{}\" = EXCLUDED.\"{}\"", c, c))
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 let sql = format!(
                     "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *",
                     table, column_list, value_list, conflict_list, update_list
                 );
-                
+
                 let results: Vec<Self> = ::tideorm::Database::raw(&sql).await?;
-                
+
                 results.into_iter().next().ok_or_else(|| {
                     ::tideorm::Error::query("INSERT ... ON CONFLICT returned no rows".to_string())
                 })
             }
         }
-        
+
         // Register model for schema synchronization
         impl #struct_name {
             #[doc(hidden)]
             pub fn __get_sync_schema() -> ::tideorm::sync::ModelSchema {
                 use ::tideorm::sync::{ModelSchema, ColumnDef, normalize_rust_type};
-                
+
                 let mut schema = ModelSchema::new(#table_name).schema(#schema_name);
-                
+
                 #(
                     {
                         let rust_type = normalize_rust_type(stringify!(#field_types));
@@ -1467,26 +1554,26 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         schema = schema.column(col);
                     }
                 )*
-                
+
                 schema
             }
-            
+
             #[doc(hidden)]
             #[inline]
             pub fn __register_for_sync() {
                 ::tideorm::sync::SyncRegistry::register(Self::__get_sync_schema());
             }
         }
-        
+
         impl ::tideorm::sync::SyncModel for #struct_name {
             fn sync_schema() -> ::tideorm::sync::ModelSchema {
                 Self::__get_sync_schema()
             }
         }
-        
+
         #validation_impl
     };
-    
+
     // Auto-generated Default impl (only if auto_derives or auto_default is set)
     let default_impl = if should_gen_default {
         quote! {
@@ -1501,7 +1588,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Auto-generated Debug impl (only if auto_derives or auto_debug is set)
     let debug_impl = if should_gen_debug {
         quote! {
@@ -1516,7 +1603,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Auto-generated Clone impl (only if auto_derives or auto_clone is set)
     let clone_impl = if should_gen_clone {
         quote! {
@@ -1531,7 +1618,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Auto-generated Serialize impl (only if auto_derives or auto_serialize is set)
     let serialize_impl = if should_gen_serialize {
         let field_count = derive_field_names.len();
@@ -1551,15 +1638,16 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Auto-generated Deserialize impl (only if auto_derives or auto_deserialize is set)
     let deserialize_impl = if should_gen_deserialize {
         let field_count = derive_field_names.len();
         let field_indices: Vec<_> = (0..field_count).collect();
-        let field_names_upper: Vec<_> = derive_field_names.iter()
+        let field_names_upper: Vec<_> = derive_field_names
+            .iter()
             .map(|i| format_ident!("__field_{}", i))
             .collect();
-        
+
         quote! {
             impl<'de> ::serde::Deserialize<'de> for #struct_name {
                 fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
@@ -1571,16 +1659,16 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                         #(#field_names_upper,)*
                         __ignore,
                     }
-                    
+
                     struct __FieldVisitor;
-                    
+
                     impl<'de> ::serde::de::Visitor<'de> for __FieldVisitor {
                         type Value = __Field;
-                        
+
                         fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                             formatter.write_str("field identifier")
                         }
-                        
+
                         fn visit_str<E>(self, value: &str) -> ::std::result::Result<__Field, E>
                         where
                             E: ::serde::de::Error,
@@ -1591,7 +1679,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                             }
                         }
                     }
-                    
+
                     impl<'de> ::serde::Deserialize<'de> for __Field {
                         fn deserialize<D>(deserializer: D) -> ::std::result::Result<__Field, D::Error>
                         where
@@ -1600,22 +1688,22 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                             deserializer.deserialize_identifier(__FieldVisitor)
                         }
                     }
-                    
+
                     struct __Visitor;
-                    
+
                     impl<'de> ::serde::de::Visitor<'de> for __Visitor {
                         type Value = #struct_name;
-                        
+
                         fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
                             formatter.write_str(concat!("struct ", stringify!(#struct_name)))
                         }
-                        
+
                         fn visit_map<A>(self, mut map: A) -> ::std::result::Result<#struct_name, A::Error>
                         where
                             A: ::serde::de::MapAccess<'de>,
                         {
                             #(let mut #field_names_upper: Option<_> = None;)*
-                            
+
                             while let Some(key) = map.next_key()? {
                                 match key {
                                     #(__Field::#field_names_upper => {
@@ -1629,12 +1717,12 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                                     }
                                 }
                             }
-                            
+
                             Ok(#struct_name {
                                 #(#derive_field_names: #field_names_upper.unwrap_or_default()),*
                             })
                         }
-                        
+
                         fn visit_seq<A>(self, mut seq: A) -> ::std::result::Result<#struct_name, A::Error>
                         where
                             A: ::serde::de::SeqAccess<'de>,
@@ -1643,13 +1731,13 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                                 let #field_names_upper = seq.next_element()?
                                     .ok_or_else(|| ::serde::de::Error::invalid_length(#field_indices, &self))?;
                             )*
-                            
+
                             Ok(#struct_name {
                                 #(#derive_field_names: #field_names_upper),*
                             })
                         }
                     }
-                    
+
                     const FIELDS: &'static [&'static str] = &[#(#derive_field_names_str),*];
                     deserializer.deserialize_struct(stringify!(#struct_name), FIELDS, __Visitor)
                 }
@@ -1658,7 +1746,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     // Generate the Columns struct and constant for this model
     // This allows usage like: User::columns.name.eq("Alice")
     let columns_impl = quote! {
@@ -1668,10 +1756,10 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
         pub struct #columns_struct_name {
             #(#columns_struct_fields),*
         }
-        
+
         impl #struct_name {
             /// Typed column definitions for type-safe queries.
-            /// 
+            ///
             /// # Example
             /// ```ignore
             /// // Type-safe column access
@@ -1687,7 +1775,7 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
             };
         }
     };
-    
+
     // Generate Tokenizable trait implementation if enabled
     let tokenize_enabled = input.tokenize;
     let struct_name_str = struct_name.to_string();
@@ -1698,15 +1786,15 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
                 fn token_model_name() -> &'static str {
                     #struct_name_str
                 }
-                
+
                 fn token_primary_key(&self) -> i64 {
                     self.#pk_ident as i64
                 }
-                
+
                 fn tokenization_enabled() -> bool {
                     true
                 }
-                
+
                 async fn from_token(token: &str) -> ::tideorm::Result<Self> {
                     let id = Self::decode_token(token)?;
                     Self::find(id as #pk_type)
@@ -1720,18 +1808,18 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
     } else {
         quote! {}
     };
-    
+
     quote! {
         #base_output
-        
+
         #columns_impl
-        
+
         #default_impl
         #debug_impl
         #clone_impl
         #serialize_impl
         #deserialize_impl
-        
+
         #tokenizable_impl
     }
 }
@@ -1740,8 +1828,13 @@ fn generate_model_impl(input: &ModelInput, indexes: Vec<IndexDef>, unique_indexe
 fn pluralize(word: &str) -> String {
     if word.ends_with('s') || word.ends_with('x') || word.ends_with("ch") || word.ends_with("sh") {
         format!("{}es", word)
-    } else if word.ends_with('y') && !word.ends_with("ay") && !word.ends_with("ey") && !word.ends_with("oy") && !word.ends_with("uy") {
-        format!("{}ies", &word[..word.len()-1])
+    } else if word.ends_with('y')
+        && !word.ends_with("ay")
+        && !word.ends_with("ey")
+        && !word.ends_with("oy")
+        && !word.ends_with("uy")
+    {
+        format!("{}ies", &word[..word.len() - 1])
     } else {
         format!("{}s", word)
     }
@@ -1760,19 +1853,24 @@ pub fn belongs_to(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_clone = item.clone();
     let input = parse_macro_input!(item_clone as DeriveInput);
     let _struct_name = &input.ident;
-    
+
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, owner_key) = parse_relation_attr(&attr_str);
-    
+
     // Validate the related type is parseable
     let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
     if _related_ident.is_err() {
         return syn::Error::new_spanned(
             &input.ident,
-            format!("Invalid related type '{}' in belongs_to attribute", related_type),
-        ).to_compile_error().into();
+            format!(
+                "Invalid related type '{}' in belongs_to attribute",
+                related_type
+            ),
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     let _owner_key_impl = if let Some(ok) = owner_key {
         quote! {
             fn owner_key() -> &'static str { #ok }
@@ -1780,17 +1878,17 @@ pub fn belongs_to(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
-    
+
     let impl_block = quote! {
         // Legacy trait-based relation for backward compatibility
     };
-    
+
     let original: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
         #original
         #impl_block
     };
-    
+
     TokenStream::from(expanded)
 }
 
@@ -1800,19 +1898,24 @@ pub fn has_one(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_clone = item.clone();
     let input = parse_macro_input!(item_clone as DeriveInput);
     let _struct_name = &input.ident;
-    
+
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
-    
+
     // Validate the related type is parseable
     let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
     if _related_ident.is_err() {
         return syn::Error::new_spanned(
             &input.ident,
-            format!("Invalid related type '{}' in has_one attribute", related_type),
-        ).to_compile_error().into();
+            format!(
+                "Invalid related type '{}' in has_one attribute",
+                related_type
+            ),
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     let _local_key_impl = if let Some(lk) = local_key {
         quote! {
             fn local_key() -> &'static str { #lk }
@@ -1820,17 +1923,17 @@ pub fn has_one(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
-    
+
     let impl_block = quote! {
         // Legacy trait-based relation for backward compatibility
     };
-    
+
     let original: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
         #original
         #impl_block
     };
-    
+
     TokenStream::from(expanded)
 }
 
@@ -1840,19 +1943,24 @@ pub fn has_many(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item_clone = item.clone();
     let input = parse_macro_input!(item_clone as DeriveInput);
     let _struct_name = &input.ident;
-    
+
     let attr_str = attr.to_string();
     let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
-    
+
     // Validate the related type is parseable
     let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
     if _related_ident.is_err() {
         return syn::Error::new_spanned(
             &input.ident,
-            format!("Invalid related type '{}' in has_many attribute", related_type),
-        ).to_compile_error().into();
+            format!(
+                "Invalid related type '{}' in has_many attribute",
+                related_type
+            ),
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     let _local_key_impl = if let Some(lk) = local_key {
         quote! {
             fn local_key() -> &'static str { #lk }
@@ -1860,36 +1968,33 @@ pub fn has_many(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {}
     };
-    
+
     let impl_block = quote! {
         // Legacy trait-based relation for backward compatibility
     };
-    
+
     let original: proc_macro2::TokenStream = item.into();
     let expanded = quote! {
         #original
         #impl_block
     };
-    
+
     TokenStream::from(expanded)
 }
 
 /// Parse relation attribute string
 fn parse_relation_attr(attr: &str) -> (String, String, Option<String>) {
     let attr = attr.trim();
-    
+
     let mut parts = attr.splitn(2, ',');
-    
-    let related_type = parts.next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    
+
+    let related_type = parts.next().unwrap_or("").trim().to_string();
+
     let rest = parts.next().unwrap_or("");
-    
+
     let mut foreign_key = String::new();
     let mut optional_key: Option<String> = None;
-    
+
     for part in rest.split(',') {
         let part = part.trim();
         if part.starts_with("foreign_key") {
@@ -1898,7 +2003,7 @@ fn parse_relation_attr(attr: &str) -> (String, String, Option<String>) {
             optional_key = Some(extract_string_value(part));
         }
     }
-    
+
     (related_type, foreign_key, optional_key)
 }
 
@@ -1953,27 +2058,31 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let vis = &input.vis;
     let attrs = &input.attrs;
     let generics = &input.generics;
-    
+
     // Get struct fields
     let fields = match &input.data {
         syn::Data::Struct(data) => &data.fields,
         _ => {
             return syn::Error::new_spanned(
                 &input,
-                "#[tideorm::model] can only be applied to structs"
-            ).to_compile_error().into();
+                "#[tideorm::model] can only be applied to structs",
+            )
+            .to_compile_error()
+            .into();
         }
     };
-    
+
     // Preserve all attributes except derive (we'll add our own)
-    let other_attrs: Vec<_> = attrs.iter()
+    let other_attrs: Vec<_> = attrs
+        .iter()
         .filter(|a| !a.path().is_ident("derive"))
         .collect();
-    
+
     // Generate the struct with derive(Model)
     quote! {
         #[derive(tideorm::Model)]
         #(#other_attrs)*
         #vis struct #name #generics #fields
-    }.into()
+    }
+    .into()
 }

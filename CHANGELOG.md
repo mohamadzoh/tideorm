@@ -5,6 +5,24 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-03-15
+
+### Changed
+
+- Refactored the query subsystem so the oversized query builder implementation is now split into focused modules, reducing maintenance risk without changing the public builder API.
+- Standardized read execution paths on parameterized SQL generation for get, first, count, exists, and JSON reads to keep backend-specific quoting and placeholder handling consistent.
+
+### Fixed
+
+- Repaired the extracted SQL query module after a bad split left overlapping implementations in place.
+- Restored JOIN clause validation in the advanced query builder so invalid table, alias, and column identifiers invalidate the query instead of being accepted.
+- Hardened mutation queries so delete, restore, soft-delete, and force-delete fail fast when combined with incompatible SELECT, JOIN, ORDER BY, GROUP BY, HAVING, UNION, CTE, or window-function modifiers.
+- Improved cache key generation so more query-shaping fields are included, preventing collisions between distinct advanced query configurations.
+
+### Internal
+
+- Verified the release with a full cargo test pass after the query-module recovery and cleanup.
+
 ## [0.7.0] - 2025-03-09
 
 ### Added — MariaDB Support
@@ -233,7 +251,6 @@ User::query()
 - **Manual URL generation**: `Config::generate_file_url()`, `Model::generate_file_url()`, `FileAttachment::url()`
 - **FileUrlGenerator type**: Exported in prelude for custom generator functions
 - New comprehensive example: `examples/attachment_url_demo.rs` with 24 test cases
-- New benchmarks: `benches/attachment_url_benchmarks.rs` with 39 benchmark tests
 
 ### Changed
 
@@ -454,5 +471,6 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/mohamadzoh/tideorm/compare/v0.7.0...v0.7.2
 [0.1.0]: https://github.com/mohamadzoh/tideorm/releases/tag/v0.1.0

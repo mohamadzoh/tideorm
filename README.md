@@ -203,13 +203,13 @@ let recent_posts = user.posts.load_with(|q| {
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "*", features = ["postgres"] }
+tideorm = { version = "0.7.2", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "*", features = ["mysql"] }
+tideorm = { version = "0.7.2", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "*", features = ["sqlite"] }
+tideorm = { version = "0.7.2", features = ["sqlite"] }
 ```
 
 ### Feature Flags

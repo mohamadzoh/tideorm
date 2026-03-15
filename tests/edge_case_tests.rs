@@ -56,7 +56,10 @@ mod error_from_serde {
         let tide_err: Error = serde_err.into();
         match &tide_err {
             Error::Conversion { message } => {
-                assert!(!message.is_empty(), "message should describe the JSON error");
+                assert!(
+                    !message.is_empty(),
+                    "message should describe the JSON error"
+                );
             }
             other => panic!("expected Conversion, got {:?}", other),
         }
@@ -70,7 +73,9 @@ mod error_from_serde {
         let tide_err: Error = serde_err.into();
         match &tide_err {
             Error::Conversion { message } => {
-                assert!(message.contains("EOF") || message.contains("end of") || !message.is_empty());
+                assert!(
+                    message.contains("EOF") || message.contains("end of") || !message.is_empty()
+                );
             }
             other => panic!("expected Conversion, got {:?}", other),
         }
@@ -103,10 +108,22 @@ mod config_url_edge_cases {
 
     #[test]
     fn test_from_url_case_insensitive() {
-        assert_eq!(DatabaseType::from_url("POSTGRES://host"), Some(DatabaseType::Postgres));
-        assert_eq!(DatabaseType::from_url("MySQL://host"), Some(DatabaseType::MySQL));
-        assert_eq!(DatabaseType::from_url("MARIADB://host"), Some(DatabaseType::MariaDB));
-        assert_eq!(DatabaseType::from_url("SQLite:./db.sqlite"), Some(DatabaseType::SQLite));
+        assert_eq!(
+            DatabaseType::from_url("POSTGRES://host"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_url("MySQL://host"),
+            Some(DatabaseType::MySQL)
+        );
+        assert_eq!(
+            DatabaseType::from_url("MARIADB://host"),
+            Some(DatabaseType::MariaDB)
+        );
+        assert_eq!(
+            DatabaseType::from_url("SQLite:./db.sqlite"),
+            Some(DatabaseType::SQLite)
+        );
     }
 
     #[test]
@@ -120,8 +137,14 @@ mod config_url_edge_cases {
     #[test]
     fn test_from_url_no_host() {
         // Still returns Some because from_url only checks the scheme prefix
-        assert_eq!(DatabaseType::from_url("postgres://"), Some(DatabaseType::Postgres));
-        assert_eq!(DatabaseType::from_url("mysql://"), Some(DatabaseType::MySQL));
+        assert_eq!(
+            DatabaseType::from_url("postgres://"),
+            Some(DatabaseType::Postgres)
+        );
+        assert_eq!(
+            DatabaseType::from_url("mysql://"),
+            Some(DatabaseType::MySQL)
+        );
     }
 }
 
@@ -140,11 +163,20 @@ mod mariadb_feature_parity {
 
         // Same
         assert_eq!(mysql.supports_json(), maria.supports_json());
-        assert_eq!(mysql.supports_native_json_operators(), maria.supports_native_json_operators());
+        assert_eq!(
+            mysql.supports_native_json_operators(),
+            maria.supports_native_json_operators()
+        );
         assert_eq!(mysql.supports_arrays(), maria.supports_arrays());
         assert_eq!(mysql.supports_upsert(), maria.supports_upsert());
-        assert_eq!(mysql.supports_fulltext_search(), maria.supports_fulltext_search());
-        assert_eq!(mysql.supports_window_functions(), maria.supports_window_functions());
+        assert_eq!(
+            mysql.supports_fulltext_search(),
+            maria.supports_fulltext_search()
+        );
+        assert_eq!(
+            mysql.supports_window_functions(),
+            maria.supports_window_functions()
+        );
         assert_eq!(mysql.supports_cte(), maria.supports_cte());
         assert_eq!(mysql.supports_schemas(), maria.supports_schemas());
         assert_eq!(mysql.default_port(), maria.default_port());
@@ -178,8 +210,8 @@ mod mariadb_feature_parity {
 // 5. Cache: capacity-1 boundary + immediate eviction
 // ============================================================================
 mod cache_capacity_boundary {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_cache_capacity_one_evicts_on_second_insert() {
@@ -192,12 +224,16 @@ mod cache_capacity_boundary {
             key_prefix: None,
         });
 
-        cache.set::<String>("k1", &"val1".to_string(), None, "test").unwrap();
+        cache
+            .set::<String>("k1", &"val1".to_string(), None, "test")
+            .unwrap();
         assert_eq!(cache.len(), 1);
         assert!(cache.contains("k1"));
 
         // Second insert should evict the first
-        cache.set::<String>("k2", &"val2".to_string(), None, "test").unwrap();
+        cache
+            .set::<String>("k2", &"val2".to_string(), None, "test")
+            .unwrap();
         assert_eq!(cache.len(), 1);
         assert!(cache.contains("k2"));
         assert!(!cache.contains("k1")); // evicted
@@ -232,9 +268,9 @@ mod cache_capacity_boundary {
 // 6. Cache: TTL expiration
 // ============================================================================
 mod cache_ttl_expiration {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_cache_entry_expires_after_ttl() {
@@ -247,7 +283,9 @@ mod cache_ttl_expiration {
             key_prefix: None,
         });
 
-        cache.set::<String>("k", &"value".to_string(), None, "test").unwrap();
+        cache
+            .set::<String>("k", &"value".to_string(), None, "test")
+            .unwrap();
         assert!(cache.get::<String>("k").is_some());
 
         // Wait for TTL to expire
@@ -262,10 +300,10 @@ mod cache_ttl_expiration {
 // 7. Cache: concurrent read/write stress
 // ============================================================================
 mod cache_concurrent_stress {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::sync::Arc;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_cache_concurrent_read_write_50_threads() {
@@ -316,8 +354,8 @@ mod cache_concurrent_stress {
 // 8. Cache: invalidate_model selective removal
 // ============================================================================
 mod cache_invalidate_model {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_invalidate_model_only_removes_matching() {
@@ -330,9 +368,15 @@ mod cache_invalidate_model {
             key_prefix: None,
         });
 
-        cache.set::<String>("user:1", &"alice".into(), None, "User").unwrap();
-        cache.set::<String>("user:2", &"bob".into(), None, "User").unwrap();
-        cache.set::<String>("post:1", &"hello".into(), None, "Post").unwrap();
+        cache
+            .set::<String>("user:1", &"alice".into(), None, "User")
+            .unwrap();
+        cache
+            .set::<String>("user:2", &"bob".into(), None, "User")
+            .unwrap();
+        cache
+            .set::<String>("post:1", &"hello".into(), None, "Post")
+            .unwrap();
 
         assert_eq!(cache.len(), 3);
 
@@ -349,8 +393,8 @@ mod cache_invalidate_model {
 // 9. Cache: key prefix generation
 // ============================================================================
 mod cache_key_prefix {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_generate_key_with_prefix() {
@@ -379,8 +423,8 @@ mod cache_key_prefix {
 // 10. Cache: stats accounting
 // ============================================================================
 mod cache_stats_accounting {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_stats_track_hits_misses_evictions() {
@@ -419,8 +463,8 @@ mod cache_stats_accounting {
 // 11. Profiling: N+1 detection via ProfileReport::suggestions
 // ============================================================================
 mod profiling_n_plus_one {
-    use tideorm::profiling::{Profiler, ProfiledQuery};
     use std::time::Duration;
+    use tideorm::profiling::{ProfiledQuery, Profiler};
 
     #[test]
     fn test_n_plus_one_detection_triggers_above_10_queries() {
@@ -431,7 +475,8 @@ mod profiling_n_plus_one {
             let q = ProfiledQuery::new(
                 format!("SELECT * FROM posts WHERE id = {}", i),
                 Duration::from_micros(500),
-            ).with_table("posts");
+            )
+            .with_table("posts");
             profiler.record_full(q);
         }
 
@@ -451,7 +496,8 @@ mod profiling_n_plus_one {
             let q = ProfiledQuery::new(
                 format!("SELECT * FROM posts WHERE id = {}", i),
                 Duration::from_micros(500),
-            ).with_table("posts");
+            )
+            .with_table("posts");
             profiler.record_full(q);
         }
         let report = profiler.stop();
@@ -483,14 +529,19 @@ mod profiling_query_analyzer {
 
     #[test]
     fn test_analyzer_detects_function_in_where() {
-        let suggestions = QueryAnalyzer::analyze("SELECT * FROM users WHERE LOWER(email) = 'a@b.com'");
+        let suggestions =
+            QueryAnalyzer::analyze("SELECT * FROM users WHERE LOWER(email) = 'a@b.com'");
         assert!(suggestions.iter().any(|s| s.title.contains("Function")));
     }
 
     #[test]
     fn test_analyzer_order_by_without_limit() {
         let suggestions = QueryAnalyzer::analyze("SELECT id FROM users ORDER BY created_at");
-        assert!(suggestions.iter().any(|s| s.title.contains("ORDER BY") && s.title.contains("LIMIT")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.title.contains("ORDER BY") && s.title.contains("LIMIT"))
+        );
     }
 
     #[test]
@@ -506,7 +557,10 @@ mod profiling_query_analyzer {
                     ORDER BY u.created_at DESC";
         let complexity = QueryAnalyzer::estimate_complexity(sql);
         assert!(
-            matches!(complexity, QueryComplexity::Complex | QueryComplexity::VeryComplex),
+            matches!(
+                complexity,
+                QueryComplexity::Complex | QueryComplexity::VeryComplex
+            ),
             "expected Complex or VeryComplex, got {:?}",
             complexity
         );
@@ -514,16 +568,22 @@ mod profiling_query_analyzer {
 
     #[test]
     fn test_complexity_simple_insert() {
-        let complexity = QueryAnalyzer::estimate_complexity("INSERT INTO users (name) VALUES ('Alice')");
-        assert!(matches!(complexity, QueryComplexity::Simple | QueryComplexity::Moderate));
+        let complexity =
+            QueryAnalyzer::estimate_complexity("INSERT INTO users (name) VALUES ('Alice')");
+        assert!(matches!(
+            complexity,
+            QueryComplexity::Simple | QueryComplexity::Moderate
+        ));
     }
 
     #[test]
     fn test_missing_where_on_update_is_critical() {
         let suggestions = QueryAnalyzer::analyze("UPDATE users SET active = false");
-        assert!(suggestions
-            .iter()
-            .any(|s| s.level == SuggestionLevel::Critical && s.title.contains("WHERE")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.level == SuggestionLevel::Critical && s.title.contains("WHERE"))
+        );
     }
 }
 
@@ -531,8 +591,8 @@ mod profiling_query_analyzer {
 // 13. Profiling: ProfileReport formatting & statistics
 // ============================================================================
 mod profiling_report_stats {
-    use tideorm::profiling::{Profiler, ProfiledQuery};
     use std::time::Duration;
+    use tideorm::profiling::{ProfiledQuery, Profiler};
 
     #[test]
     fn test_empty_profiler_report() {
@@ -543,7 +603,11 @@ mod profiling_report_stats {
         assert_eq!(report.query_count(), 0);
         assert_eq!(report.avg_query_time(), Duration::ZERO);
         assert_eq!(report.query_time_percentage(), 0.0);
-        assert!(report.queries_slower_than(Duration::from_secs(1)).is_empty());
+        assert!(
+            report
+                .queries_slower_than(Duration::from_secs(1))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -564,9 +628,12 @@ mod profiling_report_stats {
     fn test_report_display_does_not_panic() {
         let mut profiler = Profiler::start();
         profiler.record("SELECT * FROM users WHERE id = 1", Duration::from_millis(5));
-        let q = ProfiledQuery::new("UPDATE posts SET title = 'test' WHERE id = 1", Duration::from_millis(150))
-            .with_table("posts")
-            .with_rows(1);
+        let q = ProfiledQuery::new(
+            "UPDATE posts SET title = 'test' WHERE id = 1",
+            Duration::from_millis(150),
+        )
+        .with_table("posts")
+        .with_rows(1);
         profiler.record_full(q);
         let report = profiler.stop();
 
@@ -594,8 +661,8 @@ mod profiling_report_stats {
 // 14. Profiling: GlobalProfiler reset & stat accumulation
 // ============================================================================
 mod profiling_global {
-    use tideorm::profiling::GlobalProfiler;
     use std::time::Duration;
+    use tideorm::profiling::GlobalProfiler;
 
     #[test]
     fn test_global_profiler_reset_clears_stats() {
@@ -634,9 +701,9 @@ mod profiling_global {
         GlobalProfiler::reset();
         GlobalProfiler::set_slow_threshold(50);
 
-        GlobalProfiler::record(Duration::from_millis(10));  // fast
+        GlobalProfiler::record(Duration::from_millis(10)); // fast
         GlobalProfiler::record(Duration::from_millis(100)); // slow
-        GlobalProfiler::record(Duration::from_millis(30));  // fast
+        GlobalProfiler::record(Duration::from_millis(30)); // fast
         GlobalProfiler::record(Duration::from_millis(200)); // slow
 
         let stats = GlobalProfiler::stats();
@@ -662,20 +729,50 @@ mod logging_operation_detection {
 
     #[test]
     fn test_all_operations_detected_correctly() {
-        assert_eq!(QueryOperation::from_sql("SELECT * FROM users"), QueryOperation::Select);
-        assert_eq!(QueryOperation::from_sql("INSERT INTO users VALUES (1)"), QueryOperation::Insert);
-        assert_eq!(QueryOperation::from_sql("UPDATE users SET name = 'x'"), QueryOperation::Update);
-        assert_eq!(QueryOperation::from_sql("DELETE FROM users WHERE id = 1"), QueryOperation::Delete);
-        assert_eq!(QueryOperation::from_sql("BEGIN"), QueryOperation::Transaction);
-        assert_eq!(QueryOperation::from_sql("COMMIT"), QueryOperation::Transaction);
-        assert_eq!(QueryOperation::from_sql("ROLLBACK"), QueryOperation::Transaction);
-        assert_eq!(QueryOperation::from_sql("CREATE TABLE foo (id INT)"), QueryOperation::Unknown);
+        assert_eq!(
+            QueryOperation::from_sql("SELECT * FROM users"),
+            QueryOperation::Select
+        );
+        assert_eq!(
+            QueryOperation::from_sql("INSERT INTO users VALUES (1)"),
+            QueryOperation::Insert
+        );
+        assert_eq!(
+            QueryOperation::from_sql("UPDATE users SET name = 'x'"),
+            QueryOperation::Update
+        );
+        assert_eq!(
+            QueryOperation::from_sql("DELETE FROM users WHERE id = 1"),
+            QueryOperation::Delete
+        );
+        assert_eq!(
+            QueryOperation::from_sql("BEGIN"),
+            QueryOperation::Transaction
+        );
+        assert_eq!(
+            QueryOperation::from_sql("COMMIT"),
+            QueryOperation::Transaction
+        );
+        assert_eq!(
+            QueryOperation::from_sql("ROLLBACK"),
+            QueryOperation::Transaction
+        );
+        assert_eq!(
+            QueryOperation::from_sql("CREATE TABLE foo (id INT)"),
+            QueryOperation::Unknown
+        );
     }
 
     #[test]
     fn test_operation_case_insensitive() {
-        assert_eq!(QueryOperation::from_sql("  select * from users"), QueryOperation::Select);
-        assert_eq!(QueryOperation::from_sql("  insert into users"), QueryOperation::Insert);
+        assert_eq!(
+            QueryOperation::from_sql("  select * from users"),
+            QueryOperation::Select
+        );
+        assert_eq!(
+            QueryOperation::from_sql("  insert into users"),
+            QueryOperation::Insert
+        );
     }
 
     #[test]
@@ -700,13 +797,12 @@ mod logging_operation_detection {
 // 16. Logging: QueryLogEntry formatting & slow query detection
 // ============================================================================
 mod logging_entry_formatting {
-    use tideorm::logging::QueryLogEntry;
     use std::time::Duration;
+    use tideorm::logging::QueryLogEntry;
 
     #[test]
     fn test_log_entry_is_slow_with_various_thresholds() {
-        let entry = QueryLogEntry::new("SELECT 1")
-            .with_duration(Duration::from_millis(150));
+        let entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(150));
 
         assert!(entry.is_slow(100));
         assert!(entry.is_slow(150)); // >= threshold
@@ -738,8 +834,7 @@ mod logging_entry_formatting {
 
     #[test]
     fn test_log_entry_failed_format() {
-        let entry = QueryLogEntry::new("INSERT INTO users VALUES (1)")
-            .with_error("duplicate key");
+        let entry = QueryLogEntry::new("INSERT INTO users VALUES (1)").with_error("duplicate key");
 
         let output = entry.format_console();
         assert!(output.contains("FAILED"));
@@ -822,7 +917,7 @@ mod logging_level_parsing {
 // 19. Fulltext: highlight_text with empty query
 // ============================================================================
 mod fulltext_edge_cases {
-    use tideorm::fulltext::{highlight_text, generate_snippet};
+    use tideorm::fulltext::{generate_snippet, highlight_text};
 
     #[test]
     fn test_highlight_empty_query_returns_original() {
@@ -949,7 +1044,11 @@ mod error_exhaustive_variants {
 
         for err in &errors {
             let suggestion = err.suggestion();
-            assert!(!suggestion.is_empty(), "{} should have a suggestion", err.code());
+            assert!(
+                !suggestion.is_empty(),
+                "{} should have a suggestion",
+                err.code()
+            );
         }
     }
 }
@@ -1085,8 +1184,8 @@ mod database_type_default {
 // 25. Profiling: Profiler inactive after stop
 // ============================================================================
 mod profiler_lifecycle {
-    use tideorm::profiling::Profiler;
     use std::time::Duration;
+    use tideorm::profiling::Profiler;
 
     #[test]
     fn test_profiler_query_count_increments() {
@@ -1120,8 +1219,8 @@ mod profiler_lifecycle {
 // 26. Logging: QueryTimer lifecycle
 // ============================================================================
 mod logging_query_timer {
-    use tideorm::logging::QueryTimer;
     use std::time::Duration;
+    use tideorm::logging::QueryTimer;
 
     #[test]
     fn test_query_timer_stop_returns_duration() {
@@ -1133,8 +1232,7 @@ mod logging_query_timer {
 
     #[test]
     fn test_query_timer_finish_creates_entry() {
-        let timer = QueryTimer::start("INSERT INTO users VALUES (1)")
-            .with_table("users");
+        let timer = QueryTimer::start("INSERT INTO users VALUES (1)").with_table("users");
         std::thread::sleep(Duration::from_millis(5));
         let entry = timer.finish();
         assert_eq!(entry.table, Some("users".to_string()));
@@ -1162,8 +1260,8 @@ mod logging_query_timer {
 // 27. Cache: empty results caching toggle
 // ============================================================================
 mod cache_empty_results_toggle {
-    use tideorm::cache::{QueryCache, CacheConfig, CacheStrategy};
     use std::time::Duration;
+    use tideorm::cache::{CacheConfig, CacheStrategy, QueryCache};
 
     #[test]
     fn test_cache_skips_empty_array_when_disabled() {

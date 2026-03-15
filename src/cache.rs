@@ -72,11 +72,11 @@
 //!
 //! All cache implementations are thread-safe and can be shared across async tasks.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{RwLock, OnceLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
-use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
 
@@ -178,11 +178,11 @@ impl CacheEntry {
             hit_count: 0,
         }
     }
-    
+
     fn is_expired(&self) -> bool {
         self.created_at.elapsed() > self.ttl
     }
-    
+
     fn touch(&mut self) {
         self.last_accessed = Instant::now();
         self.hit_count += 1;
@@ -241,7 +241,7 @@ impl QueryCache {
             stats: RwLock::new(CacheStats::default()),
         }
     }
-    
+
     /// Create a new query cache with custom configuration
     pub fn with_config(config: CacheConfig) -> Self {
         Self {
@@ -250,22 +250,22 @@ impl QueryCache {
             stats: RwLock::new(CacheStats::default()),
         }
     }
-    
+
     /// Get or initialize the global query cache
     pub fn global() -> &'static QueryCache {
         GLOBAL_QUERY_CACHE.get_or_init(QueryCache::new)
     }
-    
+
     /// Initialize the global cache (call at startup)
     pub fn init_global(config: CacheConfig) -> &'static QueryCache {
         let _ = GLOBAL_QUERY_CACHE.set(QueryCache::with_config(config));
         QueryCache::global()
     }
-    
+
     // =========================================================================
     // CONFIGURATION
     // =========================================================================
-    
+
     /// Enable the cache
     pub fn enable(&self) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -273,7 +273,7 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Disable the cache
     pub fn disable(&self) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -281,12 +281,12 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
         self.config.read().map(|c| c.enabled).unwrap_or(false)
     }
-    
+
     /// Set the maximum number of cache entries
     pub fn set_max_entries(&self, max: usize) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -294,7 +294,7 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Set the default TTL for cache entries
     pub fn set_default_ttl(&self, ttl: Duration) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -302,7 +302,7 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Set the cache eviction strategy
     pub fn set_strategy(&self, strategy: CacheStrategy) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -310,7 +310,7 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Set the key prefix
     pub fn set_key_prefix(&self, prefix: &str) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -318,7 +318,7 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Set whether to cache empty results
     pub fn set_cache_empty_results(&self, cache_empty: bool) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -326,39 +326,41 @@ impl QueryCache {
         }
         self
     }
-    
+
     /// Get current configuration
     pub fn config(&self) -> Option<CacheConfig> {
         self.config.read().ok().map(|c| c.clone())
     }
-    
+
     // =========================================================================
     // CACHE OPERATIONS
     // =========================================================================
-    
+
     /// Generate a cache key from a query
     pub fn generate_key(&self, table: &str, query_hash: u64) -> String {
-        let prefix = self.config.read()
+        let prefix = self
+            .config
+            .read()
             .ok()
             .and_then(|c| c.key_prefix.clone())
             .unwrap_or_default();
-        
+
         if prefix.is_empty() {
             format!("{}:{}", table, query_hash)
         } else {
             format!("{}:{}:{}", prefix, table, query_hash)
         }
     }
-    
+
     /// Get a cached value
     pub fn get<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Option<T> {
         if !self.is_enabled() {
             return None;
         }
-        
+
         // Check if entry exists and is not expired
         let mut cache = self.cache.write().ok()?;
-        
+
         if let Some(entry) = cache.get_mut(key) {
             if entry.is_expired() {
                 cache.remove(key);
@@ -368,13 +370,13 @@ impl QueryCache {
                 }
                 return None;
             }
-            
+
             entry.touch();
-            
+
             if let Ok(mut stats) = self.stats.write() {
                 stats.hits += 1;
             }
-            
+
             serde_json::from_value(entry.data.clone()).ok()
         } else {
             if let Ok(mut stats) = self.stats.write() {
@@ -383,27 +385,37 @@ impl QueryCache {
             None
         }
     }
-    
+
     /// Set a cached value
-    pub fn set<T: Serialize>(&self, key: &str, value: &T, ttl: Option<Duration>, model_name: &str) -> Result<()> {
+    pub fn set<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+        model_name: &str,
+    ) -> Result<()> {
         if !self.is_enabled() {
             return Ok(());
         }
-        
-        let config = self.config.read()
+
+        let config = self
+            .config
+            .read()
             .map_err(|_| Error::internal("Failed to read cache config"))?;
-        
+
         let ttl = ttl.unwrap_or(config.default_ttl);
         let max_entries = config.max_entries;
         drop(config);
-        
+
         let data = serde_json::to_value(value)
             .map_err(|e| Error::internal(format!("Failed to serialize cache value: {}", e)))?;
-        
+
         // Check if we should cache empty results
         if let serde_json::Value::Array(arr) = &data {
             if arr.is_empty() {
-                let should_cache = self.config.read()
+                let should_cache = self
+                    .config
+                    .read()
                     .map(|c| c.cache_empty_results)
                     .unwrap_or(true);
                 if !should_cache {
@@ -411,28 +423,30 @@ impl QueryCache {
                 }
             }
         }
-        
+
         let entry = CacheEntry::new(data, ttl, model_name);
         let entry_size = entry.data.to_string().len();
-        
-        let mut cache = self.cache.write()
+
+        let mut cache = self
+            .cache
+            .write()
             .map_err(|_| Error::internal("Failed to acquire cache write lock"))?;
-        
+
         // Evict if necessary
         while cache.len() >= max_entries {
             self.evict_one(&mut cache);
         }
-        
+
         cache.insert(key.to_string(), entry);
-        
+
         if let Ok(mut stats) = self.stats.write() {
             stats.entries = cache.len();
             stats.size_bytes += entry_size;
         }
-        
+
         Ok(())
     }
-    
+
     /// Remove a specific cache entry
     pub fn invalidate(&self, key: &str) -> bool {
         if let Ok(mut cache) = self.cache.write() {
@@ -448,33 +462,34 @@ impl QueryCache {
             false
         }
     }
-    
+
     /// Invalidate all cache entries for a specific model/table
     pub fn invalidate_model(&self, model_name: &str) {
         if let Ok(mut cache) = self.cache.write() {
-            let keys_to_remove: Vec<String> = cache.iter()
+            let keys_to_remove: Vec<String> = cache
+                .iter()
                 .filter(|(_, entry)| entry.model_name == model_name)
                 .map(|(key, _)| key.clone())
                 .collect();
-            
+
             let count = keys_to_remove.len();
             for key in keys_to_remove {
                 cache.remove(&key);
             }
-            
+
             if let Ok(mut stats) = self.stats.write() {
                 stats.invalidations += count as u64;
                 stats.entries = cache.len();
             }
         }
     }
-    
+
     /// Clear the entire cache
     pub fn clear(&self) {
         if let Ok(mut cache) = self.cache.write() {
             let count = cache.len();
             cache.clear();
-            
+
             if let Ok(mut stats) = self.stats.write() {
                 stats.invalidations += count as u64;
                 stats.entries = 0;
@@ -482,12 +497,12 @@ impl QueryCache {
             }
         }
     }
-    
+
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
         self.stats.read().map(|s| s.clone()).unwrap_or_default()
     }
-    
+
     /// Reset cache statistics
     pub fn reset_stats(&self) {
         if let Ok(mut stats) = self.stats.write() {
@@ -497,55 +512,59 @@ impl QueryCache {
             }
         }
     }
-    
+
     /// Evict expired entries
     pub fn evict_expired(&self) {
         if let Ok(mut cache) = self.cache.write() {
-            let keys_to_remove: Vec<String> = cache.iter()
+            let keys_to_remove: Vec<String> = cache
+                .iter()
                 .filter(|(_, entry)| entry.is_expired())
                 .map(|(key, _)| key.clone())
                 .collect();
-            
+
             let count = keys_to_remove.len();
             for key in keys_to_remove {
                 cache.remove(&key);
             }
-            
+
             if let Ok(mut stats) = self.stats.write() {
                 stats.evictions += count as u64;
                 stats.entries = cache.len();
             }
         }
     }
-    
+
     /// Evict one entry based on the configured strategy
     fn evict_one(&self, cache: &mut HashMap<String, CacheEntry>) {
-        let strategy = self.config.read()
+        let strategy = self
+            .config
+            .read()
             .map(|c| c.strategy)
             .unwrap_or(CacheStrategy::LRU);
-        
+
         let key_to_remove = match strategy {
-            CacheStrategy::LRU => {
-                cache.iter()
-                    .min_by_key(|(_, entry)| entry.last_accessed)
-                    .map(|(key, _)| key.clone())
-            }
-            CacheStrategy::FIFO => {
-                cache.iter()
-                    .min_by_key(|(_, entry)| entry.created_at)
-                    .map(|(key, _)| key.clone())
-            }
+            CacheStrategy::LRU => cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_accessed)
+                .map(|(key, _)| key.clone()),
+            CacheStrategy::FIFO => cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.created_at)
+                .map(|(key, _)| key.clone()),
             CacheStrategy::TTL => {
                 // Evict the entry closest to expiration
-                cache.iter()
+                cache
+                    .iter()
                     .min_by_key(|(_, entry)| {
-                        entry.ttl.checked_sub(entry.created_at.elapsed())
+                        entry
+                            .ttl
+                            .checked_sub(entry.created_at.elapsed())
                             .unwrap_or(Duration::ZERO)
                     })
                     .map(|(key, _)| key.clone())
             }
         };
-        
+
         if let Some(key) = key_to_remove {
             cache.remove(&key);
             if let Ok(mut stats) = self.stats.write() {
@@ -553,7 +572,7 @@ impl QueryCache {
             }
         }
     }
-    
+
     /// Check if a key exists in the cache (without updating access time)
     pub fn contains(&self, key: &str) -> bool {
         if let Ok(cache) = self.cache.read() {
@@ -563,12 +582,12 @@ impl QueryCache {
         }
         false
     }
-    
+
     /// Get the number of entries in the cache
     pub fn len(&self) -> usize {
         self.cache.read().map(|c| c.len()).unwrap_or(0)
     }
-    
+
     /// Check if the cache is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -611,7 +630,7 @@ impl PreparedStatement {
             avg_execution_time_us: 0,
         }
     }
-    
+
     fn record_execution(&mut self, execution_time_us: u64) {
         self.last_used = Instant::now();
         let total = self.avg_execution_time_us * self.execution_count + execution_time_us;
@@ -692,7 +711,7 @@ impl PreparedStatementCache {
             stats: RwLock::new(PreparedStatementStats::default()),
         }
     }
-    
+
     /// Create with custom configuration
     pub fn with_config(config: PreparedStatementConfig) -> Self {
         Self {
@@ -701,22 +720,22 @@ impl PreparedStatementCache {
             stats: RwLock::new(PreparedStatementStats::default()),
         }
     }
-    
+
     /// Get or initialize the global prepared statement cache
     pub fn global() -> &'static PreparedStatementCache {
         GLOBAL_STMT_CACHE.get_or_init(PreparedStatementCache::new)
     }
-    
+
     /// Initialize the global cache (call at startup)
     pub fn init_global(config: PreparedStatementConfig) -> &'static PreparedStatementCache {
         let _ = GLOBAL_STMT_CACHE.set(PreparedStatementCache::with_config(config));
         PreparedStatementCache::global()
     }
-    
+
     // =========================================================================
     // CONFIGURATION
     // =========================================================================
-    
+
     /// Enable the cache
     pub fn enable(&self) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -724,7 +743,7 @@ impl PreparedStatementCache {
         }
         self
     }
-    
+
     /// Disable the cache
     pub fn disable(&self) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -732,12 +751,12 @@ impl PreparedStatementCache {
         }
         self
     }
-    
+
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
         self.config.read().map(|c| c.enabled).unwrap_or(false)
     }
-    
+
     /// Set the maximum number of cached statements
     pub fn set_max_statements(&self, max: usize) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -745,7 +764,7 @@ impl PreparedStatementCache {
         }
         self
     }
-    
+
     /// Set the maximum age for cached statements
     pub fn set_max_age(&self, age: Duration) -> &Self {
         if let Ok(mut config) = self.config.write() {
@@ -753,16 +772,16 @@ impl PreparedStatementCache {
         }
         self
     }
-    
+
     /// Get current configuration
     pub fn config(&self) -> Option<PreparedStatementConfig> {
         self.config.read().ok().map(|c| c.clone())
     }
-    
+
     // =========================================================================
     // CACHE OPERATIONS
     // =========================================================================
-    
+
     /// Hash a SQL query for cache lookup
     pub fn hash_sql(sql: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -770,19 +789,21 @@ impl PreparedStatementCache {
         sql.hash(&mut hasher);
         hasher.finish()
     }
-    
+
     /// Get or prepare a statement
     /// Returns (sql, is_cached)
     pub fn get_or_prepare(&self, sql: &str) -> (String, bool) {
         if !self.is_enabled() {
             return (sql.to_string(), false);
         }
-        
+
         let hash = Self::hash_sql(sql);
-        let max_age = self.config.read()
+        let max_age = self
+            .config
+            .read()
             .map(|c| c.max_age)
             .unwrap_or(Duration::from_secs(3600));
-        
+
         // Try to get from cache
         if let Ok(mut statements) = self.statements.write() {
             if let Some(stmt) = statements.get_mut(&hash) {
@@ -798,31 +819,30 @@ impl PreparedStatementCache {
                 }
             }
         }
-        
+
         // Cache miss - prepare and cache
         self.cache_statement(sql);
-        
+
         if let Ok(mut stats) = self.stats.write() {
             stats.misses += 1;
         }
-        
+
         (sql.to_string(), false)
     }
-    
+
     /// Cache a statement
     fn cache_statement(&self, sql: &str) {
         let hash = Self::hash_sql(sql);
-        let max_statements = self.config.read()
-            .map(|c| c.max_statements)
-            .unwrap_or(500);
-        
+        let max_statements = self.config.read().map(|c| c.max_statements).unwrap_or(500);
+
         if let Ok(mut statements) = self.statements.write() {
             // Evict if necessary (LRU)
             while statements.len() >= max_statements {
-                let oldest_key = statements.iter()
+                let oldest_key = statements
+                    .iter()
                     .min_by_key(|(_, stmt)| stmt.last_used)
                     .map(|(key, _)| *key);
-                
+
                 if let Some(key) = oldest_key {
                     statements.remove(&key);
                     if let Ok(mut stats) = self.stats.write() {
@@ -830,34 +850,34 @@ impl PreparedStatementCache {
                     }
                 }
             }
-            
+
             statements.insert(hash, PreparedStatement::new(sql.to_string()));
-            
+
             if let Ok(mut stats) = self.stats.write() {
                 stats.cached_count = statements.len();
             }
         }
     }
-    
+
     /// Record execution of a statement
     pub fn record_execution(&self, sql: &str, execution_time_us: u64) {
         if !self.is_enabled() {
             return;
         }
-        
+
         let hash = Self::hash_sql(sql);
-        
+
         if let Ok(mut statements) = self.statements.write() {
             if let Some(stmt) = statements.get_mut(&hash) {
                 stmt.record_execution(execution_time_us);
             }
         }
-        
+
         if let Ok(mut stats) = self.stats.write() {
             stats.total_executions += 1;
         }
     }
-    
+
     /// Invalidate a specific statement
     pub fn invalidate(&self, sql: &str) -> bool {
         let hash = Self::hash_sql(sql);
@@ -873,7 +893,7 @@ impl PreparedStatementCache {
             false
         }
     }
-    
+
     /// Clear all cached statements
     pub fn clear(&self) {
         if let Ok(mut statements) = self.statements.write() {
@@ -883,12 +903,12 @@ impl PreparedStatementCache {
             }
         }
     }
-    
+
     /// Get cache statistics
     pub fn stats(&self) -> PreparedStatementStats {
         self.stats.read().map(|s| s.clone()).unwrap_or_default()
     }
-    
+
     /// Reset statistics
     pub fn reset_stats(&self) {
         if let Ok(mut stats) = self.stats.write() {
@@ -898,22 +918,23 @@ impl PreparedStatementCache {
             }
         }
     }
-    
+
     /// Get the number of cached statements
     pub fn len(&self) -> usize {
         self.statements.read().map(|s| s.len()).unwrap_or(0)
     }
-    
+
     /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get information about cached statements
     pub fn cached_statements_info(&self) -> Vec<CachedStatementInfo> {
         if let Ok(statements) = self.statements.read() {
-            statements.iter().map(|(hash, stmt)| {
-                CachedStatementInfo {
+            statements
+                .iter()
+                .map(|(hash, stmt)| CachedStatementInfo {
                     hash: *hash,
                     sql_preview: if stmt.sql.len() > 100 {
                         format!("{}...", &stmt.sql[..100])
@@ -923,8 +944,8 @@ impl PreparedStatementCache {
                     execution_count: stmt.execution_count,
                     avg_execution_time_us: stmt.avg_execution_time_us,
                     age_secs: stmt.prepared_at.elapsed().as_secs(),
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             Vec::new()
         }
@@ -967,48 +988,48 @@ impl CacheKeyBuilder {
     pub fn new() -> Self {
         Self { parts: Vec::new() }
     }
-    
+
     /// Add a table name
     pub fn table(mut self, table: &str) -> Self {
         self.parts.push(format!("t:{}", table));
         self
     }
-    
+
     /// Add a column condition
     pub fn condition(mut self, column: &str, value: impl std::fmt::Display) -> Self {
         self.parts.push(format!("{}={}", column, value));
         self
     }
-    
+
     /// Add an order by clause
     pub fn order(mut self, column: &str, direction: &str) -> Self {
         self.parts.push(format!("o:{}:{}", column, direction));
         self
     }
-    
+
     /// Add a limit
     pub fn limit(mut self, limit: u64) -> Self {
         self.parts.push(format!("l:{}", limit));
         self
     }
-    
+
     /// Add an offset
     pub fn offset(mut self, offset: u64) -> Self {
         self.parts.push(format!("off:{}", offset));
         self
     }
-    
+
     /// Add a raw part
     pub fn raw(mut self, part: &str) -> Self {
         self.parts.push(part.to_string());
         self
     }
-    
+
     /// Build the cache key
     pub fn build(self) -> String {
         self.parts.join(":")
     }
-    
+
     /// Build and hash the cache key
     pub fn build_hash(self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -1043,19 +1064,19 @@ impl CacheOptions {
             tags: Vec::new(),
         }
     }
-    
+
     /// Set a custom cache key
     pub fn with_key(mut self, key: &str) -> Self {
         self.key = Some(key.to_string());
         self
     }
-    
+
     /// Add a tag
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tags.push(tag.to_string());
         self
     }
-    
+
     /// Add multiple tags
     pub fn with_tags(mut self, tags: &[&str]) -> Self {
         self.tags.extend(tags.iter().map(|s| s.to_string()));
@@ -1084,9 +1105,11 @@ struct WarmQuery {
 impl CacheWarmer {
     /// Create a new cache warmer
     pub fn new() -> Self {
-        Self { queries: Vec::new() }
+        Self {
+            queries: Vec::new(),
+        }
     }
-    
+
     /// Add a query to warm
     pub fn add_query(mut self, key: &str, sql: &str, ttl: Duration) -> Self {
         self.queries.push(WarmQuery {
@@ -1096,15 +1119,17 @@ impl CacheWarmer {
         });
         self
     }
-    
+
     /// Get the number of queries to warm
     pub fn query_count(&self) -> usize {
         self.queries.len()
     }
-    
+
     /// Get the configured queries for warming
     pub fn queries(&self) -> impl Iterator<Item = (&str, &str, Duration)> {
-        self.queries.iter().map(|q| (q.key.as_str(), q.sql.as_str(), q.ttl))
+        self.queries
+            .iter()
+            .map(|q| (q.key.as_str(), q.sql.as_str(), q.ttl))
     }
 }
 
@@ -1117,7 +1142,7 @@ impl Default for CacheWarmer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cache_config_default() {
         let config = CacheConfig::default();
@@ -1125,75 +1150,77 @@ mod tests {
         assert_eq!(config.max_entries, 1000);
         assert_eq!(config.default_ttl, Duration::from_secs(60));
     }
-    
+
     #[test]
     fn test_query_cache_basic() {
         let cache = QueryCache::new();
         cache.enable();
-        
+
         assert!(cache.is_enabled());
         assert!(cache.is_empty());
-        
+
         // Set a value
-        cache.set("test_key", &vec![1, 2, 3], None, "test_model").unwrap();
-        
+        cache
+            .set("test_key", &vec![1, 2, 3], None, "test_model")
+            .unwrap();
+
         assert!(!cache.is_empty());
         assert_eq!(cache.len(), 1);
-        
+
         // Get the value
         let result: Option<Vec<i32>> = cache.get("test_key");
         assert_eq!(result, Some(vec![1, 2, 3]));
-        
+
         // Check stats
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.entries, 1);
     }
-    
+
     #[test]
     fn test_query_cache_invalidation() {
         let cache = QueryCache::new();
         cache.enable();
-        
+
         cache.set("key1", &"value1", None, "model1").unwrap();
         cache.set("key2", &"value2", None, "model1").unwrap();
         cache.set("key3", &"value3", None, "model2").unwrap();
-        
+
         assert_eq!(cache.len(), 3);
-        
+
         // Invalidate single key
         cache.invalidate("key1");
         assert_eq!(cache.len(), 2);
-        
+
         // Invalidate by model
         cache.invalidate_model("model1");
         assert_eq!(cache.len(), 1);
-        
+
         // Clear all
         cache.clear();
         assert!(cache.is_empty());
     }
-    
+
     #[test]
     fn test_prepared_statement_cache() {
         let cache = PreparedStatementCache::new();
         cache.enable();
-        
+
         let sql = "SELECT * FROM users WHERE id = $1";
-        
+
         // First call should be a miss
         let (_, cached) = cache.get_or_prepare(sql);
         assert!(!cached);
-        
+
         // Second call should be a hit
         let (_, cached) = cache.get_or_prepare(sql);
         assert!(cached);
-        
+
         let stats = cache.stats();
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
     }
-    
+
     #[test]
     fn test_cache_key_builder() {
         let key = CacheKeyBuilder::new()
@@ -1203,24 +1230,24 @@ mod tests {
             .order("created_at", "desc")
             .limit(10)
             .build();
-        
+
         assert!(key.contains("t:users"));
         assert!(key.contains("active=true"));
         assert!(key.contains("role=admin"));
         assert!(key.contains("o:created_at:desc"));
         assert!(key.contains("l:10"));
     }
-    
+
     #[test]
     fn test_cache_stats_hit_ratio() {
         let mut stats = CacheStats::default();
         assert_eq!(stats.hit_ratio(), 0.0);
-        
+
         stats.hits = 75;
         stats.misses = 25;
         assert!((stats.hit_ratio() - 0.75).abs() < 0.001);
     }
-    
+
     #[test]
     fn test_cache_strategy_display() {
         assert_eq!(format!("{}", CacheStrategy::LRU), "LRU");

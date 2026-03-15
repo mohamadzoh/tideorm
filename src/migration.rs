@@ -59,10 +59,10 @@
 use std::fmt;
 
 use crate::config::DatabaseType;
-use crate::database::{require_db, Database};
+use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
-use crate::{tide_info, tide_debug};
+use crate::{tide_debug, tide_info};
 
 // Re-export async_trait for users
 pub use async_trait::async_trait;
@@ -223,19 +223,13 @@ impl Schema {
     /// schema.drop_table("users").await?;
     /// ```
     pub async fn drop_table(&mut self, name: &str) -> Result<()> {
-        let sql = format!(
-            "DROP TABLE {}",
-            self.quote_identifier(name)
-        );
+        let sql = format!("DROP TABLE {}", self.quote_identifier(name));
         self.execute(&sql).await
     }
 
     /// Drop a table if it exists
     pub async fn drop_table_if_exists(&mut self, name: &str) -> Result<()> {
-        let sql = format!(
-            "DROP TABLE IF EXISTS {}",
-            self.quote_identifier(name)
-        );
+        let sql = format!("DROP TABLE IF EXISTS {}", self.quote_identifier(name));
         self.execute(&sql).await
     }
 
@@ -303,10 +297,7 @@ impl Schema {
                 self.quote_identifier(name),
                 self.quote_identifier(table)
             ),
-            _ => format!(
-                "DROP INDEX {}",
-                self.quote_identifier(name)
-            ),
+            _ => format!("DROP INDEX {}", self.quote_identifier(name)),
         };
         self.execute(&sql).await
     }
@@ -331,10 +322,12 @@ impl Schema {
         db.__internal_connection()
             .execute_unprepared(sql)
             .await
-            .map_err(|e| Error::query_with_context(
-                e.to_string(),
-                crate::error::ErrorContext::new().query(sql.to_string()),
-            ))?;
+            .map_err(|e| {
+                Error::query_with_context(
+                    e.to_string(),
+                    crate::error::ErrorContext::new().query(sql.to_string()),
+                )
+            })?;
 
         Ok(())
     }
@@ -474,7 +467,13 @@ impl TableBuilder {
 
     /// Add a decimal column
     pub fn decimal(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Decimal { precision: 10, scale: 2 })
+        self.column(
+            name,
+            ColumnType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        )
     }
 
     /// Add a decimal column with precision and scale
@@ -513,17 +512,17 @@ impl TableBuilder {
     }
 
     /// Add a timestamp column (without time zone)
-    /// 
+    ///
     /// Use this for `chrono::NaiveDateTime` fields.
     pub fn timestamp(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnType::Timestamp)
     }
 
     /// Add a timestamp with time zone column (TIMESTAMPTZ)
-    /// 
+    ///
     /// Use this for `chrono::DateTime<Utc>` fields in PostgreSQL.
     /// For MySQL, this falls back to TIMESTAMP.
-    /// 
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -552,7 +551,7 @@ impl TableBuilder {
     }
 
     /// Add created_at and updated_at timestamp columns (without time zone)
-    /// 
+    ///
     /// Use this for `chrono::NaiveDateTime` fields.
     pub fn timestamps_naive(&mut self) -> &mut Self {
         self.column("created_at", ColumnType::Timestamp)
@@ -566,7 +565,8 @@ impl TableBuilder {
 
     /// Add a soft delete column (deleted_at)
     pub fn soft_deletes(&mut self) -> &mut Self {
-        self.column("deleted_at", ColumnType::TimestampTz).nullable();
+        self.column("deleted_at", ColumnType::TimestampTz)
+            .nullable();
         self
     }
 
@@ -677,7 +677,7 @@ impl TableBuilder {
         self
     }
 
-    /// Add a named multi-column unique constraint 
+    /// Add a named multi-column unique constraint
     ///
     /// # Example
     ///
@@ -693,7 +693,7 @@ impl TableBuilder {
         self
     }
 
-    /// Set a composite primary key on multiple columns 
+    /// Set a composite primary key on multiple columns
     ///
     /// This is useful for junction tables or tables with natural composite keys.
     ///
@@ -750,13 +750,10 @@ impl TableBuilder {
         // Add primary key constraint if specified (single column)
         if let Some(ref pk) = self.primary_key {
             sql.push_str(",\n");
-            sql.push_str(&format!(
-                "    PRIMARY KEY ({})",
-                self.quote_identifier(pk)
-            ));
+            sql.push_str(&format!("    PRIMARY KEY ({})", self.quote_identifier(pk)));
         }
 
-        // Add composite primary key if specified 
+        // Add composite primary key if specified
         if let Some(ref cpk) = self.composite_primary_key {
             sql.push_str(",\n");
             let cols: Vec<String> = cpk
@@ -804,14 +801,10 @@ impl TableBuilder {
                 DatabaseType::Postgres => {
                     // Replace type with SERIAL/BIGSERIAL
                     def = match col.column_type {
-                        ColumnType::Integer => format!(
-                            "    {} SERIAL",
-                            self.quote_identifier(&col.name)
-                        ),
-                        _ => format!(
-                            "    {} BIGSERIAL",
-                            self.quote_identifier(&col.name)
-                        ),
+                        ColumnType::Integer => {
+                            format!("    {} SERIAL", self.quote_identifier(&col.name))
+                        }
+                        _ => format!("    {} BIGSERIAL", self.quote_identifier(&col.name)),
                     };
                 }
                 DatabaseType::MySQL | DatabaseType::MariaDB => {
@@ -837,12 +830,12 @@ impl TableBuilder {
         if col.unique && !col.primary_key {
             def.push_str(" UNIQUE");
         }
-        
+
         // CHECK constraint
         if let Some(ref check_expr) = col.check {
             def.push_str(&format!(" CHECK ({})", check_expr));
         }
-        
+
         // Extra SQL
         if let Some(ref extra_sql) = col.extra {
             def.push_str(&format!(" {}", extra_sql));
@@ -951,7 +944,7 @@ impl<'a> ColumnBuilder<'a> {
         self.table.primary_key = Some(self.definition.name.clone());
         self
     }
-    
+
     /// Add a CHECK constraint to the column
     ///
     /// # Example
@@ -965,7 +958,7 @@ impl<'a> ColumnBuilder<'a> {
         self.definition.check = Some(expression.to_string());
         self
     }
-    
+
     /// Add extra SQL to the column definition
     ///
     /// This allows adding arbitrary SQL after the column definition.
@@ -1046,7 +1039,8 @@ impl AlterTableBuilder {
 
     /// Drop a column
     pub fn drop_column(&mut self, name: &str) -> &mut Self {
-        self.operations.push(AlterOperation::DropColumn(name.to_string()));
+        self.operations
+            .push(AlterOperation::DropColumn(name.to_string()));
         self
     }
 
@@ -1080,7 +1074,8 @@ impl AlterTableBuilder {
 
     /// Drop an index
     pub fn drop_index(&mut self, name: &str) -> &mut Self {
-        self.operations.push(AlterOperation::DropIndex(name.to_string()));
+        self.operations
+            .push(AlterOperation::DropIndex(name.to_string()));
         self
     }
 
@@ -1579,7 +1574,7 @@ impl Migrator {
         self.migrations.push(Box::new(migration));
         self
     }
-    
+
     /// Add a boxed migration (used internally by TideConfig)
     #[doc(hidden)]
     pub fn add_boxed(mut self, migration: Box<dyn Migration>) -> Self {
@@ -1790,7 +1785,9 @@ impl Migrator {
         let q = |id: &str| quote_migration_identifier(id, db_type);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
-            q("version"), q("_migrations"), q("version")
+            q("version"),
+            q("_migrations"),
+            q("version")
         );
         let stmt = Statement::from_string(backend, sql);
 
@@ -1801,8 +1798,11 @@ impl Migrator {
             .map_err(|e| Error::query(e.to_string()))?;
 
         // Get the list of registered migration versions for filtering
-        let registered_versions: std::collections::HashSet<_> = 
-            self.migrations.iter().map(|m| m.version().to_string()).collect();
+        let registered_versions: std::collections::HashSet<_> = self
+            .migrations
+            .iter()
+            .map(|m| m.version().to_string())
+            .collect();
 
         let mut versions = Vec::new();
         for row in results {
@@ -1826,7 +1826,9 @@ impl Migrator {
 
         let sql = format!(
             "INSERT INTO {} ({}, {}) VALUES ('{}', '{}')",
-            q("_migrations"), q("version"), q("name"),
+            q("_migrations"),
+            q("version"),
+            q("name"),
             version.replace('\'', "''"),
             name.replace('\'', "''")
         );
@@ -1847,7 +1849,8 @@ impl Migrator {
 
         let sql = format!(
             "DELETE FROM {} WHERE {} = '{}'",
-            q("_migrations"), q("version"),
+            q("_migrations"),
+            q("version"),
             version.replace('\'', "''")
         );
 
@@ -2080,10 +2083,16 @@ mod tests {
 
         let sql = builder.build_create();
         // Verify timestamps use TIMESTAMPTZ with NOT NULL and DEFAULT CURRENT_TIMESTAMP
-        assert!(sql.contains("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
-            "PostgreSQL should have created_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "PostgreSQL should have updated_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(
+            sql.contains("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL should have created_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL should have updated_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
 
         // Test MySQL timestamps - TIMESTAMPTZ falls back to TIMESTAMP
         let mut builder = TableBuilder::new("posts", DatabaseType::MySQL);
@@ -2092,10 +2101,16 @@ mod tests {
         builder.timestamps();
 
         let sql = builder.build_create();
-        assert!(sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MySQL should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MySQL should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(
+            sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MySQL should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MySQL should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
 
         // Test MariaDB timestamps - same as MySQL
         let mut builder = TableBuilder::new("posts", DatabaseType::MariaDB);
@@ -2104,10 +2119,16 @@ mod tests {
         builder.timestamps();
 
         let sql = builder.build_create();
-        assert!(sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MariaDB should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "MariaDB should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(
+            sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MariaDB should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "MariaDB should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
 
         // Test SQLite timestamps
         let mut builder = TableBuilder::new("posts", DatabaseType::SQLite);
@@ -2116,10 +2137,16 @@ mod tests {
         builder.timestamps();
 
         let sql = builder.build_create();
-        assert!(sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite should have created_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"updated_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite should have updated_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}", sql);
+        assert!(
+            sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite should have created_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"updated_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "SQLite should have updated_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2132,10 +2159,16 @@ mod tests {
 
         let sql = builder.build_create();
         // Verify naive timestamps use TIMESTAMP (not TIMESTAMPTZ)
-        assert!(sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"), 
-            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"updated_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}", sql);
+        assert!(
+            sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"updated_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2148,13 +2181,22 @@ mod tests {
         builder.timestamptz("last_activity").nullable();
 
         let sql = builder.build_create();
-        assert!(sql.contains("\"expires_at\" TIMESTAMPTZ NOT NULL"),
-            "Should have expires_at as TIMESTAMPTZ NOT NULL. Got: {}", sql);
-        assert!(sql.contains("\"last_activity\" TIMESTAMPTZ"),
-            "Should have last_activity as TIMESTAMPTZ. Got: {}", sql);
+        assert!(
+            sql.contains("\"expires_at\" TIMESTAMPTZ NOT NULL"),
+            "Should have expires_at as TIMESTAMPTZ NOT NULL. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"last_activity\" TIMESTAMPTZ"),
+            "Should have last_activity as TIMESTAMPTZ. Got: {}",
+            sql
+        );
         // last_activity should be nullable (no NOT NULL)
-        assert!(!sql.contains("\"last_activity\" TIMESTAMPTZ NOT NULL"),
-            "last_activity should be nullable. Got: {}", sql);
+        assert!(
+            !sql.contains("\"last_activity\" TIMESTAMPTZ NOT NULL"),
+            "last_activity should be nullable. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2162,14 +2204,20 @@ mod tests {
         // Test that timestamp() and timestamptz() produce different SQL in PostgreSQL
         let mut builder = TableBuilder::new("events", DatabaseType::Postgres);
         builder.id();
-        builder.timestamp("local_time");      // TIMESTAMP (no timezone)
-        builder.timestamptz("utc_time");      // TIMESTAMPTZ (with timezone)
+        builder.timestamp("local_time"); // TIMESTAMP (no timezone)
+        builder.timestamptz("utc_time"); // TIMESTAMPTZ (with timezone)
 
         let sql = builder.build_create();
-        assert!(sql.contains("\"local_time\" TIMESTAMP"),
-            "timestamp() should produce TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"utc_time\" TIMESTAMPTZ"),
-            "timestamptz() should produce TIMESTAMPTZ. Got: {}", sql);
+        assert!(
+            sql.contains("\"local_time\" TIMESTAMP"),
+            "timestamp() should produce TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"utc_time\" TIMESTAMPTZ"),
+            "timestamptz() should produce TIMESTAMPTZ. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2184,11 +2232,31 @@ mod tests {
         builder.timestamptz("utc_timestamp");
 
         let sql = builder.build_create();
-        assert!(sql.contains("\"event_date\" DATE"), "Should have DATE column. Got: {}", sql);
-        assert!(sql.contains("\"start_time\" TIME"), "Should have TIME column. Got: {}", sql);
-        assert!(sql.contains("\"local_datetime\" TIMESTAMP"), "Should have TIMESTAMP for datetime. Got: {}", sql);
-        assert!(sql.contains("\"naive_timestamp\" TIMESTAMP"), "Should have TIMESTAMP. Got: {}", sql);
-        assert!(sql.contains("\"utc_timestamp\" TIMESTAMPTZ"), "Should have TIMESTAMPTZ. Got: {}", sql);
+        assert!(
+            sql.contains("\"event_date\" DATE"),
+            "Should have DATE column. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"start_time\" TIME"),
+            "Should have TIME column. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"local_datetime\" TIMESTAMP"),
+            "Should have TIMESTAMP for datetime. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"naive_timestamp\" TIMESTAMP"),
+            "Should have TIMESTAMP. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("\"utc_timestamp\" TIMESTAMPTZ"),
+            "Should have TIMESTAMPTZ. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2200,10 +2268,16 @@ mod tests {
 
         let sql = builder.build_create();
         // soft_deletes should be nullable TIMESTAMPTZ
-        assert!(sql.contains("\"deleted_at\" TIMESTAMPTZ"),
-            "Should have deleted_at TIMESTAMPTZ column. Got: {}", sql);
-        assert!(!sql.contains("\"deleted_at\" TIMESTAMPTZ NOT NULL"),
-            "deleted_at should be nullable (no NOT NULL). Got: {}", sql);
+        assert!(
+            sql.contains("\"deleted_at\" TIMESTAMPTZ"),
+            "Should have deleted_at TIMESTAMPTZ column. Got: {}",
+            sql
+        );
+        assert!(
+            !sql.contains("\"deleted_at\" TIMESTAMPTZ NOT NULL"),
+            "deleted_at should be nullable (no NOT NULL). Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2229,8 +2303,11 @@ mod tests {
         builder.unique(&["user_id", "role_id"]);
 
         let sql = builder.build_create();
-        assert!(sql.contains("UNIQUE (\"user_id\", \"role_id\")"),
-            "Should have multi-column unique constraint. Got: {}", sql);
+        assert!(
+            sql.contains("UNIQUE (\"user_id\", \"role_id\")"),
+            "Should have multi-column unique constraint. Got: {}",
+            sql
+        );
 
         // Test named unique constraint
         let mut builder = TableBuilder::new("users", DatabaseType::Postgres);
@@ -2240,8 +2317,11 @@ mod tests {
         builder.unique_named("uq_user_email_tenant", &["email", "tenant_id"]);
 
         let sql = builder.build_create();
-        assert!(sql.contains("CONSTRAINT \"uq_user_email_tenant\" UNIQUE (\"email\", \"tenant_id\")"),
-            "Should have named unique constraint. Got: {}", sql);
+        assert!(
+            sql.contains("CONSTRAINT \"uq_user_email_tenant\" UNIQUE (\"email\", \"tenant_id\")"),
+            "Should have named unique constraint. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2254,11 +2334,17 @@ mod tests {
         builder.primary_key(&["user_id", "role_id"]);
 
         let sql = builder.build_create();
-        assert!(sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
-            "Should have composite primary key. Got: {}", sql);
+        assert!(
+            sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
+            "Should have composite primary key. Got: {}",
+            sql
+        );
         // Should NOT have individual primary keys
-        assert!(!sql.contains("BIGINT PRIMARY KEY"),
-            "Individual columns should not be marked as primary key. Got: {}", sql);
+        assert!(
+            !sql.contains("BIGINT PRIMARY KEY"),
+            "Individual columns should not be marked as primary key. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2269,10 +2355,16 @@ mod tests {
         builder.integer("quantity").check("quantity >= 0");
 
         let sql = builder.build_create();
-        assert!(sql.contains("CHECK (price >= 0)"),
-            "Should have CHECK constraint on price. Got: {}", sql);
-        assert!(sql.contains("CHECK (quantity >= 0)"),
-            "Should have CHECK constraint on quantity. Got: {}", sql);
+        assert!(
+            sql.contains("CHECK (price >= 0)"),
+            "Should have CHECK constraint on price. Got: {}",
+            sql
+        );
+        assert!(
+            sql.contains("CHECK (quantity >= 0)"),
+            "Should have CHECK constraint on quantity. Got: {}",
+            sql
+        );
     }
 
     #[test]
@@ -2282,8 +2374,11 @@ mod tests {
         builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
 
         let sql = builder.build_create();
-        assert!(sql.contains("COLLATE utf8mb4_unicode_ci"),
-            "Should include extra SQL. Got: {}", sql);
+        assert!(
+            sql.contains("COLLATE utf8mb4_unicode_ci"),
+            "Should include extra SQL. Got: {}",
+            sql
+        );
 
         // MariaDB should also support extra SQL
         let mut builder = TableBuilder::new("logs", DatabaseType::MariaDB);
@@ -2291,8 +2386,11 @@ mod tests {
         builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
 
         let sql = builder.build_create();
-        assert!(sql.contains("COLLATE utf8mb4_unicode_ci"),
-            "MariaDB should include extra SQL. Got: {}", sql);
+        assert!(
+            sql.contains("COLLATE utf8mb4_unicode_ci"),
+            "MariaDB should include extra SQL. Got: {}",
+            sql
+        );
     }
 
     #[test]

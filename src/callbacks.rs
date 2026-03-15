@@ -96,19 +96,19 @@ use crate::error::Result;
 /// and the error is returned to the caller.
 pub trait Callbacks: Sized {
     /// Called before validation runs
-    /// 
+    ///
     /// Use this to prepare data for validation.
     fn before_validation(&mut self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called after validation passes
     ///
     /// Use this to perform actions that depend on valid data.
     fn after_validation(&self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called before both create and update operations
     ///
     /// Use this for common pre-save logic like setting timestamps
@@ -116,7 +116,7 @@ pub trait Callbacks: Sized {
     fn before_save(&mut self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called after both create and update operations complete
     ///
     /// Use this for post-save actions like sending notifications
@@ -124,7 +124,7 @@ pub trait Callbacks: Sized {
     fn after_save(&self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called before inserting a new record
     ///
     /// Use this for create-specific logic like generating UUIDs
@@ -132,7 +132,7 @@ pub trait Callbacks: Sized {
     fn before_create(&mut self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called after inserting a new record
     ///
     /// Use this for post-create actions like creating related records
@@ -140,7 +140,7 @@ pub trait Callbacks: Sized {
     fn after_create(&self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called before updating an existing record
     ///
     /// Use this for update-specific logic like tracking changes
@@ -148,7 +148,7 @@ pub trait Callbacks: Sized {
     fn before_update(&mut self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called after updating an existing record
     ///
     /// Use this for post-update actions like audit logging
@@ -156,14 +156,14 @@ pub trait Callbacks: Sized {
     fn after_update(&self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called before deleting a record
     ///
     /// Use this to prevent deletion or clean up related data.
     fn before_delete(&self) -> Result<()> {
         Ok(())
     }
-    
+
     /// Called after deleting a record
     ///
     /// Use this for post-delete cleanup like removing files
@@ -186,14 +186,14 @@ pub trait CallbackRunner: Callbacks {
         self.before_create()?;
         Ok(())
     }
-    
+
     /// Run the post-create callbacks
     fn run_after_create_callbacks(&self) -> Result<()> {
         self.after_create()?;
         self.after_save()?;
         Ok(())
     }
-    
+
     /// Run the full update callback chain
     fn run_update_callbacks(&mut self) -> Result<()> {
         self.before_validation()?;
@@ -202,20 +202,20 @@ pub trait CallbackRunner: Callbacks {
         self.before_update()?;
         Ok(())
     }
-    
+
     /// Run the post-update callbacks
     fn run_after_update_callbacks(&self) -> Result<()> {
         self.after_update()?;
         self.after_save()?;
         Ok(())
     }
-    
+
     /// Run the delete callback chain
     fn run_delete_callbacks(&self) -> Result<()> {
         self.before_delete()?;
         Ok(())
     }
-    
+
     /// Run post-delete callbacks
     fn run_after_delete_callbacks(&self) -> Result<()> {
         self.after_delete()?;
@@ -227,7 +227,7 @@ pub trait CallbackRunner: Callbacks {
 impl<T: Callbacks> CallbackRunner for T {}
 
 /// Blanket implementation of Callbacks for all types (no-op by default)
-/// 
+///
 /// This allows models to work without explicitly implementing Callbacks.
 /// Models that want custom callbacks should implement the trait themselves.
 impl<T> Callbacks for T where T: Sized {}

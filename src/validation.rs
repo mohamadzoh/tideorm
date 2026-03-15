@@ -106,7 +106,7 @@ impl ValidationErrors {
     pub fn is_empty(&self) -> bool {
         self.errors.is_empty()
     }
-    
+
     /// Check if there are any errors (alias for !is_empty())
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
@@ -121,7 +121,7 @@ impl ValidationErrors {
     pub fn get(&self, field: &str) -> Option<&Vec<String>> {
         self.errors.get(field)
     }
-    
+
     /// Get errors for a specific field (alias for get())
     pub fn field_errors(&self, field: &str) -> Vec<String> {
         self.errors.get(field).cloned().unwrap_or_default()
@@ -139,9 +139,10 @@ impl ValidationErrors {
 
     /// Get the first error message (useful for simple error display)
     pub fn first(&self) -> Option<(&String, &String)> {
-        self.errors.iter().next().and_then(|(field, messages)| {
-            messages.first().map(|msg| (field, msg))
-        })
+        self.errors
+            .iter()
+            .next()
+            .and_then(|(field, messages)| messages.first().map(|msg| (field, msg)))
     }
 
     /// Get all error messages as a flat list
@@ -149,7 +150,9 @@ impl ValidationErrors {
         self.errors
             .iter()
             .flat_map(|(field, messages)| {
-                messages.iter().map(move |msg| format!("{}: {}", field, msg))
+                messages
+                    .iter()
+                    .map(move |msg| format!("{}: {}", field, msg))
             })
             .collect()
     }
@@ -165,15 +168,11 @@ impl ValidationErrors {
 
     /// Convert to a Result, returning Ok if empty
     pub fn to_result(self) -> Result<(), Self> {
-        if self.is_empty() {
-            Ok(())
-        } else {
-            Err(self)
-        }
+        if self.is_empty() { Ok(()) } else { Err(self) }
     }
 
     /// Get all errors as (field, message) pairs for backwards compatibility
-    /// 
+    ///
     /// Returns a flat list of all errors
     pub fn errors(&self) -> Vec<(String, String)> {
         self.errors
@@ -186,12 +185,11 @@ impl ValidationErrors {
 
     /// Convert to a single Error (takes the first error) for backwards compatibility
     pub fn into_error(self) -> Option<crate::error::Error> {
-        self.first().map(|(field, message)| {
-            crate::error::Error::Validation {
+        self.first()
+            .map(|(field, message)| crate::error::Error::Validation {
                 field: field.clone(),
                 message: message.clone(),
-            }
-        })
+            })
     }
 }
 
@@ -303,9 +301,9 @@ impl ValidationRule {
             ValidationRule::Custom(msg) => msg.clone(),
         }
     }
-    
+
     /// Validate a value against this rule
-    /// 
+    ///
     /// Returns Ok(()) if the value passes validation, or Err with an error message
     pub fn validate<T: ValidatableValue>(&self, value: &T) -> Result<(), String> {
         match Validator::validate_rule(value, self, "field") {
@@ -319,10 +317,10 @@ impl ValidationRule {
 pub trait ValidatableValue {
     /// Check if the value is empty (for Required validation)
     fn is_empty_value(&self) -> bool;
-    
+
     /// Get the string representation for string validations
     fn as_str_value(&self) -> Option<&str>;
-    
+
     /// Get the numeric value for numeric validations
     fn as_f64_value(&self) -> Option<f64>;
 }
@@ -331,11 +329,11 @@ impl ValidatableValue for String {
     fn is_empty_value(&self) -> bool {
         self.trim().is_empty()
     }
-    
+
     fn as_str_value(&self) -> Option<&str> {
         Some(self.as_str())
     }
-    
+
     fn as_f64_value(&self) -> Option<f64> {
         self.parse().ok()
     }
@@ -345,11 +343,11 @@ impl ValidatableValue for &str {
     fn is_empty_value(&self) -> bool {
         self.trim().is_empty()
     }
-    
+
     fn as_str_value(&self) -> Option<&str> {
         Some(self)
     }
-    
+
     fn as_f64_value(&self) -> Option<f64> {
         self.parse().ok()
     }
@@ -362,11 +360,11 @@ impl<T: ValidatableValue> ValidatableValue for Option<T> {
             None => true,
         }
     }
-    
+
     fn as_str_value(&self) -> Option<&str> {
         self.as_ref().and_then(|v| v.as_str_value())
     }
-    
+
     fn as_f64_value(&self) -> Option<f64> {
         self.as_ref().and_then(|v| v.as_f64_value())
     }
@@ -379,11 +377,11 @@ macro_rules! impl_validatable_for_int {
                 fn is_empty_value(&self) -> bool {
                     false  // Numbers are never "empty"
                 }
-                
+
                 fn as_str_value(&self) -> Option<&str> {
                     None
                 }
-                
+
                 fn as_f64_value(&self) -> Option<f64> {
                     Some(*self as f64)
                 }
@@ -392,7 +390,9 @@ macro_rules! impl_validatable_for_int {
     };
 }
 
-impl_validatable_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64);
+impl_validatable_for_int!(
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+);
 
 /// Validator for applying validation rules
 pub struct Validator;
@@ -531,9 +531,8 @@ impl Validator {
     /// Check if a string is a valid email address
     pub fn is_valid_email(s: &str) -> bool {
         // Simple email validation regex
-        let email_regex = regex::Regex::new(
-            r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        ).unwrap();
+        let email_regex =
+            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
         email_regex.is_match(s)
     }
 

@@ -671,6 +671,8 @@ pub struct Post {
 
 TideORM provides a fluent query builder with all common operations.
 
+As of 0.7.2, query execution paths are aligned on parameterized SQL generation for reads, JOIN clauses are validated before execution, and destructive mutations reject incompatible SELECT, JOIN, ORDER BY, GROUP BY, UNION, CTE, and window-function modifiers instead of silently ignoring them.
+
 ### WHERE Conditions
 
 **Type-Safe Approach (Recommended)**

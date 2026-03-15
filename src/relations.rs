@@ -98,19 +98,19 @@
 //! ```
 
 use async_trait::async_trait;
-use serde::{Serialize, Deserialize, Serializer, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
 use crate::model::Model;
-use crate::query::{QueryBuilder, Order};
+use crate::query::{Order, QueryBuilder};
 
 // =============================================================================
-// SELF-REFERENCING RELATIONS 
+// SELF-REFERENCING RELATIONS
 // =============================================================================
 
-/// SelfRef relation type - represents a self-referencing relationship 
+/// SelfRef relation type - represents a self-referencing relationship
 ///
 /// Use this for hierarchical data like org charts, categories, or tree structures
 /// where a model references itself.
@@ -164,26 +164,26 @@ impl<E: Model> SelfRef<E> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the foreign key value for lazy loading
     pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
         self.fk_value = Some(fk);
         self
     }
-    
+
     /// Load the referenced model (e.g., load the manager)
     pub async fn load(&self) -> Result<Option<E>> {
         let fk = match &self.fk_value {
             Some(v) if !v.is_null() => v,
             _ => return Ok(None), // No FK set means no relation
         };
-        
+
         E::query()
             .where_eq(self.local_key, fk.clone())
             .first()
             .await
     }
-    
+
     /// Load with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
     where
@@ -193,24 +193,24 @@ impl<E: Model> SelfRef<E> {
             Some(v) if !v.is_null() => v,
             _ => return Ok(None),
         };
-        
+
         let query = E::query().where_eq(self.local_key, fk.clone());
         constraint_fn(query).first().await
     }
-    
+
     /// Check if the self-reference exists
     pub async fn exists(&self) -> Result<bool> {
         let fk = match &self.fk_value {
             Some(v) if !v.is_null() => v,
             _ => return Ok(false),
         };
-        
+
         E::query()
             .where_eq(self.local_key, fk.clone())
             .exists()
             .await
     }
-    
+
     /// Get the cached value if already loaded
     pub fn get_cached(&self) -> Option<&E> {
         self.cached.as_deref()
@@ -293,63 +293,75 @@ impl<E: Model> SelfRefMany<E> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent primary key for lazy loading
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
     }
-    
+
     /// Load all records that reference this one
     pub async fn load(&self) -> Result<Vec<E>> {
-        let pk = self.parent_pk.as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
-        
+        let pk = self.parent_pk.as_ref().ok_or_else(|| {
+            Error::query(String::from(
+                "Parent primary key not set for self-reference",
+            ))
+        })?;
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .get()
             .await
     }
-    
+
     /// Load with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<E>>
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let pk = self.parent_pk.as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
-        
+        let pk = self.parent_pk.as_ref().ok_or_else(|| {
+            Error::query(String::from(
+                "Parent primary key not set for self-reference",
+            ))
+        })?;
+
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).get().await
     }
-    
+
     /// Count records that reference this one
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_pk.as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
-        
+        let pk = self.parent_pk.as_ref().ok_or_else(|| {
+            Error::query(String::from(
+                "Parent primary key not set for self-reference",
+            ))
+        })?;
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .count()
             .await
     }
-    
+
     /// Check if any records reference this one
     pub async fn exists(&self) -> Result<bool> {
-        let pk = self.parent_pk.as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
-        
+        let pk = self.parent_pk.as_ref().ok_or_else(|| {
+            Error::query(String::from(
+                "Parent primary key not set for self-reference",
+            ))
+        })?;
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .exists()
             .await
     }
-    
+
     /// Get the cached values if already loaded
     pub fn get_cached(&self) -> Option<&[E]> {
         self.cached.as_deref()
     }
-    
+
     /// Load the full tree of descendants (recursive)
     ///
     /// This loads all descendants recursively up to the specified depth.
@@ -364,27 +376,34 @@ impl<E: Model> SelfRefMany<E> {
         if max_depth == 0 {
             return Ok(Vec::new());
         }
-        
-        let pk = self.parent_pk.as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for self-reference")))?;
-        
+
+        let pk = self.parent_pk.as_ref().ok_or_else(|| {
+            Error::query(String::from(
+                "Parent primary key not set for self-reference",
+            ))
+        })?;
+
         self.load_tree_recursive(pk.clone(), max_depth).await
     }
-    
+
     /// Internal recursive tree loading
     #[async_recursion::async_recursion]
-    async fn load_tree_recursive(&self, parent_pk: serde_json::Value, depth: usize) -> Result<Vec<E>> {
+    async fn load_tree_recursive(
+        &self,
+        parent_pk: serde_json::Value,
+        depth: usize,
+    ) -> Result<Vec<E>> {
         if depth == 0 {
             return Ok(Vec::new());
         }
-        
+
         let children: Vec<E> = E::query()
             .where_eq(self.foreign_key, parent_pk)
             .get()
             .await?;
-        
+
         let mut all = children.clone();
-        
+
         for child in children {
             // Convert primary key to JSON value using Display trait
             let pk_string = format!("{}", child.primary_key());
@@ -393,13 +412,13 @@ impl<E: Model> SelfRefMany<E> {
             } else {
                 serde_json::Value::String(pk_string)
             };
-            
+
             if !child_pk.is_null() {
                 let descendants = self.load_tree_recursive(child_pk, depth - 1).await?;
                 all.extend(descendants);
             }
         }
-        
+
         Ok(all)
     }
 }
@@ -478,47 +497,53 @@ impl<E: Model> HasOne<E> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent primary key for lazy loading
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
     }
-    
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<E>> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .first()
             .await
     }
-    
+
     /// Load the related model with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).first().await
     }
-    
+
     /// Check if the relation exists
     pub async fn exists(&self) -> Result<bool> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .exists()
             .await
     }
-    
+
     /// Get the cached value if already loaded
     pub fn get_cached(&self) -> Option<&E> {
         self.cached.as_deref()
@@ -597,58 +622,66 @@ impl<E: Model> HasMany<E> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent primary key for lazy loading
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
     }
-    
+
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<E>> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .get()
             .await
     }
-    
+
     /// Load related models with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<E>>
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).get().await
     }
-    
+
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .count()
             .await
     }
-    
+
     /// Check if any related models exist
     pub async fn exists(&self) -> Result<bool> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.foreign_key, pk.clone())
             .exists()
             .await
     }
-    
+
     /// Get the cached values if already loaded
     pub fn get_cached(&self) -> Option<&[E]> {
         self.cached.as_deref()
@@ -726,47 +759,53 @@ impl<E: Model> BelongsTo<E> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the foreign key value for lazy loading
     pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
         self.fk_value = Some(fk);
         self
     }
-    
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<E>> {
-        let fk = self.fk_value.as_ref()
+        let fk = self
+            .fk_value
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.owner_key, fk.clone())
             .first()
             .await
     }
-    
+
     /// Load the related model with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let fk = self.fk_value.as_ref()
+        let fk = self
+            .fk_value
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
-        
+
         let query = E::query().where_eq(self.owner_key, fk.clone());
         constraint_fn(query).first().await
     }
-    
+
     /// Check if the relation exists
     pub async fn exists(&self) -> Result<bool> {
-        let fk = self.fk_value.as_ref()
+        let fk = self
+            .fk_value
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
-        
+
         E::query()
             .where_eq(self.owner_key, fk.clone())
             .exists()
             .await
     }
-    
+
     /// Get the cached value if already loaded
     pub fn get_cached(&self) -> Option<&E> {
         self.cached.as_deref()
@@ -860,18 +899,20 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent primary key for lazy loading
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
     }
-    
+
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         // Build a query that joins through the pivot table
         Related::query()
             .inner_join(
@@ -879,50 +920,65 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                 &format!("{}.{}", self.pivot_table, self.related_key),
                 &format!("{}.{}", Related::table_name(), self.related_local_key),
             )
-            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk))
+            .where_raw(&format!(
+                "{}.{} = {}",
+                self.pivot_table, self.foreign_key, pk
+            ))
             .get()
             .await
     }
-    
+
     /// Load related models with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<Related>>
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         let query = Related::query()
             .inner_join(
                 self.pivot_table,
                 &format!("{}.{}", self.pivot_table, self.related_key),
                 &format!("{}.{}", Related::table_name(), self.related_local_key),
             )
-            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk));
-        
+            .where_raw(&format!(
+                "{}.{} = {}",
+                self.pivot_table, self.foreign_key, pk
+            ));
+
         constraint_fn(query).get().await
     }
-    
+
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         Pivot::query()
-            .where_raw(&format!("{}.{} = {}", self.pivot_table, self.foreign_key, pk))
+            .where_raw(&format!(
+                "{}.{} = {}",
+                self.pivot_table, self.foreign_key, pk
+            ))
             .count()
             .await
     }
-    
+
     /// Attach a related model (create pivot entry)
     pub async fn attach(&self, related_id: impl Into<serde_json::Value>) -> Result<()> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         let mut data = HashMap::new();
         data.insert(self.foreign_key.to_string(), pk.clone());
         data.insert(self.related_key.to_string(), related_id.into());
-        
+
         // Build INSERT SQL
         let columns: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
@@ -932,47 +988,52 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             columns.join(", "),
             placeholders.join(", ")
         );
-        
-        let params: Vec<crate::internal::Value> = columns.iter()
+
+        let params: Vec<crate::internal::Value> = columns
+            .iter()
             .filter_map(|col| data.get(*col))
             .map(|v| crate::internal::Value::from(v.clone()))
             .collect();
-        
+
         crate::database::Database::execute_with_params(&sql, params).await?;
         Ok(())
     }
-    
+
     /// Detach a related model (remove pivot entry)
     pub async fn detach(&self, related_id: impl Into<serde_json::Value>) -> Result<u64> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         Pivot::query()
             .where_eq(self.foreign_key, pk.clone())
             .where_eq(self.related_key, related_id.into())
             .delete()
             .await
     }
-    
+
     /// Sync related models (replace all with new set)
     pub async fn sync(&self, related_ids: Vec<serde_json::Value>) -> Result<()> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        
+
         // Delete all existing pivot entries
         Pivot::query()
             .where_eq(self.foreign_key, pk.clone())
             .delete()
             .await?;
-        
+
         // Insert new pivot entries
         for id in related_ids {
             self.attach(id).await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Get the cached values if already loaded
     pub fn get_cached(&self) -> Option<&[Related]> {
         self.cached.as_deref()
@@ -1027,17 +1088,17 @@ impl<M, P> WithPivot<M, P> {
     pub fn new(model: M, pivot: P) -> Self {
         Self { model, pivot }
     }
-    
+
     /// Get the inner model
     pub fn into_model(self) -> M {
         self.model
     }
-    
+
     /// Get the pivot data
     pub fn pivot(&self) -> &P {
         &self.pivot
     }
-    
+
     /// Decompose into model and pivot parts
     pub fn into_parts(self) -> (M, P) {
         (self.model, self.pivot)
@@ -1046,7 +1107,7 @@ impl<M, P> WithPivot<M, P> {
 
 impl<M, P> std::ops::Deref for WithPivot<M, P> {
     type Target = M;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.model
     }
@@ -1081,7 +1142,7 @@ impl<Morphable> MorphTo<Morphable> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the type and id values for loading
     pub fn with_values(mut self, type_value: String, id_value: serde_json::Value) -> Self {
         self.type_value = Some(type_value);
@@ -1148,31 +1209,35 @@ impl<Related: Model> MorphOne<Related> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent values for loading
     pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
         self.parent_pk = Some(pk);
         self.parent_table = Some(table);
         self
     }
-    
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<Related>> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let table = self.parent_table.as_ref()
+        let table = self
+            .parent_table
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-        
+
         let type_column = format!("{}_type", self.morph_name);
         let id_column = format!("{}_id", self.morph_name);
-        
+
         Related::query()
             .where_eq(&type_column, table.clone())
             .where_eq(&id_column, pk.clone())
             .first()
             .await
     }
-    
+
     /// Get the cached value if already loaded
     pub fn get_cached(&self) -> Option<&Related> {
         self.cached.as_deref()
@@ -1238,68 +1303,80 @@ impl<Related: Model> MorphMany<Related> {
             _marker: PhantomData,
         }
     }
-    
+
     /// Set the parent values for loading
     pub fn with_parent(mut self, pk: serde_json::Value, table: String) -> Self {
         self.parent_pk = Some(pk);
         self.parent_table = Some(table);
         self
     }
-    
+
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let table = self.parent_table.as_ref()
+        let table = self
+            .parent_table
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-        
+
         let type_column = format!("{}_type", self.morph_name);
         let id_column = format!("{}_id", self.morph_name);
-        
+
         Related::query()
             .where_eq(&type_column, table.clone())
             .where_eq(&id_column, pk.clone())
             .get()
             .await
     }
-    
+
     /// Load related models with custom constraints
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<Related>>
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let table = self.parent_table.as_ref()
+        let table = self
+            .parent_table
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-        
+
         let type_column = format!("{}_type", self.morph_name);
         let id_column = format!("{}_id", self.morph_name);
-        
+
         let query = Related::query()
             .where_eq(&type_column, table.clone())
             .where_eq(&id_column, pk.clone());
-        
+
         constraint_fn(query).get().await
     }
-    
+
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_pk.as_ref()
+        let pk = self
+            .parent_pk
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let table = self.parent_table.as_ref()
+        let table = self
+            .parent_table
+            .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-        
+
         let type_column = format!("{}_type", self.morph_name);
         let id_column = format!("{}_id", self.morph_name);
-        
+
         Related::query()
             .where_eq(&type_column, table.clone())
             .where_eq(&id_column, pk.clone())
             .count()
             .await
     }
-    
+
     /// Get the cached values if already loaded
     pub fn get_cached(&self) -> Option<&[Related]> {
         self.cached.as_deref()
@@ -1353,17 +1430,17 @@ impl<A, B> MorphResult<A, B> {
     pub fn is_type_a(&self) -> bool {
         matches!(self, MorphResult::TypeA(_))
     }
-    
+
     /// Check if this is TypeB
     pub fn is_type_b(&self) -> bool {
         matches!(self, MorphResult::TypeB(_))
     }
-    
+
     /// Check if this is Unknown
     pub fn is_unknown(&self) -> bool {
         matches!(self, MorphResult::Unknown(_))
     }
-    
+
     /// Get TypeA if present
     pub fn as_type_a(&self) -> Option<&A> {
         match self {
@@ -1371,7 +1448,7 @@ impl<A, B> MorphResult<A, B> {
             _ => None,
         }
     }
-    
+
     /// Get TypeB if present
     pub fn as_type_b(&self) -> Option<&B> {
         match self {
@@ -1379,7 +1456,7 @@ impl<A, B> MorphResult<A, B> {
             _ => None,
         }
     }
-    
+
     /// Convert to TypeA, consuming self
     pub fn into_type_a(self) -> Option<A> {
         match self {
@@ -1387,7 +1464,7 @@ impl<A, B> MorphResult<A, B> {
             _ => None,
         }
     }
-    
+
     /// Convert to TypeB, consuming self
     pub fn into_type_b(self) -> Option<B> {
         match self {
@@ -1451,69 +1528,69 @@ impl RelationConstraints {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Add a where condition
     pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
         self.conditions.push((column.to_string(), value.into()));
         self
     }
-    
+
     /// Set order by
     pub fn order_by(mut self, column: &str, order: Order) -> Self {
         self.order_by = Some((column.to_string(), order));
         self
     }
-    
+
     /// Set limit
     pub fn limit(mut self, n: u64) -> Self {
         self.limit = Some(n);
         self
     }
-    
+
     /// Set offset
     pub fn offset(mut self, n: u64) -> Self {
         self.offset = Some(n);
         self
     }
-    
+
     /// Include soft-deleted records
     pub fn with_trashed(mut self) -> Self {
         self.with_trashed = true;
         self
     }
-    
+
     /// Only soft-deleted records
     pub fn only_trashed(mut self) -> Self {
         self.only_trashed = true;
         self
     }
-    
+
     /// Apply constraints to a query builder
     pub fn apply<M: Model>(self, mut query: QueryBuilder<M>) -> QueryBuilder<M> {
         for (column, value) in self.conditions {
             query = query.where_eq(&column, value);
         }
-        
+
         if let Some((column, order)) = self.order_by {
             query = query.order_by(&column, order);
         }
-        
+
         if let Some(limit) = self.limit {
             query = query.limit(limit);
         }
-        
+
         if let Some(offset) = self.offset {
             query = query.offset(offset);
         }
-        
+
         if self.with_trashed {
             query = query.with_trashed();
         }
-        
+
         if self.only_trashed {
             query = query.only_trashed();
         }
-        
+
         query
     }
 }
@@ -1528,7 +1605,7 @@ pub struct WithRelations<M> {
     /// The main model
     #[serde(flatten)]
     pub model: M,
-    
+
     /// Loaded relations stored by name
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub relations: HashMap<String, serde_json::Value>,
@@ -1542,24 +1619,25 @@ impl<M: Model> WithRelations<M> {
             relations: HashMap::new(),
         }
     }
-    
+
     /// Add a loaded relation
     pub fn with_relation(mut self, name: &str, data: serde_json::Value) -> Self {
         self.relations.insert(name.to_string(), data);
         self
     }
-    
+
     /// Get a loaded relation by name
     pub fn get_relation<R: for<'de> Deserialize<'de>>(&self, name: &str) -> Option<R> {
-        self.relations.get(name)
+        self.relations
+            .get(name)
             .and_then(|v| serde_json::from_value(v.clone()).ok())
     }
-    
+
     /// Check if a relation is loaded
     pub fn has_relation(&self, name: &str) -> bool {
         self.relations.contains_key(name)
     }
-    
+
     /// Get the inner model
     pub fn into_inner(self) -> M {
         self.model
@@ -1568,7 +1646,7 @@ impl<M: Model> WithRelations<M> {
 
 impl<M> std::ops::Deref for WithRelations<M> {
     type Target = M;
-    
+
     fn deref(&self) -> &Self::Target {
         &self.model
     }
@@ -1602,12 +1680,12 @@ impl RelationPath {
             segments,
         }
     }
-    
+
     /// Get the top-level relation name
     pub fn root(&self) -> &str {
         self.segments.first().map(|s| s.as_str()).unwrap_or("")
     }
-    
+
     /// Get nested path (everything after the first segment)
     pub fn nested(&self) -> Option<RelationPath> {
         if self.segments.len() > 1 {
@@ -1619,12 +1697,12 @@ impl RelationPath {
             None
         }
     }
-    
+
     /// Check if this is a nested path
     pub fn is_nested(&self) -> bool {
         self.segments.len() > 1
     }
-    
+
     /// Get depth of nesting
     pub fn depth(&self) -> usize {
         self.segments.len()
@@ -1645,39 +1723,40 @@ impl RelationTree {
             children: HashMap::new(),
         }
     }
-    
+
     /// Add a relation path to the tree
     pub fn add_path(&mut self, path: &RelationPath) {
         if path.segments.is_empty() {
             return;
         }
-        
+
         let root = path.root().to_string();
         let child = self.children.entry(root).or_default();
-        
+
         if let Some(nested) = path.nested() {
             child.add_path(&nested);
         }
     }
-    
+
     /// Get all root-level relations
     pub fn roots(&self) -> Vec<String> {
         self.children.keys().cloned().collect()
     }
-    
+
     /// Get nested tree for a relation
     pub fn get_nested(&self, name: &str) -> Option<&RelationTree> {
         self.children.get(name)
     }
-    
+
     /// Check if tree is empty
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
     }
-    
+
     /// Check if a relation has nested relations
     pub fn has_nested(&self, name: &str) -> bool {
-        self.children.get(name)
+        self.children
+            .get(name)
             .map(|t| !t.is_empty())
             .unwrap_or(false)
     }
@@ -1697,14 +1776,14 @@ impl<M: Model> EagerQueryBuilder<M> {
             relation_tree: RelationTree::new(),
         }
     }
-    
+
     /// Add a relation to eager load
     pub fn with(mut self, relation: &str) -> Self {
         let path = RelationPath::parse(relation);
         self.relation_tree.add_path(&path);
         self
     }
-    
+
     /// Add multiple relations at once
     pub fn with_many(mut self, relations: &[&str]) -> Self {
         for relation in relations {
@@ -1712,69 +1791,69 @@ impl<M: Model> EagerQueryBuilder<M> {
         }
         self
     }
-    
+
     /// Add a where condition
     pub fn where_eq<V: Into<serde_json::Value>>(mut self, column: &str, value: V) -> Self {
         self.query = self.query.where_eq(column, value);
         self
     }
-    
+
     /// Add a where_in condition
     pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.query = self.query.where_in(column, values);
         self
     }
-    
+
     /// Add a raw where condition
     pub fn where_raw(mut self, sql: &str) -> Self {
         self.query = self.query.where_raw(sql);
         self
     }
-    
+
     /// Set ordering
     pub fn order_by(mut self, column: &str, order: Order) -> Self {
         self.query = self.query.order_by(column, order);
         self
     }
-    
+
     /// Set limit
     pub fn limit(mut self, n: u64) -> Self {
         self.query = self.query.limit(n);
         self
     }
-    
+
     /// Set offset
     pub fn offset(mut self, n: u64) -> Self {
         self.query = self.query.offset(n);
         self
     }
-    
+
     /// Get the relation tree
     pub fn get_relation_tree(&self) -> &RelationTree {
         &self.relation_tree
     }
-    
+
     /// Execute and get all results with loaded relations
     pub async fn get(self) -> Result<Vec<WithRelations<M>>> {
         let models = self.query.get().await?;
-        
-        let results: Vec<WithRelations<M>> = models
-            .into_iter()
-            .map(WithRelations::new)
-            .collect();
-        
+
+        let results: Vec<WithRelations<M>> = models.into_iter().map(WithRelations::new).collect();
+
         Ok(results)
     }
-    
+
     /// Execute and get first result with loaded relations
     pub async fn first(mut self) -> Result<Option<WithRelations<M>>> {
         self.query = self.query.limit(1);
         let results = self.get().await?;
         Ok(results.into_iter().next())
     }
-    
+
     /// Find by ID with eager loaded relations
-    pub async fn find(mut self, id: impl Into<serde_json::Value>) -> Result<Option<WithRelations<M>>> {
+    pub async fn find(
+        mut self,
+        id: impl Into<serde_json::Value>,
+    ) -> Result<Option<WithRelations<M>>> {
         self.query = self.query.where_eq(M::primary_key_name(), id);
         self.first().await
     }
@@ -1792,7 +1871,17 @@ pub struct RelationLoader<M> {
     pub name: String,
     /// Loader function
     #[allow(clippy::type_complexity)]
-    pub loader: Box<dyn Fn(&[M]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>> + Send>> + Send + Sync>,
+    pub loader: Box<
+        dyn Fn(
+                &[M],
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>>
+                        + Send,
+                >,
+            > + Send
+            + Sync,
+    >,
 }
 
 // =============================================================================
@@ -1834,7 +1923,7 @@ impl RelationInfo {
             morph_id_column: None,
         }
     }
-    
+
     /// Create a HasOne relation info
     pub fn has_one(name: &str, related_table: &str, foreign_key: &str, local_key: &str) -> Self {
         Self {
@@ -1848,7 +1937,7 @@ impl RelationInfo {
             morph_id_column: None,
         }
     }
-    
+
     /// Create a HasMany relation info
     pub fn has_many(name: &str, related_table: &str, foreign_key: &str, local_key: &str) -> Self {
         Self {
@@ -1862,7 +1951,7 @@ impl RelationInfo {
             morph_id_column: None,
         }
     }
-    
+
     /// Create a HasManyThrough relation info
     pub fn has_many_through(
         name: &str,
@@ -1883,7 +1972,7 @@ impl RelationInfo {
             morph_id_column: None,
         }
     }
-    
+
     /// Create a MorphOne relation info
     pub fn morph_one(
         name: &str,
@@ -1903,7 +1992,7 @@ impl RelationInfo {
             morph_id_column: Some(id_column.to_string()),
         }
     }
-    
+
     /// Create a MorphMany relation info
     pub fn morph_many(
         name: &str,
@@ -1971,7 +2060,7 @@ pub trait EagerLoadExt: Model {
     {
         EagerQueryBuilder::new()
     }
-    
+
     /// Start with a specific relation
     fn with_relation(relation_name: &str) -> EagerQueryBuilder<Self>
     where
@@ -1979,7 +2068,7 @@ pub trait EagerLoadExt: Model {
     {
         EagerQueryBuilder::new().with(relation_name)
     }
-    
+
     /// Start with multiple relations
     fn with_relations(relations: &[&str]) -> EagerQueryBuilder<Self>
     where
@@ -1999,7 +2088,7 @@ pub trait RelationExt: Model {
     fn get_field_value(&self, field: &str) -> Result<serde_json::Value> {
         let json = serde_json::to_value(self)
             .map_err(|e| Error::query(format!("Failed to serialize model: {}", e)))?;
-        
+
         json.get(field)
             .cloned()
             .ok_or_else(|| Error::query(format!("Field '{}' not found on model", field)))

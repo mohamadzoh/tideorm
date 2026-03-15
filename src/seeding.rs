@@ -29,7 +29,7 @@
 //!         // Insert seed data
 //!         db.execute_raw(r#"
 //!             INSERT INTO users (email, name, active)
-//!             VALUES 
+//!             VALUES
 //!                 ('admin@example.com', 'Admin User', true),
 //!                 ('user@example.com', 'Regular User', true)
 //!         "#).await?;
@@ -62,7 +62,7 @@
 use std::fmt;
 
 use crate::config::DatabaseType;
-use crate::database::{require_db, Database};
+use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
 use crate::tide_info;
@@ -458,14 +458,15 @@ impl Seeder {
 
         // Any remaining seeds (circular deps) are appended at the end sorted by priority
         if sorted_indices.len() < n {
-            let mut remaining: Vec<usize> = (0..n)
-                .filter(|i| !visited.contains(i))
-                .collect();
+            let mut remaining: Vec<usize> = (0..n).filter(|i| !visited.contains(i)).collect();
             remaining.sort_by_key(|&i| seeds[i].priority());
             sorted_indices.extend(remaining);
         }
 
-        sorted_indices.into_iter().map(|i| seeds[i].as_ref()).collect()
+        sorted_indices
+            .into_iter()
+            .map(|i| seeds[i].as_ref())
+            .collect()
     }
 
     // =========================================================================
@@ -526,7 +527,9 @@ impl Seeder {
         let q = |id: &str| quote_identifier(id, backend);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
-            q("name"), q("_seeds"), q("executed_at")
+            q("name"),
+            q("_seeds"),
+            q("executed_at")
         );
         let stmt = Statement::from_string(backend, sql);
 
@@ -555,7 +558,9 @@ impl Seeder {
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ('{}')",
-            q("_seeds"), q("name"), name.replace('\'', "''")
+            q("_seeds"),
+            q("name"),
+            name.replace('\'', "''")
         );
 
         database
@@ -575,7 +580,9 @@ impl Seeder {
 
         let sql = format!(
             "DELETE FROM {} WHERE {} = '{}'",
-            q("_seeds"), q("name"), name.replace('\'', "''")
+            q("_seeds"),
+            q("name"),
+            name.replace('\'', "''")
         );
 
         database
@@ -682,7 +689,11 @@ pub struct SeedStatus {
 impl fmt::Display for SeedStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let status = if self.executed { "✓" } else { "○" };
-        write!(f, "[{}] {} (priority: {})", status, self.name, self.priority)
+        write!(
+            f,
+            "[{}] {} (priority: {})",
+            status, self.name, self.priority
+        )
     }
 }
 

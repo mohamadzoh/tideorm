@@ -7,7 +7,9 @@
 //! - Linked partial select
 //! - Join result consolidation
 
-use tideorm::columns::{Column, ColumnOperator, ColumnEq, ColumnOrd, ColumnLike, ColumnNullable, ColumnIn};
+use tideorm::columns::{
+    Column, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOperator, ColumnOrd,
+};
 
 // =============================================================================
 // STRONGLY-TYPED COLUMNS TESTS
@@ -19,11 +21,9 @@ mod typed_columns {
     /// Define typed columns for testing
     mod user_cols {
         use tideorm::columns::Column;
-        
+
         pub const ID: Column<i64> = Column::new("id");
         pub const NAME: Column<String> = Column::new("name");
-        #[allow(dead_code)]
-        pub const EMAIL: Column<String> = Column::new("email");
         pub const AGE: Column<Option<i32>> = Column::new("age");
         pub const SCORE: Column<f64> = Column::new("score");
         pub const ACTIVE: Column<bool> = Column::new("active");
@@ -33,7 +33,7 @@ mod typed_columns {
     fn test_column_creation() {
         let col: Column<i64> = Column::new("id");
         assert_eq!(col.name(), "id");
-        
+
         let col: Column<String> = Column::new("name");
         assert_eq!(col.name(), "name");
     }
@@ -58,13 +58,13 @@ mod typed_columns {
     fn test_integer_column_comparisons() {
         let gt = user_cols::ID.gt(10i64);
         assert_eq!(gt.operator, ColumnOperator::Gt);
-        
+
         let gte = user_cols::ID.gte(10i64);
         assert_eq!(gte.operator, ColumnOperator::Gte);
-        
+
         let lt = user_cols::ID.lt(100i64);
         assert_eq!(lt.operator, ColumnOperator::Lt);
-        
+
         let lte = user_cols::ID.lte(100i64);
         assert_eq!(lte.operator, ColumnOperator::Lte);
     }
@@ -148,7 +148,7 @@ mod typed_columns {
         let gt = user_cols::AGE.gt(18);
         assert_eq!(gt.column, "age");
         assert_eq!(gt.operator, ColumnOperator::Gt);
-        
+
         let between = user_cols::AGE.between(18, 65);
         assert_eq!(between.operator, ColumnOperator::Between);
     }
@@ -180,7 +180,7 @@ mod typed_columns {
         let gt = user_cols::SCORE.gt(90.5);
         assert_eq!(gt.column, "score");
         assert_eq!(gt.operator, ColumnOperator::Gt);
-        
+
         let between = user_cols::SCORE.between(0.0, 100.0);
         assert_eq!(between.operator, ColumnOperator::Between);
     }
@@ -208,7 +208,7 @@ mod typed_columns {
         let c1 = user_cols::NAME.eq("Alice");
         let c2 = user_cols::AGE.gt(18);
         let c3 = user_cols::ACTIVE.eq(true);
-        
+
         assert_eq!(c1.column, "name");
         assert_eq!(c2.column, "age");
         assert_eq!(c3.column, "active");
@@ -220,8 +220,8 @@ mod typed_columns {
 // =============================================================================
 
 mod join_consolidation {
-    use tideorm::prelude::JoinResultConsolidator;
     use serde::{Deserialize, Serialize};
+    use tideorm::prelude::JoinResultConsolidator;
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
     struct Order {
@@ -252,12 +252,21 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_two_single_order_single_item() {
-        let flat = vec![
-            (Order { id: 1, customer: "Alice".into() }, LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 }),
-        ];
-        
+        let flat = vec![(
+            Order {
+                id: 1,
+                customer: "Alice".into(),
+            },
+            LineItem {
+                id: 1,
+                order_id: 1,
+                product: "Widget".into(),
+                qty: 2,
+            },
+        )];
+
         let result = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.id, 1);
         assert_eq!(result[0].1.len(), 1);
@@ -266,15 +275,42 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_two_single_order_multiple_items() {
-        let order = Order { id: 1, customer: "Alice".into() };
+        let order = Order {
+            id: 1,
+            customer: "Alice".into(),
+        };
         let flat = vec![
-            (order.clone(), LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 }),
-            (order.clone(), LineItem { id: 2, order_id: 1, product: "Gadget".into(), qty: 1 }),
-            (order.clone(), LineItem { id: 3, order_id: 1, product: "Gizmo".into(), qty: 5 }),
+            (
+                order.clone(),
+                LineItem {
+                    id: 1,
+                    order_id: 1,
+                    product: "Widget".into(),
+                    qty: 2,
+                },
+            ),
+            (
+                order.clone(),
+                LineItem {
+                    id: 2,
+                    order_id: 1,
+                    product: "Gadget".into(),
+                    qty: 1,
+                },
+            ),
+            (
+                order.clone(),
+                LineItem {
+                    id: 3,
+                    order_id: 1,
+                    product: "Gizmo".into(),
+                    qty: 5,
+                },
+            ),
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.customer, "Alice");
         assert_eq!(result[0].1.len(), 3);
@@ -282,23 +318,53 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_two_multiple_orders() {
-        let order1 = Order { id: 1, customer: "Alice".into() };
-        let order2 = Order { id: 2, customer: "Bob".into() };
-        
+        let order1 = Order {
+            id: 1,
+            customer: "Alice".into(),
+        };
+        let order2 = Order {
+            id: 2,
+            customer: "Bob".into(),
+        };
+
         let flat = vec![
-            (order1.clone(), LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 }),
-            (order1.clone(), LineItem { id: 2, order_id: 1, product: "Gadget".into(), qty: 1 }),
-            (order2.clone(), LineItem { id: 3, order_id: 2, product: "Gizmo".into(), qty: 5 }),
+            (
+                order1.clone(),
+                LineItem {
+                    id: 1,
+                    order_id: 1,
+                    product: "Widget".into(),
+                    qty: 2,
+                },
+            ),
+            (
+                order1.clone(),
+                LineItem {
+                    id: 2,
+                    order_id: 1,
+                    product: "Gadget".into(),
+                    qty: 1,
+                },
+            ),
+            (
+                order2.clone(),
+                LineItem {
+                    id: 3,
+                    order_id: 2,
+                    product: "Gizmo".into(),
+                    qty: 5,
+                },
+            ),
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
-        
+
         assert_eq!(result.len(), 2);
-        
+
         // Find Alice's order
         let alice_order = result.iter().find(|(o, _)| o.customer == "Alice").unwrap();
         assert_eq!(alice_order.1.len(), 2);
-        
+
         // Find Bob's order
         let bob_order = result.iter().find(|(o, _)| o.customer == "Bob").unwrap();
         assert_eq!(bob_order.1.len(), 1);
@@ -306,21 +372,35 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_two_optional_with_nulls() {
-        let order1 = Order { id: 1, customer: "Alice".into() };
-        let order2 = Order { id: 2, customer: "Bob".into() };
-        
+        let order1 = Order {
+            id: 1,
+            customer: "Alice".into(),
+        };
+        let order2 = Order {
+            id: 2,
+            customer: "Bob".into(),
+        };
+
         let flat: Vec<(Order, Option<LineItem>)> = vec![
-            (order1.clone(), Some(LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 })),
+            (
+                order1.clone(),
+                Some(LineItem {
+                    id: 1,
+                    order_id: 1,
+                    product: "Widget".into(),
+                    qty: 2,
+                }),
+            ),
             (order2.clone(), None), // Bob has no items (LEFT JOIN result)
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_two_optional(flat, |o| o.id);
-        
+
         assert_eq!(result.len(), 2);
-        
+
         let alice_order = result.iter().find(|(o, _)| o.customer == "Alice").unwrap();
         assert_eq!(alice_order.1.len(), 1);
-        
+
         let bob_order = result.iter().find(|(o, _)| o.customer == "Bob").unwrap();
         assert_eq!(bob_order.1.len(), 0); // Empty vec, not None
     }
@@ -334,23 +414,42 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_three_nested() {
-        let order = Order { id: 1, customer: "Alice".into() };
-        let item1 = LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 };
-        let item2 = LineItem { id: 2, order_id: 1, product: "Gadget".into(), qty: 1 };
-        let prod1 = Product { id: 1, name: "Super Widget".into() };
-        let prod2 = Product { id: 2, name: "Mega Gadget".into() };
-        
+        let order = Order {
+            id: 1,
+            customer: "Alice".into(),
+        };
+        let item1 = LineItem {
+            id: 1,
+            order_id: 1,
+            product: "Widget".into(),
+            qty: 2,
+        };
+        let item2 = LineItem {
+            id: 2,
+            order_id: 1,
+            product: "Gadget".into(),
+            qty: 1,
+        };
+        let prod1 = Product {
+            id: 1,
+            name: "Super Widget".into(),
+        };
+        let prod2 = Product {
+            id: 2,
+            name: "Mega Gadget".into(),
+        };
+
         let flat = vec![
             (order.clone(), item1.clone(), prod1.clone()),
             (order.clone(), item2.clone(), prod2.clone()),
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_three(flat, |o| o.id, |i| i.id);
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0.customer, "Alice");
         assert_eq!(result[0].1.len(), 2); // Two line items
-        
+
         // Each line item should have one product
         for (_item, products) in &result[0].1 {
             assert_eq!(products.len(), 1);
@@ -359,43 +458,94 @@ mod join_consolidation {
 
     #[test]
     fn test_consolidate_three_optional() {
-        let order = Order { id: 1, customer: "Alice".into() };
-        let item1 = LineItem { id: 1, order_id: 1, product: "Widget".into(), qty: 2 };
-        let item2 = LineItem { id: 2, order_id: 1, product: "Custom".into(), qty: 1 };
-        let prod1 = Product { id: 1, name: "Super Widget".into() };
-        
+        let order = Order {
+            id: 1,
+            customer: "Alice".into(),
+        };
+        let item1 = LineItem {
+            id: 1,
+            order_id: 1,
+            product: "Widget".into(),
+            qty: 2,
+        };
+        let item2 = LineItem {
+            id: 2,
+            order_id: 1,
+            product: "Custom".into(),
+            qty: 1,
+        };
+        let prod1 = Product {
+            id: 1,
+            name: "Super Widget".into(),
+        };
+
         let flat: Vec<(Order, LineItem, Option<Product>)> = vec![
             (order.clone(), item1.clone(), Some(prod1.clone())),
             (order.clone(), item2.clone(), None), // Custom item has no product
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_three_optional(flat, |o| o.id, |i| i.id);
-        
+
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1.len(), 2);
-        
+
         // Find the Widget item
-        let widget_item = result[0].1.iter().find(|(i, _)| i.product == "Widget").unwrap();
+        let widget_item = result[0]
+            .1
+            .iter()
+            .find(|(i, _)| i.product == "Widget")
+            .unwrap();
         assert_eq!(widget_item.1.len(), 1);
-        
+
         // Find the Custom item
-        let custom_item = result[0].1.iter().find(|(i, _)| i.product == "Custom").unwrap();
+        let custom_item = result[0]
+            .1
+            .iter()
+            .find(|(i, _)| i.product == "Custom")
+            .unwrap();
         assert_eq!(custom_item.1.len(), 0);
     }
 
     #[test]
     fn test_consolidate_preserves_order() {
         // Items should be preserved in insertion order
-        let order = Order { id: 1, customer: "Test".into() };
-        
+        let order = Order {
+            id: 1,
+            customer: "Test".into(),
+        };
+
         let flat = vec![
-            (order.clone(), LineItem { id: 1, order_id: 1, product: "First".into(), qty: 1 }),
-            (order.clone(), LineItem { id: 2, order_id: 1, product: "Second".into(), qty: 1 }),
-            (order.clone(), LineItem { id: 3, order_id: 1, product: "Third".into(), qty: 1 }),
+            (
+                order.clone(),
+                LineItem {
+                    id: 1,
+                    order_id: 1,
+                    product: "First".into(),
+                    qty: 1,
+                },
+            ),
+            (
+                order.clone(),
+                LineItem {
+                    id: 2,
+                    order_id: 1,
+                    product: "Second".into(),
+                    qty: 1,
+                },
+            ),
+            (
+                order.clone(),
+                LineItem {
+                    id: 3,
+                    order_id: 1,
+                    product: "Third".into(),
+                    qty: 1,
+                },
+            ),
         ];
-        
+
         let result = JoinResultConsolidator::consolidate_two(flat, |o| o.id);
-        
+
         assert_eq!(result[0].1[0].product, "First");
         assert_eq!(result[0].1[1].product, "Second");
         assert_eq!(result[0].1[2].product, "Third");
@@ -422,7 +572,7 @@ mod self_referencing {
         //
         // This test verifies the module compiles correctly.
     }
-    
+
     #[test]
     fn test_self_ref_api_documentation() {
         // API usage example (would require database):
@@ -434,10 +584,10 @@ mod self_referencing {
         //     id: i64,
         //     name: String,
         //     manager_id: Option<i64>,
-        //     
+        //
         //     #[tide(self_ref = "id", foreign_key = "manager_id")]
         //     manager: SelfRef<Employee>,
-        //     
+        //
         //     #[tide(self_ref_many = "id", foreign_key = "manager_id")]
         //     reports: SelfRefMany<Employee>,
         // }
@@ -461,26 +611,33 @@ mod nested_save {
     fn test_nested_save_builder_serialization() {
         // Test that serialization/deserialization works as expected
         // for the JSON manipulation used in NestedSave
-        
+
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         struct MockUser {
             id: i64,
             name: String,
         }
-        
+
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         struct MockProfile {
             id: i64,
             user_id: i64,
             bio: String,
         }
-        
-        let user = MockUser { id: 0, name: "Test".into() };
-        let profile = MockProfile { id: 0, user_id: 0, bio: "Hello".into() };
-        
+
+        let user = MockUser {
+            id: 0,
+            name: "Test".into(),
+        };
+        let profile = MockProfile {
+            id: 0,
+            user_id: 0,
+            bio: "Hello".into(),
+        };
+
         let user_json = serde_json::to_value(&user).unwrap();
         let profile_json = serde_json::to_value(&profile).unwrap();
-        
+
         assert!(user_json.is_object());
         assert!(profile_json.is_object());
     }
@@ -488,27 +645,31 @@ mod nested_save {
     #[test]
     fn test_foreign_key_update_logic() {
         // Test the JSON manipulation used by NestedSave
-        
+
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
         struct Child {
             id: i64,
             parent_id: i64,
             name: String,
         }
-        
-        let child = Child { id: 0, parent_id: 0, name: "Test".into() };
+
+        let child = Child {
+            id: 0,
+            parent_id: 0,
+            name: "Test".into(),
+        };
         let mut json = serde_json::to_value(&child).unwrap();
-        
+
         // Simulate what save_with_one does
         if let serde_json::Value::Object(ref mut map) = json {
             map.insert("parent_id".to_string(), serde_json::json!(42));
         }
-        
+
         let updated: Child = serde_json::from_value(json).unwrap();
         assert_eq!(updated.parent_id, 42);
         assert_eq!(updated.name, "Test");
     }
-    
+
     #[test]
     fn test_multiple_children_update() {
         #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -517,30 +678,45 @@ mod nested_save {
             user_id: i64,
             title: String,
         }
-        
+
         let posts = vec![
-            Post { id: 0, user_id: 0, title: "First".into() },
-            Post { id: 0, user_id: 0, title: "Second".into() },
-            Post { id: 0, user_id: 0, title: "Third".into() },
+            Post {
+                id: 0,
+                user_id: 0,
+                title: "First".into(),
+            },
+            Post {
+                id: 0,
+                user_id: 0,
+                title: "Second".into(),
+            },
+            Post {
+                id: 0,
+                user_id: 0,
+                title: "Third".into(),
+            },
         ];
-        
+
         let parent_id = 99i64;
-        
-        let updated: Vec<Post> = posts.into_iter().map(|post| {
-            let mut json = serde_json::to_value(&post).unwrap();
-            if let serde_json::Value::Object(ref mut map) = json {
-                map.insert("user_id".to_string(), serde_json::json!(parent_id));
-            }
-            serde_json::from_value(json).unwrap()
-        }).collect();
-        
+
+        let updated: Vec<Post> = posts
+            .into_iter()
+            .map(|post| {
+                let mut json = serde_json::to_value(&post).unwrap();
+                if let serde_json::Value::Object(ref mut map) = json {
+                    map.insert("user_id".to_string(), serde_json::json!(parent_id));
+                }
+                serde_json::from_value(json).unwrap()
+            })
+            .collect();
+
         assert_eq!(updated.len(), 3);
         assert!(updated.iter().all(|p| p.user_id == 99));
         assert_eq!(updated[0].title, "First");
         assert_eq!(updated[1].title, "Second");
         assert_eq!(updated[2].title, "Third");
     }
-    
+
     #[test]
     fn test_nested_save_api_documentation() {
         // API usage example (would require database):
@@ -566,12 +742,12 @@ mod nested_save {
 mod linked_select {
     // These features are tested at compile time
     // Full integration tests require database connection
-    
+
     #[test]
     fn test_linked_select_types_exist() {
         // This is mainly a compile-time check that the methods exist
         // and have the correct signatures
-        
+
         // The actual usage would be:
         // User::query()
         //     .select_with_linked::<Profile>(&["id", "name"], &["bio"], "user_id")

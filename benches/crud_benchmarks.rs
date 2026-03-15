@@ -10,18 +10,17 @@
 //!
 //! Run with: cargo bench --bench crud_benchmarks
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use tideorm::prelude::*;
-use tideorm::{TideConfig, Database};
-use tokio::runtime::Runtime;
-use std::sync::atomic::{AtomicU64, Ordering};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tideorm::prelude::*;
+use tideorm::{Database, TideConfig};
+use tokio::runtime::Runtime;
 
 fn database_url() -> String {
     let _ = dotenvy::dotenv();
-    std::env::var("POSTGRESQL_DATABASE_URL")
-        .unwrap()
+    std::env::var("POSTGRESQL_DATABASE_URL").unwrap()
 }
 
 // Atomic counter for generating unique values
@@ -67,11 +66,12 @@ fn init_database() {
                 .connect()
                 .await
                 .expect("Failed to connect to database");
-            
+
             // Create benchmark table
             let _ = Database::execute("DROP TABLE IF EXISTS bench_users CASCADE").await;
-            
-            Database::execute(r#"
+
+            Database::execute(
+                r#"
                 CREATE TABLE bench_users (
                     id BIGSERIAL PRIMARY KEY,
                     email VARCHAR(255) NOT NULL,
@@ -79,7 +79,10 @@ fn init_database() {
                     age INTEGER NOT NULL,
                     active BOOLEAN NOT NULL DEFAULT true
                 )
-            "#).await.expect("Failed to create table");
+            "#,
+            )
+            .await
+            .expect("Failed to create table");
         });
     });
 }
@@ -102,10 +105,10 @@ fn setup_benchmark() {
 fn bench_single_insert(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     let mut group = c.benchmark_group("single_insert");
     group.throughput(Throughput::Elements(1));
-    
+
     group.bench_function("insert_one_user", |b| {
         b.iter(|| {
             let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -121,23 +124,23 @@ fn bench_single_insert(c: &mut Criterion) {
             })
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_batch_insert(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     let mut group = c.benchmark_group("batch_insert");
     group.sample_size(20); // Reduced sample size for batch operations
-    
+
     for size in [10, 50, 100, 500].iter() {
         group.throughput(Throughput::Elements(*size as u64));
-        
+
         // Clean up before each size benchmark
         cleanup_data();
-        
+
         group.bench_with_input(BenchmarkId::new("insert_batch", size), size, |b, &size| {
             b.iter(|| {
                 let base = COUNTER.fetch_add(size as u64, Ordering::SeqCst);
@@ -151,20 +154,22 @@ fn bench_batch_insert(c: &mut Criterion) {
                             active: i % 2 == 0,
                         })
                         .collect();
-                    
-                    BenchUser::insert_all(users).await.expect("Batch insert failed")
+
+                    BenchUser::insert_all(users)
+                        .await
+                        .expect("Batch insert failed")
                 })
             });
         });
     }
-    
+
     group.finish();
 }
 
 fn bench_find_by_id(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     // Setup: Insert users and get their IDs
     let user_ids: Vec<i64> = rt.block_on(async {
         let mut ids = Vec::new();
@@ -181,28 +186,26 @@ fn bench_find_by_id(c: &mut Criterion) {
         }
         ids
     });
-    
+
     let mut group = c.benchmark_group("find_by_id");
     group.throughput(Throughput::Elements(1));
-    
+
     let counter = AtomicU64::new(0);
     group.bench_function("find_one_user", |b| {
         b.iter(|| {
             let idx = counter.fetch_add(1, Ordering::SeqCst) as usize % user_ids.len();
             let id = user_ids[idx];
-            rt.block_on(async {
-                BenchUser::find(id).await.expect("Find failed")
-            })
+            rt.block_on(async { BenchUser::find(id).await.expect("Find failed") })
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_update(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     // Setup: Insert users
     let user_ids: Vec<i64> = rt.block_on(async {
         let mut ids = Vec::new();
@@ -219,10 +222,10 @@ fn bench_update(c: &mut Criterion) {
         }
         ids
     });
-    
+
     let mut group = c.benchmark_group("update");
     group.throughput(Throughput::Elements(1));
-    
+
     let counter = AtomicU64::new(0);
     group.bench_function("update_one_user", |b| {
         b.iter(|| {
@@ -235,23 +238,23 @@ fn bench_update(c: &mut Criterion) {
             })
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_delete(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     let mut group = c.benchmark_group("delete");
     group.throughput(Throughput::Elements(1));
     group.sample_size(20);
-    
+
     group.bench_function("delete_one_user", |b| {
         b.iter_custom(|iters| {
             // Setup: Create users for this iteration batch
             cleanup_data();
-            
+
             let ids: Vec<i64> = rt.block_on(async {
                 let mut ids = Vec::with_capacity(iters as usize);
                 for i in 0..iters {
@@ -267,7 +270,7 @@ fn bench_delete(c: &mut Criterion) {
                 }
                 ids
             });
-            
+
             // Measure delete time
             let start = std::time::Instant::now();
             rt.block_on(async {
@@ -278,27 +281,27 @@ fn bench_delete(c: &mut Criterion) {
             start.elapsed()
         });
     });
-    
+
     group.finish();
 }
 
 fn bench_count(c: &mut Criterion) {
     setup_benchmark();
     let rt = get_runtime();
-    
+
     let mut group = c.benchmark_group("count");
     group.sample_size(20);
-    
+
     for size in [100, 1000, 10000].iter() {
         // Setup: Insert many users
         cleanup_data();
-        
+
         rt.block_on(async {
             // Insert in batches for speed
             let batch_size = 500;
             let batches = *size / batch_size;
             let remainder = *size % batch_size;
-            
+
             for batch in 0..batches {
                 let users: Vec<BenchUser> = (0..batch_size)
                     .map(|i| BenchUser {
@@ -309,9 +312,11 @@ fn bench_count(c: &mut Criterion) {
                         active: i % 2 == 0,
                     })
                     .collect();
-                BenchUser::insert_all(users).await.expect("Batch insert failed");
+                BenchUser::insert_all(users)
+                    .await
+                    .expect("Batch insert failed");
             }
-            
+
             if remainder > 0 {
                 let users: Vec<BenchUser> = (0..remainder)
                     .map(|i| BenchUser {
@@ -322,19 +327,17 @@ fn bench_count(c: &mut Criterion) {
                         active: i % 2 == 0,
                     })
                     .collect();
-                BenchUser::insert_all(users).await.expect("Batch insert failed");
+                BenchUser::insert_all(users)
+                    .await
+                    .expect("Batch insert failed");
             }
         });
-        
+
         group.bench_with_input(BenchmarkId::new("count_all", size), size, |b, _size| {
-            b.iter(|| {
-                rt.block_on(async {
-                    BenchUser::count().await.expect("Count failed")
-                })
-            });
+            b.iter(|| rt.block_on(async { BenchUser::count().await.expect("Count failed") }));
         });
     }
-    
+
     group.finish();
 }
 

@@ -48,18 +48,18 @@ pub trait SoftDelete: Model {
     fn deleted_at_column() -> &'static str {
         "deleted_at"
     }
-    
+
     /// Get the deleted_at timestamp
     fn deleted_at(&self) -> Option<DateTime<Utc>>;
-    
+
     /// Set the deleted_at timestamp
     fn set_deleted_at(&mut self, timestamp: Option<DateTime<Utc>>);
-    
+
     /// Check if this record is soft deleted
     fn is_deleted(&self) -> bool {
         self.deleted_at().is_some()
     }
-    
+
     /// Soft delete this record (sets deleted_at to now)
     ///
     /// # Example
@@ -74,7 +74,7 @@ pub trait SoftDelete: Model {
         self.set_deleted_at(Some(Utc::now()));
         self.update().await
     }
-    
+
     /// Restore a soft-deleted record (sets deleted_at to None)
     ///
     /// # Example
@@ -89,7 +89,7 @@ pub trait SoftDelete: Model {
         self.set_deleted_at(None);
         self.update().await
     }
-    
+
     /// Permanently delete this record from the database
     ///
     /// # Example
@@ -102,7 +102,7 @@ pub trait SoftDelete: Model {
     {
         <Self as Model>::delete(self).await
     }
-    
+
     // Note: Static methods like with_trashed(), only_trashed() would need
     // to be implemented via query builder extensions or custom methods
     // on each model since Rust doesn't support static methods in traits
@@ -110,12 +110,12 @@ pub trait SoftDelete: Model {
 }
 
 /// Extension methods for querying soft-deleted records
-/// 
+///
 /// These methods can be added to the QueryBuilder to support soft delete queries
 pub mod query_extensions {
     /// Query scope that excludes soft-deleted records
     pub const WITHOUT_TRASHED: &str = "deleted_at IS NULL";
-    
+
     /// Query scope that includes only soft-deleted records  
     pub const ONLY_TRASHED: &str = "deleted_at IS NOT NULL";
 }

@@ -33,7 +33,6 @@
 //! | `Transaction` | Transaction failed | Deadlock, timeout |
 //! | `Configuration` | Config issue | Missing settings |
 
-
 use thiserror::Error;
 
 // ── From impls for common external error types ─────────────────────
@@ -61,7 +60,7 @@ impl From<serde_json::Error> for Error {
 }
 
 /// A specialized Result type for TideORM operations
-/// 
+///
 /// Note: Named `TideResult` to avoid conflicts with `std::result::Result` in derive macros.
 /// You can also use the re-exported `Result` from the prelude in most contexts.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -81,14 +80,14 @@ pub enum Error {
         #[source]
         context: Option<ErrorContext>,
     },
-    
+
     /// Database connection failed
     #[error("Connection error: {message}")]
     Connection {
         /// Details about the connection failure
         message: String,
     },
-    
+
     /// Query execution failed
     #[error("Query error: {message}")]
     Query {
@@ -98,7 +97,7 @@ pub enum Error {
         #[source]
         context: Option<ErrorContext>,
     },
-    
+
     /// Data validation failed
     #[error("Validation error: {field} - {message}")]
     Validation {
@@ -107,35 +106,35 @@ pub enum Error {
         /// Description of the validation failure
         message: String,
     },
-    
+
     /// Type conversion failed
     #[error("Conversion error: {message}")]
     Conversion {
         /// Details about the conversion failure
         message: String,
     },
-    
+
     /// Transaction failed
     #[error("Transaction error: {message}")]
     Transaction {
         /// Details about the transaction failure
         message: String,
     },
-    
+
     /// Configuration error
     #[error("Configuration error: {message}")]
     Configuration {
         /// Details about the configuration issue
         message: String,
     },
-    
+
     /// Internal error (should rarely happen)
     #[error("Internal error: {message}")]
     Internal {
         /// Details about the internal error
         message: String,
     },
-    
+
     /// Backend not supported for the requested operation
     ///
     /// Thrown when an operation is attempted that is not supported
@@ -147,7 +146,7 @@ pub enum Error {
         /// The backend that doesn't support the operation
         backend: String,
     },
-    
+
     /// Primary key not set when required
     ///
     /// Thrown when an operation requires a primary key value
@@ -159,7 +158,7 @@ pub enum Error {
         /// The model type involved
         model: String,
     },
-    
+
     /// Insert with RETURNING not supported by this backend
     ///
     /// Thrown when trying to use insert().returning() on a database
@@ -171,7 +170,7 @@ pub enum Error {
         /// The backend that doesn't support RETURNING
         backend: String,
     },
-    
+
     /// Tokenization error
     ///
     /// Thrown when tokenization operations fail, such as encoding
@@ -181,7 +180,7 @@ pub enum Error {
         /// Details about the tokenization error
         message: String,
     },
-    
+
     /// Invalid token error
     ///
     /// Thrown when attempting to decode an invalid, expired, or
@@ -231,19 +230,19 @@ impl ErrorContext {
             query: None,
         }
     }
-    
+
     /// Set the table name
     pub fn table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
-    
+
     /// Set the column name
     pub fn column(mut self, column: impl Into<String>) -> Self {
         self.column = Some(column.into());
         self
     }
-    
+
     /// Set the query
     pub fn query(mut self, query: impl Into<String>) -> Self {
         self.query = Some(query.into());
@@ -265,7 +264,7 @@ impl Error {
             context: None,
         }
     }
-    
+
     /// Create a NotFound error with context
     pub fn not_found_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::NotFound {
@@ -273,14 +272,14 @@ impl Error {
             context: Some(context),
         }
     }
-    
+
     /// Create a Connection error
     pub fn connection(message: impl Into<String>) -> Self {
         Self::Connection {
             message: message.into(),
         }
     }
-    
+
     /// Create a Query error
     pub fn query(message: impl Into<String>) -> Self {
         Self::Query {
@@ -288,7 +287,7 @@ impl Error {
             context: None,
         }
     }
-    
+
     /// Create a Query error with context
     pub fn query_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::Query {
@@ -296,7 +295,7 @@ impl Error {
             context: Some(context),
         }
     }
-    
+
     /// Create a Validation error
     pub fn validation(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Validation {
@@ -304,35 +303,35 @@ impl Error {
             message: message.into(),
         }
     }
-    
+
     /// Create a Conversion error
     pub fn conversion(message: impl Into<String>) -> Self {
         Self::Conversion {
             message: message.into(),
         }
     }
-    
+
     /// Create a Transaction error
     pub fn transaction(message: impl Into<String>) -> Self {
         Self::Transaction {
             message: message.into(),
         }
     }
-    
+
     /// Create a Configuration error
     pub fn configuration(message: impl Into<String>) -> Self {
         Self::Configuration {
             message: message.into(),
         }
     }
-    
+
     /// Create an Internal error
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
         }
     }
-    
+
     /// Create a BackendNotSupported error
     ///
     /// Use when an operation is not supported by the current database backend.
@@ -342,7 +341,7 @@ impl Error {
             backend: backend.into(),
         }
     }
-    
+
     /// Create a PrimaryKeyNotSet error
     ///
     /// Use when an operation requires a primary key but it's not set.
@@ -352,17 +351,20 @@ impl Error {
             model: model.into(),
         }
     }
-    
+
     /// Create an InsertReturningNotSupported error
     ///
     /// Use when trying to use RETURNING on a database that doesn't support it.
-    pub fn insert_returning_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
+    pub fn insert_returning_not_supported(
+        message: impl Into<String>,
+        backend: impl Into<String>,
+    ) -> Self {
         Self::InsertReturningNotSupported {
             message: message.into(),
             backend: backend.into(),
         }
     }
-    
+
     /// Create a Tokenization error
     ///
     /// Use when token encoding/decoding fails.
@@ -371,7 +373,7 @@ impl Error {
             message: message.into(),
         }
     }
-    
+
     /// Create an InvalidToken error
     ///
     /// Use when a token is invalid, tampered, or for the wrong model.
@@ -380,9 +382,9 @@ impl Error {
             message: message.into(),
         }
     }
-    
+
     /// Create an invalid query error (semantic query issues, not DB errors)
-    /// 
+    ///
     /// Use this for errors like using soft_delete() on a non-soft-delete model,
     /// or other query builder usage errors.
     pub fn invalid_query(message: impl Into<String>) -> Self {
@@ -391,7 +393,7 @@ impl Error {
             context: None,
         }
     }
-    
+
     /// Get the error context if available
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
@@ -400,61 +402,67 @@ impl Error {
             _ => None,
         }
     }
-    
+
     /// Add context to an error
     pub fn with_context(self, ctx: ErrorContext) -> Self {
         match self {
-            Self::NotFound { message, .. } => Self::NotFound { message, context: Some(ctx) },
-            Self::Query { message, .. } => Self::Query { message, context: Some(ctx) },
+            Self::NotFound { message, .. } => Self::NotFound {
+                message,
+                context: Some(ctx),
+            },
+            Self::Query { message, .. } => Self::Query {
+                message,
+                context: Some(ctx),
+            },
             other => other,
         }
     }
-    
+
     /// Check if this is a NotFound error
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
-    
+
     /// Check if this is a Connection error
     pub fn is_connection_error(&self) -> bool {
         matches!(self, Self::Connection { .. })
     }
-    
+
     /// Check if this is a Validation error
     pub fn is_validation_error(&self) -> bool {
         matches!(self, Self::Validation { .. })
     }
-    
+
     /// Check if this is a Query error
     pub fn is_query_error(&self) -> bool {
         matches!(self, Self::Query { .. })
     }
-    
+
     /// Check if this is a Transaction error
     pub fn is_transaction_error(&self) -> bool {
         matches!(self, Self::Transaction { .. })
     }
-    
+
     /// Check if this is a Configuration error
     pub fn is_configuration_error(&self) -> bool {
         matches!(self, Self::Configuration { .. })
     }
-    
+
     /// Check if this is a BackendNotSupported error
     pub fn is_backend_not_supported(&self) -> bool {
         matches!(self, Self::BackendNotSupported { .. })
     }
-    
+
     /// Check if this is a PrimaryKeyNotSet error
     pub fn is_primary_key_not_set(&self) -> bool {
         matches!(self, Self::PrimaryKeyNotSet { .. })
     }
-    
+
     /// Check if this is an InsertReturningNotSupported error
     pub fn is_insert_returning_not_supported(&self) -> bool {
         matches!(self, Self::InsertReturningNotSupported { .. })
     }
-    
+
     /// Get a helpful suggestion for fixing this error
     ///
     /// Returns actionable advice based on the error type and message.
@@ -608,7 +616,7 @@ impl Error {
             }
         }
     }
-    
+
     /// Get the error code for programmatic handling
     ///
     /// Returns a unique code for each error type that can be used
@@ -642,7 +650,7 @@ impl Error {
             Self::InvalidToken { .. } => "TIDE_INVALID_TOKEN",
         }
     }
-    
+
     /// Get the HTTP status code appropriate for this error
     ///
     /// Useful when building REST APIs.
@@ -661,9 +669,9 @@ impl Error {
     pub fn http_status(&self) -> u16 {
         match self {
             Self::NotFound { .. } => 404,
-            Self::Connection { .. } => 503,  // Service Unavailable
-            Self::Query { .. } => 400,       // Bad Request
-            Self::Validation { .. } => 422,  // Unprocessable Entity
+            Self::Connection { .. } => 503, // Service Unavailable
+            Self::Query { .. } => 400,      // Bad Request
+            Self::Validation { .. } => 422, // Unprocessable Entity
             Self::Conversion { .. } => 400,
             Self::Transaction { .. } => 409, // Conflict
             Self::Configuration { .. } => 500,
@@ -675,7 +683,7 @@ impl Error {
             Self::InvalidToken { .. } => 401,        // Unauthorized
         }
     }
-    
+
     /// Check if this error is retryable
     ///
     /// Some errors (like connection timeouts or deadlocks) may succeed on retry.
@@ -699,24 +707,24 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Connection { message } => {
-                message.contains("timeout") || 
-                message.contains("pool") ||
-                message.contains("refused")
+                message.contains("timeout")
+                    || message.contains("pool")
+                    || message.contains("refused")
             }
             Self::Query { message, .. } => {
-                message.contains("deadlock") ||
-                message.contains("lock") ||
-                message.contains("timeout")
+                message.contains("deadlock")
+                    || message.contains("lock")
+                    || message.contains("timeout")
             }
             Self::Transaction { message } => {
-                message.contains("deadlock") ||
-                message.contains("timeout") ||
-                message.contains("serialization")
+                message.contains("deadlock")
+                    || message.contains("timeout")
+                    || message.contains("serialization")
             }
             _ => false,
         }
     }
-    
+
     /// Format error for logging with full details
     ///
     /// Includes error type, message, context, and suggestion.
@@ -728,7 +736,7 @@ impl Error {
     /// ```
     pub fn log_format(&self) -> String {
         let mut output = format!("[{}] {}", self.code(), self);
-        
+
         if let Some(ctx) = self.context() {
             if let Some(ref table) = ctx.table {
                 output.push_str(&format!("\n  Table: {}", table));
@@ -740,7 +748,7 @@ impl Error {
                 output.push_str(&format!("\n  Query: {}", query));
             }
         }
-        
+
         output.push_str(&format!("\n  Suggestion: {}", self.suggestion()));
         output
     }
@@ -749,42 +757,50 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_error_suggestions() {
         // Test NotFound suggestion
         let err = Error::not_found("User with ID 123 not found");
         let suggestion = err.suggestion();
-        assert!(suggestion.contains("verify") || suggestion.contains("exists") || suggestion.contains("ID") || suggestion.contains("record"));
-        
+        assert!(
+            suggestion.contains("verify")
+                || suggestion.contains("exists")
+                || suggestion.contains("ID")
+                || suggestion.contains("record")
+        );
+
         // Test Connection suggestion for refused
         let err = Error::connection("Connection refused");
         let suggestion = err.suggestion();
         assert!(suggestion.contains("running") || suggestion.contains("server"));
-        
+
         // Test Query suggestion for duplicate
         let err = Error::query("duplicate key value violates unique constraint");
         let suggestion = err.suggestion();
         assert!(suggestion.contains("Duplicate") || suggestion.contains("unique"));
-        
+
         // Test Query suggestion for foreign key
         let err = Error::query("violates foreign key constraint");
         let suggestion = err.suggestion();
         assert!(suggestion.contains("Foreign key") || suggestion.contains("foreign"));
     }
-    
+
     #[test]
     fn test_error_codes() {
         assert_eq!(Error::not_found("User not found").code(), "TIDE_NOT_FOUND");
         assert_eq!(Error::connection("test").code(), "TIDE_CONNECTION");
         assert_eq!(Error::query("test").code(), "TIDE_QUERY");
-        assert_eq!(Error::validation("field", "message").code(), "TIDE_VALIDATION");
+        assert_eq!(
+            Error::validation("field", "message").code(),
+            "TIDE_VALIDATION"
+        );
         assert_eq!(Error::conversion("test").code(), "TIDE_CONVERSION");
         assert_eq!(Error::transaction("test").code(), "TIDE_TRANSACTION");
         assert_eq!(Error::configuration("test").code(), "TIDE_CONFIG");
         assert_eq!(Error::internal("test").code(), "TIDE_INTERNAL");
     }
-    
+
     #[test]
     fn test_http_status() {
         assert_eq!(Error::not_found("User not found").http_status(), 404);
@@ -796,84 +812,86 @@ mod tests {
         assert_eq!(Error::configuration("test").http_status(), 500);
         assert_eq!(Error::internal("test").http_status(), 500);
     }
-    
+
     #[test]
     fn test_is_retryable() {
         // Connection errors with timeout should be retryable
         let err = Error::connection("Connection timeout");
         assert!(err.is_retryable());
-        
+
         // Connection errors with pool should be retryable
         let err = Error::connection("connection pool exhausted");
         assert!(err.is_retryable());
-        
+
         // Query errors with deadlock should be retryable
         let err = Error::query("deadlock detected");
         assert!(err.is_retryable());
-        
+
         // Regular query errors should not be retryable
         let err = Error::query("syntax error");
         assert!(!err.is_retryable());
-        
+
         // Not found is not retryable
         let err = Error::not_found("User not found");
         assert!(!err.is_retryable());
     }
-    
+
     #[test]
     fn test_log_format() {
         let err = Error::query_with_context(
             "syntax error at position 10",
-            ErrorContext::new().table("users").query("SELECT * FROM users WHERE")
+            ErrorContext::new()
+                .table("users")
+                .query("SELECT * FROM users WHERE"),
         );
-        
+
         let log = err.log_format();
         assert!(log.contains("TIDE_QUERY"));
         assert!(log.contains("syntax error"));
         assert!(log.contains("Table: users"));
         assert!(log.contains("Suggestion:"));
     }
-    
+
     #[test]
     fn test_error_context() {
         let ctx = ErrorContext::new()
             .table("users")
             .column("email")
             .query("SELECT * FROM users");
-        
+
         assert_eq!(ctx.table, Some("users".to_string()));
         assert_eq!(ctx.column, Some("email".to_string()));
         assert_eq!(ctx.query, Some("SELECT * FROM users".to_string()));
     }
-    
+
     #[test]
     fn test_validation_errors() {
         use crate::validation::ValidationErrors;
-        
+
         let mut errors = ValidationErrors::new();
         assert!(errors.is_empty());
-        
+
         errors.add("email", "Invalid email format");
         errors.add("name", "Name is required");
-        
+
         assert!(!errors.is_empty());
         assert_eq!(errors.len(), 2);
-        
+
         let display = format!("{}", errors);
         assert!(display.contains("email"));
         assert!(display.contains("name"));
     }
-    
+
     #[test]
     fn test_error_checks() {
         let err = Error::not_found("User not found");
         assert!(err.is_not_found());
         assert!(!err.is_connection_error());
-        
+
         let err = Error::connection("test");
         assert!(err.is_connection_error());
         assert!(!err.is_not_found());
-        
+
         let err = Error::query("test");
         assert!(err.is_query_error());
         assert!(!err.is_not_found());

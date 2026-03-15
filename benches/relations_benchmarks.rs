@@ -5,14 +5,13 @@
 //!
 //! Run with: cargo bench --bench relations_benchmarks
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
-use tideorm::relations::{
-    RelationType, RelationInfo, RelationPath, RelationTree,
-    RelationConstraints, MorphResult,
-};
-use tideorm::query::Order;
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::json;
+use std::hint::black_box;
+use tideorm::query::Order;
+use tideorm::relations::{
+    MorphResult, RelationConstraints, RelationInfo, RelationPath, RelationTree, RelationType,
+};
 
 // =============================================================================
 // RELATION TYPE BENCHMARKS
@@ -20,31 +19,23 @@ use serde_json::json;
 
 fn bench_relation_type_display(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_type_display");
-    
+
     group.bench_function("has_one", |b| {
-        b.iter(|| {
-            format!("{}", black_box(RelationType::HasOne))
-        });
+        b.iter(|| format!("{}", black_box(RelationType::HasOne)));
     });
-    
+
     group.bench_function("has_many", |b| {
-        b.iter(|| {
-            format!("{}", black_box(RelationType::HasMany))
-        });
+        b.iter(|| format!("{}", black_box(RelationType::HasMany)));
     });
-    
+
     group.bench_function("belongs_to", |b| {
-        b.iter(|| {
-            format!("{}", black_box(RelationType::BelongsTo))
-        });
+        b.iter(|| format!("{}", black_box(RelationType::BelongsTo)));
     });
-    
+
     group.bench_function("has_many_through", |b| {
-        b.iter(|| {
-            format!("{}", black_box(RelationType::HasManyThrough))
-        });
+        b.iter(|| format!("{}", black_box(RelationType::HasManyThrough)));
     });
-    
+
     group.finish();
 }
 
@@ -64,7 +55,7 @@ fn bench_relation_type_equality(c: &mut Criterion) {
 
 fn bench_relation_info_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_info_creation");
-    
+
     group.bench_function("belongs_to", |b| {
         b.iter(|| {
             RelationInfo::belongs_to(
@@ -75,7 +66,7 @@ fn bench_relation_info_creation(c: &mut Criterion) {
             )
         });
     });
-    
+
     group.bench_function("has_one", |b| {
         b.iter(|| {
             RelationInfo::has_one(
@@ -86,7 +77,7 @@ fn bench_relation_info_creation(c: &mut Criterion) {
             )
         });
     });
-    
+
     group.bench_function("has_many", |b| {
         b.iter(|| {
             RelationInfo::has_many(
@@ -97,7 +88,7 @@ fn bench_relation_info_creation(c: &mut Criterion) {
             )
         });
     });
-    
+
     group.bench_function("has_many_through", |b| {
         b.iter(|| {
             RelationInfo::has_many_through(
@@ -110,7 +101,7 @@ fn bench_relation_info_creation(c: &mut Criterion) {
             )
         });
     });
-    
+
     group.bench_function("morph_many", |b| {
         b.iter(|| {
             RelationInfo::morph_many(
@@ -122,7 +113,7 @@ fn bench_relation_info_creation(c: &mut Criterion) {
             )
         });
     });
-    
+
     group.finish();
 }
 
@@ -132,63 +123,47 @@ fn bench_relation_info_creation(c: &mut Criterion) {
 
 fn bench_relation_path_parsing(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_path_parsing");
-    
+
     group.bench_function("simple", |b| {
-        b.iter(|| {
-            RelationPath::parse(black_box("posts"))
-        });
+        b.iter(|| RelationPath::parse(black_box("posts")));
     });
-    
+
     group.bench_function("nested_2", |b| {
-        b.iter(|| {
-            RelationPath::parse(black_box("posts.comments"))
-        });
+        b.iter(|| RelationPath::parse(black_box("posts.comments")));
     });
-    
+
     group.bench_function("nested_3", |b| {
-        b.iter(|| {
-            RelationPath::parse(black_box("posts.comments.author"))
-        });
+        b.iter(|| RelationPath::parse(black_box("posts.comments.author")));
     });
-    
+
     group.bench_function("nested_5", |b| {
-        b.iter(|| {
-            RelationPath::parse(black_box("a.b.c.d.e"))
-        });
+        b.iter(|| RelationPath::parse(black_box("a.b.c.d.e")));
     });
-    
+
     group.finish();
 }
 
 fn bench_relation_path_operations(c: &mut Criterion) {
     let path = RelationPath::parse("posts.comments.author");
-    
+
     let mut group = c.benchmark_group("relation_path_operations");
-    
+
     group.bench_function("root", |b| {
-        b.iter(|| {
-            black_box(&path).root()
-        });
+        b.iter(|| black_box(&path).root());
     });
-    
+
     group.bench_function("depth", |b| {
-        b.iter(|| {
-            black_box(&path).depth()
-        });
+        b.iter(|| black_box(&path).depth());
     });
-    
+
     group.bench_function("is_nested", |b| {
-        b.iter(|| {
-            black_box(&path).is_nested()
-        });
+        b.iter(|| black_box(&path).is_nested());
     });
-    
+
     group.bench_function("nested", |b| {
-        b.iter(|| {
-            black_box(&path).nested()
-        });
+        b.iter(|| black_box(&path).nested());
     });
-    
+
     group.finish();
 }
 
@@ -198,13 +173,11 @@ fn bench_relation_path_operations(c: &mut Criterion) {
 
 fn bench_relation_tree_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_tree_operations");
-    
+
     group.bench_function("create_empty", |b| {
-        b.iter(|| {
-            RelationTree::new()
-        });
+        b.iter(|| RelationTree::new());
     });
-    
+
     group.bench_function("add_single_path", |b| {
         b.iter(|| {
             let mut tree = RelationTree::new();
@@ -212,7 +185,7 @@ fn bench_relation_tree_operations(c: &mut Criterion) {
             tree
         });
     });
-    
+
     group.bench_function("add_nested_path", |b| {
         b.iter(|| {
             let mut tree = RelationTree::new();
@@ -220,7 +193,7 @@ fn bench_relation_tree_operations(c: &mut Criterion) {
             tree
         });
     });
-    
+
     group.bench_function("add_multiple_paths", |b| {
         b.iter(|| {
             let mut tree = RelationTree::new();
@@ -231,7 +204,7 @@ fn bench_relation_tree_operations(c: &mut Criterion) {
             tree
         });
     });
-    
+
     group.finish();
 }
 
@@ -240,39 +213,29 @@ fn bench_relation_tree_lookup(c: &mut Criterion) {
     tree.add_path(&RelationPath::parse("posts.comments.author"));
     tree.add_path(&RelationPath::parse("profile"));
     tree.add_path(&RelationPath::parse("roles"));
-    
+
     let mut group = c.benchmark_group("relation_tree_lookup");
-    
+
     group.bench_function("roots", |b| {
-        b.iter(|| {
-            black_box(&tree).roots()
-        });
+        b.iter(|| black_box(&tree).roots());
     });
-    
+
     group.bench_function("has_nested_true", |b| {
-        b.iter(|| {
-            black_box(&tree).has_nested("posts")
-        });
+        b.iter(|| black_box(&tree).has_nested("posts"));
     });
-    
+
     group.bench_function("has_nested_false", |b| {
-        b.iter(|| {
-            black_box(&tree).has_nested("profile")
-        });
+        b.iter(|| black_box(&tree).has_nested("profile"));
     });
-    
+
     group.bench_function("get_nested", |b| {
-        b.iter(|| {
-            black_box(&tree).get_nested("posts")
-        });
+        b.iter(|| black_box(&tree).get_nested("posts"));
     });
-    
+
     group.bench_function("is_empty", |b| {
-        b.iter(|| {
-            black_box(&tree).is_empty()
-        });
+        b.iter(|| black_box(&tree).is_empty());
     });
-    
+
     group.finish();
 }
 
@@ -282,20 +245,17 @@ fn bench_relation_tree_lookup(c: &mut Criterion) {
 
 fn bench_relation_constraints(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_constraints");
-    
+
     group.bench_function("default", |b| {
-        b.iter(|| {
-            RelationConstraints::default()
-        });
+        b.iter(|| RelationConstraints::default());
     });
-    
+
     group.bench_function("where_eq", |b| {
         b.iter(|| {
-            RelationConstraints::default()
-                .where_eq(black_box("status"), black_box(json!("active")))
+            RelationConstraints::default().where_eq(black_box("status"), black_box(json!("active")))
         });
     });
-    
+
     group.bench_function("chained_operations", |b| {
         b.iter(|| {
             RelationConstraints::default()
@@ -306,17 +266,15 @@ fn bench_relation_constraints(c: &mut Criterion) {
                 .offset(black_box(0))
         });
     });
-    
+
     group.bench_function("clone", |b| {
         let constraints = RelationConstraints::default()
             .where_eq("status", json!("active"))
             .limit(10);
-        
-        b.iter(|| {
-            black_box(&constraints).clone()
-        });
+
+        b.iter(|| black_box(&constraints).clone());
     });
-    
+
     group.finish();
 }
 
@@ -325,48 +283,42 @@ fn bench_relation_constraints(c: &mut Criterion) {
 // =============================================================================
 
 #[derive(Debug, Clone, PartialEq)]
-struct Post { id: i32 }
+struct Post {
+    id: i32,
+}
 
 #[derive(Debug, Clone, PartialEq)]
-struct Video { id: i32 }
+struct Video {
+    id: i32,
+}
 
 fn bench_morph_result_operations(c: &mut Criterion) {
     let post = Post { id: 1 };
     let result_a: MorphResult<Post, Video> = MorphResult::TypeA(post.clone());
     let result_b: MorphResult<Post, Video> = MorphResult::TypeB(Video { id: 1 });
-    
+
     let mut group = c.benchmark_group("morph_result_operations");
-    
+
     group.bench_function("create_type_a", |b| {
-        b.iter(|| {
-            MorphResult::<Post, Video>::TypeA(black_box(Post { id: 1 }))
-        });
+        b.iter(|| MorphResult::<Post, Video>::TypeA(black_box(Post { id: 1 })));
     });
-    
+
     group.bench_function("is_type_a", |b| {
-        b.iter(|| {
-            black_box(&result_a).is_type_a()
-        });
+        b.iter(|| black_box(&result_a).is_type_a());
     });
-    
+
     group.bench_function("is_type_b", |b| {
-        b.iter(|| {
-            black_box(&result_b).is_type_b()
-        });
+        b.iter(|| black_box(&result_b).is_type_b());
     });
-    
+
     group.bench_function("as_type_a", |b| {
-        b.iter(|| {
-            black_box(&result_a).as_type_a()
-        });
+        b.iter(|| black_box(&result_a).as_type_a());
     });
-    
+
     group.bench_function("clone", |b| {
-        b.iter(|| {
-            black_box(&result_a).clone()
-        });
+        b.iter(|| black_box(&result_a).clone());
     });
-    
+
     group.finish();
 }
 
@@ -380,10 +332,7 @@ criterion_group!(
     bench_relation_type_equality,
 );
 
-criterion_group!(
-    relation_info_benches,
-    bench_relation_info_creation,
-);
+criterion_group!(relation_info_benches, bench_relation_info_creation,);
 
 criterion_group!(
     relation_path_benches,
@@ -397,15 +346,9 @@ criterion_group!(
     bench_relation_tree_lookup,
 );
 
-criterion_group!(
-    relation_constraints_benches,
-    bench_relation_constraints,
-);
+criterion_group!(relation_constraints_benches, bench_relation_constraints,);
 
-criterion_group!(
-    morph_result_benches,
-    bench_morph_result_operations,
-);
+criterion_group!(morph_result_benches, bench_morph_result_operations,);
 
 criterion_main!(
     relation_type_benches,
