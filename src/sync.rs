@@ -12,9 +12,9 @@
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub email: String,
 //! }
@@ -91,9 +91,9 @@
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub email: String,
 //!     pub name: Option<String>,
@@ -134,15 +134,15 @@ pub type EntityRegistrationFn = Box<dyn Fn(SchemaBuilder) -> SchemaBuilder + Sen
 /// Global registry of entity registration functions
 static ENTITY_REGISTRY: OnceLock<RwLock<Vec<EntityRegistrationFn>>> = OnceLock::new();
 
-/// Direct schemas registry (for manual/legacy registration)
-static DIRECT_SCHEMAS: OnceLock<RwLock<Vec<ModelSchema>>> = OnceLock::new();
+/// Registry of TideORM model schemas used during synchronization.
+static MODEL_SCHEMAS: OnceLock<RwLock<Vec<ModelSchema>>> = OnceLock::new();
 
 fn get_entity_registry() -> &'static RwLock<Vec<EntityRegistrationFn>> {
     ENTITY_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
-fn get_direct_schemas() -> &'static RwLock<Vec<ModelSchema>> {
-    DIRECT_SCHEMAS.get_or_init(|| RwLock::new(Vec::new()))
+fn get_model_schemas() -> &'static RwLock<Vec<ModelSchema>> {
+    MODEL_SCHEMAS.get_or_init(|| RwLock::new(Vec::new()))
 }
 
 /// Trait for models that can be synced with the database
@@ -158,7 +158,7 @@ pub trait SyncModel {
 
     /// Register this model for synchronization
     fn register_for_sync() {
-        SyncRegistry::register(Self::sync_schema());
+        SyncRegistry::register_schema(Self::sync_schema());
     }
 }
 
@@ -259,9 +259,9 @@ impl SyncRegistry {
         fns.len()
     }
 
-    /// Get the number of legacy schemas
-    pub fn legacy_count() -> usize {
-        let direct = get_direct_schemas();
+    /// Get the number of registered TideORM model schemas
+    pub fn schema_count() -> usize {
+        let direct = get_model_schemas();
         let schemas = direct.read();
         schemas.len()
     }
@@ -272,21 +272,14 @@ impl SyncRegistry {
         let mut fns = registry.write();
         fns.clear();
 
-        let direct = get_direct_schemas();
+        let direct = get_model_schemas();
         let mut schemas = direct.write();
         schemas.clear();
     }
 
-    // ========================================================================
-    // Legacy API support (for backward compatibility)
-    // ========================================================================
-
-    /// Register a model schema for synchronization (legacy API)
-    ///
-    /// This is kept for backward compatibility with existing code.
-    /// New code should use `register_entity::<E>()` instead.
-    pub fn register(schema: ModelSchema) {
-        let direct = get_direct_schemas();
+    /// Register a TideORM model schema for synchronization
+    pub fn register_schema(schema: ModelSchema) {
+        let direct = get_model_schemas();
         let mut schemas = direct.write();
 
         if !schemas.iter().any(|s| s.table_name == schema.table_name) {
@@ -294,19 +287,15 @@ impl SyncRegistry {
         }
     }
 
-    /// Get all registered legacy model schemas
-    pub fn get_all() -> Vec<ModelSchema> {
-        let direct = get_direct_schemas();
+    /// Get all registered TideORM model schemas
+    pub fn get_all_schemas() -> Vec<ModelSchema> {
+        let direct = get_model_schemas();
         let schemas = direct.read();
         schemas.clone()
     }
 }
 
-// ============================================================================
-// Legacy ModelSchema support (for backward compatibility)
-// ============================================================================
-
-/// Column definition for schema comparison (legacy)
+/// Column definition for TideORM schema synchronization
 #[derive(Debug, Clone)]
 pub struct ColumnDef {
     /// Column name
@@ -362,7 +351,7 @@ impl ColumnDef {
     }
 }
 
-/// Model schema definition for synchronization (legacy)
+/// Model schema definition for TideORM synchronization
 #[derive(Debug, Clone)]
 pub struct ModelSchema {
     /// Table name in the database
@@ -458,8 +447,8 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
     let backend = conn.get_database_backend();
 
     let entity_count = SyncRegistry::entity_count();
-    let legacy_count = SyncRegistry::legacy_count();
-    let total_count = entity_count + legacy_count;
+    let schema_count = SyncRegistry::schema_count();
+    let total_count = entity_count + schema_count;
 
     if total_count == 0 {
         tide_info!("No models registered for sync");
@@ -471,7 +460,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         total_count
     );
     tide_debug!("  - {} entity-based models", entity_count);
-    tide_debug!("  - {} legacy schema models", legacy_count);
+    tide_debug!("  - {} TideORM schema models", schema_count);
 
     // Build SchemaBuilder with all registered entities
     if entity_count > 0 {
@@ -502,19 +491,19 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         }
     }
 
-    // Handle legacy schemas if any
-    if legacy_count > 0 {
-        tide_debug!("  Processing {} legacy schema(s)...", legacy_count);
-        sync_legacy_schemas(db, force_sync).await?;
+    // Handle TideORM model schemas if any
+    if schema_count > 0 {
+        tide_debug!("  Processing {} TideORM schema(s)...", schema_count);
+        sync_model_schemas(db, force_sync).await?;
     }
 
     tide_info!("Database sync completed using SeaORM");
     Ok(())
 }
 
-/// Sync legacy ModelSchema definitions (backward compatibility)
-async fn sync_legacy_schemas(db: &Database, force_sync: bool) -> Result<()> {
-    let models = SyncRegistry::get_all();
+/// Sync TideORM ModelSchema definitions.
+async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
+    let models = SyncRegistry::get_all_schemas();
     let conn = db.__internal_connection();
     let backend = conn.get_database_backend();
 
@@ -539,15 +528,15 @@ async fn sync_legacy_schemas(db: &Database, force_sync: bool) -> Result<()> {
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
 
-            tide_warn!("Dropped legacy table: {}", model.table_name);
+            tide_warn!("Dropped TideORM table: {}", model.table_name);
         }
 
         if !table_exists || force_sync {
             // Create new table
-            create_table_from_legacy_schema(conn, &model, backend).await?;
-            tide_info!("Created legacy table: {}", model.table_name);
+            create_table_from_model_schema(conn, &model, backend).await?;
+            tide_info!("Created TideORM table: {}", model.table_name);
         } else {
-            tide_debug!("Legacy table exists: {}", model.table_name);
+            tide_debug!("TideORM table exists: {}", model.table_name);
         }
     }
 
@@ -607,8 +596,8 @@ async fn check_table_exists(
     }
 }
 
-/// Create a table from a legacy ModelSchema definition
-async fn create_table_from_legacy_schema(
+/// Create a table from a TideORM ModelSchema definition
+async fn create_table_from_model_schema(
     conn: &sea_orm::DatabaseConnection,
     model: &ModelSchema,
     backend: DbBackend,

@@ -11,48 +11,48 @@
 //!
 //! ## Defining Relations Inside Models
 //!
-//! Relations are declared as fields in your model struct using the `#[tide(relation)]` attribute:
+//! Relations are declared as fields in your model struct using `#[tideorm(...)]` relation attributes:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub name: String,
 //!     pub email: String,
 //!     
 //!     // Relations defined as fields
-//!     #[tide(has_one = "Profile", foreign_key = "user_id")]
+//!     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
 //!     pub profile: HasOne<Profile>,
 //!     
-//!     #[tide(has_many = "Post", foreign_key = "user_id")]
+//!     #[tideorm(has_many = "Post", foreign_key = "user_id")]
 //!     pub posts: HasMany<Post>,
 //! }
 //!
 //! #[derive(Model)]
-//! #[tide(table = "posts")]
+//! #[tideorm(table = "posts")]
 //! pub struct Post {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub user_id: i64,
 //!     pub title: String,
 //!     
-//!     #[tide(belongs_to = "User", foreign_key = "user_id")]
+//!     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
 //!     pub author: BelongsTo<User>,
 //! }
 //!
 //! #[derive(Model)]
-//! #[tide(table = "profiles")]
+//! #[tideorm(table = "profiles")]
 //! pub struct Profile {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub user_id: i64,
 //!     pub bio: String,
 //!     
-//!     #[tide(belongs_to = "User", foreign_key = "user_id")]
+//!     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
 //!     pub user: BelongsTo<User>,
 //! }
 //!
@@ -69,13 +69,13 @@
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub name: String,
 //!     
-//!     #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+//!     #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
 //!     pub roles: HasManyThrough<Role, UserRole>,
 //! }
 //!
@@ -119,19 +119,19 @@ use crate::query::{Order, QueryBuilder};
 ///
 /// ```rust,ignore
 /// #[derive(Model)]
-/// #[tide(table = "employees")]
+/// #[tideorm(table = "employees")]
 /// pub struct Employee {
-///     #[tide(primary_key)]
+///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub name: String,
 ///     pub manager_id: Option<i64>,
 ///     
 ///     // Self-reference: each employee optionally reports to another employee
-///     #[tide(self_ref = "id", foreign_key = "manager_id")]
+///     #[tideorm(self_ref = "id", foreign_key = "manager_id")]
 ///     pub manager: SelfRef<Employee>,
 ///     
 ///     // Inverse: employees who report to this employee
-///     #[tide(self_ref_many = "id", foreign_key = "manager_id")]
+///     #[tideorm(self_ref_many = "id", foreign_key = "manager_id")]
 ///     pub reports: SelfRefMany<Employee>,
 /// }
 ///
@@ -261,11 +261,11 @@ impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
 ///     pub parent_id: Option<i64>,
 ///     
 ///     // Get the parent category
-///     #[tide(self_ref = "id", foreign_key = "parent_id")]
+///     #[tideorm(self_ref = "id", foreign_key = "parent_id")]
 ///     pub parent: SelfRef<Category>,
 ///     
 ///     // Get all child categories
-///     #[tide(self_ref_many = "id", foreign_key = "parent_id")]
+///     #[tideorm(self_ref_many = "id", foreign_key = "parent_id")]
 ///     pub children: SelfRefMany<Category>,
 /// }
 /// ```
@@ -469,7 +469,7 @@ impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
 ///     pub id: i64,
 ///     pub name: String,
 ///     
-///     #[tide(has_one = "Profile", foreign_key = "user_id")]
+///     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
 ///     pub profile: HasOne<Profile>,
 /// }
 /// ```
@@ -594,7 +594,7 @@ impl<'de, E: Model> Deserialize<'de> for HasOne<E> {
 ///     pub id: i64,
 ///     pub name: String,
 ///     
-///     #[tide(has_many = "Post", foreign_key = "user_id")]
+///     #[tideorm(has_many = "Post", foreign_key = "user_id")]
 ///     pub posts: HasMany<Post>,
 /// }
 /// ```
@@ -731,7 +731,7 @@ impl<'de, E: Model> Deserialize<'de> for HasMany<E> {
 ///     pub user_id: i64,
 ///     pub title: String,
 ///     
-///     #[tide(belongs_to = "User", foreign_key = "user_id")]
+///     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
 ///     pub author: BelongsTo<User>,
 /// }
 /// ```
@@ -856,7 +856,7 @@ impl<'de, E: Model> Deserialize<'de> for BelongsTo<E> {
 ///     pub id: i64,
 ///     pub name: String,
 ///     
-///     #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+///     #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
 ///     pub roles: HasManyThrough<Role, UserRole>,
 /// }
 /// ```
@@ -2081,7 +2081,7 @@ pub trait EagerLoadExt: Model {
 // Implement for all Models
 impl<T: Model> EagerLoadExt for T {}
 
-/// Extension trait providing relation query methods on models (for backward compatibility)
+/// Extension trait providing relation query methods on models
 #[async_trait]
 pub trait RelationExt: Model {
     /// Get a field value by name (helper for relations)

@@ -22,15 +22,15 @@
 //!
 //! ## Quick Start with Derive Macro
 //!
-//! The easiest way to enable tokenization is using the `#[tide(tokenize)]` attribute:
+//! The easiest way to enable tokenization is using the `#[tideorm(tokenize)]` attribute:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users", tokenize)]  // Enable tokenization with derive macro
+//! #[tideorm(table = "users", tokenize)]  // Enable tokenization with derive macro
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub email: String,
 //!     pub name: String,
@@ -60,9 +60,9 @@
 //! use tideorm::tokenization::Tokenizable;
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key)]
+//!     #[tideorm(primary_key)]
 //!     pub id: i64,
 //!     pub name: String,
 //! }
@@ -433,15 +433,15 @@ pub fn default_decode(token: &str, model_name: &str) -> Option<i64> {
 /// Trait for models that support tokenization
 ///
 /// This trait is automatically implemented by the `#[derive(Model)]` macro
-/// when tokenization is enabled via `#[tide(tokenize)]`.
+/// when tokenization is enabled via `#[tideorm(tokenize)]`.
 ///
 /// ## Example
 ///
 /// ```rust,ignore
 /// #[derive(Model)]
-/// #[tide(table = "users", tokenize)]  // Enable tokenization
+/// #[tideorm(table = "users", tokenize)]  // Enable tokenization
 /// pub struct User {
-///     #[tide(primary_key)]
+///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub email: String,
 /// }

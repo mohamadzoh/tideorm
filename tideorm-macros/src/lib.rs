@@ -5,6 +5,7 @@
 use convert_case::{Case, Casing};
 use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
     Attribute, DeriveInput, GenericArgument, Ident, Meta, PathArguments, Type, parse_macro_input,
@@ -12,7 +13,7 @@ use syn::{
 
 /// Field-level attributes for model fields
 #[derive(Debug, FromField)]
-#[darling(attributes(tide), forward_attrs(validate))]
+#[darling(attributes(tideorm), forward_attrs(validate))]
 #[allow(dead_code)]
 struct ModelField {
     ident: Option<Ident>,
@@ -48,15 +49,15 @@ struct ModelField {
     timestamp: bool,
 
     // Relation attributes (SeaORM-style, defined inside struct)
-    /// HasOne relation: #[tide(has_one = "RelatedModel", foreign_key = "fk_column")]
+    /// HasOne relation: #[tideorm(has_one = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     has_one: Option<String>,
 
-    /// HasMany relation: #[tide(has_many = "RelatedModel", foreign_key = "fk_column")]
+    /// HasMany relation: #[tideorm(has_many = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     has_many: Option<String>,
 
-    /// BelongsTo relation: #[tide(belongs_to = "RelatedModel", foreign_key = "fk_column")]
+    /// BelongsTo relation: #[tideorm(belongs_to = "RelatedModel", foreign_key = "fk_column")]
     #[darling(default)]
     belongs_to: Option<String>,
 
@@ -468,7 +469,7 @@ fn extract_value(input: &str, key: &str) -> Option<String> {
 
 /// Struct-level attributes for the model
 #[derive(Debug, FromDeriveInput)]
-#[darling(attributes(tide), supports(struct_named))]
+#[darling(attributes(tideorm), supports(struct_named))]
 #[allow(dead_code)]
 struct ModelInput {
     ident: Ident,
@@ -545,7 +546,7 @@ struct ModelInput {
 
     /// Enable auto-derives - automatically implement Debug, Clone, Default, Serialize, Deserialize
     /// Use this when you want the Model macro to generate all common traits automatically.
-    /// Example: #[tide(table = "users", auto_derives)]
+    /// Example: #[tideorm(table = "users", auto_derives)]
     #[darling(default)]
     auto_derives: bool,
 
@@ -572,7 +573,7 @@ struct ModelInput {
     /// Enable tokenization for this model
     /// When enabled, generates `Tokenizable` trait implementation
     /// allowing conversion between record IDs and encrypted tokens.
-    /// Example: #[tide(table = "users", tokenize)]
+    /// Example: #[tideorm(table = "users", tokenize)]
     #[darling(default)]
     tokenize: bool,
 }
@@ -596,9 +597,9 @@ struct ModelInput {
 /// ```rust,ignore
 /// // Just #[derive(Model)] - everything else is auto-generated!
 /// #[derive(Model)]
-/// #[tide(table = "users")]
+/// #[tideorm(table = "users")]
 /// pub struct User {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     pub id: i64,
 ///     pub name: String,
 /// }
@@ -610,16 +611,16 @@ struct ModelInput {
 ///
 /// ```rust,ignore
 /// #[derive(Model)]
-/// #[tide(table = "users", skip_debug)]  // Skip Debug only
+/// #[tideorm(table = "users", skip_debug)]  // Skip Debug only
 /// pub struct User { ... }
 ///
 /// #[derive(Model)]
-/// #[tide(table = "users", skip_derives)]  // Skip all auto-derives
+/// #[tideorm(table = "users", skip_derives)]  // Skip all auto-derives
 /// pub struct User { ... }
 /// ```
-/// #[tide(table = "users")]
+/// #[tideorm(table = "users")]
 /// pub struct User {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     pub id: i64,
 ///     pub name: String,
 /// }
@@ -631,11 +632,11 @@ struct ModelInput {
 /// use tideorm::prelude::*;
 ///
 /// #[derive(Model)]
-/// #[tide(table = "users")]
+/// #[tideorm(table = "users")]
 /// #[index("email")]
 /// #[unique_index("email")]
 /// pub struct User {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     pub id: i64,
 ///     
 ///     #[validate(email)]
@@ -644,14 +645,14 @@ struct ModelInput {
 ///     pub name: String,
 ///     
 ///     // Relation defined inside the struct
-///     #[tide(has_one = "Profile", foreign_key = "user_id")]
+///     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
 ///     pub profile: HasOne<Profile>,
 ///     
-///     #[tide(has_many = "Post", foreign_key = "user_id")]
+///     #[tideorm(has_many = "Post", foreign_key = "user_id")]
 ///     pub posts: HasMany<Post>,
 /// }
 /// ```
-#[proc_macro_derive(Model, attributes(tide, index, unique_index, validate))]
+#[proc_macro_derive(Model, attributes(tideorm, index, unique_index, validate))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -1622,7 +1623,7 @@ fn generate_model_impl(
             #[doc(hidden)]
             #[inline]
             pub fn __register_for_sync() {
-                ::tideorm::sync::SyncRegistry::register(Self::__get_sync_schema());
+                ::tideorm::sync::SyncRegistry::register_schema(Self::__get_sync_schema());
             }
         }
 
@@ -1903,183 +1904,6 @@ fn pluralize(word: &str) -> String {
     }
 }
 
-// =============================================================================
-// LEGACY RELATION MACROS (for backward compatibility)
-// =============================================================================
-
-/// Derive BelongsTo relation for a model (legacy attribute macro)
-///
-/// This is kept for backward compatibility. The recommended approach is to
-/// define relations inside the model struct using field attributes.
-#[proc_macro_attribute]
-pub fn belongs_to(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let item_clone = item.clone();
-    let input = parse_macro_input!(item_clone as DeriveInput);
-    let _struct_name = &input.ident;
-
-    let attr_str = attr.to_string();
-    let (related_type, _foreign_key, owner_key) = parse_relation_attr(&attr_str);
-
-    // Validate the related type is parseable
-    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
-    if _related_ident.is_err() {
-        return syn::Error::new_spanned(
-            &input.ident,
-            format!(
-                "Invalid related type '{}' in belongs_to attribute",
-                related_type
-            ),
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let _owner_key_impl = if let Some(ok) = owner_key {
-        quote! {
-            fn owner_key() -> &'static str { #ok }
-        }
-    } else {
-        quote! {}
-    };
-
-    let impl_block = quote! {
-        // Legacy trait-based relation for backward compatibility
-    };
-
-    let original: proc_macro2::TokenStream = item.into();
-    let expanded = quote! {
-        #original
-        #impl_block
-    };
-
-    TokenStream::from(expanded)
-}
-
-/// Derive HasOne relation for a model (legacy attribute macro)
-#[proc_macro_attribute]
-pub fn has_one(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let item_clone = item.clone();
-    let input = parse_macro_input!(item_clone as DeriveInput);
-    let _struct_name = &input.ident;
-
-    let attr_str = attr.to_string();
-    let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
-
-    // Validate the related type is parseable
-    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
-    if _related_ident.is_err() {
-        return syn::Error::new_spanned(
-            &input.ident,
-            format!(
-                "Invalid related type '{}' in has_one attribute",
-                related_type
-            ),
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let _local_key_impl = if let Some(lk) = local_key {
-        quote! {
-            fn local_key() -> &'static str { #lk }
-        }
-    } else {
-        quote! {}
-    };
-
-    let impl_block = quote! {
-        // Legacy trait-based relation for backward compatibility
-    };
-
-    let original: proc_macro2::TokenStream = item.into();
-    let expanded = quote! {
-        #original
-        #impl_block
-    };
-
-    TokenStream::from(expanded)
-}
-
-/// Derive HasMany relation for a model (legacy attribute macro)
-#[proc_macro_attribute]
-pub fn has_many(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let item_clone = item.clone();
-    let input = parse_macro_input!(item_clone as DeriveInput);
-    let _struct_name = &input.ident;
-
-    let attr_str = attr.to_string();
-    let (related_type, _foreign_key, local_key) = parse_relation_attr(&attr_str);
-
-    // Validate the related type is parseable
-    let _related_ident: Result<proc_macro2::TokenStream, _> = related_type.parse();
-    if _related_ident.is_err() {
-        return syn::Error::new_spanned(
-            &input.ident,
-            format!(
-                "Invalid related type '{}' in has_many attribute",
-                related_type
-            ),
-        )
-        .to_compile_error()
-        .into();
-    }
-
-    let _local_key_impl = if let Some(lk) = local_key {
-        quote! {
-            fn local_key() -> &'static str { #lk }
-        }
-    } else {
-        quote! {}
-    };
-
-    let impl_block = quote! {
-        // Legacy trait-based relation for backward compatibility
-    };
-
-    let original: proc_macro2::TokenStream = item.into();
-    let expanded = quote! {
-        #original
-        #impl_block
-    };
-
-    TokenStream::from(expanded)
-}
-
-/// Parse relation attribute string
-fn parse_relation_attr(attr: &str) -> (String, String, Option<String>) {
-    let attr = attr.trim();
-
-    let mut parts = attr.splitn(2, ',');
-
-    let related_type = parts.next().unwrap_or("").trim().to_string();
-
-    let rest = parts.next().unwrap_or("");
-
-    let mut foreign_key = String::new();
-    let mut optional_key: Option<String> = None;
-
-    for part in rest.split(',') {
-        let part = part.trim();
-        if part.starts_with("foreign_key") {
-            foreign_key = extract_string_value(part);
-        } else if part.starts_with("owner_key") || part.starts_with("local_key") {
-            optional_key = Some(extract_string_value(part));
-        }
-    }
-
-    (related_type, foreign_key, optional_key)
-}
-
-/// Extract string value from `key = "value"` format
-fn extract_string_value(s: &str) -> String {
-    s.split('=')
-        .nth(1)
-        .unwrap_or("")
-        .trim()
-        .trim_matches('"')
-        .to_string()
-}
-
 /// Attribute macro for defining TideORM models.
 ///
 /// It automatically adds the `#[derive(Model)]` along with other common derives.
@@ -2089,10 +1913,9 @@ fn extract_string_value(s: &str) -> String {
 /// ```rust,ignore
 /// use tideorm::prelude::*;
 ///
-/// #[tideorm::model]
-/// #[tide(table = "users")]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     pub id: i64,
 ///     pub name: String,
 ///     pub email: String,
@@ -2102,7 +1925,16 @@ fn extract_string_value(s: &str) -> String {
 /// This is equivalent to:
 /// ```rust,ignore
 /// #[derive(Model)]
-/// #[tide(table = "users")]
+/// #[tideorm(table = "users")]
+/// pub struct User {
+///     // ...
+/// }
+/// ```
+///
+/// The stacked form is also supported:
+/// ```rust,ignore
+/// #[tideorm::model]
+/// #[tideorm(table = "users")]
 /// pub struct User {
 ///     // ...
 /// }
@@ -2115,8 +1947,16 @@ fn extract_string_value(s: &str) -> String {
 /// - `Serialize` - for JSON serialization
 /// - `Deserialize` - for JSON deserialization
 #[proc_macro_attribute]
-pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let model_attr = TokenStream2::from(attr);
     let input = parse_macro_input!(item as DeriveInput);
+
+    expand_model(model_attr, input)
+        .unwrap_or_else(|error| error.to_compile_error())
+        .into()
+}
+
+fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let vis = &input.vis;
     let attrs = &input.attrs;
@@ -2126,14 +1966,22 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fields = match &input.data {
         syn::Data::Struct(data) => &data.fields,
         _ => {
-            return syn::Error::new_spanned(
+            return Err(syn::Error::new_spanned(
                 &input,
                 "#[tideorm::model] can only be applied to structs",
-            )
-            .to_compile_error()
-            .into();
+            ));
         }
     };
+
+    let has_inline_model_options = !model_attr.is_empty();
+    let has_explicit_tide_attr = attrs.iter().any(|attr| attr.path().is_ident("tideorm"));
+
+    if has_inline_model_options && has_explicit_tide_attr {
+        return Err(syn::Error::new_spanned(
+            &input,
+            "use either #[tideorm::model(...)] or a separate #[tideorm(...)] attribute, not both",
+        ));
+    }
 
     // Preserve all attributes except derive (we'll add our own)
     let other_attrs: Vec<_> = attrs
@@ -2141,19 +1989,30 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .filter(|a| !a.path().is_ident("derive"))
         .collect();
 
+    let inline_tide_attr = if has_inline_model_options {
+        Some(quote! { #[tideorm(#model_attr)] })
+    } else {
+        None
+    };
+
     // Generate the struct with derive(Model)
-    quote! {
+    Ok(quote! {
         #[derive(tideorm::Model)]
+        #inline_tide_attr
         #(#other_attrs)*
         #vis struct #name #generics #fields
-    }
-    .into()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quote::quote;
     use syn::parse_quote;
+
+    fn normalize_tokens(tokens: &str) -> String {
+        tokens.chars().filter(|ch| !ch.is_whitespace()).collect()
+    }
 
     fn field_with_type(ty: Type) -> ModelField {
         ModelField {
@@ -2209,5 +2068,55 @@ mod tests {
         assert!(!field_with_type(parse_quote!(MyBelongsToMetadata)).is_relation_type());
         assert!(!field_with_type(parse_quote!(Vec<HasManyLabel>)).is_relation_type());
         assert!(!field_with_type(parse_quote!(String)).is_relation_type());
+    }
+
+    #[test]
+    fn model_attribute_accepts_inline_table_options() {
+        let input: DeriveInput = parse_quote! {
+            pub struct User {
+                pub id: i64,
+            }
+        };
+
+        let expanded = expand_model(quote!(table = "users", soft_delete), input)
+            .expect("inline model attribute should expand successfully")
+            .to_string();
+        let normalized = normalize_tokens(&expanded);
+
+        assert!(normalized.contains("#[derive(tideorm::Model)]"));
+        assert!(normalized.contains("#[tideorm(table=\"users\",soft_delete)]"));
+    }
+
+    #[test]
+    fn model_attribute_preserves_stacked_tideorm_attribute() {
+        let input: DeriveInput = parse_quote! {
+            #[tideorm(table = "users")]
+            pub struct User {
+                pub id: i64,
+            }
+        };
+
+        let expanded = expand_model(TokenStream2::new(), input)
+            .expect("stacked tideorm syntax should still expand successfully")
+            .to_string();
+        let normalized = normalize_tokens(&expanded);
+
+        assert!(normalized.contains("#[tideorm(table=\"users\")]"));
+    }
+
+    #[test]
+    fn model_attribute_rejects_mixed_inline_and_stacked_options() {
+        let input: DeriveInput = parse_quote! {
+            #[tideorm(table = "users")]
+            pub struct User {
+                pub id: i64,
+            }
+        };
+
+        let error = expand_model(quote!(table = "users"), input)
+            .expect_err("mixed syntax should be rejected")
+            .to_string();
+
+        assert!(error.contains("use either #[tideorm::model(...)] or a separate #[tideorm(...)]"));
     }
 }

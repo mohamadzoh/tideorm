@@ -38,9 +38,9 @@ fn get_runtime() -> &'static Runtime {
 // =============================================================================
 
 #[derive(Model, PartialEq)]
-#[tide(table = "or_bench_users")]
+#[tideorm(table = "or_bench_users")]
 pub struct OrBenchUser {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub email: String,

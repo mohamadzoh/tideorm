@@ -8,9 +8,9 @@
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub email: String,
 //!     pub name: String,
@@ -119,11 +119,11 @@
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "posts", soft_delete)]
+//! #[tideorm(table = "posts", soft_delete)]
 //! #[index("user_id")]
 //! #[unique_index("slug")]
 //! pub struct Post {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     
 //!     pub user_id: i64,
@@ -165,17 +165,17 @@
 //!
 //! | Attribute | Description |
 //! |-----------|-------------|
-//! | `#[tide(primary_key)]` | Marks the primary key field |
-//! | `#[tide(auto_increment)]` | Auto-incrementing field (usually with primary_key) |
-//! | `#[tide(column = "name")]` | Override the column name |
-//! | `#[tide(skip)]` | Skip this field in database operations |
+//! | `#[tideorm(primary_key)]` | Marks the primary key field |
+//! | `#[tideorm(auto_increment)]` | Auto-incrementing field (usually with primary_key) |
+//! | `#[tideorm(column = "name")]` | Override the column name |
+//! | `#[tideorm(skip)]` | Skip this field in database operations |
 //!
 //! ### Table Attributes
 //!
 //! | Attribute | Description |
 //! |-----------|-------------|
-//! | `#[tide(table = "name")]` | Override the table name |
-//! | `#[tide(soft_delete)]` | Enable soft delete support |
+//! | `#[tideorm(table = "name")]` | Override the table name |
+//! | `#[tideorm(soft_delete)]` | Enable soft delete support |
 //! | `#[index("col1,col2")]` | Create a composite index |
 //! | `#[unique_index("col")]` | Create a unique index |
 //!
@@ -284,7 +284,7 @@
 //!
 //! ## Soft Delete
 //!
-//! Models with `#[tide(soft_delete)]` support soft deletion:
+//! Models with `#[tideorm(soft_delete)]` support soft deletion:
 //!
 //! ```rust,ignore
 //! // Regular queries exclude soft-deleted records
@@ -617,9 +617,6 @@ pub use tideorm_macros::Model;
 
 // Re-export the attribute macro
 pub use tideorm_macros::model;
-
-// Re-export relation attribute macros
-pub use tideorm_macros::{belongs_to, has_many, has_one};
 
 // Re-export async_trait for macro use
 pub use async_trait;

@@ -137,9 +137,9 @@ mod integration_tests {
     Example test structure:
 
     #[derive(Model, Clone, Debug, Serialize, Deserialize)]
-    #[tide(table = "test_users")]
+    #[tideorm(table = "test_users")]
     struct TestUser {
-        #[tide(primary_key, auto_increment)]
+        #[tideorm(primary_key, auto_increment)]
         pub id: i64,
         pub name: String,
         pub email: String,

@@ -23,10 +23,9 @@ use test_config::test_database_url;
 // TEST MODELS WITH JSON AND ARRAY COLUMNS
 // =============================================================================
 
-#[tideorm::model]
-#[tide(table = "test_documents")]
+#[tideorm::model(table = "test_documents")]
 pub struct TestDocument {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
     pub metadata: serde_json::Value, // JSONB column
@@ -34,48 +33,45 @@ pub struct TestDocument {
     pub ratings: Vec<i32>,           // Array of integers
 }
 
-#[tideorm::model]
-#[tide(table = "test_authors")]
+#[tideorm::model(table = "test_authors")]
 pub struct TestAuthor {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub country: String,
 
     // HasMany relation - author has many books
-    #[tide(has_many = "TestBook", foreign_key = "author_id")]
+    #[tideorm(has_many = "TestBook", foreign_key = "author_id")]
     pub books: HasMany<TestBook>,
 }
 
-#[tideorm::model]
-#[tide(table = "test_books")]
+#[tideorm::model(table = "test_books")]
 pub struct TestBook {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub author_id: i64,
     pub title: String,
     pub year: i32,
 
     // BelongsTo relation - book belongs to an author
-    #[tide(belongs_to = "TestAuthor", foreign_key = "author_id")]
+    #[tideorm(belongs_to = "TestAuthor", foreign_key = "author_id")]
     pub author: BelongsTo<TestAuthor>,
 
     // HasOne relation - book has one detail record
-    #[tide(has_one = "TestBookDetail", foreign_key = "book_id")]
+    #[tideorm(has_one = "TestBookDetail", foreign_key = "book_id")]
     pub detail: HasOne<TestBookDetail>,
 }
 
-#[tideorm::model]
-#[tide(table = "test_book_details")]
+#[tideorm::model(table = "test_book_details")]
 pub struct TestBookDetail {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub book_id: i64,
     pub isbn: String,
     pub pages: i32,
 
     // BelongsTo relation - detail belongs to a book
-    #[tide(belongs_to = "TestBook", foreign_key = "book_id")]
+    #[tideorm(belongs_to = "TestBook", foreign_key = "book_id")]
     pub book: BelongsTo<TestBook>,
 }
 

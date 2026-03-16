@@ -16,9 +16,9 @@
 //! use tideorm::prelude::*;
 //!
 //! #[derive(Model, Clone, Debug)]
-//! #[tide(table = "articles")]
+//! #[tideorm(table = "articles")]
 //! pub struct Article {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub title: String,
 //!     pub content: String,

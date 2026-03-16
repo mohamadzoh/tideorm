@@ -141,10 +141,9 @@ Use `chrono::DateTime<Utc>` for timestamps that should include timezone informat
 ```rust
 use chrono::{DateTime, Utc};
 
-#[tideorm::model]
-#[tide(table = "sessions")]
+#[tideorm::model(table = "sessions")]
 pub struct Session {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub token: String,
@@ -173,10 +172,9 @@ Use `chrono::NaiveDateTime` when you don't need timezone information:
 ```rust
 use chrono::NaiveDateTime;
 
-#[tideorm::model]
-#[tide(table = "logs")]
+#[tideorm::model(table = "logs")]
 pub struct Log {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub message: String,
     pub logged_at: NaiveDateTime,         // Maps to TIMESTAMP (no timezone)
@@ -200,10 +198,9 @@ Use `chrono::NaiveDate` for date-only fields:
 ```rust
 use chrono::NaiveDate;
 
-#[tideorm::model]
-#[tide(table = "events")]
+#[tideorm::model(table = "events")]
 pub struct Event {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub event_date: NaiveDate,            // Maps to DATE
@@ -227,10 +224,9 @@ Use `chrono::NaiveTime` for time-only fields:
 ```rust
 use chrono::NaiveTime;
 
-#[tideorm::model]
-#[tide(table = "schedules")]
+#[tideorm::model(table = "schedules")]
 pub struct Schedule {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub start_time: NaiveTime,            // Maps to TIME
@@ -359,10 +355,9 @@ impl Migration for CreateUsersTable {
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 
-#[tideorm::model]
-#[tide(table = "users", soft_delete)]
+#[tideorm::model(table = "users", soft_delete)]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub name: String,
@@ -384,13 +379,12 @@ pub struct User {
 
 ### Default Behavior (Recommended)
 
-The simplest way to define a model - just `#[tideorm::model]`:
+The preferred way to define a model is `#[tideorm::model(table = "...")]`:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products")]
+#[tideorm::model(table = "products")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub price: f64,
@@ -409,14 +403,13 @@ The `#[tideorm::model]` macro automatically implements:
 If you need custom implementations, use `skip_derives` and provide your own:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products", skip_derives)]
+#[tideorm::model(table = "products", skip_derives)]
 #[index("category")]
 #[index("active")]
 #[index(name = "idx_price_category", columns = "price,category")]
 #[unique_index("sku")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     
     pub name: String,
@@ -424,7 +417,7 @@ pub struct Product {
     pub category: String,
     pub price: i64,
     
-    #[tide(nullable)]
+    #[tideorm(nullable)]
     pub description: Option<String>,
     
     pub active: bool,
@@ -439,14 +432,16 @@ impl Clone for Product { /* custom impl */ }
 
 #### Struct-Level Attributes
 
+Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(...)]` attribute.
+
 | Attribute | Description |
 |-----------|-------------|
-| `#[tide(table = "name")]` | Custom table name |
-| `#[tide(skip_derives)]` | Skip auto-generated Debug, Clone, Serialize, Deserialize |
-| `#[tide(skip_debug)]` | Skip auto-generated Debug impl only |
-| `#[tide(skip_clone)]` | Skip auto-generated Clone impl only |
-| `#[tide(skip_serialize)]` | Skip auto-generated Serialize impl only |
-| `#[tide(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
+| `#[tideorm(table = "name")]` | Custom table name |
+| `#[tideorm(skip_derives)]` | Skip auto-generated Debug, Clone, Serialize, Deserialize |
+| `#[tideorm(skip_debug)]` | Skip auto-generated Debug impl only |
+| `#[tideorm(skip_clone)]` | Skip auto-generated Clone impl only |
+| `#[tideorm(skip_serialize)]` | Skip auto-generated Serialize impl only |
+| `#[tideorm(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
@@ -455,12 +450,12 @@ impl Clone for Product { /* custom impl */ }
 
 | Attribute | Description |
 |-----------|-------------|
-| `#[tide(primary_key)]` | Mark as primary key |
-| `#[tide(auto_increment)]` | Auto-increment field |
-| `#[tide(nullable)]` | Optional/nullable field |
-| `#[tide(column = "name")]` | Custom column name |
-| `#[tide(default = "value")]` | Default value |
-| `#[tide(skip)]` | Skip field in queries |
+| `#[tideorm(primary_key)]` | Mark as primary key |
+| `#[tideorm(auto_increment)]` | Auto-increment field |
+| `#[tideorm(nullable)]` | Optional/nullable field |
+| `#[tideorm(column = "name")]` | Custom column name |
+| `#[tideorm(default = "value")]` | Default value |
+| `#[tideorm(skip)]` | Skip field in queries |
 
 ---
 
@@ -473,51 +468,48 @@ TideORM supports SeaORM-style relations defined as struct fields. Relations are 
 ```rust
 use tideorm::prelude::*;
 
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub email: String,
     
     // One-to-one: User has one Profile
-    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
     
     // One-to-many: User has many Posts
-    #[tide(has_many = "Post", foreign_key = "user_id")]
+    #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
 }
 
-#[tideorm::model]
-#[tide(table = "profiles")]
+#[tideorm::model(table = "profiles")]
 pub struct Profile {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub bio: String,
     
     // Inverse: Profile belongs to User
-    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub user: BelongsTo<User>,
 }
 
-#[tideorm::model]
-#[tide(table = "posts")]
+#[tideorm::model(table = "posts")]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub title: String,
     pub content: String,
     
     // Inverse: Post belongs to User
-    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub author: BelongsTo<User>,
     
     // One-to-many: Post has many Comments
-    #[tide(has_many = "Comment", foreign_key = "post_id")]
+    #[tideorm(has_many = "Comment", foreign_key = "post_id")]
     pub comments: HasMany<Comment>,
 }
 ```
@@ -588,30 +580,27 @@ let profile = user.profile.load_with(|query| {
 ### Many-to-Many Relations
 
 ```rust
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     
     // Many-to-many: User has many Roles through user_roles pivot table
-    #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+    #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
-#[tideorm::model]
-#[tide(table = "roles")]
+#[tideorm::model(table = "roles")]
 pub struct Role {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
 }
 
-#[tideorm::model]
-#[tide(table = "user_roles")]
+#[tideorm::model(table = "user_roles")]
 pub struct UserRole {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub role_id: i64,
@@ -643,20 +632,18 @@ user.roles.sync(vec![
 use tideorm::prelude::*;
 
 // Images can belong to Posts or Videos (polymorphic)
-#[tideorm::model]
-#[tide(table = "images")]
+#[tideorm::model(table = "images")]
 pub struct Image {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub path: String,
     pub imageable_type: String,  // "posts" or "videos"
     pub imageable_id: i64,
 }
 
-#[tideorm::model]
-#[tide(table = "posts")]
+#[tideorm::model(table = "posts")]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
     
@@ -1257,10 +1244,9 @@ TideConfig::init()
 TideORM supports soft deletes for models that have a `deleted_at` column:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "posts", soft_delete)]
+#[tideorm::model(table = "posts", soft_delete)]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
     pub deleted_at: Option<DateTime<Utc>>,
@@ -1377,10 +1363,9 @@ If it returns `Err` or panics, the transaction is rolled back.
 automatically manages `created_at` and `updated_at` fields:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "posts")]
+#[tideorm::model(table = "posts")]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
     pub content: String,
@@ -1411,10 +1396,9 @@ Implement lifecycle callbacks for your models:
 ```rust
 use tideorm::callbacks::Callbacks;
 
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub password_hash: String,
@@ -1498,12 +1482,11 @@ tideorm = { version = "0.7.3", features = ["postgres", "attachments"] }
 ### Model Setup
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products")]
-#[tide(has_one_file = "thumbnail")]
-#[tide(has_many_files = "images,documents")]
+#[tideorm::model(table = "products")]
+#[tideorm(has_one_file = "thumbnail")]
+#[tideorm(has_many_files = "images,documents")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub files: Option<Json>,  // JSONB column storing attachments
@@ -1749,11 +1732,10 @@ TideConfig::init()
 Override the URL generator for specific models:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products")]
-#[tide(has_one_file = "thumbnail")]
+#[tideorm::model(table = "products")]
+#[tideorm(has_one_file = "thumbnail")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub files: Option<Json>,
@@ -1835,11 +1817,10 @@ tideorm = { version = "0.7.3", features = ["postgres", "translations"] }
 ### Model Setup
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products")]
-#[tide(translatable = "name,description")]
+#[tideorm::model(table = "products")]
+#[tideorm(translatable = "name,description")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     
     // Default/fallback values
@@ -2016,13 +1997,12 @@ Translations are stored in JSONB with this structure:
 Models can use both features together:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "products")]
-#[tide(translatable = "name,description")]
-#[tide(has_one_file = "thumbnail")]
-#[tide(has_many_files = "images")]
+#[tideorm::model(table = "products")]
+#[tideorm(translatable = "name,description")]
+#[tideorm(has_one_file = "thumbnail")]
+#[tideorm(has_many_files = "images")]
 pub struct Product {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub description: String,
@@ -2156,15 +2136,15 @@ TideORM provides secure tokenization for record IDs, converting them to encrypte
 
 ### Tokenization Quick Start
 
-Enable tokenization with the `#[tide(tokenize)]` attribute:
+Enable tokenization with the `#[tideorm(tokenize)]` attribute:
 
 ```rust
 use tideorm::prelude::*;
 
 #[derive(Model)]
-#[tide(table = "users", tokenize)]  // Enable tokenization
+#[tideorm(table = "users", tokenize)]  // Enable tokenization
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub name: String,
@@ -2187,7 +2167,7 @@ assert_eq!(user.id, same_user.id);
 
 ### Tokenization Methods
 
-When a model has `#[tide(tokenize)]`, these methods are available:
+When a model has `#[tideorm(tokenize)]`, these methods are available:
 
 | Method | Description |
 |--------|-------------|
@@ -2205,11 +2185,11 @@ Tokens are bound to their model type. A User token cannot decode a Product:
 
 ```rust
 #[derive(Model)]
-#[tide(table = "users", tokenize)]
+#[tideorm(table = "users", tokenize)]
 pub struct User { /* ... */ }
 
 #[derive(Model)]
-#[tide(table = "products", tokenize)]
+#[tideorm(table = "products", tokenize)]
 pub struct Product { /* ... */ }
 
 // Same ID, different tokens
@@ -2245,9 +2225,9 @@ For custom tokenization logic, implement the `Tokenizable` trait manually:
 use tideorm::tokenization::{Tokenizable, TokenEncoder, TokenDecoder};
 
 #[derive(Model)]
-#[tide(table = "documents")]
+#[tideorm(table = "documents")]
 pub struct Document {
-    #[tide(primary_key)]
+    #[tideorm(primary_key)]
     pub id: i64,
     pub title: String,
 }
@@ -2694,10 +2674,9 @@ Compile-time type safety for column operations. The compiler catches type mismat
 When you define a model with `#[tideorm::model]`, typed columns are automatically generated as an attribute on the model:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub age: Option<i32>,
@@ -2804,20 +2783,19 @@ All these methods accept both `"column_name"` (string) and `Model::columns.field
 Support for hierarchical data like org charts, categories, or comment threads:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "employees")]
+#[tideorm::model(table = "employees")]
 pub struct Employee {
-    #[tide(primary_key)]
+    #[tideorm(primary_key)]
     pub id: i64,
     pub name: String,
     pub manager_id: Option<i64>,
     
     // Parent reference (manager)
-    #[tide(self_ref = "id", foreign_key = "manager_id")]
+    #[tideorm(self_ref = "id", foreign_key = "manager_id")]
     pub manager: SelfRef<Employee>,
     
     // Children reference (direct reports)
-    #[tide(self_ref_many = "id", foreign_key = "manager_id")]
+    #[tideorm(self_ref_many = "id", foreign_key = "manager_id")]
     pub reports: SelfRefMany<Employee>,
 }
 

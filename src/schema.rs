@@ -30,7 +30,7 @@
 //!
 //! ```ignore
 //! #[derive(Model)]
-//! #[tide(
+//! #[tideorm(
 //!     table = "users",
 //!     index = "email;name:first_name,last_name",
 //!     unique_index = "tenant_id,email"

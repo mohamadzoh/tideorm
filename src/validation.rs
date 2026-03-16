@@ -26,9 +26,9 @@
 //! use tideorm::validation::{Validate, ValidationRule};
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     
 //!     #[validate(email)]

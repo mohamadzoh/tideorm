@@ -578,17 +578,17 @@ mod self_referencing {
         // API usage example (would require database):
         //
         // #[tideorm::model]
-        // #[tide(table = "employees")]
+        // #[tideorm(table = "employees")]
         // struct Employee {
-        //     #[tide(primary_key)]
+        //     #[tideorm(primary_key)]
         //     id: i64,
         //     name: String,
         //     manager_id: Option<i64>,
         //
-        //     #[tide(self_ref = "id", foreign_key = "manager_id")]
+        //     #[tideorm(self_ref = "id", foreign_key = "manager_id")]
         //     manager: SelfRef<Employee>,
         //
-        //     #[tide(self_ref_many = "id", foreign_key = "manager_id")]
+        //     #[tideorm(self_ref_many = "id", foreign_key = "manager_id")]
         //     reports: SelfRefMany<Employee>,
         // }
         //

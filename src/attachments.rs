@@ -11,16 +11,16 @@
 //!
 //! ## Setup
 //!
-//! Add a `files` JSONB column to your table and use the `#[tide(has_one_file)]` or
-//! `#[tide(has_many_files)]` attributes:
+//! Add a `files` JSONB column to your table and use the `#[tideorm(has_one_file)]` or
+//! `#[tideorm(has_many_files)]` attributes:
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "products")]
-//! #[tide(has_one_file = "thumbnail")]
-//! #[tide(has_many_files = "images,documents")]
+//! #[tideorm(table = "products")]
+//! #[tideorm(has_one_file = "thumbnail")]
+//! #[tideorm(has_many_files = "images,documents")]
 //! pub struct Product {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub name: String,
 //!     pub files: Option<Json>,  // JSONB column storing attachments

@@ -31,16 +31,16 @@
 //! use tideorm::types::{Encrypted, Hashed, CommaSeparated};
 //!
 //! #[derive(Model)]
-//! #[tide(table = "users")]
+//! #[tideorm(table = "users")]
 //! pub struct User {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub email: String,
-//!     #[tide(cast = "encrypted")]
+//!     #[tideorm(cast = "encrypted")]
 //!     pub ssn: Encrypted<String>,
-//!     #[tide(cast = "hashed")]
+//!     #[tideorm(cast = "hashed")]
 //!     pub password: Hashed,
-//!     #[tide(cast = "comma_separated")]
+//!     #[tideorm(cast = "comma_separated")]
 //!     pub tags: CommaSeparated<String>,
 //! }
 //! ```
@@ -92,9 +92,9 @@ pub type JsonArray = Vec<serde_json::Value>;
 /// use tideorm::types::UnixTimestamp;
 ///
 /// #[derive(Model)]
-/// #[tide(table = "events")]
+/// #[tideorm(table = "events")]
 /// pub struct Event {
-///     #[tide(primary_key)]
+///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub created_at: UnixTimestamp,  // Stored as INTEGER in DB
 /// }
@@ -193,9 +193,9 @@ impl fmt::Display for UnixTimestamp {
 /// use tideorm::types::UnixTimestampMillis;
 ///
 /// #[derive(Model)]
-/// #[tide(table = "events")]
+/// #[tideorm(table = "events")]
 /// pub struct Event {
-///     #[tide(primary_key)]
+///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub created_at: UnixTimestampMillis,  // Stored as BIGINT in DB
 /// }
@@ -513,7 +513,7 @@ pub trait AttributeCaster<T>: Sized {
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
-///     #[tide(cast = "encrypted")]
+///     #[tideorm(cast = "encrypted")]
 ///     pub ssn: Encrypted<String>,
 /// }
 /// ```
@@ -599,7 +599,7 @@ impl<T: Default> Default for Encrypted<T> {
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
-///     #[tide(cast = "hashed")]
+///     #[tideorm(cast = "hashed")]
 ///     pub password: Hashed,
 /// }
 ///
@@ -704,7 +704,7 @@ impl<'de> Deserialize<'de> for Hashed {
 /// ```rust,ignore
 /// #[derive(Model)]
 /// pub struct User {
-///     #[tide(cast = "comma_separated")]
+///     #[tideorm(cast = "comma_separated")]
 ///     pub tags: CommaSeparated<String>,
 /// }
 ///

@@ -17,9 +17,9 @@ use test_config::{should_run_sqlite_tests, sqlite_database_url};
 // =============================================================================
 
 #[derive(Model, PartialEq)]
-#[tide(table = "test_users")]
+#[tideorm(table = "test_users")]
 pub struct TestUser {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub name: String,
@@ -27,10 +27,9 @@ pub struct TestUser {
     pub active: bool,
 }
 
-#[tideorm::model]
-#[tide(table = "test_posts")]
+#[tideorm::model(table = "test_posts")]
 pub struct TestPost {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub title: String,
@@ -38,22 +37,20 @@ pub struct TestPost {
     pub published: bool,
 }
 
-#[tideorm::model]
-#[tide(table = "test_products")]
+#[tideorm::model(table = "test_products")]
 pub struct TestProduct {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub category: String,
     pub price: i64,
-    #[tide(nullable)]
+    #[tideorm(nullable)]
     pub metadata: Option<serde_json::Value>,
 }
 
-#[tideorm::model]
-#[tide(table = "test_soft_deletes", soft_delete)]
+#[tideorm::model(table = "test_soft_deletes", soft_delete)]
 pub struct TestSoftDelete {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,

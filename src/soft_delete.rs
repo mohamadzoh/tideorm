@@ -11,9 +11,9 @@
 //! use tideorm::SoftDelete;
 //!
 //! #[derive(Model)]
-//! #[tide(table = "posts", soft_delete)]
+//! #[tideorm(table = "posts", soft_delete)]
 //! pub struct Post {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub title: String,
 //!     pub deleted_at: Option<DateTime<Utc>>,

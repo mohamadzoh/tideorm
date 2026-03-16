@@ -10,9 +10,9 @@ use crate::fulltext::{FullTextSearchBuilder, SearchMode};
 use crate::internal::Value;
 
 #[derive(tideorm::Model)]
-#[tide(table = "query_test_users")]
+#[tideorm(table = "query_test_users")]
 struct QueryTestUser {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
 }

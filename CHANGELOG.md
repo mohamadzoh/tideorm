@@ -175,7 +175,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Note: The original tokenization implementation described below was replaced in 0.7.2 by XChaCha20-Poly1305 authenticated encryption with randomized nonces. These notes remain here as historical release context.
 
-- **New `#[tide(tokenize)]` attribute**: Enable tokenization on any model with a single attribute
+- **New `#[tideorm(tokenize)]` attribute**: Enable tokenization on any model with a single attribute
 - **Secure ID encryption**: Convert record IDs to encrypted, URL-safe tokens via `Tokenizable` trait
 - **Model-specific tokens**: Tokens include model name in HMAC, preventing cross-model token reuse
 - **Tamper detection**: HMAC verification ensures tokens haven't been modified
@@ -199,9 +199,9 @@ Note: The original tokenization implementation described below was replaced in 0
 use tideorm::prelude::*;
 
 #[derive(Model)]
-#[tide(table = "users", tokenize)]  // Just add `tokenize` here!
+#[tideorm(table = "users", tokenize)]  // Just add `tokenize` here!
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
 }
@@ -374,7 +374,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 
 #### Soft Deletes
 
-- `#[tide(soft_delete)]` attribute
+- `#[tideorm(soft_delete)]` attribute
 - `with_trashed()` - Include soft-deleted records
 - `only_trashed()` - Only soft-deleted records
 - Manual restore via setting `deleted_at = None`
@@ -407,17 +407,17 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - `to_json()` - Convert model to JSON
 - `collection_to_json()` - Convert collection to JSON array
 - `to_hash_map()` - Convert to HashMap
-- `#[tide(hidden = "field1,field2")]` - Hide fields from JSON output
+- `#[tideorm(hidden = "field1,field2")]` - Hide fields from JSON output
 
 #### Configuration
 
-- `#[tide(table = "name")]` - Custom table name
-- `#[tide(primary_key)]` - Mark primary key
-- `#[tide(auto_increment)]` - Auto-increment field
-- `#[tide(searchable = "fields")]` - Searchable fields
-- `#[tide(translatable = "fields")]` - Translatable fields
-- `#[tide(has_one_files = "field")]` - Single file attachment config
-- `#[tide(has_many_files = "fields")]` - Multiple file attachments config
+- `#[tideorm(table = "name")]` - Custom table name
+- `#[tideorm(primary_key)]` - Mark primary key
+- `#[tideorm(auto_increment)]` - Auto-increment field
+- `#[tideorm(searchable = "fields")]` - Searchable fields
+- `#[tideorm(translatable = "fields")]` - Translatable fields
+- `#[tideorm(has_one_files = "field")]` - Single file attachment config
+- `#[tideorm(has_many_files = "fields")]` - Multiple file attachments config
 
 #### Raw SQL
 

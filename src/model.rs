@@ -20,7 +20,7 @@ use std::collections::HashMap;
 /// # Example (in macro)
 /// ```ignore
 /// #[derive(Model)]
-/// #[tide(
+/// #[tideorm(
 ///     table = "users",
 ///     index = "email;name:first_name,last_name",
 ///     unique_index = "tenant_id,email"
@@ -279,7 +279,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     ///
     /// Override this in the macro to define indexes:
     /// ```ignore
-    /// #[tide(index = "email;name:first_name,last_name")]
+    /// #[tideorm(index = "email;name:first_name,last_name")]
     /// ```
     fn indexes() -> Vec<IndexDefinition> {
         vec![]
@@ -289,7 +289,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     ///
     /// Override this in the macro to define unique indexes:
     /// ```ignore
-    /// #[tide(unique_index = "tenant_id,email")]
+    /// #[tideorm(unique_index = "tenant_id,email")]
     /// ```
     fn unique_indexes() -> Vec<IndexDefinition> {
         vec![]
@@ -313,16 +313,16 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     /// Check if tokenization is enabled for this model
     ///
-    /// Override this to enable tokenization via `#[tide(tokenize)]` attribute.
+    /// Override this to enable tokenization via `#[tideorm(tokenize)]` attribute.
     /// When enabled, the model will have `to_token()` and `from_token()` methods.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// #[derive(Model)]
-    /// #[tide(table = "users", tokenize)]
+    /// #[tideorm(table = "users", tokenize)]
     /// pub struct User {
-    ///     #[tide(primary_key)]
+    ///     #[tideorm(primary_key)]
     ///     pub id: i64,
     ///     pub email: String,
     /// }
@@ -1055,7 +1055,7 @@ pub trait Model:
         serde_json::Value::Array(items)
     }
 
-    /// Convert model to HashMap (legacy support)
+    /// Convert model to HashMap
     fn to_hash_map(&self) -> HashMap<String, String>
     where
         Self: serde::Serialize,
@@ -2315,7 +2315,7 @@ impl<M: Model> Default for BatchUpdateBuilder<M> {
 /// // Define models
 /// #[derive(Model)]
 /// struct User {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     id: i64,
 ///     name: String,
 ///     email: String,
@@ -2323,7 +2323,7 @@ impl<M: Model> Default for BatchUpdateBuilder<M> {
 ///
 /// #[derive(Model)]
 /// struct Post {
-///     #[tide(primary_key, auto_increment)]
+///     #[tideorm(primary_key, auto_increment)]
 ///     id: i64,
 ///     user_id: i64,
 ///     title: String,

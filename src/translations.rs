@@ -17,14 +17,14 @@
 //!
 //! ## Setup
 //!
-//! Add a `translations` JSONB column to your table and use the `#[tide(translatable)]` attribute:
+//! Add a `translations` JSONB column to your table and use the `#[tideorm(translatable)]` attribute:
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "products")]
-//! #[tide(translatable = "name,description")]
+//! #[tideorm(table = "products")]
+//! #[tideorm(translatable = "name,description")]
 //! pub struct Product {
-//!     #[tide(primary_key, auto_increment)]
+//!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     
 //!     // Default/fallback values stored directly on the model

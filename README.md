@@ -36,7 +36,7 @@ See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
 
 ## Features
 
-- **Clean Model Definitions** - Simple `#[tideorm::model]` attribute macro
+- **Clean Model Definitions** - Simple `#[tideorm::model(table = "...")]` attribute macro
 - **SeaORM-Style Relations** - Define relations as struct fields
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development
@@ -49,32 +49,30 @@ See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
 ```rust
 use tideorm::prelude::*;
 
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub name: String,
     pub active: bool,
     
     // Relations defined as struct fields
-    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
     
-    #[tide(has_many = "Post", foreign_key = "user_id")]
+    #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
 }
 
-#[tideorm::model]
-#[tide(table = "posts")]
+#[tideorm::model(table = "posts")]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub title: String,
     
-    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub author: BelongsTo<User>,
 }
 
@@ -137,36 +135,34 @@ Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideO
 TideORM supports SeaORM-style relations defined as struct fields:
 
 ```rust
-#[tideorm::model]
-#[tide(table = "users")]
+#[tideorm::model(table = "users")]
 pub struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     
     // One-to-one: User has one Profile
-    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
     
     // One-to-many: User has many Posts
-    #[tide(has_many = "Post", foreign_key = "user_id")]
+    #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
     
     // Many-to-many through pivot table
-    #[tide(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+    #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
-#[tideorm::model]
-#[tide(table = "posts")]
+#[tideorm::model(table = "posts")]
 pub struct Post {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub user_id: i64,
     pub title: String,
     
     // Inverse relation: Post belongs to User
-    #[tide(belongs_to = "User", foreign_key = "user_id")]
+    #[tideorm(belongs_to = "User", foreign_key = "user_id")]
     pub author: BelongsTo<User>,
 }
 

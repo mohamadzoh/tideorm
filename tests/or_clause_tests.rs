@@ -446,9 +446,9 @@ mod integration_tests {
     use tideorm::prelude::*;
 
     #[derive(Model, Clone, Debug)]
-    #[tide(table = "or_test_users")]
+    #[tideorm(table = "or_test_users")]
     struct OrTestUser {
-        #[tide(primary_key, auto_increment)]
+        #[tideorm(primary_key, auto_increment)]
         pub id: i64,
         pub name: String,
         pub role: String,
@@ -854,9 +854,9 @@ mod fluent_or_integration_tests {
 
     // Test model for OR clause integration tests
     #[derive(Model, PartialEq)]
-    #[tide(table = "or_test_users")]
+    #[tideorm(table = "or_test_users")]
     pub struct OrTestUser {
-        #[tide(primary_key, auto_increment)]
+        #[tideorm(primary_key, auto_increment)]
         pub id: i64,
         pub name: String,
         pub email: String,

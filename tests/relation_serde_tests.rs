@@ -1,35 +1,35 @@
 use tideorm::{HasMany, HasOne, Model};
 
 #[derive(Model)]
-#[tide(table = "profiles")]
+#[tideorm(table = "profiles")]
 struct Profile {
-    #[tide(primary_key)]
+    #[tideorm(primary_key)]
     pub id: i64,
     pub user_id: i64,
     pub bio: String,
 }
 
 #[derive(Model)]
-#[tide(table = "posts")]
+#[tideorm(table = "posts")]
 struct Post {
-    #[tide(primary_key)]
+    #[tideorm(primary_key)]
     pub id: i64,
     pub user_id: i64,
     pub title: String,
 }
 
 #[derive(Model)]
-#[tide(table = "users")]
+#[tideorm(table = "users")]
 struct User {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub email: String,
     pub name: String,
 
-    #[tide(has_one = "Profile", foreign_key = "user_id")]
+    #[tideorm(has_one = "Profile", foreign_key = "user_id")]
     pub profile: HasOne<Profile>,
 
-    #[tide(has_many = "Post", foreign_key = "user_id")]
+    #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
 }
 

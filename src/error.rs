@@ -595,7 +595,7 @@ impl Error {
                     "Tokenization failed: {}\n\
                      Ensure:\n\
                      1. An encryption key is configured via TideConfig::encryption_key()\n\
-                     2. The model has tokenization enabled via #[tide(tokenize)]\n\
+                     2. The model has tokenization enabled via #[tideorm(tokenize)]\n\
                      3. The record has a valid primary key",
                     message
                 )

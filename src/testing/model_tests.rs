@@ -1,17 +1,17 @@
 use crate::model::Model;
 
 #[derive(tideorm::Model)]
-#[tide(table = "model_test_users")]
+#[tideorm(table = "model_test_users")]
 struct AutoIncrementModel {
-    #[tide(primary_key, auto_increment)]
+    #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
 }
 
 #[derive(tideorm::Model)]
-#[tide(table = "model_test_tokens")]
+#[tideorm(table = "model_test_tokens")]
 struct NaturalKeyModel {
-    #[tide(primary_key)]
+    #[tideorm(primary_key)]
     id: String,
 }
 

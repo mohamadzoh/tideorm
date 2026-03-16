@@ -163,9 +163,6 @@ pub use tideorm_macros::Model;
 // Attribute macro
 pub use tideorm_macros::model;
 
-// Relation attribute macros
-pub use tideorm_macros::{belongs_to, has_many, has_one};
-
 // Common external types users will need
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::{Value as JsonValue, json};

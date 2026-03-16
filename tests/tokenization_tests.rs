@@ -10,9 +10,9 @@
 //!
 //! ```rust,ignore
 //! #[derive(Model)]
-//! #[tide(table = "users", tokenize)]  // <-- Just add `tokenize` here!
+//! #[tideorm(table = "users", tokenize)]  // <-- Just add `tokenize` here!
 //! pub struct User {
-//!     #[tide(primary_key)]
+//!     #[tideorm(primary_key)]
 //!     pub id: i64,
 //!     pub name: String,
 //! }
@@ -256,7 +256,7 @@ mod tokenizable_trait_tests {
     use tideorm::tokenization::Tokenizable;
 
     // Manual implementation of Tokenizable for testing (without database).
-    // In real apps, just use `#[tide(tokenize)]` on your model - no manual impl needed!
+    // In real apps, just use `#[tideorm(tokenize)]` on your model - no manual impl needed!
     struct TestUser {
         id: i64,
     }
