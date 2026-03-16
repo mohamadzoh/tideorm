@@ -1090,8 +1090,9 @@ impl TideConfig {
     /// Set the encryption key for record tokenization
     ///
     /// This key is used to encrypt/decrypt record IDs when generating tokens.
-    /// The key should be at least 32 bytes for security. Keep this key secret
-    /// and consistent - changing it will invalidate existing tokens.
+    /// TideORM derives the encryption material used by the default authenticated
+    /// token encoder from this secret. Keep it secret and consistent; changing
+    /// it will invalidate existing tokens.
     ///
     /// # Security Warning
     ///
@@ -1107,13 +1108,13 @@ impl TideConfig {
     ///
     /// TideConfig::init()
     ///     .database("postgres://localhost/mydb")
-    ///     .encryption_key(&key)  // At least 32 characters
+    ///     .encryption_key(&key)  // High-entropy secret, 32+ chars recommended
     ///     .connect()
     ///     .await?;
     ///
     /// // Now tokenization uses this key
     /// let user = User::find(1).await?;
-    /// let token = user.to_token()?;  // Encrypted with your key
+    /// let token = user.to_token()?;  // Authenticated and encoded with your key
     /// ```
     pub fn encryption_key(mut self, key: &str) -> Self {
         self.encryption_key = Some(key.to_string());

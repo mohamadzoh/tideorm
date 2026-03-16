@@ -462,7 +462,7 @@ mod fulltext_tests {
         assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
         assert!(sqls[0].contains("articles_fts"));
         assert!(sqls[0].contains("fts5"));
-        assert!(sqls[0].contains("title, content"));
+        assert!(sqls[0].contains("\"title\", \"content\""));
 
         // Insert trigger
         assert!(sqls[1].contains("AFTER INSERT"));

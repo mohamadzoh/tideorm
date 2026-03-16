@@ -25,10 +25,10 @@ tideorm ui
 ```
 
 TideORM Studio provides a visual interface for:
-- 🏗️ Model generation with all options
-- 📦 Migration management
-- 🌱 Database seeding
-- ⚡ Interactive SQL query playground
+- Model generation with all options
+- Migration management
+- Database seeding
+- Interactive SQL query playground
 
 See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
 
@@ -46,7 +46,7 @@ See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
   - Fluent Query Builder with Window Functions & CTEs
   - Database Migrations & Seeding
   - Model Validation System
-  - Record Tokenization (secure ID encryption)
+    - Record Tokenization (authenticated, URL-safe ID tokens)
   - Translations (i18n) for multilingual content
   - File Attachments with metadata
   - Full-Text Search with highlighting
@@ -98,7 +98,6 @@ async fn main() -> tideorm::Result<()> {
 
     // Create
     let user = User {
-        id: 0,
         email: "john@example.com".into(),
         name: "John Doe".into(),
         active: true,
@@ -129,6 +128,8 @@ async fn main() -> tideorm::Result<()> {
     let profile = user.profile.load().await?;
 
     // Update
+
+Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
     let mut user = User::find(1).await?.unwrap();
     user.name = "Jane Doe".into();
     user.update().await?;
@@ -203,13 +204,13 @@ let recent_posts = user.posts.load_with(|q| {
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.7.2", features = ["postgres"] }
+tideorm = { version = "0.7.3", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.7.2", features = ["mysql"] }
+tideorm = { version = "0.7.3", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.7.2", features = ["sqlite"] }
+tideorm = { version = "0.7.3", features = ["sqlite"] }
 ```
 
 ### Feature Flags
@@ -298,13 +299,22 @@ See the [tideorm-examples README](https://github.com/mohamadzoh/tideorm-examples
 
 ## Testing
 
-Run tests:
+TideORM ships with unit, integration, and feature-specific test coverage. The repository CI runs `cargo check` plus `cargo test --lib` across PostgreSQL, MySQL, and SQLite feature sets.
+
+Common local commands:
 
 ```bash
+# Fast library validation
+cargo test --lib
+
+# Full suite for a backend feature set
 cargo test --features postgres
+
+# Cross-backend compile/test coverage
+cargo test --all-features
 ```
 
-See [DOCUMENTATION.md](DOCUMENTATION.md#examples) for more.
+See [DOCUMENTATION.md](DOCUMENTATION.md#testing) for more.
 
 ## Rusty Rails Project
 

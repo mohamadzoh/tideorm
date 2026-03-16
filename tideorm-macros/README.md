@@ -12,7 +12,7 @@ This crate is typically used as a dependency of the main `tideorm` crate. If you
 
 ```toml
 [dependencies]
-tideorm-macros = "0.7.2"
+tideorm-macros = "0.7.3"
 ```
 
 ## Usage

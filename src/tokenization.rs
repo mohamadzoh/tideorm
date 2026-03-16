@@ -6,18 +6,19 @@
 //!
 //! ## Features
 //!
-//! - **Secure encryption**: Uses XOR encryption with HMAC verification
+//! - **Secure encryption**: Uses XChaCha20-Poly1305 authenticated encryption
 //! - **Configurable at multiple levels**: Global (TideConfig), Model-specific, or default
 //! - **Override priority**: Model → TideConfig → Default
-//! - **Tamper detection**: HMAC ensures token integrity
+//! - **Tamper detection**: Authenticated encryption rejects modified tokens
 //! - **URL-safe encoding**: Base64-URL encoding for safe use in URLs
 //! - **Model-specific tokens**: Tokens are bound to model type (User token ≠ Product token)
+//! - **Randomized tokens**: The default encoder uses a fresh nonce for every token
 //!
 //! ## Configuration Hierarchy
 //!
 //! 1. **Model-level** - Override `token_encoder()`/`token_decoder()` in `Tokenizable`
 //! 2. **TideConfig-level** - Set via `TokenConfig::set_encoder()` / `TokenConfig::set_decoder()`
-//! 3. **Default** - Built-in XOR encryption using the configured encryption key
+//! 3. **Default** - Built-in authenticated encryption using the configured encryption key
 //!
 //! ## Quick Start with Derive Macro
 //!
@@ -97,7 +98,7 @@
 //! | `User::detokenize(&token)` | Decode token to ID (doesn't fetch from DB) |
 //! | `User::decode_token(&token)` | Alias for `detokenize()` |
 //! | `User::from_token(&token).await` | Decode token and fetch record from DB |
-//! | `user.regenerate_token()` | Generate a new token (same as tokenize) |
+//! | `user.regenerate_token()` | Generate a fresh token; default encoding uses a new random nonce |
 //!
 //! ## Custom Encoder/Decoder
 //!
@@ -131,12 +132,18 @@
 //!
 //! ## Security Notes
 //!
-//! - Use a secure 32+ character encryption key in production
+//! - Use a high-entropy secret in production; 32+ characters is a good baseline
 //! - Store keys in environment variables, never hardcode in source
 //! - Changing the encryption key invalidates all existing tokens
 //! - Tokens are model-specific: a User token cannot decode a Product
+//! - The same record may produce different valid tokens with the default encoder
 
 use std::sync::OnceLock;
+
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use rand::random;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -296,50 +303,10 @@ impl TokenConfig {
 // ENCRYPTION UTILITIES
 // =============================================================================
 
-/// XOR-based encryption with key stretching (simple but effective)
-///
-/// This provides a basic level of encryption suitable for tokenization.
-/// For production use with sensitive data, consider using proper encryption libraries.
-fn xor_encrypt(data: &[u8], key: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
-    for (i, &byte) in data.iter().enumerate() {
-        result.push(byte ^ key[i % key.len()]);
-    }
-    result
-}
-
-/// Compute HMAC-like hash for integrity verification
-fn compute_hmac(data: &[u8], key: &[u8]) -> [u8; 8] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    key.hash(&mut hasher);
-    let hash = hasher.finish();
-    hash.to_be_bytes()
-}
-
-/// Generate a pseudo-random IV from the key and timestamp
-fn generate_iv(key: &[u8], model_name: &str) -> [u8; 16] {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    key.hash(&mut hasher);
-    model_name.hash(&mut hasher);
-    // Add some entropy from the record
-    let hash1 = hasher.finish();
-
-    let mut hasher2 = DefaultHasher::new();
-    hash1.hash(&mut hasher2);
-    key.iter().rev().collect::<Vec<_>>().hash(&mut hasher2);
-    let hash2 = hasher2.finish();
-
-    let mut iv = [0u8; 16];
-    iv[..8].copy_from_slice(&hash1.to_be_bytes());
-    iv[8..].copy_from_slice(&hash2.to_be_bytes());
-    iv
+fn derive_encryption_key(key: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(key.as_bytes());
+    hasher.finalize().into()
 }
 
 /// Base64-URL safe encoding (no padding)
@@ -401,42 +368,30 @@ fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
 // DEFAULT ENCODER/DECODER
 // =============================================================================
 
-/// Default token encoder using XOR encryption with HMAC
+/// Default token encoder using XChaCha20-Poly1305 authenticated encryption.
 ///
-/// Token format: base64url(iv || encrypted_data || hmac)
-/// - iv: 16 bytes - derived from key and model
-/// - encrypted_data: 8 bytes - XOR encrypted record ID
-/// - hmac: 8 bytes - integrity verification
+/// Token format: base64url(nonce || ciphertext)
+/// - nonce: 24 bytes - random nonce for XChaCha20-Poly1305
+/// - ciphertext: encrypted record ID plus authentication tag
 pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
     let key = TokenConfig::get_encryption_key();
-    let key_bytes = key.as_bytes();
+    let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
+    let nonce_bytes: [u8; 24] = random();
+    let nonce = XNonce::from_slice(&nonce_bytes);
 
-    // Generate IV based on key and model name
-    let iv = generate_iv(key_bytes, model_name);
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: &record_id.to_be_bytes(),
+                aad: model_name.as_bytes(),
+            },
+        )
+        .map_err(|_| Error::tokenization("Failed to encrypt token payload"))?;
 
-    // Convert record ID to bytes
-    let id_bytes = record_id.to_be_bytes();
-
-    // Create combined key from base key and IV
-    let mut combined_key = Vec::with_capacity(key_bytes.len() + iv.len());
-    combined_key.extend_from_slice(key_bytes);
-    combined_key.extend_from_slice(&iv);
-
-    // Encrypt the ID
-    let encrypted = xor_encrypt(&id_bytes, &combined_key);
-
-    // Compute HMAC
-    let mut hmac_data = Vec::new();
-    hmac_data.extend_from_slice(&iv);
-    hmac_data.extend_from_slice(&encrypted);
-    hmac_data.extend_from_slice(model_name.as_bytes());
-    let hmac = compute_hmac(&hmac_data, key_bytes);
-
-    // Combine: iv || encrypted || hmac
-    let mut token_data = Vec::with_capacity(32);
-    token_data.extend_from_slice(&iv);
-    token_data.extend_from_slice(&encrypted);
-    token_data.extend_from_slice(&hmac);
+    let mut token_data = Vec::with_capacity(24 + ciphertext.len());
+    token_data.extend_from_slice(&nonce_bytes);
+    token_data.extend_from_slice(&ciphertext);
 
     Ok(base64_url_encode(&token_data))
 }
@@ -444,46 +399,30 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
 /// Default token decoder
 pub fn default_decode(token: &str, model_name: &str) -> Option<i64> {
     let key = TokenConfig::get_encryption_key();
-    let key_bytes = key.as_bytes();
+    let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
 
-    // Decode base64
     let token_data = base64_url_decode(token)?;
 
-    // Check minimum length: 16 (iv) + 8 (data) + 8 (hmac) = 32
-    if token_data.len() < 32 {
+    if token_data.len() <= 24 {
         return None;
     }
 
-    // Extract parts
-    let iv = &token_data[0..16];
-    let encrypted = &token_data[16..24];
-    let provided_hmac = &token_data[24..32];
+    let nonce = XNonce::from_slice(&token_data[..24]);
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &token_data[24..],
+                aad: model_name.as_bytes(),
+            },
+        )
+        .ok()?;
 
-    // Verify HMAC
-    let mut hmac_data = Vec::new();
-    hmac_data.extend_from_slice(iv);
-    hmac_data.extend_from_slice(encrypted);
-    hmac_data.extend_from_slice(model_name.as_bytes());
-    let computed_hmac = compute_hmac(&hmac_data, key_bytes);
-
-    if provided_hmac != computed_hmac {
-        return None; // Tampered or wrong model
-    }
-
-    // Create combined key from base key and IV
-    let mut combined_key = Vec::with_capacity(key_bytes.len() + iv.len());
-    combined_key.extend_from_slice(key_bytes);
-    combined_key.extend_from_slice(iv);
-
-    // Decrypt
-    let decrypted = xor_encrypt(encrypted, &combined_key);
-
-    // Convert to i64
-    if decrypted.len() != 8 {
+    if plaintext.len() != 8 {
         return None;
     }
 
-    let id_bytes: [u8; 8] = decrypted.try_into().ok()?;
+    let id_bytes: [u8; 8] = plaintext.try_into().ok()?;
     Some(i64::from_be_bytes(id_bytes))
 }
 
@@ -643,9 +582,8 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Regenerate a new token for this record
     ///
-    /// Creates a fresh token. Note: With the default encoder,
-    /// tokens for the same record will be identical unless the
-    /// key or encoder changes.
+    /// Creates a fresh token. With the default encoder, tokens for the same
+    /// record differ because a new random nonce is used each time.
     ///
     /// # Example
     ///
@@ -653,7 +591,7 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// let user = User::find(42).await?;
     /// let token1 = user.to_token()?;
     /// let token2 = user.regenerate_token()?;
-    /// // With default encoder: token1 == token2
+    /// // With the default encoder: token1 != token2
     /// ```
     fn regenerate_token(&self) -> Result<String> {
         self.to_token()
@@ -791,22 +729,13 @@ mod tests {
     }
 
     #[test]
-    fn test_same_id_same_token() {
+    fn test_same_id_generates_different_tokens() {
         let token1 = default_encode(42, "User").unwrap();
         let token2 = default_encode(42, "User").unwrap();
 
-        assert_eq!(token1, token2);
-    }
-
-    #[test]
-    fn test_xor_encrypt_decrypt() {
-        let data = b"test data";
-        let key = b"secret key";
-
-        let encrypted = xor_encrypt(data, key);
-        let decrypted = xor_encrypt(&encrypted, key);
-
-        assert_eq!(data.to_vec(), decrypted);
+        assert_ne!(token1, token2);
+        assert_eq!(default_decode(&token1, "User"), Some(42));
+        assert_eq!(default_decode(&token2, "User"), Some(42));
     }
 
     #[test]

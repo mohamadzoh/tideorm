@@ -77,7 +77,6 @@ pub enum Error {
         /// Description of what was not found
         message: String,
         /// Optional table name for context
-        #[source]
         context: Option<ErrorContext>,
     },
 
@@ -94,7 +93,6 @@ pub enum Error {
         /// Details about the query failure
         message: String,
         /// Optional context about the query
-        #[source]
         context: Option<ErrorContext>,
     },
 
@@ -218,8 +216,6 @@ impl std::fmt::Display for ErrorContext {
         write!(f, "{}", parts.join(", "))
     }
 }
-
-impl std::error::Error for ErrorContext {}
 
 impl ErrorContext {
     /// Create a new error context
@@ -757,6 +753,7 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as StdError;
 
     #[test]
     fn test_error_suggestions() {
@@ -895,5 +892,16 @@ mod tests {
         let err = Error::query("test");
         assert!(err.is_query_error());
         assert!(!err.is_not_found());
+    }
+
+    #[test]
+    fn test_error_context_is_not_reported_as_source() {
+        let err = Error::query_with_context(
+            "syntax error",
+            ErrorContext::new().table("users").query("SELECT * FROM users WHERE"),
+        );
+
+        assert!(StdError::source(&err).is_none());
+        assert!(err.context().is_some());
     }
 }

@@ -45,7 +45,7 @@ use std::marker::PhantomData;
 use crate::config::DatabaseType;
 use crate::database::try_db;
 use crate::error::{Error, Result};
-use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
+use crate::internal::{ConnectionTrait, FromQueryResult, Statement, Value};
 use crate::model::Model;
 
 // =============================================================================
@@ -411,10 +411,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
     {
         let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
         let db_type = db.backend();
-        let sql = self.build_sql(db_type)?;
+        let (sql, params) = self.build_sql(db_type)?;
 
         let backend = db.__internal_backend();
-        let statement = Statement::from_string(backend, sql);
+        let statement = Statement::from_sql_and_values(backend, &sql, params);
 
         let results = db
             .__internal_connection()
@@ -439,10 +439,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
     {
         let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
         let db_type = db.backend();
-        let sql = self.build_ranked_sql(db_type)?;
+        let (sql, params) = self.build_ranked_sql(db_type)?;
 
         let backend = db.__internal_backend();
-        let statement = Statement::from_string(backend, sql);
+        let statement = Statement::from_sql_and_values(backend, &sql, params);
 
         let results = db
             .__internal_connection()
@@ -476,10 +476,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn count(self) -> Result<u64> {
         let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
         let db_type = db.backend();
-        let sql = self.build_count_sql(db_type)?;
+        let (sql, params) = self.build_count_sql(db_type)?;
 
         let backend = db.__internal_backend();
-        let statement = Statement::from_string(backend, sql);
+        let statement = Statement::from_sql_and_values(backend, &sql, params);
 
         let result = db
             .__internal_connection()
@@ -496,7 +496,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     }
 
     /// Build the SQL query for the current database type
-    fn build_sql(&self, db_type: DatabaseType) -> Result<String> {
+    pub(crate) fn build_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_sql(),
@@ -505,7 +505,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     }
 
     /// Build ranked SQL query
-    fn build_ranked_sql(&self, db_type: DatabaseType) -> Result<String> {
+    pub(crate) fn build_ranked_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_ranked_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_ranked_sql(),
@@ -514,7 +514,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     }
 
     /// Build count SQL query
-    fn build_count_sql(&self, db_type: DatabaseType) -> Result<String> {
+    pub(crate) fn build_count_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
         match db_type {
             DatabaseType::Postgres => self.build_postgres_count_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_count_sql(),
@@ -526,21 +526,18 @@ impl<T: Model> FullTextSearchBuilder<T> {
     // POSTGRESQL IMPLEMENTATION
     // =========================================================================
 
-    fn build_postgres_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_postgres_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let language = self.config.language.as_deref().unwrap_or("english");
+        let mut params = Vec::new();
 
         // Build tsvector expression for columns
         let tsvector_expr = self.build_pg_tsvector_expr(language);
 
         // Build tsquery based on search mode
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &escaped_query);
+        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
 
-        let mut sql = format!(
-            "SELECT * FROM \"{}\" WHERE {} @@ {}",
-            table, tsvector_expr, tsquery_expr
-        );
+        let mut sql = format!("SELECT * FROM {} WHERE {} @@ {}", table, tsvector_expr, tsquery_expr);
 
         if self.with_ranking {
             let weights = self
@@ -550,7 +547,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 .map(|w| w.to_pg_array())
                 .unwrap_or_else(|| "'{0.1,0.2,0.4,1.0}'".to_string());
             sql = format!(
-                "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM \"{}\" WHERE {} @@ {} ORDER BY _fts_rank DESC",
+                "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM {} WHERE {} @@ {} ORDER BY _fts_rank DESC",
                 weights, tsvector_expr, tsquery_expr, table, tsvector_expr, tsquery_expr
             );
         }
@@ -562,16 +559,16 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!(" OFFSET {}", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_postgres_ranked_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let language = self.config.language.as_deref().unwrap_or("english");
+        let mut params = Vec::new();
 
         let tsvector_expr = self.build_pg_tsvector_expr(language);
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &escaped_query);
+        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
 
         let weights = self
             .config
@@ -581,14 +578,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .unwrap_or_else(|| "'{0.1,0.2,0.4,1.0}'".to_string());
 
         let mut sql = format!(
-            "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM \"{}\" WHERE {} @@ {}",
+            "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM {} WHERE {} @@ {}",
             weights, tsvector_expr, tsquery_expr, table, tsvector_expr, tsquery_expr
         );
 
         if let Some(min_rank) = self.min_rank {
+            let min_rank_placeholder = self.push_param(DatabaseType::Postgres, &mut params, Value::Double(Some(min_rank)));
             sql.push_str(&format!(
                 " AND ts_rank_cd({}, {}, {}) >= {}",
-                weights, tsvector_expr, tsquery_expr, min_rank
+                weights, tsvector_expr, tsquery_expr, min_rank_placeholder
             ));
         }
 
@@ -601,67 +599,81 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!(" OFFSET {}", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_postgres_count_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let language = self.config.language.as_deref().unwrap_or("english");
+        let mut params = Vec::new();
 
         let tsvector_expr = self.build_pg_tsvector_expr(language);
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &escaped_query);
+        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
 
-        Ok(format!(
-            "SELECT COUNT(*) as count FROM \"{}\" WHERE {} @@ {}",
-            table, tsvector_expr, tsquery_expr
+        Ok((
+            format!("SELECT COUNT(*) as count FROM {} WHERE {} @@ {}", table, tsvector_expr, tsquery_expr),
+            params,
         ))
     }
 
     fn build_pg_tsvector_expr(&self, language: &str) -> String {
+        let language = escape_string(language);
         if self.columns.len() == 1 {
             format!(
-                "to_tsvector('{}', COALESCE(\"{}\", ''))",
-                language, self.columns[0]
+                "to_tsvector('{}', COALESCE({}, ''))",
+                language,
+                quote_ident(DatabaseType::Postgres, &self.columns[0])
             )
         } else {
             let cols: Vec<String> = self
                 .columns
                 .iter()
-                .map(|c| format!("COALESCE(\"{}\", '')", c))
+                .map(|c| format!("COALESCE({}, '')", quote_ident(DatabaseType::Postgres, c)))
                 .collect();
             format!("to_tsvector('{}', {})", language, cols.join(" || ' ' || "))
         }
     }
 
-    fn build_pg_tsquery_expr(&self, language: &str, query: &str) -> String {
+    fn build_pg_tsquery_expr(&self, language: &str, params: &mut Vec<Value>) -> String {
+        let language = escape_string(language);
         match self.config.mode {
             SearchMode::Natural => {
-                format!("plainto_tsquery('{}', '{}')", language, query)
+                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                format!("plainto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Boolean => {
-                format!("to_tsquery('{}', '{}')", language, query)
+                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                format!("to_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Phrase => {
-                format!("phraseto_tsquery('{}', '{}')", language, query)
+                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                format!("phraseto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Prefix => {
-                // Convert words to prefix queries
-                let words: Vec<&str> = query.split_whitespace().collect();
+                let words: Vec<&str> = self.query.split_whitespace().collect();
                 let prefixed: Vec<String> = words.iter().map(|w| format!("{}:*", w)).collect();
-                format!("to_tsquery('{}', '{}')", language, prefixed.join(" & "))
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(prefixed.join(" & "))),
+                );
+                format!("to_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Fuzzy => {
-                // Use similarity with trigrams (requires pg_trgm extension)
-                format!("plainto_tsquery('{}', '{}')", language, query)
+                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                format!("plainto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Proximity(distance) => {
-                let words: Vec<&str> = query.split_whitespace().collect();
+                let words: Vec<&str> = self.query.split_whitespace().collect();
                 let proximity: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(proximity.join(&format!(" <{}> ", distance)))),
+                );
                 format!(
-                    "to_tsquery('{}', '{}')",
-                    language,
-                    proximity.join(&format!(" <{}> ", distance))
+                    "to_tsquery('{}', {})",
+                    language, placeholder
                 )
             }
         }
@@ -671,14 +683,14 @@ impl<T: Model> FullTextSearchBuilder<T> {
     // MYSQL IMPLEMENTATION
     // =========================================================================
 
-    fn build_mysql_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_mysql_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::MySQL, T::table_name());
+        let mut params = Vec::new();
 
         let columns_str = self
             .columns
             .iter()
-            .map(|c| format!("`{}`", c))
+            .map(|c| quote_ident(DatabaseType::MySQL, c))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -689,9 +701,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
+        let query_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
         let mut sql = format!(
-            "SELECT * FROM `{}` WHERE MATCH({}) AGAINST('{}'{}) ",
-            table, columns_str, escaped_query, mode_modifier
+            "SELECT * FROM {} WHERE MATCH({}) AGAINST({}{}) ",
+            table, columns_str, query_placeholder, mode_modifier
         );
 
         if let Some(limit) = self.limit {
@@ -701,17 +714,17 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!("OFFSET {} ", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_mysql_ranked_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_mysql_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::MySQL, T::table_name());
+        let mut params = Vec::new();
 
         let columns_str = self
             .columns
             .iter()
-            .map(|c| format!("`{}`", c))
+            .map(|c| quote_ident(DatabaseType::MySQL, c))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -722,22 +735,30 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
+        let rank_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        let where_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
         let mut sql = format!(
-            "SELECT *, MATCH({}) AGAINST('{}'{}) AS _fts_rank FROM `{}` \
-             WHERE MATCH({}) AGAINST('{}'{}) ",
+            "SELECT *, MATCH({}) AGAINST({}{}) AS _fts_rank FROM {} \
+             WHERE MATCH({}) AGAINST({}{}) ",
             columns_str,
-            escaped_query,
+            rank_placeholder,
             mode_modifier,
             table,
             columns_str,
-            escaped_query,
+            where_placeholder,
             mode_modifier
         );
 
         if let Some(min_rank) = self.min_rank {
+            let min_rank_placeholder = self.push_param(
+                DatabaseType::MySQL,
+                &mut params,
+                Value::Double(Some(min_rank)),
+            );
+            let against_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
             sql.push_str(&format!(
-                "AND MATCH({}) AGAINST('{}'{}) >= {} ",
-                columns_str, escaped_query, mode_modifier, min_rank
+                "AND MATCH({}) AGAINST({}{}) >= {} ",
+                columns_str, against_placeholder, mode_modifier, min_rank_placeholder
             ));
         }
 
@@ -750,17 +771,17 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!("OFFSET {} ", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_mysql_count_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let escaped_query = escape_string(&self.query);
+    fn build_mysql_count_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table = quote_ident(DatabaseType::MySQL, T::table_name());
+        let mut params = Vec::new();
 
         let columns_str = self
             .columns
             .iter()
-            .map(|c| format!("`{}`", c))
+            .map(|c| quote_ident(DatabaseType::MySQL, c))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -770,9 +791,13 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        Ok(format!(
-            "SELECT COUNT(*) as count FROM `{}` WHERE MATCH({}) AGAINST('{}'{})",
-            table, columns_str, escaped_query, mode_modifier
+        let query_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        Ok((
+            format!(
+                "SELECT COUNT(*) as count FROM {} WHERE MATCH({}) AGAINST({}{})",
+                table, columns_str, query_placeholder, mode_modifier
+            ),
+            params,
         ))
     }
 
@@ -780,18 +805,25 @@ impl<T: Model> FullTextSearchBuilder<T> {
     // SQLITE IMPLEMENTATION (FTS5)
     // =========================================================================
 
-    fn build_sqlite_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let fts_table = format!("{}_fts", table);
-        let escaped_query = escape_fts5_query(&self.query);
+    fn build_sqlite_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table_name = T::table_name();
+        let table = quote_ident(DatabaseType::SQLite, table_name);
+        let fts_table_name = format!("{}_fts", table_name);
+        let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
+        let mut params = Vec::new();
+        let query_placeholder = self.push_param(
+            DatabaseType::SQLite,
+            &mut params,
+            Value::String(Some(escape_fts5_query(&self.query))),
+        );
 
         // SQLite FTS5 requires a separate virtual table
         // This assumes the FTS5 table exists with the same columns
         let mut sql = format!(
-            "SELECT t.* FROM \"{}\" t \
-             INNER JOIN \"{}\" fts ON t.rowid = fts.rowid \
-             WHERE \"{}\" MATCH '{}' ",
-            table, fts_table, fts_table, escaped_query
+            "SELECT t.* FROM {} t \
+             INNER JOIN {} fts ON t.rowid = fts.rowid \
+             WHERE {} MATCH {} ",
+            table, fts_table, fts_table, query_placeholder
         );
 
         if let Some(limit) = self.limit {
@@ -801,28 +833,40 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!("OFFSET {} ", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_sqlite_ranked_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let fts_table = format!("{}_fts", table);
-        let escaped_query = escape_fts5_query(&self.query);
+    fn build_sqlite_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table_name = T::table_name();
+        let table = quote_ident(DatabaseType::SQLite, table_name);
+        let fts_table_name = format!("{}_fts", table_name);
+        let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
+        let mut params = Vec::new();
+        let query_placeholder = self.push_param(
+            DatabaseType::SQLite,
+            &mut params,
+            Value::String(Some(escape_fts5_query(&self.query))),
+        );
 
         let mut sql = format!(
-            "SELECT t.*, bm25(\"{}\") AS _fts_rank FROM \"{}\" t \
-             INNER JOIN \"{}\" fts ON t.rowid = fts.rowid \
-             WHERE \"{}\" MATCH '{}' ",
-            fts_table, table, fts_table, fts_table, escaped_query
+            "SELECT t.*, bm25({}) AS _fts_rank FROM {} t \
+             INNER JOIN {} fts ON t.rowid = fts.rowid \
+             WHERE {} MATCH {} ",
+            fts_table, table, fts_table, fts_table, query_placeholder
         );
 
         if let Some(min_rank) = self.min_rank {
             // Note: BM25 returns negative values, lower is better
-            sql.push_str(&format!("AND bm25(\"{}\") <= {} ", fts_table, -min_rank));
+            let min_rank_placeholder = self.push_param(
+                DatabaseType::SQLite,
+                &mut params,
+                Value::Double(Some(-min_rank)),
+            );
+            sql.push_str(&format!("AND bm25({}) <= {} ", fts_table, min_rank_placeholder));
         }
 
         // BM25 returns negative values, so ORDER BY ASC for best matches
-        sql.push_str(&format!("ORDER BY bm25(\"{}\") ", fts_table));
+        sql.push_str(&format!("ORDER BY bm25({}) ", fts_table));
 
         if let Some(limit) = self.limit {
             sql.push_str(&format!("LIMIT {} ", limit));
@@ -831,20 +875,39 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&format!("OFFSET {} ", offset));
         }
 
-        Ok(sql)
+        Ok((sql, params))
     }
 
-    fn build_sqlite_count_sql(&self) -> Result<String> {
-        let table = T::table_name();
-        let fts_table = format!("{}_fts", table);
-        let escaped_query = escape_fts5_query(&self.query);
+    fn build_sqlite_count_sql(&self) -> Result<(String, Vec<Value>)> {
+        let table_name = T::table_name();
+        let table = quote_ident(DatabaseType::SQLite, table_name);
+        let fts_table_name = format!("{}_fts", table_name);
+        let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
+        let mut params = Vec::new();
+        let query_placeholder = self.push_param(
+            DatabaseType::SQLite,
+            &mut params,
+            Value::String(Some(escape_fts5_query(&self.query))),
+        );
 
-        Ok(format!(
-            "SELECT COUNT(*) as count FROM \"{}\" t \
-             INNER JOIN \"{}\" fts ON t.rowid = fts.rowid \
-             WHERE \"{}\" MATCH '{}'",
-            table, fts_table, fts_table, escaped_query
+        Ok((
+            format!(
+                "SELECT COUNT(*) as count FROM {} t \
+                 INNER JOIN {} fts ON t.rowid = fts.rowid \
+                 WHERE {} MATCH {}",
+                table, fts_table, fts_table, query_placeholder
+            ),
+            params,
         ))
+    }
+
+    fn push_param(&self, db_type: DatabaseType, params: &mut Vec<Value>, value: Value) -> String {
+        let placeholder = match db_type {
+            DatabaseType::Postgres => format!("${}", params.len() + 1),
+            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?".to_string(),
+        };
+        params.push(value);
+        placeholder
     }
 }
 
@@ -919,21 +982,25 @@ impl FullTextIndex {
 
         let tsvector_expr = if self.columns.len() == 1 {
             format!(
-                "to_tsvector('{}', COALESCE(\"{}\", ''))",
-                language, self.columns[0]
+                "to_tsvector('{}', COALESCE({}, ''))",
+                language,
+                quote_ident(DatabaseType::Postgres, &self.columns[0])
             )
         } else {
             let cols: Vec<String> = self
                 .columns
                 .iter()
-                .map(|c| format!("COALESCE(\"{}\", '')", c))
+                .map(|c| format!("COALESCE({}, '')", quote_ident(DatabaseType::Postgres, c)))
                 .collect();
             format!("to_tsvector('{}', {})", language, cols.join(" || ' ' || "))
         };
 
         format!(
-            "CREATE INDEX \"{}\" ON \"{}\" USING {} (({}))",
-            self.name, self.table, index_type, tsvector_expr
+            "CREATE INDEX {} ON {} USING {} (({}))",
+            quote_ident(DatabaseType::Postgres, &self.name),
+            quote_ident(DatabaseType::Postgres, &self.table),
+            index_type,
+            tsvector_expr
         )
     }
 
@@ -942,7 +1009,7 @@ impl FullTextIndex {
         let columns_str = self
             .columns
             .iter()
-            .map(|c| format!("`{}`", c))
+            .map(|c| quote_ident(DatabaseType::MySQL, c))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -954,72 +1021,83 @@ impl FullTextIndex {
             .unwrap_or_default();
 
         format!(
-            "CREATE FULLTEXT INDEX `{}` ON `{}`({}){}",
-            self.name, self.table, columns_str, parser
+            "CREATE FULLTEXT INDEX {} ON {}({}){}",
+            quote_ident(DatabaseType::MySQL, &self.name),
+            quote_ident(DatabaseType::MySQL, &self.table),
+            columns_str,
+            parser
         )
     }
 
     /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let fts_table = format!("{}_fts", self.table);
-        let columns_str = self.columns.join(", ");
+        let columns_str = self
+            .columns
+            .iter()
+            .map(|column| quote_ident(DatabaseType::SQLite, column))
+            .collect::<Vec<_>>()
+            .join(", ");
 
         vec![
             // Create FTS5 virtual table
             format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS \"{}\" USING fts5({}, content=\"{}\", content_rowid=\"rowid\")",
-                fts_table, columns_str, self.table
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5({}, content={}, content_rowid={})",
+                quote_ident(DatabaseType::SQLite, &fts_table),
+                columns_str,
+                quote_ident(DatabaseType::SQLite, &self.table),
+                quote_ident(DatabaseType::SQLite, "rowid")
             ),
             // Create triggers to keep FTS table in sync
             format!(
-                "CREATE TRIGGER IF NOT EXISTS \"{}_ai\" AFTER INSERT ON \"{}\" BEGIN \
+                "CREATE TRIGGER IF NOT EXISTS {} AFTER INSERT ON {} BEGIN \
                  INSERT INTO \"{}\"(rowid, {}) VALUES (new.rowid, {}); \
                  END",
-                self.table,
-                self.table,
-                fts_table,
+                quote_ident(DatabaseType::SQLite, &format!("{}_ai", self.table)),
+                quote_ident(DatabaseType::SQLite, &self.table),
+                quote_ident(DatabaseType::SQLite, &fts_table),
                 columns_str,
                 self.columns
                     .iter()
-                    .map(|c| format!("new.\"{}\"", c))
+                    .map(|c| format!("new.{}", quote_ident(DatabaseType::SQLite, c)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
             format!(
-                "CREATE TRIGGER IF NOT EXISTS \"{}_ad\" AFTER DELETE ON \"{}\" BEGIN \
-                 INSERT INTO \"{}\"(\"{}\", rowid, {}) VALUES('delete', old.rowid, {}); \
+                "CREATE TRIGGER IF NOT EXISTS {} AFTER DELETE ON {} BEGIN \
+                 INSERT INTO {}({}, rowid, {}) VALUES('delete', old.rowid, {}); \
                  END",
-                self.table,
-                self.table,
-                fts_table,
-                fts_table,
+                quote_ident(DatabaseType::SQLite, &format!("{}_ad", self.table)),
+                quote_ident(DatabaseType::SQLite, &self.table),
+                quote_ident(DatabaseType::SQLite, &fts_table),
+                quote_ident(DatabaseType::SQLite, &fts_table),
                 columns_str,
                 self.columns
                     .iter()
-                    .map(|c| format!("old.\"{}\"", c))
+                    .map(|c| format!("old.{}", quote_ident(DatabaseType::SQLite, c)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
             format!(
-                "CREATE TRIGGER IF NOT EXISTS \"{}_au\" AFTER UPDATE ON \"{}\" BEGIN \
-                 INSERT INTO \"{}\"(\"{}\", rowid, {}) VALUES('delete', old.rowid, {}); \
-                 INSERT INTO \"{}\"(rowid, {}) VALUES (new.rowid, {}); \
+                "CREATE TRIGGER IF NOT EXISTS {} AFTER UPDATE ON {} BEGIN \
+                 INSERT INTO {}({}, rowid, {}) VALUES('delete', old.rowid, {}); \
+                 INSERT INTO {}(rowid, {}) VALUES (new.rowid, {}); \
                  END",
-                self.table,
-                self.table,
-                fts_table,
-                fts_table,
+                quote_ident(DatabaseType::SQLite, &format!("{}_au", self.table)),
+                quote_ident(DatabaseType::SQLite, &self.table),
+                quote_ident(DatabaseType::SQLite, &fts_table),
+                quote_ident(DatabaseType::SQLite, &fts_table),
                 columns_str,
                 self.columns
                     .iter()
-                    .map(|c| format!("old.\"{}\"", c))
+                    .map(|c| format!("old.{}", quote_ident(DatabaseType::SQLite, c)))
                     .collect::<Vec<_>>()
                     .join(", "),
-                fts_table,
+                quote_ident(DatabaseType::SQLite, &fts_table),
                 columns_str,
                 self.columns
                     .iter()
-                    .map(|c| format!("new.\"{}\"", c))
+                    .map(|c| format!("new.{}", quote_ident(DatabaseType::SQLite, c)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1156,140 +1234,19 @@ fn escape_fts5_query(s: &str) -> String {
     s.replace('"', "\"\"").replace('\'', "''")
 }
 
+fn quote_ident(db_type: DatabaseType, name: &str) -> String {
+    let quote = match db_type {
+        DatabaseType::Postgres | DatabaseType::SQLite => '"',
+        DatabaseType::MySQL | DatabaseType::MariaDB => '`',
+    };
+    let escaped = name.replace(quote, &format!("{quote}{quote}"));
+    format!("{}{}{}", quote, escaped, quote)
+}
+
 // =============================================================================
 // TESTS
 // =============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_search_mode_display() {
-        assert_eq!(SearchMode::Natural.to_string(), "natural");
-        assert_eq!(SearchMode::Boolean.to_string(), "boolean");
-        assert_eq!(SearchMode::Phrase.to_string(), "phrase");
-        assert_eq!(SearchMode::Prefix.to_string(), "prefix");
-        assert_eq!(SearchMode::Fuzzy.to_string(), "fuzzy");
-        assert_eq!(SearchMode::Proximity(3).to_string(), "proximity(3)");
-    }
-
-    #[test]
-    fn test_search_weights() {
-        let weights = SearchWeights::new(1.0, 0.5, 0.3, 0.1);
-        assert_eq!(weights.to_pg_array(), "'{0.1,0.3,0.5,1}'");
-    }
-
-    #[test]
-    fn test_highlight_text() {
-        let text = "The quick brown fox jumps over the lazy dog";
-        let highlighted = highlight_text(text, "quick fox", "<b>", "</b>");
-        assert!(highlighted.contains("<b>quick</b>"));
-        assert!(highlighted.contains("<b>fox</b>"));
-    }
-
-    #[test]
-    fn test_generate_snippet() {
-        let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \
-                   The quick brown fox jumps over the lazy dog. \
-                   Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
-        let snippet = generate_snippet(text, "fox", 5, "<mark>", "</mark>");
-        assert!(snippet.contains("<mark>fox</mark>"));
-        assert!(snippet.contains("..."));
-    }
-
-    #[test]
-    fn test_fulltext_index_postgres() {
-        let index = FullTextIndex::new(
-            "idx_articles_search",
-            "articles",
-            vec!["title".to_string(), "content".to_string()],
-        )
-        .language("english")
-        .pg_index_type(PgFullTextIndexType::GIN);
-
-        let sql = index.to_postgres_sql();
-        assert!(sql.contains("CREATE INDEX"));
-        assert!(sql.contains("USING GIN"));
-        assert!(sql.contains("to_tsvector"));
-    }
-
-    #[test]
-    fn test_fulltext_index_mysql() {
-        let index = FullTextIndex::new(
-            "idx_articles_search",
-            "articles",
-            vec!["title".to_string(), "content".to_string()],
-        );
-        let sql = index.to_mysql_sql();
-        assert!(sql.contains("CREATE FULLTEXT INDEX"));
-        assert!(sql.contains("`title`, `content`"));
-    }
-
-    #[test]
-    fn test_fulltext_index_mariadb() {
-        let index = FullTextIndex::new(
-            "idx_articles_search",
-            "articles",
-            vec!["title".to_string(), "content".to_string()],
-        );
-        // MariaDB uses the same FULLTEXT syntax as MySQL
-        let sqls = index.to_sql(DatabaseType::MariaDB);
-        assert_eq!(sqls.len(), 1);
-        let sql = &sqls[0];
-        assert!(sql.contains("CREATE FULLTEXT INDEX"));
-        assert!(sql.contains("`title`, `content`"));
-    }
-
-    #[test]
-    fn test_fulltext_index_sqlite() {
-        let index = FullTextIndex::new(
-            "idx_articles_search",
-            "articles",
-            vec!["title".to_string(), "content".to_string()],
-        );
-        let sqls = index.to_sqlite_sql();
-        assert!(sqls.len() == 4);
-        assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
-        assert!(sqls[0].contains("fts5"));
-    }
-
-    #[test]
-    fn test_escape_string() {
-        assert_eq!(escape_string("it's"), "it''s");
-        assert_eq!(escape_string("back\\slash"), "back\\\\slash");
-    }
-
-    #[test]
-    fn test_fulltext_config() {
-        let config = FullTextConfig::new()
-            .language("german")
-            .mode(SearchMode::Boolean)
-            .min_word_length(3)
-            .max_word_length(50);
-
-        assert_eq!(config.language, Some("german".to_string()));
-        assert_eq!(config.mode, SearchMode::Boolean);
-        assert_eq!(config.min_word_length, Some(3));
-        assert_eq!(config.max_word_length, Some(50));
-    }
-
-    #[test]
-    fn test_search_result() {
-        let result: SearchResult<String> = SearchResult::new("test".to_string(), 0.95);
-        assert_eq!(result.record, "test");
-        assert_eq!(result.rank, 0.95);
-        assert!(result.highlights.is_empty());
-    }
-
-    #[test]
-    fn test_highlighted_field() {
-        let field = HighlightedField::new(
-            "content",
-            "The <mark>quick</mark> brown <mark>fox</mark>",
-            "The quick brown fox",
-        );
-        assert_eq!(field.field, "content");
-        assert_eq!(field.match_count, 2);
-    }
-}
+#[path = "testing/fulltext_tests.rs"]
+mod tests;

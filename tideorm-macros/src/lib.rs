@@ -6,7 +6,9 @@ use convert_case::{Case, Casing};
 use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Attribute, DeriveInput, Ident, Meta, Type, parse_macro_input};
+use syn::{
+    Attribute, DeriveInput, GenericArgument, Ident, Meta, PathArguments, Type, parse_macro_input,
+};
 
 /// Field-level attributes for model fields
 #[derive(Debug, FromField)]
@@ -98,13 +100,22 @@ impl ModelField {
 
     /// Check if field type looks like a relation type
     fn is_relation_type(&self) -> bool {
-        let ty_str = quote!(#(&self.ty)).to_string();
-        ty_str.contains("HasOne")
-            || ty_str.contains("HasMany")
-            || ty_str.contains("BelongsTo")
-            || ty_str.contains("MorphOne")
-            || ty_str.contains("MorphMany")
-            || ty_str.contains("MorphTo")
+        relation_wrapper_name(&self.ty)
+            .map(|name| {
+                matches!(
+                    name,
+                    "HasOne"
+                        | "HasMany"
+                        | "BelongsTo"
+                        | "HasManyThrough"
+                        | "MorphOne"
+                        | "MorphMany"
+                        | "MorphTo"
+                        | "SelfRef"
+                        | "SelfRefMany"
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Get the SeaORM ColumnType for this field's type
@@ -194,6 +205,44 @@ impl ModelField {
         } else {
             quote!(#column_type.def())
         }
+    }
+}
+
+fn relation_wrapper_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Group(group) => relation_wrapper_name(&group.elem),
+        Type::Paren(paren) => relation_wrapper_name(&paren.elem),
+        Type::Reference(reference) => relation_wrapper_name(&reference.elem),
+        Type::Path(type_path) => {
+            let segment = type_path.path.segments.last()?;
+            let ident = segment.ident.to_string();
+
+            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc") {
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(inner_ty) = argument {
+                            if let Some(name) = relation_wrapper_name(inner_ty) {
+                                return Some(name);
+                            }
+                        }
+                    }
+                }
+            }
+
+            Some(match ident.as_str() {
+                "HasOne" => "HasOne",
+                "HasMany" => "HasMany",
+                "BelongsTo" => "BelongsTo",
+                "HasManyThrough" => "HasManyThrough",
+                "MorphOne" => "MorphOne",
+                "MorphMany" => "MorphMany",
+                "MorphTo" => "MorphTo",
+                "SelfRef" => "SelfRef",
+                "SelfRefMany" => "SelfRefMany",
+                _ => return None,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -1095,6 +1144,14 @@ fn generate_model_impl(
         .collect();
     let derive_field_names_str: Vec<_> = derive_field_names.iter().map(|i| i.to_string()).collect();
 
+    // Serde should only include actual database fields. Relation wrappers are runtime helpers,
+    // not persisted model data, so they are skipped and restored with Default during deserialize.
+    let serde_field_names: Vec<_> = db_fields
+        .iter()
+        .filter_map(|f| f.ident.as_ref().cloned())
+        .collect();
+    let serde_field_names_str: Vec<_> = serde_field_names.iter().map(|i| i.to_string()).collect();
+
     // Generate typed column struct and instance for User::columns.name access
     // This allows usage like: User::columns.name.eq("Alice")
     let columns_struct_name = format_ident!("{}Columns", struct_name);
@@ -1194,6 +1251,10 @@ fn generate_model_impl(
 
             fn primary_key_name() -> &'static str {
                 stringify!(#pk_ident)
+            }
+
+            fn primary_key_auto_increment() -> bool {
+                #pk_auto_increment
             }
 
             fn column_names() -> &'static [&'static str] {
@@ -1621,7 +1682,7 @@ fn generate_model_impl(
 
     // Auto-generated Serialize impl (only if auto_derives or auto_serialize is set)
     let serialize_impl = if should_gen_serialize {
-        let field_count = derive_field_names.len();
+        let field_count = serde_field_names.len();
         quote! {
             impl ::serde::Serialize for #struct_name {
                 fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
@@ -1630,7 +1691,7 @@ fn generate_model_impl(
                 {
                     use ::serde::ser::SerializeStruct;
                     let mut state = serializer.serialize_struct(stringify!(#struct_name), #field_count)?;
-                    #(state.serialize_field(#derive_field_names_str, &self.#derive_field_names)?;)*
+                    #(state.serialize_field(#serde_field_names_str, &self.#serde_field_names)?;)*
                     state.end()
                 }
             }
@@ -1641,9 +1702,9 @@ fn generate_model_impl(
 
     // Auto-generated Deserialize impl (only if auto_derives or auto_deserialize is set)
     let deserialize_impl = if should_gen_deserialize {
-        let field_count = derive_field_names.len();
+        let field_count = serde_field_names.len();
         let field_indices: Vec<_> = (0..field_count).collect();
-        let field_names_upper: Vec<_> = derive_field_names
+        let field_names_upper: Vec<_> = serde_field_names
             .iter()
             .map(|i| format_ident!("__field_{}", i))
             .collect();
@@ -1674,7 +1735,7 @@ fn generate_model_impl(
                             E: ::serde::de::Error,
                         {
                             match value {
-                                #(#derive_field_names_str => Ok(__Field::#field_names_upper),)*
+                                #(#serde_field_names_str => Ok(__Field::#field_names_upper),)*
                                 _ => Ok(__Field::__ignore),
                             }
                         }
@@ -1708,7 +1769,7 @@ fn generate_model_impl(
                                 match key {
                                     #(__Field::#field_names_upper => {
                                         if #field_names_upper.is_some() {
-                                            return Err(::serde::de::Error::duplicate_field(#derive_field_names_str));
+                                            return Err(::serde::de::Error::duplicate_field(#serde_field_names_str));
                                         }
                                         #field_names_upper = Some(map.next_value()?);
                                     })*
@@ -1719,7 +1780,8 @@ fn generate_model_impl(
                             }
 
                             Ok(#struct_name {
-                                #(#derive_field_names: #field_names_upper.unwrap_or_default()),*
+                                #(#serde_field_names: #field_names_upper.unwrap_or_default(),)*
+                                #(#relation_field_defaults,)*
                             })
                         }
 
@@ -1733,12 +1795,13 @@ fn generate_model_impl(
                             )*
 
                             Ok(#struct_name {
-                                #(#derive_field_names: #field_names_upper),*
+                                #(#serde_field_names: #field_names_upper,)*
+                                #(#relation_field_defaults,)*
                             })
                         }
                     }
 
-                    const FIELDS: &'static [&'static str] = &[#(#derive_field_names_str),*];
+                    const FIELDS: &'static [&'static str] = &[#(#serde_field_names_str),*];
                     deserializer.deserialize_struct(stringify!(#struct_name), FIELDS, __Visitor)
                 }
             }
@@ -2085,4 +2148,66 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #vis struct #name #generics #fields
     }
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    fn field_with_type(ty: Type) -> ModelField {
+        ModelField {
+            ident: Some(parse_quote!(field)),
+            ty,
+            attrs: vec![],
+            primary_key: false,
+            auto_increment: false,
+            column: None,
+            nullable: false,
+            default: None,
+            skip: false,
+            timestamp: false,
+            has_one: None,
+            has_many: None,
+            belongs_to: None,
+            has_many_through: None,
+            foreign_key: None,
+            owner_key: None,
+            local_key: None,
+            pivot: None,
+            related_key: None,
+            morph_name: None,
+        }
+    }
+
+    #[test]
+    fn detects_direct_relation_wrappers() {
+        for ty in [
+            parse_quote!(HasOne<User>),
+            parse_quote!(::tideorm::relations::HasMany<Post>),
+            parse_quote!(BelongsTo<Account>),
+            parse_quote!(HasManyThrough<Role, UserRole>),
+            parse_quote!(MorphTo<Commentable>),
+            parse_quote!(MorphOne<Image>),
+            parse_quote!(MorphMany<Tag>),
+            parse_quote!(SelfRef<Employee>),
+            parse_quote!(SelfRefMany<Employee>),
+        ] {
+            assert!(field_with_type(ty).is_relation_type());
+        }
+    }
+
+    #[test]
+    fn detects_wrapped_relation_wrappers() {
+        assert!(field_with_type(parse_quote!(Option<HasOne<User>>)).is_relation_type());
+        assert!(field_with_type(parse_quote!(Box<::tideorm::MorphMany<Tag>>)).is_relation_type());
+    }
+
+    #[test]
+    fn does_not_match_non_relation_names_by_substring() {
+        assert!(!field_with_type(parse_quote!(HasOneCount)).is_relation_type());
+        assert!(!field_with_type(parse_quote!(MyBelongsToMetadata)).is_relation_type());
+        assert!(!field_with_type(parse_quote!(Vec<HasManyLabel>)).is_relation_type());
+        assert!(!field_with_type(parse_quote!(String)).is_relation_type());
+    }
 }

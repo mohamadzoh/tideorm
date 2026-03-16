@@ -1,0 +1,103 @@
+use super::{db_sql, QueryBuilder, QueryFragment};
+use crate::error::{Error, Result};
+use crate::model::Model;
+use std::marker::PhantomData;
+
+impl<M: Model> QueryBuilder<M> {
+    /// Create a new query builder
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+            conditions: Vec::new(),
+            or_groups: Vec::new(),
+            order_by: Vec::new(),
+            limit_value: None,
+            offset_value: None,
+            select_columns: None,
+            raw_select_expressions: Vec::new(),
+            include_trashed: false,
+            only_trashed: false,
+            joins: Vec::new(),
+            invalid_query_reason: None,
+            group_by: Vec::new(),
+            having_conditions: Vec::new(),
+            unions: Vec::new(),
+            window_functions: Vec::new(),
+            ctes: Vec::new(),
+            cache_options: None,
+            cache_key: None,
+        }
+    }
+
+    /// Consolidate the current query clauses into a reusable fragment.
+    pub fn consolidate(&self) -> QueryFragment<M> {
+        QueryFragment {
+            _marker: PhantomData,
+            conditions: self.conditions.clone(),
+            order_by: self.order_by.clone(),
+            group_by: self.group_by.clone(),
+            having_conditions: self.having_conditions.clone(),
+            joins: self.joins.clone(),
+            invalid_query_reason: self.invalid_query_reason.clone(),
+            include_trashed: self.include_trashed,
+            only_trashed: self.only_trashed,
+        }
+    }
+
+    /// Apply a reusable fragment to the current query builder.
+    pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
+        self.conditions.extend(fragment.conditions.clone());
+
+        if self.order_by.is_empty() {
+            self.order_by.extend(fragment.order_by.clone());
+        }
+
+        self.group_by.extend(fragment.group_by.clone());
+        self.having_conditions.extend(fragment.having_conditions.clone());
+        self.joins.extend(fragment.joins.clone());
+
+        if self.invalid_query_reason.is_none() {
+            self.invalid_query_reason = fragment.invalid_query_reason.clone();
+        }
+
+        if fragment.include_trashed {
+            self.include_trashed = true;
+        }
+        if fragment.only_trashed {
+            self.only_trashed = true;
+        }
+
+        self
+    }
+
+    pub(super) fn invalidate_query(&mut self, reason: String) {
+        if self.invalid_query_reason.is_none() {
+            self.invalid_query_reason = Some(reason);
+        }
+    }
+
+    pub(super) fn ensure_query_is_valid(&self) -> Result<()> {
+        if let Some(reason) = &self.invalid_query_reason {
+            return Err(Error::invalid_query(reason.clone()));
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn validate_join_clause(
+        table: &str,
+        alias: Option<&str>,
+        left_column: &str,
+        right_column: &str,
+    ) -> std::result::Result<(), String> {
+        db_sql::validate_identifier("JOIN table", table)?;
+
+        if let Some(alias) = alias {
+            db_sql::validate_identifier("JOIN alias", alias)?;
+        }
+
+        db_sql::validate_join_column(left_column)?;
+        db_sql::validate_join_column(right_column)?;
+        Ok(())
+    }
+}

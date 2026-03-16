@@ -182,19 +182,25 @@ mod unit_tests {
     }
 
     #[test]
-    fn test_token_consistency() {
+    fn test_token_randomization() {
         init_test_env();
 
         let id = 42i64;
         let model = "User";
 
-        // Same ID and model should produce identical tokens
+        // Same ID and model should produce different tokens because the
+        // default encoder uses a fresh nonce for every token.
         let token1 = default_encode(id, model).unwrap();
         let token2 = default_encode(id, model).unwrap();
         let token3 = default_encode(id, model).unwrap();
 
-        assert_eq!(token1, token2);
-        assert_eq!(token2, token3);
+        assert_ne!(token1, token2);
+        assert_ne!(token2, token3);
+        assert_ne!(token1, token3);
+
+        assert_eq!(default_decode(&token1, model), Some(id));
+        assert_eq!(default_decode(&token2, model), Some(id));
+        assert_eq!(default_decode(&token3, model), Some(id));
     }
 
     #[test]
@@ -215,15 +221,16 @@ mod unit_tests {
     fn test_token_length() {
         init_test_env();
 
-        // Token format: base64url(iv || encrypted_data || hmac)
-        // = base64url(16 + 8 + 8) = base64url(32 bytes) = 43 chars
+        // Token format: base64url(nonce || ciphertext)
+        // = base64url(24 + (8-byte plaintext + 16-byte tag))
+        // = base64url(48 bytes) = 64 chars
 
         for id in [0, 1, 100, i64::MAX, i64::MIN] {
             let token = default_encode(id, "User").unwrap();
             assert_eq!(
                 token.len(),
-                43,
-                "Token should be 43 characters, got {}",
+                64,
+                "Token should be 64 characters, got {}",
                 token.len()
             );
         }
@@ -319,8 +326,10 @@ mod tokenizable_trait_tests {
         let token1 = user.to_token().unwrap();
         let token2 = user.tokenize().unwrap();
 
-        // Both methods should produce the same token
-        assert_eq!(token1, token2);
+        // Both methods should produce valid tokens for the same ID.
+        assert_eq!(TestUser::decode_token(&token1).unwrap(), 42);
+        assert_eq!(TestUser::decode_token(&token2).unwrap(), 42);
+        assert_ne!(token1, token2);
     }
 
     #[test]
@@ -364,8 +373,10 @@ mod tokenizable_trait_tests {
         let token1 = user.to_token().unwrap();
         let token2 = user.regenerate_token().unwrap();
 
-        // With default encoder, regenerate produces the same token
-        assert_eq!(token1, token2);
+        // With the default encoder, regenerate produces a fresh token.
+        assert_ne!(token1, token2);
+        assert_eq!(TestUser::decode_token(&token1).unwrap(), 50);
+        assert_eq!(TestUser::decode_token(&token2).unwrap(), 50);
     }
 
     #[test]

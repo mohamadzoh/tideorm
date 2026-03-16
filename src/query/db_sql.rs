@@ -44,7 +44,8 @@ pub fn quote_char(db_type: DatabaseType) -> char {
 /// Quote an identifier (column or table name)
 pub fn quote_ident(db_type: DatabaseType, name: &str) -> String {
     let q = quote_char(db_type);
-    format!("{}{}{}", q, name, q)
+    let escaped = name.replace(q, &format!("{q}{q}"));
+    format!("{}{}{}", q, escaped, q)
 }
 
 /// Generate JSON contains expression
@@ -54,16 +55,17 @@ pub fn quote_ident(db_type: DatabaseType, name: &str) -> String {
 /// - SQLite: `json_type(column) IS NOT NULL AND json(column) LIKE '%value%'` (fallback)
 pub fn json_contains(db_type: DatabaseType, column: &str, value: &str) -> String {
     let escaped_value = value.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" @> '{}'", column, escaped_value)
+            format!("{} @> '{}'", column, escaped_value)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!("JSON_CONTAINS(`{}`, '{}')", column, escaped_value)
+            format!("JSON_CONTAINS({}, '{}')", column, escaped_value)
         }
         DatabaseType::SQLite => {
             format!(
-                "EXISTS (SELECT 1 FROM json_each(\"{}\") WHERE value = '{}')",
+                "EXISTS (SELECT 1 FROM json_each({}) WHERE value = '{}')",
                 column,
                 escaped_value.trim_matches('"')
             )
@@ -78,16 +80,17 @@ pub fn json_contains(db_type: DatabaseType, column: &str, value: &str) -> String
 /// - SQLite: Limited support via JSON1
 pub fn json_contained_by(db_type: DatabaseType, column: &str, value: &str) -> String {
     let escaped_value = value.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" <@ '{}'", column, escaped_value)
+            format!("{} <@ '{}'", column, escaped_value)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!("JSON_CONTAINS('{}', `{}`)", escaped_value, column)
+            format!("JSON_CONTAINS('{}', {})", escaped_value, column)
         }
         DatabaseType::SQLite => {
             format!(
-                "json_type(\"{}\") IS NOT NULL AND '{}' LIKE '%' || \"{}\" || '%'",
+                "json_type({}) IS NOT NULL AND '{}' LIKE '%' || {} || '%'",
                 column, escaped_value, column
             )
         }
@@ -101,19 +104,17 @@ pub fn json_contained_by(db_type: DatabaseType, column: &str, value: &str) -> St
 /// - SQLite: `json_extract(column, '$.key') IS NOT NULL`
 pub fn json_key_exists(db_type: DatabaseType, column: &str, key: &str) -> String {
     let escaped_key = key.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" ? '{}'", column, escaped_key)
+            format!("{} ? '{}'", column, escaped_key)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!(
-                "JSON_CONTAINS_PATH(`{}`, 'one', '$.{}')",
-                column, escaped_key
-            )
+            format!("JSON_CONTAINS_PATH({}, 'one', '$.{}')", column, escaped_key)
         }
         DatabaseType::SQLite => {
             format!(
-                "json_extract(\"{}\", '$.{}') IS NOT NULL",
+                "json_extract({}, '$.{}') IS NOT NULL",
                 column, escaped_key
             )
         }
@@ -123,18 +124,16 @@ pub fn json_key_exists(db_type: DatabaseType, column: &str, key: &str) -> String
 /// Generate JSON key not exists expression
 pub fn json_key_not_exists(db_type: DatabaseType, column: &str, key: &str) -> String {
     let escaped_key = key.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("NOT (\"{}\" ? '{}')", column, escaped_key)
+            format!("NOT ({} ? '{}')", column, escaped_key)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!(
-                "NOT JSON_CONTAINS_PATH(`{}`, 'one', '$.{}')",
-                column, escaped_key
-            )
+            format!("NOT JSON_CONTAINS_PATH({}, 'one', '$.{}')", column, escaped_key)
         }
         DatabaseType::SQLite => {
-            format!("json_extract(\"{}\", '$.{}') IS NULL", column, escaped_key)
+            format!("json_extract({}, '$.{}') IS NULL", column, escaped_key)
         }
     }
 }
@@ -146,19 +145,17 @@ pub fn json_key_not_exists(db_type: DatabaseType, column: &str, key: &str) -> St
 /// - SQLite: `json_extract(column, 'path') IS NOT NULL`
 pub fn json_path_exists(db_type: DatabaseType, column: &str, path: &str) -> String {
     let escaped_path = path.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" @? '{}'", column, escaped_path)
+            format!("{} @? '{}'", column, escaped_path)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!(
-                "JSON_CONTAINS_PATH(`{}`, 'one', '{}')",
-                column, escaped_path
-            )
+            format!("JSON_CONTAINS_PATH({}, 'one', '{}')", column, escaped_path)
         }
         DatabaseType::SQLite => {
             format!(
-                "json_extract(\"{}\", '{}') IS NOT NULL",
+                "json_extract({}, '{}') IS NOT NULL",
                 column, escaped_path
             )
         }
@@ -168,18 +165,16 @@ pub fn json_path_exists(db_type: DatabaseType, column: &str, path: &str) -> Stri
 /// Generate JSON path not exists expression
 pub fn json_path_not_exists(db_type: DatabaseType, column: &str, path: &str) -> String {
     let escaped_path = path.replace("'", "''");
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("NOT (\"{}\" @? '{}')", column, escaped_path)
+            format!("NOT ({} @? '{}')", column, escaped_path)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!(
-                "NOT JSON_CONTAINS_PATH(`{}`, 'one', '{}')",
-                column, escaped_path
-            )
+            format!("NOT JSON_CONTAINS_PATH({}, 'one', '{}')", column, escaped_path)
         }
         DatabaseType::SQLite => {
-            format!("json_extract(\"{}\", '{}') IS NULL", column, escaped_path)
+            format!("json_extract({}, '{}') IS NULL", column, escaped_path)
         }
     }
 }
@@ -190,9 +185,10 @@ pub fn json_path_not_exists(db_type: DatabaseType, column: &str, path: &str) -> 
 /// - MySQL: Uses JSON_CONTAINS with JSON array
 /// - SQLite: Uses json_each for array element checking
 pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" @> ARRAY[{}]", column, values.join(","))
+            format!("{} @> ARRAY[{}]", column, values.join(","))
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let json_array = format!(
@@ -207,11 +203,7 @@ pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) ->
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            format!(
-                "JSON_CONTAINS(`{}`, '{}')",
-                column,
-                json_array.replace("'", "''")
-            )
+            format!("JSON_CONTAINS({}, '{}')", column, json_array.replace("'", "''"))
         }
         DatabaseType::SQLite => {
             let conditions: Vec<String> = values
@@ -219,7 +211,7 @@ pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) ->
                 .map(|v| {
                     let clean_val = v.trim_matches('\'');
                     format!(
-                        "EXISTS (SELECT 1 FROM json_each(\"{}\") WHERE value = '{}')",
+                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = '{}')",
                         column,
                         clean_val.replace("'", "''")
                     )
@@ -232,9 +224,10 @@ pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) ->
 
 /// Generate array contained by expression
 pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" <@ ARRAY[{}]", column, values.join(","))
+            format!("{} <@ ARRAY[{}]", column, values.join(","))
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let json_array = format!(
@@ -249,11 +242,7 @@ pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            format!(
-                "JSON_CONTAINS('{}', `{}`)",
-                json_array.replace("'", "''"),
-                column
-            )
+            format!("JSON_CONTAINS('{}', {})", json_array.replace("'", "''"), column)
         }
         DatabaseType::SQLite => {
             let value_list = values
@@ -262,7 +251,7 @@ pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "NOT EXISTS (SELECT 1 FROM json_each(\"{}\") WHERE value NOT IN ({}))",
+                "NOT EXISTS (SELECT 1 FROM json_each({}) WHERE value NOT IN ({}))",
                 column, value_list
             )
         }
@@ -271,9 +260,10 @@ pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]
 
 /// Generate array overlaps expression (any element matches)
 pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+    let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("\"{}\" && ARRAY[{}]", column, values.join(","))
+            format!("{} && ARRAY[{}]", column, values.join(","))
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let conditions: Vec<String> = values
@@ -281,7 +271,7 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
                 .map(|v| {
                     let clean_val = v.trim_matches('\'');
                     format!(
-                        "JSON_CONTAINS(`{}`, '\"{}\"')",
+                        "JSON_CONTAINS({}, '\"{}\"')",
                         column,
                         clean_val.replace("'", "''")
                     )
@@ -295,7 +285,7 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
                 .map(|v| {
                     let clean_val = v.trim_matches('\'');
                     format!(
-                        "EXISTS (SELECT 1 FROM json_each(\"{}\") WHERE value = '{}')",
+                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = '{}')",
                         column,
                         clean_val.replace("'", "''")
                     )
@@ -308,14 +298,12 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
 
 /// Format a column identifier for the database
 pub fn format_column(db_type: DatabaseType, column: &str) -> String {
-    if column.contains('(') || column.contains('*') || column.contains('"') || column.contains('`')
-    {
+    if column.contains('(') || column.contains('*') {
         column.to_string()
     } else if column.contains('.') {
         let parts: Vec<&str> = column.split('.').collect();
         if parts.len() == 2 {
-            let q = quote_char(db_type);
-            format!("{0}{1}{0}.{0}{2}{0}", q, parts[0], parts[1])
+            format!("{}.{}", quote_ident(db_type, parts[0]), quote_ident(db_type, parts[1]))
         } else {
             column.to_string()
         }

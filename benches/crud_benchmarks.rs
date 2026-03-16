@@ -51,6 +51,28 @@ pub struct BenchUser {
     pub active: bool,
 }
 
+impl BenchUser {
+    pub fn new(email: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: 0,
+            email: email.into(),
+            name: name.into(),
+            age: 25,
+            active: true,
+        }
+    }
+
+    pub fn with_age(mut self, age: i32) -> Self {
+        self.age = age;
+        self
+    }
+
+    pub fn with_active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+}
+
 // =============================================================================
 // SETUP HELPERS
 // =============================================================================
@@ -113,13 +135,7 @@ fn bench_single_insert(c: &mut Criterion) {
         b.iter(|| {
             let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
             rt.block_on(async {
-                let user = BenchUser {
-                    id: 0,
-                    email: format!("bench_{unique_id}@example.com"),
-                    name: "Benchmark User".to_string(),
-                    age: 25,
-                    active: true,
-                };
+                let user = BenchUser::new(format!("bench_{unique_id}@example.com"), "Benchmark User");
                 user.save().await.expect("Insert failed")
             })
         });
@@ -146,12 +162,13 @@ fn bench_batch_insert(c: &mut Criterion) {
                 let base = COUNTER.fetch_add(size as u64, Ordering::SeqCst);
                 rt.block_on(async {
                     let users: Vec<BenchUser> = (0..size)
-                        .map(|i| BenchUser {
-                            id: 0,
-                            email: format!("batch_{base}_{i}@example.com"),
-                            name: format!("Batch User {i}"),
-                            age: 20 + (i % 50),
-                            active: i % 2 == 0,
+                        .map(|i| {
+                            BenchUser::new(
+                                format!("batch_{base}_{i}@example.com"),
+                                format!("Batch User {i}"),
+                            )
+                            .with_age(20 + (i % 50))
+                            .with_active(i % 2 == 0)
                         })
                         .collect();
 
@@ -174,13 +191,11 @@ fn bench_find_by_id(c: &mut Criterion) {
     let user_ids: Vec<i64> = rt.block_on(async {
         let mut ids = Vec::new();
         for i in 0..100 {
-            let user = BenchUser {
-                id: 0,
-                email: format!("find_{i}@example.com"),
-                name: format!("Find User {i}"),
-                age: 25 + (i % 30),
-                active: true,
-            };
+            let user = BenchUser::new(
+                format!("find_{i}@example.com"),
+                format!("Find User {i}"),
+            )
+            .with_age(25 + (i % 30));
             let saved = user.save().await.expect("Insert failed");
             ids.push(saved.id);
         }
@@ -210,13 +225,10 @@ fn bench_update(c: &mut Criterion) {
     let user_ids: Vec<i64> = rt.block_on(async {
         let mut ids = Vec::new();
         for i in 0..100 {
-            let user = BenchUser {
-                id: 0,
-                email: format!("update_{i}@example.com"),
-                name: format!("Update User {i}"),
-                age: 25,
-                active: true,
-            };
+            let user = BenchUser::new(
+                format!("update_{i}@example.com"),
+                format!("Update User {i}"),
+            );
             let saved = user.save().await.expect("Insert failed");
             ids.push(saved.id);
         }
@@ -258,13 +270,10 @@ fn bench_delete(c: &mut Criterion) {
             let ids: Vec<i64> = rt.block_on(async {
                 let mut ids = Vec::with_capacity(iters as usize);
                 for i in 0..iters {
-                    let user = BenchUser {
-                        id: 0,
-                        email: format!("delete_{i}@example.com"),
-                        name: format!("Delete User {i}"),
-                        age: 25,
-                        active: true,
-                    };
+                    let user = BenchUser::new(
+                        format!("delete_{i}@example.com"),
+                        format!("Delete User {i}"),
+                    );
                     let saved = user.save().await.expect("Insert failed");
                     ids.push(saved.id);
                 }
@@ -304,12 +313,13 @@ fn bench_count(c: &mut Criterion) {
 
             for batch in 0..batches {
                 let users: Vec<BenchUser> = (0..batch_size)
-                    .map(|i| BenchUser {
-                        id: 0,
-                        email: format!("count_{batch}_{i}@example.com"),
-                        name: format!("Count User {i}"),
-                        age: 20 + (i % 50),
-                        active: i % 2 == 0,
+                    .map(|i| {
+                        BenchUser::new(
+                            format!("count_{batch}_{i}@example.com"),
+                            format!("Count User {i}"),
+                        )
+                        .with_age(20 + (i % 50))
+                        .with_active(i % 2 == 0)
                     })
                     .collect();
                 BenchUser::insert_all(users)
@@ -319,12 +329,13 @@ fn bench_count(c: &mut Criterion) {
 
             if remainder > 0 {
                 let users: Vec<BenchUser> = (0..remainder)
-                    .map(|i| BenchUser {
-                        id: 0,
-                        email: format!("count_rem_{i}@example.com"),
-                        name: format!("Count User Rem {i}"),
-                        age: 20 + (i % 50),
-                        active: i % 2 == 0,
+                    .map(|i| {
+                        BenchUser::new(
+                            format!("count_rem_{i}@example.com"),
+                            format!("Count User Rem {i}"),
+                        )
+                        .with_age(20 + (i % 50))
+                        .with_active(i % 2 == 0)
                     })
                     .collect();
                 BenchUser::insert_all(users)

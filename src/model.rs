@@ -100,6 +100,11 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// Returns the primary key column name
     fn primary_key_name() -> &'static str;
 
+    /// Returns whether the primary key is auto-incrementing.
+    fn primary_key_auto_increment() -> bool {
+        false
+    }
+
     /// Returns all column names in the database
     fn column_names() -> &'static [&'static str];
 
@@ -838,10 +843,21 @@ pub trait Model:
     }
 
     /// Check if this record is new (not yet saved)
+    ///
+    /// For auto-increment primary keys, TideORM treats `0` as unsaved so
+    /// freshly constructed records like `{ id: 0, .. }` are handled correctly.
+    /// For natural keys, an empty primary key is considered new.
     fn is_new(&self) -> bool {
-        if self.primary_key().to_string().is_empty() {
+        let primary_key = self.primary_key().to_string();
+
+        if primary_key.is_empty() {
             return true;
         }
+
+        if Self::primary_key_auto_increment() {
+            return primary_key.parse::<i128>().map(|value| value == 0).unwrap_or(false);
+        }
+
         false
     }
 
@@ -2541,3 +2557,7 @@ impl<M: Model> NestedSaveBuilder<M> {
         Ok((parent, saved_json))
     }
 }
+
+#[cfg(test)]
+#[path = "testing/model_tests.rs"]
+mod tests;

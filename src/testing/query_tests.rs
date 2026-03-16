@@ -4,6 +4,8 @@ use super::{
     WindowFunctionType,
 };
 use crate::config::DatabaseType;
+use crate::fulltext::{FullTextSearchBuilder, SearchMode};
+use crate::internal::Value;
 
 #[derive(tideorm::Model)]
 #[tide(table = "query_test_users")]
@@ -38,6 +40,14 @@ fn test_quote_ident() {
     assert_eq!(
         db_sql::quote_ident(DatabaseType::SQLite, "column"),
         "\"column\""
+    );
+    assert_eq!(
+        db_sql::quote_ident(DatabaseType::Postgres, "col\"umn"),
+        "\"col\"\"umn\""
+    );
+    assert_eq!(
+        db_sql::quote_ident(DatabaseType::MySQL, "col`umn"),
+        "`col``umn`"
     );
 }
 
@@ -468,6 +478,15 @@ fn test_build_where_sql_includes_or_groups() {
 }
 
 #[test]
+fn test_build_where_sql_escapes_inner_quotes_in_column_names() {
+    let query = QueryBuilder::<QueryTestUser>::new().where_eq("profile.na\"me", "active");
+
+    let sql = query.build_where_sql_for_db(DatabaseType::Postgres);
+
+    assert_eq!(sql, "\"profile\".\"na\"\"me\" = 'active'");
+}
+
+#[test]
 fn test_build_select_sql_with_params_parameterizes_read_filters() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .select_raw("COUNT(*) as total")
@@ -501,4 +520,65 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
         "SELECT `query_test_users`.`id`, `query_test_users`.`name` FROM `query_test_users` WHERE `status` = ? ORDER BY `name` ASC LIMIT 5"
     );
     assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na\"me", "bio"], "o'hai")
+        .language("en'g\"lish");
+
+    let (sql, params) = builder.build_sql(DatabaseType::Postgres).unwrap();
+
+    assert!(sql.contains("SELECT * FROM \"query_test_users\""));
+    assert!(sql.contains("COALESCE(\"na\"\"me\", '')"));
+    assert!(sql.contains("plainto_tsquery('en''g\"lish', $1)"));
+    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "o'hai"));
+}
+
+#[test]
+fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "quick fox")
+        .mode(SearchMode::Prefix)
+        .with_ranking()
+        .min_rank(0.75);
+
+    let (sql, params) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
+
+    assert!(sql.contains("to_tsquery('english', $1)"));
+    assert!(sql.contains(" >= $2"));
+    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "quick:* & fox:*"));
+    assert!(matches!(params.get(1), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON));
+}
+
+#[test]
+fn test_fulltext_build_mysql_ranked_sql_uses_bound_values_for_all_dynamic_inputs() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na`me", "bio"], "+urgent term")
+        .mode(SearchMode::Boolean)
+        .with_ranking()
+        .min_rank(0.5);
+
+    let (sql, params) = builder.build_ranked_sql(DatabaseType::MySQL).unwrap();
+
+    assert!(sql.contains("MATCH(`na``me`, `bio`) AGAINST(? IN BOOLEAN MODE)"));
+    assert!(sql.contains("AND MATCH(`na``me`, `bio`) AGAINST(? IN BOOLEAN MODE) >= ?"));
+    assert_eq!(params.len(), 4);
+    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "+urgent term"));
+    assert!(matches!(params.get(1), Some(Value::String(Some(query))) if query == "+urgent term"));
+    assert!(matches!(params.get(2), Some(Value::Double(Some(rank))) if (*rank - 0.5).abs() < f64::EPSILON));
+    assert!(matches!(params.get(3), Some(Value::String(Some(query))) if query == "+urgent term"));
+}
+
+#[test]
+fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name", "bio"], "say \"hello\" to it's")
+        .limit(5)
+        .offset(2);
+
+    let (sql, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
+
+    assert!(sql.contains("SELECT t.* FROM \"query_test_users\" t"));
+    assert!(sql.contains("INNER JOIN \"query_test_users_fts\" fts"));
+    assert!(sql.contains("WHERE \"query_test_users_fts\" MATCH ?"));
+    assert!(sql.contains("LIMIT 5 OFFSET 2"));
+    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "say \"\"hello\"\" to it''s"));
 }

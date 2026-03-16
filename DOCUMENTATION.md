@@ -545,6 +545,8 @@ pub struct Post {
 
 ### Loading Relations
 
+Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are runtime helpers, not persisted columns. TideORM's generated serde implementation skips them during serialization and restores them with defaults during deserialization, so they do not leak into JSON payloads.
+
 ```rust
 // Load a HasOne relation
 let user = User::find(1).await?.unwrap();
@@ -671,7 +673,7 @@ pub struct Post {
 
 TideORM provides a fluent query builder with all common operations.
 
-As of 0.7.2, query execution paths are aligned on parameterized SQL generation for reads, JOIN clauses are validated before execution, and destructive mutations reject incompatible SELECT, JOIN, ORDER BY, GROUP BY, UNION, CTE, and window-function modifiers instead of silently ignoring them.
+Query execution paths are aligned on parameterized SQL generation for reads, JOIN clauses are validated before execution, and destructive mutations reject incompatible SELECT, JOIN, ORDER BY, GROUP BY, UNION, CTE, and window-function modifiers instead of silently ignoring them.
 
 ### WHERE Conditions
 
@@ -1173,14 +1175,16 @@ let employees = Employee::query()
 
 ```rust
 let user = User {
-    id: 0,  // Auto-generated
     email: "john@example.com".to_string(),
     name: "John Doe".to_string(),
     active: true,
+    ..Default::default()
 };
 let user = user.save().await?;
 println!("Created user with id: {}", user.id);
 ```
+
+For auto-increment primary keys, TideORM treats `0` as an unsaved record marker internally. You usually do not need to assign it yourself when constructing a new model. Natural keys and non-auto-increment primary keys are considered persisted unless the primary key is empty.
 
 ### Read
 
@@ -1386,11 +1390,9 @@ pub struct Post {
 
 // No need to set timestamps manually
 let post = Post {
-    id: 0,
     title: "Hello".into(),
     content: "World".into(),
-    created_at: Utc::now(),  // Will be overwritten
-    updated_at: Utc::now(),  // Will be overwritten
+    ..Default::default()
 };
 let post = post.save().await?;
 // created_at and updated_at are now set to the current time
@@ -1465,9 +1467,9 @@ For efficient bulk operations:
 ```rust
 // Insert multiple records at once
 let users = vec![
-    User { id: 0, name: "John".into(), email: "john@example.com".into() },
-    User { id: 0, name: "Jane".into(), email: "jane@example.com".into() },
-    User { id: 0, name: "Bob".into(), email: "bob@example.com".into() },
+    User { name: "John".into(), email: "john@example.com".into(), ..Default::default() },
+    User { name: "Jane".into(), email: "jane@example.com".into(), ..Default::default() },
+    User { name: "Bob".into(), email: "bob@example.com".into(), ..Default::default() },
 ];
 let inserted = User::insert_all(users).await?;
 
@@ -2181,7 +2183,7 @@ When a model has `#[tide(tokenize)]`, these methods are available:
 | `User::detokenize(&token)` | Decode token to ID (doesn't fetch from DB) |
 | `User::decode_token(&token)` | Alias for `detokenize()` |
 | `User::from_token(&token).await` | Decode token and fetch record from DB |
-| `user.regenerate_token()` | Generate a new token (same as tokenize) |
+| `user.regenerate_token()` | Generate a fresh token; the default encoder uses a new random nonce each time |
 
 ### Model-Specific Tokens
 
@@ -2281,15 +2283,17 @@ TokenConfig::set_decoder(|token, model| {
 ### Tokenization Security
 
 **Features:**
-- **XOR encryption** with HMAC integrity verification
-- **Model binding**: HMAC includes model name, preventing cross-model reuse
-- **Tamper detection**: Modified tokens are rejected
+- **Authenticated encryption**: Default tokens use XChaCha20-Poly1305
+- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse
+- **Tamper detection**: Modified tokens fail authentication and are rejected
+- **Randomized output**: The default encoder uses a fresh nonce, so the same record can produce different valid tokens
 - **URL-safe**: Base64-URL encoding (A-Za-z0-9-_), no escaping needed
 
 **Best Practices:**
-- Use a secure 32+ character encryption key in production
+- Use a high-entropy secret from the environment; 32+ characters is a good baseline
 - Store keys in environment variables, never in code
 - Changing the key invalidates all existing tokens
+- If you override the encoder/decoder, you are responsible for preserving equivalent security guarantees
 - Consider token rotation for high-security applications
 
 ```rust
@@ -2942,14 +2946,21 @@ Repository: https://github.com/mohamadzoh/tideorm-examples
 ## Testing
 
 ```bash
-# Run all tests
+# Fast library validation
+cargo test --lib
+
+# Run the full suite for one backend feature set
 cargo test --features postgres
 
 # Run specific test
 cargo test query_builder --features postgres
 
-# Run with all features
+# Cross-backend compile/test coverage
 cargo test --all-features
 ```
 
-See [tests/TEST_GUIDE.md](tests/TEST_GUIDE.md) for detailed testing information.
+Notes:
+
+- Unit tests for core modules live in the crate and include dedicated files under `src/testing/` for larger internal test suites.
+- Integration tests under `tests/` cover query building, tokenization, OR clauses, and backend-specific behavior.
+- The GitHub Actions workflow in `.github/workflows/ci.yml` runs `cargo check` and `cargo test --lib` across the supported database feature sets.

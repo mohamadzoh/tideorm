@@ -27,11 +27,12 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(super) fn build_sea_condition(&self) -> Condition {
-        let where_sql = self.build_where_sql();
+        let db_type = self.db_type_for_sql();
+        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
         if where_sql.is_empty() {
             Condition::all()
         } else {
-            Condition::all().add(Expr::cust(where_sql))
+            Condition::all().add(Expr::cust_with_values(where_sql, params))
         }
     }
 
@@ -66,7 +67,7 @@ impl<M: Model> QueryBuilder<M> {
         placeholder
     }
 
-    fn format_value(&self, value: &serde_json::Value) -> String {
+    fn format_preview_value(&self, value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::Null => "NULL".to_string(),
             serde_json::Value::Bool(boolean) => boolean.to_string(),
@@ -203,62 +204,62 @@ impl<M: Model> QueryBuilder<M> {
         match &condition.operator {
             Operator::Eq => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} = {}", column, self.format_value(value)))
+                    Some(format!("{} = {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::NotEq => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} != {}", column, self.format_value(value)))
+                    Some(format!("{} != {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::Gt => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} > {}", column, self.format_value(value)))
+                    Some(format!("{} > {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::Gte => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} >= {}", column, self.format_value(value)))
+                    Some(format!("{} >= {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::Lt => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} < {}", column, self.format_value(value)))
+                    Some(format!("{} < {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::Lte => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} <= {}", column, self.format_value(value)))
+                    Some(format!("{} <= {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::Like => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} LIKE {}", column, self.format_value(value)))
+                    Some(format!("{} LIKE {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::NotLike => match &condition.value {
                 ConditionValue::Single(value) => {
-                    Some(format!("{} NOT LIKE {}", column, self.format_value(value)))
+                    Some(format!("{} NOT LIKE {}", column, self.format_preview_value(value)))
                 }
                 _ => None,
             },
             Operator::In => match &condition.value {
                 ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values.iter().map(|value| self.format_value(value)).collect();
+                    let rendered: Vec<String> = values.iter().map(|value| self.format_preview_value(value)).collect();
                     Some(format!("{} IN ({})", column, rendered.join(", ")))
                 }
                 _ => None,
             },
             Operator::NotIn => match &condition.value {
                 ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values.iter().map(|value| self.format_value(value)).collect();
+                    let rendered: Vec<String> = values.iter().map(|value| self.format_preview_value(value)).collect();
                     Some(format!("{} NOT IN ({})", column, rendered.join(", ")))
                 }
                 _ => None,
@@ -269,8 +270,8 @@ impl<M: Model> QueryBuilder<M> {
                 ConditionValue::Range(low, high) => Some(format!(
                     "{} BETWEEN {} AND {}",
                     column,
-                    self.format_value(low),
-                    self.format_value(high)
+                    self.format_preview_value(low),
+                    self.format_preview_value(high)
                 )),
                 _ => None,
             },
@@ -547,10 +548,6 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         parts.join(&format!(" {} ", group.combine_with.as_sql()))
-    }
-
-    fn build_where_sql(&self) -> String {
-        self.build_where_sql_for_db(self.db_type_for_sql())
     }
 
     pub(crate) fn build_where_sql_for_db(&self, db_type: DatabaseType) -> String {
