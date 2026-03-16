@@ -15,10 +15,9 @@ pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
 pub use crate::callbacks::{CallbackRunner, Callbacks};
-pub use crate::config::{
-    Config, DatabaseType, FileUrlGenerator, PoolConfig, RegisterMigrations, RegisterSeeds,
-    TideConfig,
-};
+pub use crate::config::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds, TideConfig};
+#[cfg(feature = "attachments")]
+pub use crate::config::FileUrlGenerator;
 pub use crate::model::{
     BatchUpdateBuilder, CreateBuilder, IndexDefinition, Model, ModelMeta, NestedSave,
     NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,
@@ -105,9 +104,11 @@ pub use crate::relations::{
 };
 
 // File Attachments
+#[cfg(feature = "attachments")]
 pub use crate::attachments::{AttachmentError, FileAttachment, FilesData, HasAttachments};
 
 // Translations
+#[cfg(feature = "translations")]
 pub use crate::translations::{
     ApplyTranslations, FieldTranslations, HasTranslations, TranslationError, TranslationInput,
     TranslationsData,
@@ -143,6 +144,7 @@ pub use crate::validation::{
 pub use crate::tokenization::{TokenConfig, TokenDecoder, TokenEncoder, Tokenizable};
 
 // Full-text search
+#[cfg(feature = "fulltext")]
 pub use crate::fulltext::{
     FullTextConfig, FullTextIndex, FullTextIndexConfig, FullTextSearch, FullTextSearchBuilder,
     HighlightConfig, HighlightedField, PgFullTextIndexType, SearchMode, SearchResult,

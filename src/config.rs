@@ -31,7 +31,9 @@ use std::time::Duration;
 use crate::database::Database;
 use crate::error::Result;
 use crate::migration::Migration;
-use crate::{tide_info, tide_warn};
+use crate::tide_info;
+#[cfg(feature = "attachments")]
+use crate::tide_warn;
 
 /// Global configuration instance
 static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
@@ -50,10 +52,12 @@ static SCHEMA_FILE_PATH: OnceLock<String> = OnceLock::new();
 /// - `file`: The full `FileAttachment` struct with all metadata (key, filename, size, mime_type, etc.)
 ///
 /// This allows URL generation based on both the field context and file metadata.
+#[cfg(feature = "attachments")]
 pub type FileUrlGenerator =
     fn(field_name: &str, file: &crate::attachments::FileAttachment) -> String;
 
 /// Global file URL generator
+#[cfg(feature = "attachments")]
 static GLOBAL_FILE_URL_GENERATOR: OnceLock<FileUrlGenerator> = OnceLock::new();
 
 /// Global pool configuration (set during connect)
@@ -360,6 +364,7 @@ impl Config {
     ///
     /// Returns the custom generator if set, otherwise returns the default generator
     /// which uses `file_base_url` to construct URLs.
+    #[cfg(feature = "attachments")]
     pub fn get_file_url_generator() -> FileUrlGenerator {
         GLOBAL_FILE_URL_GENERATOR
             .get()
@@ -384,6 +389,7 @@ impl Config {
     ///     }
     /// });
     /// ```
+    #[cfg(feature = "attachments")]
     pub fn set_file_url_generator(generator: FileUrlGenerator) {
         if GLOBAL_FILE_URL_GENERATOR.set(generator).is_err() {
             tide_warn!("File URL generator already set, ignoring subsequent call");
@@ -395,6 +401,7 @@ impl Config {
     /// Uses a field-specific base URL when configured, then falls back to `file_base_url`,
     /// otherwise returns the key as-is.
     #[inline]
+    #[cfg(feature = "attachments")]
     pub fn default_file_url_generator(
         field_name: &str,
         file: &crate::attachments::FileAttachment,
@@ -425,6 +432,7 @@ impl Config {
     /// // Returns: "https://cdn.example.com/uploads/2024/image.jpg"
     /// ```
     #[inline]
+    #[cfg(feature = "attachments")]
     pub fn generate_file_url(
         field_name: &str,
         file: &crate::attachments::FileAttachment,
@@ -1078,6 +1086,7 @@ impl TideConfig {
     ///     .connect()
     ///     .await?;
     /// ```
+    #[cfg(feature = "attachments")]
     pub fn file_url_generator(self, generator: FileUrlGenerator) -> Self {
         Config::set_file_url_generator(generator);
         self

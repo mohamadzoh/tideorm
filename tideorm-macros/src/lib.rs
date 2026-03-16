@@ -1183,6 +1183,26 @@ fn generate_model_impl(
         })
         .collect();
 
+    let allowed_languages_impl = if has_custom_languages {
+        quote! {
+            vec![#(#allowed_languages.to_string()),*]
+        }
+    } else {
+        quote! {
+            ::tideorm::config::Config::get_languages()
+        }
+    };
+
+    let fallback_language_impl = if has_custom_fallback {
+        quote! {
+            #fallback_language.to_string()
+        }
+    } else {
+        quote! {
+            ::tideorm::config::Config::get_fallback_language()
+        }
+    };
+
     let base_impl = quote! {
         // Internal SeaORM entity — generated code, targeted lint suppression
         #[doc(hidden)]
@@ -1277,6 +1297,14 @@ fn generate_model_impl(
                 vec![#(#translatable_fields),*]
             }
 
+            fn allowed_languages() -> Vec<String> {
+                #allowed_languages_impl
+            }
+
+            fn fallback_language() -> String {
+                #fallback_language_impl
+            }
+
             fn has_one_attached_file() -> Vec<&'static str> {
                 vec![#(#has_one_files),*]
             }
@@ -1301,31 +1329,6 @@ fn generate_model_impl(
                 vec![#(#unique_index_impls),*]
             }
         }
-    };
-
-    // Generate optional language overrides
-    let language_override = if has_custom_languages {
-        quote! {
-            impl #struct_name {
-                pub fn model_allowed_languages() -> Vec<String> {
-                    vec![#(#allowed_languages.to_string()),*]
-                }
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let fallback_override = if has_custom_fallback {
-        quote! {
-            impl #struct_name {
-                pub fn model_fallback_language() -> String {
-                    #fallback_language.to_string()
-                }
-            }
-        }
-    } else {
-        quote! {}
     };
 
     // Generate validation implementation
@@ -1384,9 +1387,6 @@ fn generate_model_impl(
 
     let base_output = quote! {
         #base_impl
-
-        #language_override
-        #fallback_override
 
         // Internal adapter implementation
         #[doc(hidden)]

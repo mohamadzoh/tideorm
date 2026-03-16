@@ -1488,6 +1488,13 @@ let affected = User::update_all()
 
 TideORM provides a file attachment system for managing file relationships. Attachments are stored in a JSONB column with metadata.
 
+Enable the feature first:
+
+```toml
+[dependencies]
+tideorm = { version = "0.7.3", features = ["postgres", "attachments"] }
+```
+
 ### Model Setup
 
 ```rust
@@ -1817,6 +1824,13 @@ URL generators are resolved in this order:
 ## Translations (i18n)
 
 TideORM provides a translation system for multilingual content. Translations are stored in a JSONB column.
+
+Enable the feature first:
+
+```toml
+[dependencies]
+tideorm = { version = "0.7.3", features = ["postgres", "translations"] }
+```
 
 ### Model Setup
 
@@ -2308,6 +2322,12 @@ TokenConfig::set_encryption_key(
 ## Full-Text Search
 
 provides full-text search capabilities across PostgreSQL (tsvector/tsquery), MySQL (FULLTEXT), and SQLite (FTS5).
+
+Enable the feature explicitly when you need the full-text search API:
+
+```toml
+tideorm = { version = "0.7.3", features = ["postgres", "fulltext"] }
+```
 
 ### Search Basics
 

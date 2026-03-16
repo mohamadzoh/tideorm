@@ -521,9 +521,11 @@ pub mod relations;
 extern crate self as tideorm;
 
 /// File attachments system (attach, detach, sync)
+#[cfg(feature = "attachments")]
 pub mod attachments;
 
 /// Translations system for multi-language support
+#[cfg(feature = "translations")]
 pub mod translations;
 
 /// Global configuration
@@ -548,6 +550,7 @@ pub mod seeding;
 pub mod validation;
 
 /// Full-text search support
+#[cfg(feature = "fulltext")]
 pub mod fulltext;
 
 /// Strongly-typed columns for compile-time type safety
@@ -565,6 +568,7 @@ pub mod prelude;
 
 pub use database::Database;
 // Global database access functions
+#[cfg(feature = "attachments")]
 pub use attachments::{AttachmentError, FileAttachment, FilesData, HasAttachments};
 pub use callbacks::{CallbackRunner, Callbacks};
 pub use config::{Config, TideConfig};
@@ -576,6 +580,7 @@ pub use query::{AggregateFunction, JoinClause, JoinType, Order, QueryBuilder};
 pub use relations::{BelongsTo, EagerLoadExt, HasMany, HasOne, RelationExt, WithRelations};
 pub use schema::SchemaWriter;
 pub use soft_delete::SoftDelete;
+#[cfg(feature = "translations")]
 pub use translations::{
     ApplyTranslations, FieldTranslations, HasTranslations, TranslationError, TranslationInput,
     TranslationsData,

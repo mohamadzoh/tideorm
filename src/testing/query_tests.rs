@@ -4,7 +4,9 @@ use super::{
     WindowFunctionType,
 };
 use crate::config::DatabaseType;
+#[cfg(feature = "fulltext")]
 use crate::fulltext::{FullTextSearchBuilder, SearchMode};
+#[cfg(feature = "fulltext")]
 use crate::internal::Value;
 
 #[derive(tideorm::Model)]
@@ -522,6 +524,7 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
     assert_eq!(params.len(), 1);
 }
 
+#[cfg(feature = "fulltext")]
 #[test]
 fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers() {
     let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na\"me", "bio"], "o'hai")
@@ -535,6 +538,7 @@ fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers(
     assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "o'hai"));
 }
 
+#[cfg(feature = "fulltext")]
 #[test]
 fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
     let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "quick fox")
@@ -550,6 +554,7 @@ fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
     assert!(matches!(params.get(1), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON));
 }
 
+#[cfg(feature = "fulltext")]
 #[test]
 fn test_fulltext_build_mysql_ranked_sql_uses_bound_values_for_all_dynamic_inputs() {
     let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["na`me", "bio"], "+urgent term")
@@ -568,6 +573,7 @@ fn test_fulltext_build_mysql_ranked_sql_uses_bound_values_for_all_dynamic_inputs
     assert!(matches!(params.get(3), Some(Value::String(Some(query))) if query == "+urgent term"));
 }
 
+#[cfg(feature = "fulltext")]
 #[test]
 fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
     let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name", "bio"], "say \"hello\" to it's")

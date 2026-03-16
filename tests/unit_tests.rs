@@ -311,6 +311,7 @@ mod validation_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "fulltext")]
 mod fulltext_tests {
     use tideorm::config::DatabaseType;
     use tideorm::fulltext::{
@@ -2823,6 +2824,7 @@ mod operator_coverage_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "attachments")]
 mod attachments_tests {
     use tideorm::attachments::{AttachmentError, FileAttachment, FilesData};
 
@@ -3059,6 +3061,7 @@ mod attachments_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "translations")]
 mod translations_tests {
     use tideorm::translations::{
         FieldTranslations, TranslationError, TranslationInput, TranslationsData,
@@ -3358,6 +3361,7 @@ mod translations_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "attachments")]
 mod attachments_extended_tests {
     use serde::{Deserialize, Serialize};
     use tideorm::attachments::{AttachmentError, FileAttachment, FilesData, HasAttachments};
@@ -3642,6 +3646,7 @@ mod attachments_extended_tests {
 // =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "translations")]
 mod translations_extended_tests {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;

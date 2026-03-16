@@ -916,6 +916,7 @@ mod logging_level_parsing {
 // ============================================================================
 // 19. Fulltext: highlight_text with empty query
 // ============================================================================
+#[cfg(feature = "fulltext")]
 mod fulltext_edge_cases {
     use tideorm::fulltext::{generate_snippet, highlight_text};
 

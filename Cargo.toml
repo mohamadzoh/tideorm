@@ -22,6 +22,9 @@ mysql = ["sea-orm/sqlx-mysql"]
 sqlite = ["sea-orm/sqlx-sqlite"]
 runtime-tokio = ["sea-orm/runtime-tokio-rustls", "dep:tokio"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
+attachments = []
+translations = []
+fulltext = []
 
 [dependencies]
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = ["macros", "with-chrono", "with-json", "with-uuid", "schema-sync"] }
@@ -70,6 +73,7 @@ harness = false
 [[bench]]
 name = "attachments_translations_benchmarks"
 harness = false
+required-features = ["attachments", "translations"]
 
 [[bench]]
 name = "cache_benchmarks"
@@ -86,6 +90,7 @@ harness = false
 [[bench]]
 name = "fulltext_benchmarks"
 harness = false
+required-features = ["fulltext"]
 
 [[bench]]
 name = "relations_benchmarks"

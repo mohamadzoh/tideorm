@@ -168,8 +168,15 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     }
 
     /// Check if model has translations support
+    #[cfg(feature = "translations")]
     fn has_translations() -> bool {
         !Self::translatable_fields().is_empty()
+    }
+
+    /// Check if model has translations support
+    #[cfg(not(feature = "translations"))]
+    fn has_translations() -> bool {
+        false
     }
 
     /// Returns single file attachment relations (hasOne)
@@ -190,8 +197,15 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     }
 
     /// Check if model has file attachments support
+    #[cfg(feature = "attachments")]
     fn has_file_attachments() -> bool {
         !Self::files_relations().is_empty()
+    }
+
+    /// Check if model has file attachments support
+    #[cfg(not(feature = "attachments"))]
+    fn has_file_attachments() -> bool {
+        false
     }
 
     /// Returns the file URL generator for this model
@@ -217,6 +231,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     ///     }
     /// }
     /// ```
+    #[cfg(feature = "attachments")]
     fn file_url_generator() -> crate::config::FileUrlGenerator {
         crate::config::Config::get_file_url_generator()
     }
@@ -237,6 +252,7 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// // Returns: "https://images-cdn.example.com/thumb/products/123/image.jpg"
     /// ```
     #[inline]
+    #[cfg(feature = "attachments")]
     fn generate_file_url(field_name: &str, file: &crate::attachments::FileAttachment) -> String {
         Self::file_url_generator()(field_name, file)
     }
@@ -893,7 +909,9 @@ pub trait Model:
         Self: serde::Serialize,
     {
         let opts = options.unwrap_or_default();
+        #[cfg(feature = "translations")]
         let fallback = Self::fallback_language();
+        #[cfg(feature = "translations")]
         let current_language = opts
             .get("language")
             .map(|s| s.as_str())
@@ -904,7 +922,9 @@ pub trait Model:
             .unwrap_or(Self::default_presenter());
 
         let hidden = Self::hidden_attributes();
+        #[cfg(feature = "translations")]
         let translatable = Self::translatable_fields();
+        #[cfg(feature = "attachments")]
         let file_relations = Self::files_relations();
 
         // Serialize the model to JSON
@@ -919,6 +939,7 @@ pub trait Model:
         }
 
         // Apply translations if model has translations support
+        #[cfg(feature = "translations")]
         if Self::has_translations() {
             if let Some(translations) = json.get("translations").cloned() {
                 if let Some(trans_obj) = translations.as_object() {
@@ -941,14 +962,13 @@ pub trait Model:
             }
         }
 
-        // Flatten file attachments to root level
+        #[cfg(feature = "attachments")]
         if Self::has_file_attachments() {
             let url_generator = Self::file_url_generator();
             if let Some(files) = json.remove("files") {
                 if let Some(files_obj) = files.as_object() {
                     for relation in &file_relations {
                         if let Some(file_data) = files_obj.get(*relation) {
-                            // Process file data to remove hidden attributes and add URLs
                             let processed = Self::process_file_for_json(
                                 relation,
                                 file_data,
@@ -977,6 +997,7 @@ pub trait Model:
     /// * `hidden_attrs` - Attributes to exclude from output
     /// * `url_generator` - Function to generate URLs
     #[inline]
+    #[cfg(feature = "attachments")]
     fn process_file_for_json(
         field_name: &str,
         file_data: &serde_json::Value,
@@ -1083,6 +1104,7 @@ pub trait Model:
     }
 
     /// Extract translations from data HashMap for saving
+    #[cfg(feature = "translations")]
     fn extract_translations(
         data: &mut HashMap<String, serde_json::Value>,
     ) -> std::result::Result<serde_json::Value, String> {
@@ -1103,6 +1125,15 @@ pub trait Model:
         }
 
         Ok(serde_json::Value::Object(translations))
+    }
+
+    /// Extract translations from data HashMap for saving
+    #[cfg(not(feature = "translations"))]
+    fn extract_translations(
+        data: &mut HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let _ = data;
+        Ok(serde_json::json!({}))
     }
 
     // =========================================================================
@@ -1286,6 +1317,7 @@ pub trait Model:
     }
 
     /// Extract files from data HashMap for saving
+    #[cfg(feature = "attachments")]
     fn extract_files(
         data: &mut HashMap<String, serde_json::Value>,
     ) -> std::result::Result<serde_json::Value, String> {
@@ -1303,6 +1335,15 @@ pub trait Model:
         }
 
         Ok(serde_json::Value::Object(files))
+    }
+
+    /// Extract files from data HashMap for saving
+    #[cfg(not(feature = "attachments"))]
+    fn extract_files(
+        data: &mut HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let _ = data;
+        Ok(serde_json::json!({}))
     }
 }
 

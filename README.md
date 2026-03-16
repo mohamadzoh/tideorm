@@ -42,16 +42,7 @@ See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
 - **Auto Schema Sync** - Automatic table management during development
 - **Type Safe** - Full Rust type safety with zero compromises
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
-- **Batteries Included**:
-  - Fluent Query Builder with Window Functions & CTEs
-  - Database Migrations & Seeding
-  - Model Validation System
-    - Record Tokenization (authenticated, URL-safe ID tokens)
-  - Translations (i18n) for multilingual content
-  - File Attachments with metadata
-  - Full-Text Search with highlighting
-  - Soft Deletes & Callbacks
-  - Transaction Support
+- **Batteries Included** - Fluent Query Builder with Window Functions & CTEs, database migrations and seeding, model validation, record tokenization, translations, file attachments, full-text search, soft deletes and callbacks, and transaction support
 
 ## Quick Start
 
@@ -128,8 +119,6 @@ async fn main() -> tideorm::Result<()> {
     let profile = user.profile.load().await?;
 
     // Update
-
-Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
     let mut user = User::find(1).await?.unwrap();
     user.name = "Jane Doe".into();
     user.update().await?;
@@ -140,6 +129,8 @@ Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideO
     Ok(())
 }
 ```
+
+Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
 
 ## Model Relations
 
@@ -211,6 +202,15 @@ tideorm = { version = "0.7.3", features = ["mysql"] }
 
 # SQLite
 tideorm = { version = "0.7.3", features = ["sqlite"] }
+
+# Enable attachments support explicitly
+tideorm = { version = "0.7.3", features = ["postgres", "attachments"] }
+
+# Enable translations support explicitly
+tideorm = { version = "0.7.3", features = ["postgres", "translations"] }
+
+# Enable full-text search support explicitly
+tideorm = { version = "0.7.3", features = ["postgres", "fulltext"] }
 ```
 
 ### Feature Flags
@@ -222,6 +222,15 @@ tideorm = { version = "0.7.3", features = ["sqlite"] }
 | `sqlite` | SQLite support |
 | `runtime-tokio` | Tokio runtime (default) |
 | `runtime-async-std` | async-std runtime |
+| `attachments` | Enables the attachments API and attachment-specific benchmarks/tests |
+| `translations` | Enables the translations API and translation-specific benchmarks/tests |
+| `fulltext` | Enables the full-text search API and fulltext-specific benchmarks/tests |
+
+Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers.
+
+Translations are opt-in. Enable the `translations` feature when you want to use `tideorm::translations`, `HasTranslations`, or `ApplyTranslations`.
+
+Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers.
 
 ## Relation Types
 

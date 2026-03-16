@@ -477,6 +477,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
     if entity_count > 0 {
         let schema_builder = SyncRegistry::build_schema_builder(backend);
 
+        #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
         // Use SeaORM  sync or apply based on force_sync option
         if force_sync {
             tide_debug!("  Using SeaORM SchemaBuilder.apply() - fresh schema creation");
@@ -490,6 +491,14 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
                 .sync(conn)
                 .await
                 .map_err(|e| Error::query(format!("Schema sync failed: {}", e)))?;
+        }
+
+        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+        {
+            let _ = schema_builder;
+            return Err(Error::configuration(
+                "database sync requires at least one backend feature: postgres, mysql, or sqlite",
+            ));
         }
     }
 
