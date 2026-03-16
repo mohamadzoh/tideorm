@@ -733,7 +733,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn log_query(&self, sql: &str) {
         if std::env::var("TIDE_LOG_QUERIES")
-            .map(|value| value.to_ascii_lowercase() == "true" || value == "1")
+                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
             .unwrap_or(false)
         {
             crate::tide_debug!("Query: {}", sql);
