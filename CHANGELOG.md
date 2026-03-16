@@ -5,6 +5,35 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-03-16
+
+### Changed
+
+- Moved the documentation to an mdBook with dedicated Getting Started, Models, Queries, Relations, and Migrations chapters, and wired the site for GitHub Pages deployment at `tideorm.com`.
+- Standardized model and field metadata on the `#[tideorm(...)]` attribute form across docs, tests, benchmarks, and generated macro output.
+- Split the `tideorm-macros` implementation into focused modules so entity generation, model trait generation, serde, relations, tokenization, validation, and parsing logic are maintained independently.
+- Initialized supported relation wrappers through generated `with_relations()` setup for loaded models, so `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` fields are wired with the correct runtime context.
+
+### Changed — Breaking
+
+- Gated attachments, translations, and full-text search behind explicit Cargo features. Consumers now need to opt into `attachments`, `translations`, and `fulltext` when using those modules or APIs.
+- Removed the legacy `#[tide(...)]` compatibility form and related prelude re-exports. Use `#[tideorm(...)]` attributes consistently.
+
+### Fixed
+
+- Excluded runtime-only relation helper fields from TideORM's generated serde output and restored them with defaults during deserialization.
+- Restored valid PostgreSQL JSON and array operator SQL generation after the SeaQuery condition rewrite, keeping advanced query coverage green for `@>`, `<@`, `?`, `@?`, and array overlap/containment operators.
+- Cleaned up the top-level documentation entry points so `DOCUMENTATION.md`, README links, and the split mdBook chapters no longer contain stale anchors or partially copied monolith content.
+
+### Removed
+
+- Dropped the explicit `sea-schema` dependency and removed unused development dependencies `lazy_static`, `pretty_assertions`, and `serial_test`.
+
+### Internal
+
+- Added docs verification to CI and a dedicated Pages workflow for publishing the mdBook.
+- Verified the release with `cargo test`, `cargo test postgres_advanced_tests`, and `mdbook build`.
+
 ## [0.7.3] - 2026-03-16
 
 ### Fixed
@@ -497,7 +526,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/mohamadzoh/tideorm/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/mohamadzoh/tideorm/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/mohamadzoh/tideorm/compare/v0.7.0...v0.7.2
 [0.1.0]: https://github.com/mohamadzoh/tideorm/releases/tag/v0.1.0
