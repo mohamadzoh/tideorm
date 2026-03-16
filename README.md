@@ -6,43 +6,17 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## TideORM CLI & Studio
-
-**NEW!** TideORM now includes a powerful CLI with a beautiful web-based interface!
-
-```bash
-# Install the CLI
-cargo install tideorm-cli
-
-# Initialize a project
-tideorm init my_project
-
-# Generate models with a single command
-tideorm make model User --fields="name:string,email:string:unique" --relations="posts:has_many:Post" --migration
-
-# Launch TideORM Studio (Web UI)
-tideorm ui
-```
-
-TideORM Studio provides a visual interface for:
-- Model generation with all options
-- Migration management
-- Database seeding
-- Interactive SQL query playground
-
-See the [TideORM CLI README](../tideorm-cli/README.md) for full documentation.
-
----
-
 ## Features
 
 - **Clean Model Definitions** - Simple `#[tideorm::model(table = "...")]` attribute macro
-- **SeaORM-Style Relations** - Define relations as struct fields
+- **Field-Declared Relations** - `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relations are defined directly on the model
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development
-- **Type Safe** - Full Rust type safety with zero compromises
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
-- **Batteries Included** - Fluent Query Builder with Window Functions & CTEs, database migrations and seeding, model validation, record tokenization, translations, file attachments, full-text search, soft deletes and callbacks, and transaction support
+- **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
+- **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
+- **Optional Modules** - Attachments, translations, and full-text search are available behind feature flags
+- **Tokenization** - Secure record ID encoding/decoding helpers
 
 ## Quick Start
 
@@ -103,11 +77,11 @@ async fn main() -> tideorm::Result<()> {
         .await?;
 
     // Complex queries with OR conditions
-    let premium_or_featured = Product::query()
+    let matching_users = User::query()
         .where_eq("active", true)
         .begin_or()
-            .or_where_gt("price", 500.0).and_where_gte("rating", 4.5)
-            .or_where_eq("featured", true)
+            .or_where_like("name", "%Jane%")
+            .or_where_like("email", "%@example.com")
         .end_or()
         .get()
         .await?;
@@ -236,71 +210,34 @@ Full-text search is opt-in. Enable the `fulltext` feature when you want to use `
 | `HasMany<T>` | One-to-many relationship | User has many Posts |
 | `BelongsTo<T>` | Inverse of HasOne/HasMany | Post belongs to User |
 | `HasManyThrough<T, P>` | Many-to-many via pivot | User has many Roles through UserRoles |
-| `MorphOne<T>` | Polymorphic one-to-one | Post/Video has one Image |
-| `MorphMany<T>` | Polymorphic one-to-many | Post/Video has many Comments |
+
+Annotated relation fields are initialized automatically on models loaded through TideORM. Polymorphic relation wrappers exist, but they still require manual `.with_parent(...)` setup instead of macro-generated wiring.
 
 ## Documentation
 
-For detailed documentation on all features, see **[DOCUMENTATION.md](DOCUMENTATION.md)**.
+The docs now ship as an mdBook.
 
-Key sections:
-- [Configuration](DOCUMENTATION.md#configuration) - Database connections and pool settings
-- [Model Definition](DOCUMENTATION.md#model-definition) - Defining your models
-- [Query Builder](DOCUMENTATION.md#query-builder) - Building complex queries
-- [OR Conditions](DOCUMENTATION.md#or-conditions) - Fluent OR API with begin_or/end_or
-- [CRUD Operations](DOCUMENTATION.md#crud-operations) - Create, Read, Update, Delete
-- [Soft Deletes](DOCUMENTATION.md#soft-deletes) - Soft delete support
-- [Transactions](DOCUMENTATION.md#transactions) - Transaction handling
-- [Callbacks](DOCUMENTATION.md#callbacks--hooks) - Lifecycle hooks
-- [File Attachments](DOCUMENTATION.md#file-attachments) - Manage file relationships
-- [Translations (i18n)](DOCUMENTATION.md#translations-i18n) - Multilingual content
-- [Validation](DOCUMENTATION.md#model-validation) - Data validation rules
-- [Full-Text Search](DOCUMENTATION.md#full-text-search) - Search with highlighting
-- [Multi-Database](DOCUMENTATION.md#multi-database-support) - Cross-database compatibility
+- Read the book locally in the repo: [docs/introduction.md](docs/introduction.md)
+- Published site: **[tideorm.com](https://tideorm.com)**
+- Lightweight markdown index: [DOCUMENTATION.md](DOCUMENTATION.md)
 
-### TideORM CLI
+Core chapters:
+- [Getting Started](docs/getting-started.md) - Configuration, type mappings, examples, and testing
+- [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and SeaORM 2.0-inspired helpers
+- [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
+- [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
+- [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
 
-For the command-line interface and TideORM Studio, see the **[TideORM CLI README](../tideorm-cli/README.md)**.
+## Ecosystem
 
-CLI features:
-- **Model Generator** - Create models with fields, relations, attachments, translations
-- **Migration System** - Create, run, rollback database migrations
-- **Seeders & Factories** - Database seeding and test data generation
-- **TideORM Studio** - Web-based UI for all CLI operations
+This repository is the core TideORM library. Related projects live separately:
+
+- **[TideORM CLI](https://github.com/mohamadzoh/tideorm-cli)** - External command-line tooling for TideORM
+- **[TideORM Examples](https://github.com/mohamadzoh/tideorm-examples)** - End-to-end example applications and demos
 
 ## Examples
 
-For comprehensive examples demonstrating TideORM features, see the **[tideorm-examples](https://github.com/mohamadzoh/tideorm-examples)** repository.
-
-```bash
-# Clone the examples repository
-git clone https://github.com/mohamadzoh/tideorm-examples.git
-cd tideorm-examples
-
-# Run a basic example
-cargo run --bin basic
-
-# Run with different databases
-cargo run --bin postgres_demo
-cargo run --bin mysql_demo --features "mysql runtime-tokio" --no-default-features
-cargo run --bin sqlite_demo --features "sqlite runtime-tokio" --no-default-features
-```
-
-### Available Examples
-
-| Example | Description |
-|---------|-------------|
-| `basic` | Core CRUD operations |
-| `query_builder` | Advanced querying (WHERE, ORDER BY, LIMIT) |
-| `where_and_or_demo` | Comprehensive WHERE & OR conditions |
-| `upsert_demo` | Insert-or-update with conflict handling |
-| `postgres_complete` | Complete PostgreSQL feature showcase |
-| `migrations` | Database schema migrations |
-| `validation_demo` | Model validation system |
-| `fulltext_demo` | Full-text search with highlighting |
-| `tokenization_demo` | Secure record ID tokenization |
-
-See the [tideorm-examples README](https://github.com/mohamadzoh/tideorm-examples#readme) for the complete list.
+For runnable applications and broader demos, see **[tideorm-examples](https://github.com/mohamadzoh/tideorm-examples)**.
 
 ## Testing
 
@@ -319,19 +256,7 @@ cargo test --features postgres
 cargo test --all-features
 ```
 
-See [DOCUMENTATION.md](DOCUMENTATION.md#testing) for more.
-
-## Rusty Rails Project
-
-TideORM is part of the larger **Rusty Rails** project, which aims to bridge the gap between Rust and Ruby/Ruby on Rails ecosystems. We're actively working on recreating Ruby libraries in Rust to make working with Rust more easy and fun for new developers.
-
-### Related Projects
-
-- **[TideORM CLI](https://github.com/mohamadzoh/tideorm-cli)** - Command-line interface with TideORM Studio web UI
-- **[TideORM Examples](https://github.com/mohamadzoh/tideorm-examples)** - Comprehensive examples
-- More Rust libraries coming soon!
-
----
+See [docs/getting-started.md](docs/getting-started.md#testing) for more.
 
 ## Contributing
 
@@ -340,7 +265,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-**Made with love by the Rusty Rails team**

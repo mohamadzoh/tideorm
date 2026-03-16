@@ -118,27 +118,24 @@ use crate::query::{Order, QueryBuilder};
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
-/// #[tideorm(table = "employees")]
+/// #[tideorm::model(table = "employees")]
 /// pub struct Employee {
 ///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub name: String,
 ///     pub manager_id: Option<i64>,
-///     
-///     // Self-reference: each employee optionally reports to another employee
-///     #[tideorm(self_ref = "id", foreign_key = "manager_id")]
-///     pub manager: SelfRef<Employee>,
-///     
-///     // Inverse: employees who report to this employee
-///     #[tideorm(self_ref_many = "id", foreign_key = "manager_id")]
-///     pub reports: SelfRefMany<Employee>,
 /// }
 ///
-/// // Usage:
-/// let employee = Employee::find(5).await?;
-/// let manager = employee.manager.load().await?;  // Get their manager
-/// let reports = employee.reports.load().await?;  // Get their direct reports
+/// // Manual setup is required for self references at the moment.
+/// let employee = Employee::find(5).await?.unwrap();
+/// let manager = SelfRef::<Employee>::new("manager_id", "id")
+///     .with_fk_value(serde_json::json!(employee.manager_id))
+///     .load()
+///     .await?;
+/// let reports = SelfRefMany::<Employee>::new("manager_id", "id")
+///     .with_parent_pk(serde_json::json!(employee.id))
+///     .load()
+///     .await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SelfRef<E: Model> {
@@ -254,20 +251,23 @@ impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "categories")]
 /// pub struct Category {
+///     #[tideorm(primary_key)]
 ///     pub id: i64,
 ///     pub name: String,
 ///     pub parent_id: Option<i64>,
-///     
-///     // Get the parent category
-///     #[tideorm(self_ref = "id", foreign_key = "parent_id")]
-///     pub parent: SelfRef<Category>,
-///     
-///     // Get all child categories
-///     #[tideorm(self_ref_many = "id", foreign_key = "parent_id")]
-///     pub children: SelfRefMany<Category>,
 /// }
+///
+/// let category = Category::find(1).await?.unwrap();
+/// let parent = SelfRef::<Category>::new("parent_id", "id")
+///     .with_fk_value(serde_json::json!(category.parent_id))
+///     .load()
+///     .await?;
+/// let children = SelfRefMany::<Category>::new("parent_id", "id")
+///     .with_parent_pk(serde_json::json!(category.id))
+///     .load()
+///     .await?;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SelfRefMany<E: Model> {

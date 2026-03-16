@@ -1,0 +1,382 @@
+use darling::{FromDeriveInput, FromField, ast::Data};
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::{Attribute, GenericArgument, Ident, Meta, PathArguments, Type};
+
+#[derive(Debug, Clone, FromField)]
+#[darling(attributes(tideorm), forward_attrs(validate))]
+#[allow(dead_code)]
+pub(crate) struct ModelField {
+    pub(crate) ident: Option<Ident>,
+    pub(crate) ty: Type,
+    pub(crate) attrs: Vec<syn::Attribute>,
+    #[darling(default)]
+    pub(crate) primary_key: bool,
+    #[darling(default)]
+    pub(crate) auto_increment: bool,
+    #[darling(default)]
+    pub(crate) column: Option<String>,
+    #[darling(default)]
+    pub(crate) nullable: bool,
+    #[darling(default)]
+    pub(crate) default: Option<String>,
+    #[darling(default)]
+    pub(crate) skip: bool,
+    #[darling(default)]
+    pub(crate) timestamp: bool,
+    #[darling(default)]
+    pub(crate) has_one: Option<String>,
+    #[darling(default)]
+    pub(crate) has_many: Option<String>,
+    #[darling(default)]
+    pub(crate) belongs_to: Option<String>,
+    #[darling(default)]
+    pub(crate) has_many_through: Option<String>,
+    #[darling(default)]
+    pub(crate) foreign_key: Option<String>,
+    #[darling(default)]
+    pub(crate) owner_key: Option<String>,
+    #[darling(default)]
+    pub(crate) local_key: Option<String>,
+    #[darling(default)]
+    pub(crate) pivot: Option<String>,
+    #[darling(default)]
+    pub(crate) related_key: Option<String>,
+    #[darling(default)]
+    pub(crate) morph_name: Option<String>,
+}
+
+impl ModelField {
+    pub(crate) fn is_relation(&self) -> bool {
+        self.has_one.is_some()
+            || self.has_many.is_some()
+            || self.belongs_to.is_some()
+            || self.has_many_through.is_some()
+    }
+
+    pub(crate) fn is_relation_type(&self) -> bool {
+        relation_wrapper_name(&self.ty)
+            .map(|name| {
+                matches!(
+                    name,
+                    "HasOne"
+                        | "HasMany"
+                        | "BelongsTo"
+                        | "HasManyThrough"
+                        | "MorphOne"
+                        | "MorphMany"
+                        | "MorphTo"
+                        | "SelfRef"
+                        | "SelfRefMany"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn column_type_expr(&self) -> TokenStream2 {
+        let ty = &self.ty;
+        let ty_str = quote!(#ty).to_string();
+        let ty_str: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
+        let is_nullable = ty_str.starts_with("Option<");
+        let base_type = if is_nullable {
+            ty_str
+                .strip_prefix("Option<")
+                .and_then(|s| s.strip_suffix('>'))
+                .unwrap_or(&ty_str)
+        } else {
+            &ty_str
+        };
+
+        let column_type = match base_type {
+            "i8" | "i16" | "u8" | "u16" => quote!(ColumnType::SmallInteger),
+            "i32" | "u32" => quote!(ColumnType::Integer),
+            "i64" | "u64" => quote!(ColumnType::BigInteger),
+            "f32" => quote!(ColumnType::Float),
+            "f64" => quote!(ColumnType::Double),
+            "bool" => quote!(ColumnType::Boolean),
+            "String" | "&str" | "str" => quote!(ColumnType::Text),
+            "Uuid" | "uuid::Uuid" => quote!(ColumnType::Uuid),
+            s if s.contains("DateTime<Utc>")
+                || s.contains("DateTime<chrono::Utc>")
+                || s.contains("chrono::DateTime<Utc>")
+                || s.contains("chrono::DateTime<chrono::Utc>") => {
+                quote!(ColumnType::TimestampWithTimeZone)
+            }
+            "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => quote!(ColumnType::DateTime),
+            "NaiveDate" | "chrono::NaiveDate" => quote!(ColumnType::Date),
+            "NaiveTime" | "chrono::NaiveTime" => quote!(ColumnType::Time),
+            "Decimal" | "rust_decimal::Decimal" => quote!(ColumnType::Decimal(None)),
+            "Json" | "JsonValue" | "Value" | "serde_json::Value" => quote!(ColumnType::Json),
+            "Vec<u8>" => quote!(ColumnType::Binary(sea_orm::sea_query::BlobSize::Blob(None))),
+            "Vec<i32>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Integer))),
+            "Vec<i64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::BigInteger))),
+            "Vec<String>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Text))),
+            "Vec<bool>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Boolean))),
+            "Vec<f64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Double))),
+            _ => quote!(ColumnType::Text),
+        };
+
+        if is_nullable || self.nullable {
+            quote!(#column_type.def().nullable())
+        } else {
+            quote!(#column_type.def())
+        }
+    }
+}
+
+pub(crate) fn relation_wrapper_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Group(group) => relation_wrapper_name(&group.elem),
+        Type::Paren(paren) => relation_wrapper_name(&paren.elem),
+        Type::Reference(reference) => relation_wrapper_name(&reference.elem),
+        Type::Path(type_path) => {
+            let segment = type_path.path.segments.last()?;
+            let ident = segment.ident.to_string();
+            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc") {
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(inner_ty) = argument {
+                            if let Some(name) = relation_wrapper_name(inner_ty) {
+                                return Some(name);
+                            }
+                        }
+                    }
+                }
+            }
+            Some(match ident.as_str() {
+                "HasOne" => "HasOne",
+                "HasMany" => "HasMany",
+                "BelongsTo" => "BelongsTo",
+                "HasManyThrough" => "HasManyThrough",
+                "MorphOne" => "MorphOne",
+                "MorphMany" => "MorphMany",
+                "MorphTo" => "MorphTo",
+                "SelfRef" => "SelfRef",
+                "SelfRefMany" => "SelfRefMany",
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IndexDef {
+    pub(crate) name: Option<String>,
+    pub(crate) columns: Vec<String>,
+    pub(crate) unique: bool,
+}
+
+impl IndexDef {
+    pub(crate) fn from_columns(columns: &str, unique: bool) -> Self {
+        Self {
+            name: None,
+            columns: columns.split(',').map(|s| s.trim().to_string()).collect(),
+            unique,
+        }
+    }
+
+    pub(crate) fn from_named(name: String, columns: &str, unique: bool) -> Self {
+        Self {
+            name: Some(name),
+            columns: columns.split(',').map(|s| s.trim().to_string()).collect(),
+            unique,
+        }
+    }
+
+    pub(crate) fn get_name(&self, table_name: &str) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            let prefix = if self.unique { "uidx" } else { "idx" };
+            format!("{}_{}_{}", prefix, table_name, self.columns.join("_"))
+        })
+    }
+}
+
+pub(crate) fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>) {
+    let mut indexes = Vec::new();
+    let mut unique_indexes = Vec::new();
+    for attr in attrs {
+        let is_index = attr.path().is_ident("index");
+        let is_unique_index = attr.path().is_ident("unique_index");
+        if !is_index && !is_unique_index {
+            continue;
+        }
+        let unique = is_unique_index;
+        if let Meta::List(list) = &attr.meta {
+            let tokens = list.tokens.to_string();
+            if tokens.contains("name") && tokens.contains("columns") {
+                let mut name = None;
+                let mut columns = None;
+                let _ = attr.parse_nested_meta(|nested| {
+                    if nested.path.is_ident("name") {
+                        name = Some(nested.value()?.parse::<syn::LitStr>()?.value());
+                    } else if nested.path.is_ident("columns") {
+                        columns = Some(nested.value()?.parse::<syn::LitStr>()?.value());
+                    }
+                    Ok(())
+                });
+                if let Some(cols) = columns {
+                    let idx = if let Some(name) = name {
+                        IndexDef::from_named(name, &cols, unique)
+                    } else {
+                        IndexDef::from_columns(&cols, unique)
+                    };
+                    if unique {
+                        unique_indexes.push(idx);
+                    } else {
+                        indexes.push(idx);
+                    }
+                }
+            } else {
+                let clean = tokens.trim().trim_matches('"');
+                if !clean.is_empty() {
+                    let idx = IndexDef::from_columns(clean, unique);
+                    if unique {
+                        unique_indexes.push(idx);
+                    } else {
+                        indexes.push(idx);
+                    }
+                }
+            }
+        }
+    }
+    (indexes, unique_indexes)
+}
+
+pub(crate) fn parse_validation_attributes(
+    _field_name: &str,
+    attrs: &[Attribute],
+) -> Vec<TokenStream2> {
+    let mut rules = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("validate") {
+            continue;
+        }
+        if let Meta::List(list) = &attr.meta {
+            for part in list.tokens.to_string().split(',').map(str::trim) {
+                match part {
+                    "required" => rules.push(quote!(::tideorm::validation::ValidationRule::Required)),
+                    "email" => rules.push(quote!(::tideorm::validation::ValidationRule::Email)),
+                    "url" => rules.push(quote!(::tideorm::validation::ValidationRule::Url)),
+                    "alpha" => rules.push(quote!(::tideorm::validation::ValidationRule::Alpha)),
+                    "alphanumeric" => rules.push(quote!(::tideorm::validation::ValidationRule::Alphanumeric)),
+                    "numeric" => rules.push(quote!(::tideorm::validation::ValidationRule::Numeric)),
+                    "uuid" => rules.push(quote!(::tideorm::validation::ValidationRule::Uuid)),
+                    _ if part.starts_with("min_length") => push_parsed_rule(&mut rules, part, "min_length", |n: usize| quote!(::tideorm::validation::ValidationRule::MinLength(#n))),
+                    _ if part.starts_with("max_length") => push_parsed_rule(&mut rules, part, "max_length", |n: usize| quote!(::tideorm::validation::ValidationRule::MaxLength(#n))),
+                    _ if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") => push_parsed_rule(&mut rules, part, "length", |n: usize| quote!(::tideorm::validation::ValidationRule::Length(#n))),
+                    _ if part.starts_with("min") && !part.contains("length") => push_parsed_rule(&mut rules, part, "min", |n: f64| quote!(::tideorm::validation::ValidationRule::Min(#n))),
+                    _ if part.starts_with("max") && !part.contains("length") => push_parsed_rule(&mut rules, part, "max", |n: f64| quote!(::tideorm::validation::ValidationRule::Max(#n))),
+                    _ if part.starts_with("range") => {
+                        if let Some(value) = extract_value(part, "range") {
+                            let parts: Vec<_> = value.trim_matches('"').split("..").collect();
+                            if parts.len() == 2 {
+                                if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                    rules.push(quote!(::tideorm::validation::ValidationRule::Range(#min, #max)));
+                                }
+                            }
+                        }
+                    }
+                    _ if part.starts_with("regex") => {
+                        if let Some(value) = extract_value(part, "regex") {
+                            let pattern = value.trim_matches('"');
+                            rules.push(quote!(::tideorm::validation::ValidationRule::Regex(#pattern.to_string())));
+                        }
+                    }
+                    _ if part.starts_with("custom") => {
+                        if let Some(value) = extract_value(part, "custom") {
+                            let msg = value.trim_matches('"');
+                            rules.push(quote!(::tideorm::validation::ValidationRule::Custom(#msg.to_string())));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    rules
+}
+
+fn push_parsed_rule<T, F>(rules: &mut Vec<TokenStream2>, input: &str, key: &str, build: F)
+where
+    T: std::str::FromStr,
+    F: FnOnce(T) -> TokenStream2,
+{
+    if let Some(value) = extract_value(input, key) {
+        if let Ok(parsed) = value.parse::<T>() {
+            rules.push(build(parsed));
+        }
+    }
+}
+
+pub(crate) fn extract_value(input: &str, key: &str) -> Option<String> {
+    let input = input.trim();
+    if let Some(pos) = input.find('=') {
+        let current = input[..pos].trim();
+        if current == key {
+            return Some(input[pos + 1..].trim().to_string());
+        }
+    }
+    if input.starts_with(key) && input.contains('(') && input.ends_with(')') {
+        let start = input.find('(').unwrap() + 1;
+        return Some(input[start..input.len() - 1].trim().to_string());
+    }
+    None
+}
+
+#[derive(Debug, FromDeriveInput)]
+#[darling(attributes(tideorm), supports(struct_named))]
+#[allow(dead_code)]
+pub(crate) struct ModelInput {
+    pub(crate) ident: Ident,
+    pub(crate) data: Data<(), ModelField>,
+    #[darling(default)]
+    pub(crate) table: Option<String>,
+    #[darling(default)]
+    pub(crate) schema: Option<String>,
+    #[darling(default)]
+    pub(crate) soft_delete: bool,
+    #[darling(default)]
+    pub(crate) timestamps: bool,
+    #[darling(default)]
+    pub(crate) hidden: Option<String>,
+    #[darling(default)]
+    pub(crate) translatable: Option<String>,
+    #[darling(default)]
+    pub(crate) languages: Option<String>,
+    #[darling(default)]
+    pub(crate) fallback_language: Option<String>,
+    #[darling(default)]
+    pub(crate) has_one_files: Option<String>,
+    #[darling(default)]
+    pub(crate) has_many_files: Option<String>,
+    #[darling(default)]
+    pub(crate) searchable: Option<String>,
+    #[darling(default)]
+    pub(crate) skip_debug: bool,
+    #[darling(default)]
+    pub(crate) skip_clone: bool,
+    #[darling(default)]
+    pub(crate) skip_default: bool,
+    #[darling(default)]
+    pub(crate) skip_serialize: bool,
+    #[darling(default)]
+    pub(crate) skip_deserialize: bool,
+    #[darling(default)]
+    pub(crate) skip_derives: bool,
+    #[darling(default)]
+    pub(crate) auto_derives: bool,
+    #[darling(default)]
+    pub(crate) auto_debug: bool,
+    #[darling(default)]
+    pub(crate) auto_clone: bool,
+    #[darling(default)]
+    pub(crate) auto_default: bool,
+    #[darling(default)]
+    pub(crate) auto_serialize: bool,
+    #[darling(default)]
+    pub(crate) auto_deserialize: bool,
+    #[darling(default)]
+    pub(crate) tokenize: bool,
+}
+

@@ -534,10 +534,10 @@ pub trait Model:
         crate::internal::QueryExecutor::insert_many::<Self>(conn, models).await
     }
 
-    /// Insert multiple records and return the inserted models with their IDs
+    /// Insert multiple records and return the inserted models.
     ///
-    /// Uses INSERT ... RETURNING on PostgreSQL and SQLite 3.35+.
-    /// For databases that don't support RETURNING, falls back to `insert_all`.
+    /// This is currently a compatibility alias for `insert_all`.
+    /// It does not provide different SQL generation or backend-specific behavior.
     ///
     /// # Example
     /// ```ignore
@@ -546,8 +546,6 @@ pub trait Model:
     ///     User { id: 0, name: "Jane".into(), .. },
     /// ];
     ///
-    /// // On PostgreSQL/SQLite: Uses RETURNING for efficiency
-    /// // On MySQL: Falls back to individual inserts
     /// let inserted = User::insert_many_returning(users).await?;
     /// for user in &inserted {
     ///     println!("Inserted user with ID: {}", user.id);
@@ -564,10 +562,6 @@ pub trait Model:
             return Ok(Vec::new());
         }
 
-        // For now, use the regular insert_all
-        // When RETURNING support is needed, the database can be checked:
-        // let db = crate::database::db();
-        // if db.backend().supports_returning() { ... }
         Self::insert_all(models).await
     }
 

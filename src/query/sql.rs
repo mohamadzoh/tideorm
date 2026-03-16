@@ -1,8 +1,9 @@
 use super::*;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
-use crate::internal::{Condition, Expr, Value};
+use crate::internal::{Condition, Expr, ExprTrait, Value};
 use crate::model::Model;
+use sea_orm::sea_query::{Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder};
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
@@ -27,13 +28,29 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(super) fn build_sea_condition(&self) -> Condition {
-        let db_type = self.db_type_for_sql();
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
-        if where_sql.is_empty() {
-            Condition::all()
-        } else {
-            Condition::all().add(Expr::cust_with_values(where_sql, params))
+        self.build_sea_condition_for_db(self.db_type_for_sql())
+    }
+
+    fn build_sea_condition_for_db(&self, db_type: DatabaseType) -> Condition {
+        let mut condition = Condition::all();
+
+        for filter in &self.conditions {
+            if let Some(expression) = self.build_condition_expression(filter, db_type) {
+                condition = condition.add(expression);
+            }
         }
+
+        for group in &self.or_groups {
+            if !group.is_empty() {
+                condition = condition.add(self.build_or_group_condition(group, db_type));
+            }
+        }
+
+        if let Some(soft_delete_expression) = self.build_soft_delete_expression(db_type) {
+            condition = condition.add(soft_delete_expression);
+        }
+
+        condition
     }
 
     fn db_type_for_sql(&self) -> DatabaseType {
@@ -49,22 +66,288 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn next_placeholder(&self, db_type: DatabaseType, params_len: usize) -> String {
-        match db_type {
-            DatabaseType::Postgres => format!("${}", params_len + 1),
-            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?".to_string(),
+    fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
+        values.iter().map(Self::json_to_sea_value).collect()
+    }
+
+    fn placeholder_list(count: usize) -> String {
+        std::iter::repeat_n("?", count).collect::<Vec<_>>().join(", ")
+    }
+
+    fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
+        if column.contains('(')
+            || column.contains('*')
+            || column.contains(' ')
+            || column.contains('"')
+            || column.contains('`')
+        {
+            return Expr::cust(self.format_column_for_db(db_type, column));
+        }
+
+        if let Some((table, field)) = column.split_once('.') {
+            if db_sql::validate_identifier("table", table).is_ok()
+                && db_sql::validate_identifier("column", field).is_ok()
+            {
+                return Expr::col((Alias::new(table), Alias::new(field))).into();
+            }
+        } else if db_sql::validate_identifier("column", column).is_ok() {
+            return Expr::col(Alias::new(column)).into();
+        }
+
+        Expr::cust(self.format_column_for_db(db_type, column))
+    }
+
+    fn build_custom_expression(
+        &self,
+        sql: String,
+        values: Vec<Value>,
+    ) -> SimpleExpr {
+        if values.is_empty() {
+            Expr::cust(sql)
+        } else {
+            Expr::cust_with_values(sql, values)
         }
     }
 
-    fn push_param(
+    fn build_condition_expression(
         &self,
+        condition: &WhereCondition,
         db_type: DatabaseType,
-        params: &mut Vec<Value>,
-        value: &serde_json::Value,
-    ) -> String {
-        let placeholder = self.next_placeholder(db_type, params.len());
-        params.push(Self::json_to_sea_value(value));
-        placeholder
+    ) -> Option<SimpleExpr> {
+        if matches!(condition.operator, Operator::Raw) {
+            return match &condition.value {
+                ConditionValue::RawExpr(raw_sql) => {
+                    if condition.column.is_empty() {
+                        Some(Expr::cust(raw_sql.clone()))
+                    } else {
+                        let column = self.format_column_for_db(db_type, &condition.column);
+                        Some(Expr::cust(format!("{} {}", column, raw_sql)))
+                    }
+                }
+                _ => None,
+            };
+        }
+
+        let column_expr = self.sea_column_expr(db_type, &condition.column);
+        let column_sql = self.format_column_for_db(db_type, &condition.column);
+
+        match &condition.operator {
+            Operator::Eq => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.eq(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::NotEq => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.ne(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::Gt => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.gt(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::Gte => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.gte(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::Lt => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.lt(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::Lte => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.lte(Self::json_to_sea_value(value))),
+                _ => None,
+            },
+            Operator::Like => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.like(match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    _ => value.to_string(),
+                })),
+                _ => None,
+            },
+            Operator::NotLike => match &condition.value {
+                ConditionValue::Single(value) => Some(column_expr.not_like(match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    _ => value.to_string(),
+                })),
+                _ => None,
+            },
+            Operator::In | Operator::EqAny => match &condition.value {
+                ConditionValue::List(values) => match condition.operator {
+                    Operator::EqAny if matches!(db_type, DatabaseType::Postgres) => Some(
+                        self.build_custom_expression(
+                            format!(
+                                "{} = ANY(ARRAY[{}])",
+                                column_sql,
+                                Self::placeholder_list(values.len())
+                            ),
+                            Self::sea_value_list(values),
+                        ),
+                    ),
+                    _ => Some(column_expr.is_in(Self::sea_value_list(values))),
+                },
+                _ => None,
+            },
+            Operator::NotIn | Operator::NeAll => match &condition.value {
+                ConditionValue::List(values) => match condition.operator {
+                    Operator::NeAll if matches!(db_type, DatabaseType::Postgres) => Some(
+                        self.build_custom_expression(
+                            format!(
+                                "{} <> ALL(ARRAY[{}])",
+                                column_sql,
+                                Self::placeholder_list(values.len())
+                            ),
+                            Self::sea_value_list(values),
+                        ),
+                    ),
+                    _ => Some(column_expr.is_not_in(Self::sea_value_list(values))),
+                },
+                _ => None,
+            },
+            Operator::IsNull => Some(column_expr.is_null()),
+            Operator::IsNotNull => Some(column_expr.is_not_null()),
+            Operator::Between => match &condition.value {
+                ConditionValue::Range(low, high) => Some(
+                    column_expr.between(Self::json_to_sea_value(low), Self::json_to_sea_value(high)),
+                ),
+                _ => None,
+            },
+            Operator::JsonContains => match &condition.value {
+                ConditionValue::Single(value) => Some(Expr::cust(db_sql::json_contains(
+                    db_type,
+                    &condition.column,
+                    &value.to_string(),
+                ))),
+                _ => None,
+            },
+            Operator::JsonContainedBy => match &condition.value {
+                ConditionValue::Single(value) => Some(Expr::cust(db_sql::json_contained_by(
+                    db_type,
+                    &condition.column,
+                    &value.to_string(),
+                ))),
+                _ => None,
+            },
+            Operator::JsonKeyExists => match &condition.value {
+                ConditionValue::Single(serde_json::Value::String(key)) => Some(Expr::cust(
+                    db_sql::json_key_exists(db_type, &condition.column, key),
+                )),
+                _ => None,
+            },
+            Operator::JsonKeyNotExists => match &condition.value {
+                ConditionValue::Single(serde_json::Value::String(key)) => Some(Expr::cust(
+                    db_sql::json_key_not_exists(db_type, &condition.column, key),
+                )),
+                _ => None,
+            },
+            Operator::JsonPathExists => match &condition.value {
+                ConditionValue::Single(serde_json::Value::String(path)) => Some(Expr::cust(
+                    db_sql::json_path_exists(db_type, &condition.column, path),
+                )),
+                _ => None,
+            },
+            Operator::JsonPathNotExists => match &condition.value {
+                ConditionValue::Single(serde_json::Value::String(path)) => Some(Expr::cust(
+                    db_sql::json_path_not_exists(db_type, &condition.column, path),
+                )),
+                _ => None,
+            },
+            Operator::ArrayContains | Operator::ArrayContainsAll => match &condition.value {
+                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_contains(
+                    db_type,
+                    &condition.column,
+                    &self.render_array_values(values),
+                ))),
+                _ => None,
+            },
+            Operator::ArrayContainedBy => match &condition.value {
+                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_contained_by(
+                    db_type,
+                    &condition.column,
+                    &self.render_array_values(values),
+                ))),
+                _ => None,
+            },
+            Operator::ArrayOverlaps | Operator::ArrayContainsAny => match &condition.value {
+                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_overlaps(
+                    db_type,
+                    &condition.column,
+                    &self.render_array_values(values),
+                ))),
+                _ => None,
+            },
+            Operator::SubqueryIn => match &condition.value {
+                ConditionValue::Subquery(query_sql) => {
+                    Some(Expr::cust(format!("{} IN ({})", column_sql, query_sql)))
+                }
+                _ => None,
+            },
+            Operator::SubqueryNotIn => match &condition.value {
+                ConditionValue::Subquery(query_sql) => {
+                    Some(Expr::cust(format!("{} NOT IN ({})", column_sql, query_sql)))
+                }
+                _ => None,
+            },
+            Operator::Raw => None,
+        }
+    }
+
+    fn build_or_group_condition(&self, group: &OrGroup, db_type: DatabaseType) -> Condition {
+        let mut condition = match group.combine_with {
+            LogicalOp::And => Condition::all(),
+            LogicalOp::Or => Condition::any(),
+        };
+
+        for filter in &group.conditions {
+            if let Some(expression) = self.build_condition_expression(filter, db_type) {
+                condition = condition.add(expression);
+            }
+        }
+
+        for nested_group in &group.nested_groups {
+            if !nested_group.is_empty() {
+                condition = condition.add(self.build_or_group_condition(nested_group, db_type));
+            }
+        }
+
+        condition
+    }
+
+    fn build_soft_delete_expression(&self, db_type: DatabaseType) -> Option<SimpleExpr> {
+        if !M::soft_delete_enabled() {
+            return None;
+        }
+
+        let deleted_at = self.sea_column_expr(db_type, "deleted_at");
+        if self.only_trashed {
+            Some(deleted_at.is_not_null())
+        } else if !self.include_trashed {
+            Some(deleted_at.is_null())
+        } else {
+            None
+        }
+    }
+
+    fn build_where_clause_with_condition_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+        let has_filters = !self.conditions.is_empty()
+            || !self.or_groups.is_empty()
+            || self.build_soft_delete_expression(db_type).is_some();
+        if !has_filters {
+            return (String::new(), Vec::new());
+        }
+
+        let mut query = Query::select();
+        query.expr(Expr::cust("1"));
+        query.cond_where(self.build_sea_condition_for_db(db_type));
+
+        let (sql, values) = match db_type {
+            DatabaseType::Postgres => query.build(PostgresQueryBuilder),
+            DatabaseType::MySQL | DatabaseType::MariaDB => query.build(MysqlQueryBuilder),
+            DatabaseType::SQLite => query.build(SqliteQueryBuilder),
+        };
+
+        match sql.split_once(" WHERE ") {
+            Some((_, where_sql)) => (where_sql.to_string(), values.into_iter().collect()),
+            None => (String::new(), Vec::new()),
+        }
     }
 
     fn format_preview_value(&self, value: &serde_json::Value) -> String {
@@ -362,137 +645,6 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn build_condition_sql_with_params(
-        &self,
-        condition: &WhereCondition,
-        db_type: DatabaseType,
-        params: &mut Vec<Value>,
-    ) -> Option<String> {
-        if matches!(condition.operator, Operator::Raw) {
-            return self.build_condition_sql_for_db(condition, db_type);
-        }
-
-        let column = self.format_column_for_db(db_type, &condition.column);
-
-        match &condition.operator {
-            Operator::Eq => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} = {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::NotEq => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} != {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::Gt => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} > {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::Gte => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} >= {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::Lt => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} < {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::Lte => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} <= {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::Like => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} LIKE {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::NotLike => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} NOT LIKE {}",
-                    column,
-                    self.push_param(db_type, params, value)
-                )),
-                _ => None,
-            },
-            Operator::In => match &condition.value {
-                ConditionValue::List(values) => {
-                    let placeholders: Vec<String> = values
-                        .iter()
-                        .map(|value| self.push_param(db_type, params, value))
-                        .collect();
-                    Some(format!("{} IN ({})", column, placeholders.join(", ")))
-                }
-                _ => None,
-            },
-            Operator::NotIn => match &condition.value {
-                ConditionValue::List(values) => {
-                    let placeholders: Vec<String> = values
-                        .iter()
-                        .map(|value| self.push_param(db_type, params, value))
-                        .collect();
-                    Some(format!("{} NOT IN ({})", column, placeholders.join(", ")))
-                }
-                _ => None,
-            },
-            Operator::IsNull => Some(format!("{} IS NULL", column)),
-            Operator::IsNotNull => Some(format!("{} IS NOT NULL", column)),
-            Operator::Between => match &condition.value {
-                ConditionValue::Range(low, high) => {
-                    let low_placeholder = self.push_param(db_type, params, low);
-                    let high_placeholder = self.push_param(db_type, params, high);
-                    Some(format!("{} BETWEEN {} AND {}", column, low_placeholder, high_placeholder))
-                }
-                _ => None,
-            },
-            Operator::EqAny => match &condition.value {
-                ConditionValue::List(values) => {
-                    let placeholders: Vec<String> = values
-                        .iter()
-                        .map(|value| self.push_param(db_type, params, value))
-                        .collect();
-                    Some(db_sql::eq_any(db_type, &column, &placeholders))
-                }
-                _ => None,
-            },
-            Operator::NeAll => match &condition.value {
-                ConditionValue::List(values) => {
-                    let placeholders: Vec<String> = values
-                        .iter()
-                        .map(|value| self.push_param(db_type, params, value))
-                        .collect();
-                    Some(db_sql::ne_all(db_type, &column, &placeholders))
-                }
-                _ => None,
-            },
-            _ => self.build_condition_sql_for_db(condition, db_type),
-        }
-    }
-
     fn render_array_values(&self, values: &[serde_json::Value]) -> Vec<String> {
         values
             .iter()
@@ -517,31 +669,6 @@ impl<M: Model> QueryBuilder<M> {
 
         for nested_group in &group.nested_groups {
             let nested_sql = self.build_or_group_sql_for_db(nested_group, db_type);
-            if !nested_sql.is_empty() {
-                parts.push(format!("({})", nested_sql));
-            }
-        }
-
-        parts.join(&format!(" {} ", group.combine_with.as_sql()))
-    }
-
-    fn build_or_group_sql_with_params(
-        &self,
-        group: &OrGroup,
-        db_type: DatabaseType,
-        params: &mut Vec<Value>,
-    ) -> String {
-        let mut parts = Vec::new();
-
-        for condition in &group.conditions {
-            if let Some(expression) = self.build_condition_sql_with_params(condition, db_type, params)
-            {
-                parts.push(expression);
-            }
-        }
-
-        for nested_group in &group.nested_groups {
-            let nested_sql = self.build_or_group_sql_with_params(nested_group, db_type, params);
             if !nested_sql.is_empty() {
                 parts.push(format!("({})", nested_sql));
             }
@@ -578,36 +705,6 @@ impl<M: Model> QueryBuilder<M> {
         clauses.join(" AND ")
     }
 
-    fn build_where_sql_with_params_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
-        let mut clauses = Vec::new();
-        let mut params = Vec::new();
-
-        for condition in &self.conditions {
-            if let Some(expression) = self.build_condition_sql_with_params(condition, db_type, &mut params)
-            {
-                clauses.push(expression);
-            }
-        }
-
-        for group in &self.or_groups {
-            let group_sql = self.build_or_group_sql_with_params(group, db_type, &mut params);
-            if !group_sql.is_empty() {
-                clauses.push(format!("({})", group_sql));
-            }
-        }
-
-        if M::soft_delete_enabled() {
-            let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
-            if self.only_trashed {
-                clauses.push(format!("{} IS NOT NULL", deleted_at));
-            } else if !self.include_trashed {
-                clauses.push(format!("{} IS NULL", deleted_at));
-            }
-        }
-
-        (clauses.join(" AND "), params)
-    }
-
     pub(super) fn build_base_select_sql(&self) -> String {
         let db_type = self.db_type_for_sql();
         let mut sql = String::new();
@@ -630,7 +727,7 @@ impl<M: Model> QueryBuilder<M> {
         sql.push_str(&self.build_select_clause_sql(db_type));
         self.append_from_and_join_sql(&mut sql, db_type);
 
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         if !where_sql.is_empty() {
             sql.push_str(&format!("WHERE {} ", where_sql));
         }
@@ -968,7 +1065,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!("SELECT COUNT(*) AS count FROM {}", table)
         } else {
@@ -1018,7 +1115,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!("DELETE FROM {}", table)
         } else {
@@ -1043,7 +1140,7 @@ impl<M: Model> QueryBuilder<M> {
         let table = db_sql::quote_ident(db_type, M::table_name());
         let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
         let now = Self::current_timestamp_sql(db_type);
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!("UPDATE {} SET {} = {}", table, deleted_at, now)
         } else {
@@ -1067,7 +1164,7 @@ impl<M: Model> QueryBuilder<M> {
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
         let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!(
                 "UPDATE {} SET {} = NULL WHERE {} IS NOT NULL",
@@ -1090,7 +1187,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = self.build_where_sql_with_params_for_db(db_type);
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!("DELETE FROM {}", table)
         } else {

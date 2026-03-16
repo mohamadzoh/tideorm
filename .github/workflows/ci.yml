@@ -32,3 +32,16 @@ jobs:
 
       - name: Test
         run: cargo test --lib ${{ matrix.feature-set }}
+
+  docs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: taiki-e/install-action@mdbook
+
+      - name: Build book
+        run: mdbook build

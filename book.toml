@@ -1,0 +1,16 @@
+[book]
+title = "TideORM"
+authors = ["TideORM contributors"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "site"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/mohamadzoh/tideorm"
+site-url = "https://tideorm.com/"
+edit-url-template = "https://github.com/mohamadzoh/tideorm/edit/master/{path}"
