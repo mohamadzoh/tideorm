@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        feature-set:
+          - "--no-default-features --features postgres,runtime-tokio"
+          - "--no-default-features --features mysql,runtime-tokio"
+          - "--no-default-features --features sqlite,runtime-tokio"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check ${{ matrix.feature-set }}
+
+      - name: Test
+        run: cargo test --lib ${{ matrix.feature-set }}
