@@ -26,10 +26,6 @@ runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 [dependencies]
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = ["macros", "with-chrono", "with-json", "with-uuid", "schema-sync"] }
 
-# Schema discovery for sync (automatically included via sea-orm's schema-sync feature)
-# This is used for SeaORM entity schema sync capabilities
-sea-schema = { version = "0.17.0-rc.17", default-features = false, features = ["discovery", "probe", "sqlx-postgres", "sqlx-mysql", "sqlx-sqlite"] }
-
 # Async runtime
 tokio = { version = "1.50.0", features = ["full"], optional = true }
 async-trait = "0.1.89"
@@ -51,7 +47,6 @@ tideorm-macros = { version = "0.7.3", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
-lazy_static = "1.5"
 regex = "1.12.3"
 async-recursion = "1.1.1"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
@@ -60,8 +55,6 @@ sha2 = "0.10.9"
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util", "macros"] }
-pretty_assertions = "1.4.1"
-serial_test = "3.4.0"
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
 
