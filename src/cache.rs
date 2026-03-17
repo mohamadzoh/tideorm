@@ -75,6 +75,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -154,6 +155,8 @@ impl std::fmt::Display for CacheStrategy {
 struct CacheEntry {
     /// Cached data as JSON
     data: serde_json::Value,
+    /// Approximate serialized size in bytes
+    size_bytes: usize,
     /// When this entry was created
     created_at: Instant,
     /// When this entry was last accessed
@@ -167,10 +170,11 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new(data: serde_json::Value, ttl: Duration, model_name: &str) -> Self {
+    fn new(data: serde_json::Value, size_bytes: usize, ttl: Duration, model_name: &str) -> Self {
         let now = Instant::now();
         Self {
             data,
+            size_bytes,
             created_at: now,
             last_accessed: now,
             ttl,
@@ -226,10 +230,22 @@ impl CacheStats {
 pub struct QueryCache {
     /// Cache configuration
     config: RwLock<CacheConfig>,
+    /// Fast path for checking whether caching is enabled.
+    enabled: AtomicBool,
     /// The actual cache storage
     cache: RwLock<HashMap<String, CacheEntry>>,
-    /// Cache statistics
-    stats: RwLock<CacheStats>,
+    /// Cache hit counter.
+    hits: AtomicU64,
+    /// Cache miss counter.
+    misses: AtomicU64,
+    /// Current number of entries.
+    entries: AtomicUsize,
+    /// Approximate serialized size of cached data.
+    size_bytes: AtomicUsize,
+    /// Cache eviction counter.
+    evictions: AtomicU64,
+    /// Cache invalidation counter.
+    invalidations: AtomicU64,
 }
 
 impl QueryCache {
@@ -237,18 +253,58 @@ impl QueryCache {
     pub fn new() -> Self {
         Self {
             config: RwLock::new(CacheConfig::default()),
+            enabled: AtomicBool::new(false),
             cache: RwLock::new(HashMap::new()),
-            stats: RwLock::new(CacheStats::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            entries: AtomicUsize::new(0),
+            size_bytes: AtomicUsize::new(0),
+            evictions: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
         }
     }
 
     /// Create a new query cache with custom configuration
     pub fn with_config(config: CacheConfig) -> Self {
+        let enabled = config.enabled;
         Self {
             config: RwLock::new(config),
+            enabled: AtomicBool::new(enabled),
             cache: RwLock::new(HashMap::new()),
-            stats: RwLock::new(CacheStats::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            entries: AtomicUsize::new(0),
+            size_bytes: AtomicUsize::new(0),
+            evictions: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
         }
+    }
+
+    fn snapshot_stats(&self) -> CacheStats {
+        CacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            entries: self.entries.load(Ordering::Relaxed),
+            size_bytes: self.size_bytes.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_entries_len(&self, entries: usize) {
+        self.entries.store(entries, Ordering::Relaxed);
+    }
+
+    fn add_size_bytes(&self, bytes: usize) {
+        self.size_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn subtract_size_bytes(&self, bytes: usize) {
+        self.size_bytes.fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    fn overwrite_size_bytes(&self, bytes: usize) {
+        self.size_bytes.store(bytes, Ordering::Relaxed);
     }
 
     /// Get or initialize the global query cache
@@ -271,6 +327,7 @@ impl QueryCache {
         if let Ok(mut config) = self.config.write() {
             config.enabled = true;
         }
+        self.enabled.store(true, Ordering::Release);
         self
     }
 
@@ -279,12 +336,13 @@ impl QueryCache {
         if let Ok(mut config) = self.config.write() {
             config.enabled = false;
         }
+        self.enabled.store(false, Ordering::Release);
         self
     }
 
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
-        self.config.read().map(|c| c.enabled).unwrap_or(false)
+        self.enabled.load(Ordering::Acquire)
     }
 
     /// Set the maximum number of cache entries
@@ -363,25 +421,21 @@ impl QueryCache {
 
         if let Some(entry) = cache.get_mut(key) {
             if entry.is_expired() {
-                cache.remove(key);
-                if let Ok(mut stats) = self.stats.write() {
-                    stats.misses += 1;
-                    stats.entries = cache.len();
+                if let Some(expired_entry) = cache.remove(key) {
+                    self.record_entries_len(cache.len());
+                    self.subtract_size_bytes(expired_entry.size_bytes);
                 }
+                self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
 
             entry.touch();
 
-            if let Ok(mut stats) = self.stats.write() {
-                stats.hits += 1;
-            }
+            self.hits.fetch_add(1, Ordering::Relaxed);
 
             serde_json::from_value(entry.data.clone()).ok()
         } else {
-            if let Ok(mut stats) = self.stats.write() {
-                stats.misses += 1;
-            }
+            self.misses.fetch_add(1, Ordering::Relaxed);
             None
         }
     }
@@ -424,8 +478,8 @@ impl QueryCache {
             }
         }
 
-        let entry = CacheEntry::new(data, ttl, model_name);
-        let entry_size = entry.data.to_string().len();
+        let entry_size = data.to_string().len();
+        let entry = CacheEntry::new(data, entry_size, ttl, model_name);
 
         let mut cache = self
             .cache
@@ -437,11 +491,19 @@ impl QueryCache {
             self.evict_one(&mut cache);
         }
 
-        cache.insert(key.to_string(), entry);
+        let replaced_entry = cache.insert(key.to_string(), entry);
+        self.record_entries_len(cache.len());
 
-        if let Ok(mut stats) = self.stats.write() {
-            stats.entries = cache.len();
-            stats.size_bytes += entry_size;
+        match replaced_entry {
+            Some(previous) if previous.size_bytes >= entry_size => {
+                self.subtract_size_bytes(previous.size_bytes - entry_size);
+            }
+            Some(previous) => {
+                self.add_size_bytes(entry_size - previous.size_bytes);
+            }
+            None => {
+                self.add_size_bytes(entry_size);
+            }
         }
 
         Ok(())
@@ -450,14 +512,14 @@ impl QueryCache {
     /// Remove a specific cache entry
     pub fn invalidate(&self, key: &str) -> bool {
         if let Ok(mut cache) = self.cache.write() {
-            let removed = cache.remove(key).is_some();
-            if removed {
-                if let Ok(mut stats) = self.stats.write() {
-                    stats.invalidations += 1;
-                    stats.entries = cache.len();
-                }
+            if let Some(removed) = cache.remove(key) {
+                self.invalidations.fetch_add(1, Ordering::Relaxed);
+                self.record_entries_len(cache.len());
+                self.subtract_size_bytes(removed.size_bytes);
+                true
+            } else {
+                false
             }
-            removed
         } else {
             false
         }
@@ -473,43 +535,61 @@ impl QueryCache {
                 .collect();
 
             let count = keys_to_remove.len();
+            let mut removed_size = 0;
             for key in keys_to_remove {
-                cache.remove(&key);
+                if let Some(entry) = cache.remove(&key) {
+                    removed_size += entry.size_bytes;
+                }
             }
 
-            if let Ok(mut stats) = self.stats.write() {
-                stats.invalidations += count as u64;
-                stats.entries = cache.len();
+            if count > 0 {
+                self.invalidations
+                    .fetch_add(count as u64, Ordering::Relaxed);
+                self.record_entries_len(cache.len());
+                self.subtract_size_bytes(removed_size);
             }
         }
     }
 
     /// Clear the entire cache
     pub fn clear(&self) {
-        if let Ok(mut cache) = self.cache.write() {
+        let count = if let Ok(mut cache) = self.cache.write() {
             let count = cache.len();
-            cache.clear();
+            let removed_size = cache.values().map(|entry| entry.size_bytes).sum::<usize>();
+            let old_cache = std::mem::take(&mut *cache);
+            drop(cache);
+            drop(old_cache);
+            (count, removed_size)
+        } else {
+            (0, 0)
+        };
 
-            if let Ok(mut stats) = self.stats.write() {
-                stats.invalidations += count as u64;
-                stats.entries = 0;
-                stats.size_bytes = 0;
-            }
+        if count.0 > 0 {
+            self.invalidations
+                .fetch_add(count.0 as u64, Ordering::Relaxed);
+            self.record_entries_len(0);
+            self.subtract_size_bytes(count.1);
         }
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        self.stats.read().map(|s| s.clone()).unwrap_or_default()
+        self.snapshot_stats()
     }
 
     /// Reset cache statistics
     pub fn reset_stats(&self) {
-        if let Ok(mut stats) = self.stats.write() {
-            *stats = CacheStats::default();
-            if let Ok(cache) = self.cache.read() {
-                stats.entries = cache.len();
-            }
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+        self.invalidations.store(0, Ordering::Relaxed);
+
+        if let Ok(cache) = self.cache.read() {
+            self.record_entries_len(cache.len());
+            self.overwrite_size_bytes(cache.values().map(|entry| entry.size_bytes).sum());
+        } else {
+            self.record_entries_len(0);
+            self.overwrite_size_bytes(0);
         }
     }
 
@@ -523,13 +603,17 @@ impl QueryCache {
                 .collect();
 
             let count = keys_to_remove.len();
+            let mut removed_size = 0;
             for key in keys_to_remove {
-                cache.remove(&key);
+                if let Some(entry) = cache.remove(&key) {
+                    removed_size += entry.size_bytes;
+                }
             }
 
-            if let Ok(mut stats) = self.stats.write() {
-                stats.evictions += count as u64;
-                stats.entries = cache.len();
+            if count > 0 {
+                self.evictions.fetch_add(count as u64, Ordering::Relaxed);
+                self.record_entries_len(cache.len());
+                self.subtract_size_bytes(removed_size);
             }
         }
     }
@@ -566,9 +650,10 @@ impl QueryCache {
         };
 
         if let Some(key) = key_to_remove {
-            cache.remove(&key);
-            if let Ok(mut stats) = self.stats.write() {
-                stats.evictions += 1;
+            if let Some(entry) = cache.remove(&key) {
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                self.record_entries_len(cache.len());
+                self.subtract_size_bytes(entry.size_bytes);
             }
         }
     }
@@ -585,7 +670,7 @@ impl QueryCache {
 
     /// Get the number of entries in the cache
     pub fn len(&self) -> usize {
-        self.cache.read().map(|c| c.len()).unwrap_or(0)
+        self.entries.load(Ordering::Relaxed)
     }
 
     /// Check if the cache is empty
@@ -696,6 +781,8 @@ impl Default for PreparedStatementConfig {
 pub struct PreparedStatementCache {
     /// Cache configuration
     config: RwLock<PreparedStatementConfig>,
+    /// Fast path for checking whether caching is enabled.
+    enabled: AtomicBool,
     /// Cached statements keyed by SQL hash
     statements: RwLock<HashMap<u64, PreparedStatement>>,
     /// Cache statistics
@@ -707,6 +794,7 @@ impl PreparedStatementCache {
     pub fn new() -> Self {
         Self {
             config: RwLock::new(PreparedStatementConfig::default()),
+            enabled: AtomicBool::new(false),
             statements: RwLock::new(HashMap::new()),
             stats: RwLock::new(PreparedStatementStats::default()),
         }
@@ -714,8 +802,10 @@ impl PreparedStatementCache {
 
     /// Create with custom configuration
     pub fn with_config(config: PreparedStatementConfig) -> Self {
+        let enabled = config.enabled;
         Self {
             config: RwLock::new(config),
+            enabled: AtomicBool::new(enabled),
             statements: RwLock::new(HashMap::new()),
             stats: RwLock::new(PreparedStatementStats::default()),
         }
@@ -741,6 +831,7 @@ impl PreparedStatementCache {
         if let Ok(mut config) = self.config.write() {
             config.enabled = true;
         }
+        self.enabled.store(true, Ordering::Release);
         self
     }
 
@@ -749,12 +840,13 @@ impl PreparedStatementCache {
         if let Ok(mut config) = self.config.write() {
             config.enabled = false;
         }
+        self.enabled.store(false, Ordering::Release);
         self
     }
 
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
-        self.config.read().map(|c| c.enabled).unwrap_or(false)
+        self.enabled.load(Ordering::Acquire)
     }
 
     /// Set the maximum number of cached statements
@@ -804,19 +896,35 @@ impl PreparedStatementCache {
             .map(|c| c.max_age)
             .unwrap_or(Duration::from_secs(3600));
 
-        // Try to get from cache
-        if let Ok(mut statements) = self.statements.write() {
-            if let Some(stmt) = statements.get_mut(&hash) {
-                // Check if statement is still valid
+        // Fast path: read-only cache hit without taking the write lock.
+        if let Ok(statements) = self.statements.read() {
+            if let Some(stmt) = statements.get(&hash) {
                 if stmt.prepared_at.elapsed() < max_age {
+                    let sql = stmt.sql.clone();
+                    drop(statements);
+
                     if let Ok(mut stats) = self.stats.write() {
                         stats.hits += 1;
                     }
-                    return (stmt.sql.clone(), true);
-                } else {
-                    // Expired, remove it
-                    statements.remove(&hash);
+                    return (sql, true);
                 }
+            }
+        }
+
+        // Remove expired entries or resolve races under the write lock.
+        if let Ok(mut statements) = self.statements.write() {
+            if let Some(stmt) = statements.get(&hash) {
+                if stmt.prepared_at.elapsed() < max_age {
+                    let sql = stmt.sql.clone();
+                    drop(statements);
+
+                    if let Ok(mut stats) = self.stats.write() {
+                        stats.hits += 1;
+                    }
+                    return (sql, true);
+                }
+
+                statements.remove(&hash);
             }
         }
 
@@ -1198,6 +1306,83 @@ mod tests {
 
         // Clear all
         cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_query_cache_stats_track_replacements_and_size() {
+        let cache = QueryCache::new();
+        cache.enable();
+
+        cache.set("key", &"a", None, "model").unwrap();
+        let initial = cache.stats();
+        assert_eq!(initial.entries, 1);
+        assert!(initial.size_bytes > 0);
+
+        cache
+            .set(
+                "key",
+                &"this is a much longer replacement value",
+                None,
+                "model",
+            )
+            .unwrap();
+        let replaced = cache.stats();
+        assert_eq!(replaced.entries, 1);
+        assert!(
+            replaced.size_bytes > initial.size_bytes,
+            "replacement should update tracked cache size"
+        );
+
+        assert!(cache.invalidate("key"));
+        let invalidated = cache.stats();
+        assert_eq!(invalidated.entries, 0);
+        assert_eq!(invalidated.size_bytes, 0);
+        assert_eq!(invalidated.invalidations, 1);
+    }
+
+    #[test]
+    fn test_query_cache_reset_stats_preserves_live_cache_state() {
+        let cache = QueryCache::new();
+        cache.enable();
+
+        cache.set("key1", &"value1", None, "model").unwrap();
+        cache.set("key2", &"value2", None, "model").unwrap();
+
+        let _: Option<String> = cache.get("key1");
+        let _: Option<String> = cache.get("missing_key");
+
+        let before_reset = cache.stats();
+        assert_eq!(before_reset.entries, 2);
+        assert_eq!(before_reset.hits, 1);
+        assert_eq!(before_reset.misses, 1);
+        assert!(before_reset.size_bytes > 0);
+
+        cache.reset_stats();
+
+        let after_reset = cache.stats();
+        assert_eq!(after_reset.hits, 0);
+        assert_eq!(after_reset.misses, 0);
+        assert_eq!(after_reset.evictions, 0);
+        assert_eq!(after_reset.invalidations, 0);
+        assert_eq!(after_reset.entries, 2);
+        assert!(after_reset.size_bytes > 0);
+    }
+
+    #[test]
+    fn test_query_cache_clear_resets_entries_and_size_bytes() {
+        let cache = QueryCache::new();
+        cache.enable();
+
+        cache.set("key1", &vec![1, 2, 3], None, "model").unwrap();
+        cache.set("key2", &vec![4, 5, 6], None, "model").unwrap();
+        assert_eq!(cache.stats().entries, 2);
+
+        cache.clear();
+
+        let stats = cache.stats();
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.size_bytes, 0);
         assert!(cache.is_empty());
     }
 

@@ -537,7 +537,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
         // Build tsquery based on search mode
         let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
 
-        let mut sql = format!("SELECT * FROM {} WHERE {} @@ {}", table, tsvector_expr, tsquery_expr);
+        let mut sql = format!(
+            "SELECT * FROM {} WHERE {} @@ {}",
+            table, tsvector_expr, tsquery_expr
+        );
 
         if self.with_ranking {
             let weights = self
@@ -583,7 +586,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
 
         if let Some(min_rank) = self.min_rank {
-            let min_rank_placeholder = self.push_param(DatabaseType::Postgres, &mut params, Value::Double(Some(min_rank)));
+            let min_rank_placeholder = self.push_param(
+                DatabaseType::Postgres,
+                &mut params,
+                Value::Double(Some(min_rank)),
+            );
             sql.push_str(&format!(
                 " AND ts_rank_cd({}, {}, {}) >= {}",
                 weights, tsvector_expr, tsquery_expr, min_rank_placeholder
@@ -611,7 +618,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
 
         Ok((
-            format!("SELECT COUNT(*) as count FROM {} WHERE {} @@ {}", table, tsvector_expr, tsquery_expr),
+            format!(
+                "SELECT COUNT(*) as count FROM {} WHERE {} @@ {}",
+                table, tsvector_expr, tsquery_expr
+            ),
             params,
         ))
     }
@@ -638,15 +648,27 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let language = escape_string(language);
         match self.config.mode {
             SearchMode::Natural => {
-                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(self.query.clone())),
+                );
                 format!("plainto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Boolean => {
-                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(self.query.clone())),
+                );
                 format!("to_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Phrase => {
-                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(self.query.clone())),
+                );
                 format!("phraseto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Prefix => {
@@ -660,7 +682,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 format!("to_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Fuzzy => {
-                let placeholder = self.push_param(DatabaseType::Postgres, params, Value::String(Some(self.query.clone())));
+                let placeholder = self.push_param(
+                    DatabaseType::Postgres,
+                    params,
+                    Value::String(Some(self.query.clone())),
+                );
                 format!("plainto_tsquery('{}', {})", language, placeholder)
             }
             SearchMode::Proximity(distance) => {
@@ -671,10 +697,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(proximity.join(&format!(" <{}> ", distance)))),
                 );
-                format!(
-                    "to_tsquery('{}', {})",
-                    language, placeholder
-                )
+                format!("to_tsquery('{}', {})", language, placeholder)
             }
         }
     }
@@ -701,7 +724,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let query_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        let query_placeholder = self.push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
         let mut sql = format!(
             "SELECT * FROM {} WHERE MATCH({}) AGAINST({}{}) ",
             table, columns_str, query_placeholder, mode_modifier
@@ -735,8 +762,16 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let rank_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
-        let where_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        let rank_placeholder = self.push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
+        let where_placeholder = self.push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
         let mut sql = format!(
             "SELECT *, MATCH({}) AGAINST({}{}) AS _fts_rank FROM {} \
              WHERE MATCH({}) AGAINST({}{}) ",
@@ -755,7 +790,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 &mut params,
                 Value::Double(Some(min_rank)),
             );
-            let against_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+            let against_placeholder = self.push_param(
+                DatabaseType::MySQL,
+                &mut params,
+                Value::String(Some(self.query.clone())),
+            );
             sql.push_str(&format!(
                 "AND MATCH({}) AGAINST({}{}) >= {} ",
                 columns_str, against_placeholder, mode_modifier, min_rank_placeholder
@@ -791,7 +830,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let query_placeholder = self.push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        let query_placeholder = self.push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
         Ok((
             format!(
                 "SELECT COUNT(*) as count FROM {} WHERE MATCH({}) AGAINST({}{})",
@@ -862,7 +905,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 &mut params,
                 Value::Double(Some(-min_rank)),
             );
-            sql.push_str(&format!("AND bm25({}) <= {} ", fts_table, min_rank_placeholder));
+            sql.push_str(&format!(
+                "AND bm25({}) <= {} ",
+                fts_table, min_rank_placeholder
+            ));
         }
 
         // BM25 returns negative values, so ORDER BY ASC for best matches

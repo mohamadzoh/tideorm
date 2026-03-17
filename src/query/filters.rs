@@ -189,7 +189,11 @@ impl OrGroup {
         self
     }
 
-    pub fn where_not_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+    pub fn where_not_in<V: Into<serde_json::Value>>(
+        mut self,
+        column: &str,
+        values: Vec<V>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
             operator: Operator::NotIn,

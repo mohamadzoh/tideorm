@@ -77,7 +77,7 @@ pub enum Error {
         /// Description of what was not found
         message: String,
         /// Optional table name for context
-        context: Option<ErrorContext>,
+        context: Option<Box<ErrorContext>>,
     },
 
     /// Database connection failed
@@ -93,7 +93,7 @@ pub enum Error {
         /// Details about the query failure
         message: String,
         /// Optional context about the query
-        context: Option<ErrorContext>,
+        context: Option<Box<ErrorContext>>,
     },
 
     /// Data validation failed
@@ -197,6 +197,10 @@ pub struct ErrorContext {
     pub table: Option<String>,
     /// Column name involved in the error
     pub column: Option<String>,
+    /// Rendered query conditions involved in the error
+    pub conditions: Vec<String>,
+    /// Logical operator chain used to combine the conditions
+    pub operator_chain: Option<String>,
     /// The SQL query that caused the error (if available)
     pub query: Option<String>,
 }
@@ -209,6 +213,12 @@ impl std::fmt::Display for ErrorContext {
         }
         if let Some(ref column) = self.column {
             parts.push(format!("column: {}", column));
+        }
+        if !self.conditions.is_empty() {
+            parts.push(format!("conditions: {}", self.conditions.join(" | ")));
+        }
+        if let Some(ref operator_chain) = self.operator_chain {
+            parts.push(format!("operator_chain: {}", operator_chain));
         }
         if let Some(ref query) = self.query {
             parts.push(format!("query: {}", query));
@@ -223,6 +233,8 @@ impl ErrorContext {
         Self {
             table: None,
             column: None,
+            conditions: Vec::new(),
+            operator_chain: None,
             query: None,
         }
     }
@@ -236,6 +248,24 @@ impl ErrorContext {
     /// Set the column name
     pub fn column(mut self, column: impl Into<String>) -> Self {
         self.column = Some(column.into());
+        self
+    }
+
+    /// Add a rendered condition to the context
+    pub fn condition(mut self, condition: impl Into<String>) -> Self {
+        self.conditions.push(condition.into());
+        self
+    }
+
+    /// Set all rendered conditions for the context
+    pub fn conditions(mut self, conditions: Vec<String>) -> Self {
+        self.conditions = conditions;
+        self
+    }
+
+    /// Set the logical operator chain
+    pub fn operator_chain(mut self, operator_chain: impl Into<String>) -> Self {
+        self.operator_chain = Some(operator_chain.into());
         self
     }
 
@@ -265,7 +295,7 @@ impl Error {
     pub fn not_found_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::NotFound {
             message: message.into(),
-            context: Some(context),
+            context: Some(Box::new(context)),
         }
     }
 
@@ -288,7 +318,7 @@ impl Error {
     pub fn query_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::Query {
             message: message.into(),
-            context: Some(context),
+            context: Some(Box::new(context)),
         }
     }
 
@@ -393,8 +423,8 @@ impl Error {
     /// Get the error context if available
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
-            Self::NotFound { context, .. } => context.as_ref(),
-            Self::Query { context, .. } => context.as_ref(),
+            Self::NotFound { context, .. } => context.as_deref(),
+            Self::Query { context, .. } => context.as_deref(),
             _ => None,
         }
     }
@@ -404,11 +434,11 @@ impl Error {
         match self {
             Self::NotFound { message, .. } => Self::NotFound {
                 message,
-                context: Some(ctx),
+                context: Some(Box::new(ctx)),
             },
             Self::Query { message, .. } => Self::Query {
                 message,
-                context: Some(ctx),
+                context: Some(Box::new(ctx)),
             },
             other => other,
         }
@@ -524,7 +554,7 @@ impl Error {
                 } else {
                     "Check the SQL query and ensure all referenced columns/tables exist."
                 };
-                
+
                 if let Some(ctx) = context {
                     if let Some(ref query) = ctx.query {
                         format!("{}\n\nQuery: {}", base_suggestion, query)
@@ -740,6 +770,12 @@ impl Error {
             if let Some(ref column) = ctx.column {
                 output.push_str(&format!("\n  Column: {}", column));
             }
+            if !ctx.conditions.is_empty() {
+                output.push_str(&format!("\n  Conditions: {}", ctx.conditions.join(" | ")));
+            }
+            if let Some(ref operator_chain) = ctx.operator_chain {
+                output.push_str(&format!("\n  Operator chain: {}", operator_chain));
+            }
             if let Some(ref query) = ctx.query {
                 output.push_str(&format!("\n  Query: {}", query));
             }
@@ -854,10 +890,20 @@ mod tests {
         let ctx = ErrorContext::new()
             .table("users")
             .column("email")
+            .condition("email = \"alice@example.com\"")
+            .operator_chain("email = \"alice@example.com\"")
             .query("SELECT * FROM users");
 
         assert_eq!(ctx.table, Some("users".to_string()));
         assert_eq!(ctx.column, Some("email".to_string()));
+        assert_eq!(
+            ctx.conditions,
+            vec!["email = \"alice@example.com\"".to_string()]
+        );
+        assert_eq!(
+            ctx.operator_chain,
+            Some("email = \"alice@example.com\"".to_string())
+        );
         assert_eq!(ctx.query, Some("SELECT * FROM users".to_string()));
     }
 
@@ -898,7 +944,9 @@ mod tests {
     fn test_error_context_is_not_reported_as_source() {
         let err = Error::query_with_context(
             "syntax error",
-            ErrorContext::new().table("users").query("SELECT * FROM users WHERE"),
+            ErrorContext::new()
+                .table("users")
+                .query("SELECT * FROM users WHERE"),
         );
 
         assert!(StdError::source(&err).is_none());

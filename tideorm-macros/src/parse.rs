@@ -88,32 +88,57 @@ impl ModelField {
         };
 
         let column_type = match base_type {
-            "i8" | "i16" | "u8" | "u16" => quote!(ColumnType::SmallInteger),
-            "i32" | "u32" => quote!(ColumnType::Integer),
-            "i64" | "u64" => quote!(ColumnType::BigInteger),
-            "f32" => quote!(ColumnType::Float),
-            "f64" => quote!(ColumnType::Double),
-            "bool" => quote!(ColumnType::Boolean),
-            "String" | "&str" | "str" => quote!(ColumnType::Text),
-            "Uuid" | "uuid::Uuid" => quote!(ColumnType::Uuid),
+            "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::sea_orm::ColumnType::SmallInteger),
+            "i32" | "u32" => quote!(::tideorm::sea_orm::ColumnType::Integer),
+            "i64" | "u64" => quote!(::tideorm::sea_orm::ColumnType::BigInteger),
+            "f32" => quote!(::tideorm::sea_orm::ColumnType::Float),
+            "f64" => quote!(::tideorm::sea_orm::ColumnType::Double),
+            "bool" => quote!(::tideorm::sea_orm::ColumnType::Boolean),
+            "String" | "&str" | "str" => quote!(::tideorm::sea_orm::ColumnType::Text),
+            "Uuid" | "uuid::Uuid" => quote!(::tideorm::sea_orm::ColumnType::Uuid),
             s if s.contains("DateTime<Utc>")
                 || s.contains("DateTime<chrono::Utc>")
                 || s.contains("chrono::DateTime<Utc>")
-                || s.contains("chrono::DateTime<chrono::Utc>") => {
-                quote!(ColumnType::TimestampWithTimeZone)
+                || s.contains("chrono::DateTime<chrono::Utc>") =>
+            {
+                quote!(::tideorm::sea_orm::ColumnType::TimestampWithTimeZone)
             }
-            "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => quote!(ColumnType::DateTime),
-            "NaiveDate" | "chrono::NaiveDate" => quote!(ColumnType::Date),
-            "NaiveTime" | "chrono::NaiveTime" => quote!(ColumnType::Time),
-            "Decimal" | "rust_decimal::Decimal" => quote!(ColumnType::Decimal(None)),
-            "Json" | "JsonValue" | "Value" | "serde_json::Value" => quote!(ColumnType::Json),
-            "Vec<u8>" => quote!(ColumnType::Binary(sea_orm::sea_query::BlobSize::Blob(None))),
-            "Vec<i32>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Integer))),
-            "Vec<i64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::BigInteger))),
-            "Vec<String>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Text))),
-            "Vec<bool>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Boolean))),
-            "Vec<f64>" => quote!(ColumnType::Array(sea_orm::sea_query::RcOrArc::new(ColumnType::Double))),
-            _ => quote!(ColumnType::Text),
+            "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => {
+                quote!(::tideorm::sea_orm::ColumnType::DateTime)
+            }
+            "NaiveDate" | "chrono::NaiveDate" => quote!(::tideorm::sea_orm::ColumnType::Date),
+            "NaiveTime" | "chrono::NaiveTime" => quote!(::tideorm::sea_orm::ColumnType::Time),
+            "Decimal" | "rust_decimal::Decimal" => {
+                quote!(::tideorm::sea_orm::ColumnType::Decimal(None))
+            }
+            "Json" | "JsonValue" | "Value" | "serde_json::Value" => {
+                quote!(::tideorm::sea_orm::ColumnType::Json)
+            }
+            "Vec<u8>" => quote!(::tideorm::sea_orm::ColumnType::Binary(
+                ::tideorm::sea_orm::sea_query::BlobSize::Blob(None)
+            )),
+            "Vec<i32>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+                ::tideorm::sea_orm::sea_query::RcOrArc::new(
+                    ::tideorm::sea_orm::ColumnType::Integer
+                )
+            )),
+            "Vec<i64>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+                ::tideorm::sea_orm::sea_query::RcOrArc::new(
+                    ::tideorm::sea_orm::ColumnType::BigInteger
+                )
+            )),
+            "Vec<String>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+                ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Text)
+            )),
+            "Vec<bool>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+                ::tideorm::sea_orm::sea_query::RcOrArc::new(
+                    ::tideorm::sea_orm::ColumnType::Boolean
+                )
+            )),
+            "Vec<f64>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+                ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Double)
+            )),
+            _ => quote!(::tideorm::sea_orm::ColumnType::Text),
         };
 
         if is_nullable || self.nullable {
@@ -157,6 +182,59 @@ pub(crate) fn relation_wrapper_name(ty: &Type) -> Option<&str> {
             })
         }
         _ => None,
+    }
+}
+
+pub(crate) fn relation_generic_types(ty: &Type) -> Vec<Type> {
+    match ty {
+        Type::Group(group) => relation_generic_types(&group.elem),
+        Type::Paren(paren) => relation_generic_types(&paren.elem),
+        Type::Reference(reference) => relation_generic_types(&reference.elem),
+        Type::Path(type_path) => {
+            let Some(segment) = type_path.path.segments.last() else {
+                return Vec::new();
+            };
+
+            let ident = segment.ident.to_string();
+            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc") {
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(inner_ty) = argument {
+                            return relation_generic_types(inner_ty);
+                        }
+                    }
+                }
+                return Vec::new();
+            }
+
+            if !matches!(
+                ident.as_str(),
+                "HasOne"
+                    | "HasMany"
+                    | "BelongsTo"
+                    | "HasManyThrough"
+                    | "MorphOne"
+                    | "MorphMany"
+                    | "MorphTo"
+                    | "SelfRef"
+                    | "SelfRefMany"
+            ) {
+                return Vec::new();
+            }
+
+            match &segment.arguments {
+                PathArguments::AngleBracketed(arguments) => arguments
+                    .args
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        GenericArgument::Type(inner_ty) => Some(inner_ty.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -255,23 +333,59 @@ pub(crate) fn parse_validation_attributes(
         if let Meta::List(list) = &attr.meta {
             for part in list.tokens.to_string().split(',').map(str::trim) {
                 match part {
-                    "required" => rules.push(quote!(::tideorm::validation::ValidationRule::Required)),
+                    "required" => {
+                        rules.push(quote!(::tideorm::validation::ValidationRule::Required))
+                    }
                     "email" => rules.push(quote!(::tideorm::validation::ValidationRule::Email)),
                     "url" => rules.push(quote!(::tideorm::validation::ValidationRule::Url)),
                     "alpha" => rules.push(quote!(::tideorm::validation::ValidationRule::Alpha)),
-                    "alphanumeric" => rules.push(quote!(::tideorm::validation::ValidationRule::Alphanumeric)),
+                    "alphanumeric" => {
+                        rules.push(quote!(::tideorm::validation::ValidationRule::Alphanumeric))
+                    }
                     "numeric" => rules.push(quote!(::tideorm::validation::ValidationRule::Numeric)),
                     "uuid" => rules.push(quote!(::tideorm::validation::ValidationRule::Uuid)),
-                    _ if part.starts_with("min_length") => push_parsed_rule(&mut rules, part, "min_length", |n: usize| quote!(::tideorm::validation::ValidationRule::MinLength(#n))),
-                    _ if part.starts_with("max_length") => push_parsed_rule(&mut rules, part, "max_length", |n: usize| quote!(::tideorm::validation::ValidationRule::MaxLength(#n))),
-                    _ if part.starts_with("length") && !part.contains("min_") && !part.contains("max_") => push_parsed_rule(&mut rules, part, "length", |n: usize| quote!(::tideorm::validation::ValidationRule::Length(#n))),
-                    _ if part.starts_with("min") && !part.contains("length") => push_parsed_rule(&mut rules, part, "min", |n: f64| quote!(::tideorm::validation::ValidationRule::Min(#n))),
-                    _ if part.starts_with("max") && !part.contains("length") => push_parsed_rule(&mut rules, part, "max", |n: f64| quote!(::tideorm::validation::ValidationRule::Max(#n))),
+                    _ if part.starts_with("min_length") => push_parsed_rule(
+                        &mut rules,
+                        part,
+                        "min_length",
+                        |n: usize| quote!(::tideorm::validation::ValidationRule::MinLength(#n)),
+                    ),
+                    _ if part.starts_with("max_length") => push_parsed_rule(
+                        &mut rules,
+                        part,
+                        "max_length",
+                        |n: usize| quote!(::tideorm::validation::ValidationRule::MaxLength(#n)),
+                    ),
+                    _ if part.starts_with("length")
+                        && !part.contains("min_")
+                        && !part.contains("max_") =>
+                    {
+                        push_parsed_rule(
+                            &mut rules,
+                            part,
+                            "length",
+                            |n: usize| quote!(::tideorm::validation::ValidationRule::Length(#n)),
+                        )
+                    }
+                    _ if part.starts_with("min") && !part.contains("length") => push_parsed_rule(
+                        &mut rules,
+                        part,
+                        "min",
+                        |n: f64| quote!(::tideorm::validation::ValidationRule::Min(#n)),
+                    ),
+                    _ if part.starts_with("max") && !part.contains("length") => push_parsed_rule(
+                        &mut rules,
+                        part,
+                        "max",
+                        |n: f64| quote!(::tideorm::validation::ValidationRule::Max(#n)),
+                    ),
                     _ if part.starts_with("range") => {
                         if let Some(value) = extract_value(part, "range") {
                             let parts: Vec<_> = value.trim_matches('"').split("..").collect();
                             if parts.len() == 2 {
-                                if let (Ok(min), Ok(max)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                if let (Ok(min), Ok(max)) =
+                                    (parts[0].parse::<f64>(), parts[1].parse::<f64>())
+                                {
                                     rules.push(quote!(::tideorm::validation::ValidationRule::Range(#min, #max)));
                                 }
                             }
@@ -379,4 +493,3 @@ pub(crate) struct ModelInput {
     #[darling(default)]
     pub(crate) tokenize: bool,
 }
-

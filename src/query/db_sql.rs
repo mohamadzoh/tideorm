@@ -113,10 +113,7 @@ pub fn json_key_exists(db_type: DatabaseType, column: &str, key: &str) -> String
             format!("JSON_CONTAINS_PATH({}, 'one', '$.{}')", column, escaped_key)
         }
         DatabaseType::SQLite => {
-            format!(
-                "json_extract({}, '$.{}') IS NOT NULL",
-                column, escaped_key
-            )
+            format!("json_extract({}, '$.{}') IS NOT NULL", column, escaped_key)
         }
     }
 }
@@ -130,7 +127,10 @@ pub fn json_key_not_exists(db_type: DatabaseType, column: &str, key: &str) -> St
             format!("NOT ({} ? '{}')", column, escaped_key)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!("NOT JSON_CONTAINS_PATH({}, 'one', '$.{}')", column, escaped_key)
+            format!(
+                "NOT JSON_CONTAINS_PATH({}, 'one', '$.{}')",
+                column, escaped_key
+            )
         }
         DatabaseType::SQLite => {
             format!("json_extract({}, '$.{}') IS NULL", column, escaped_key)
@@ -154,10 +154,7 @@ pub fn json_path_exists(db_type: DatabaseType, column: &str, path: &str) -> Stri
             format!("JSON_CONTAINS_PATH({}, 'one', '{}')", column, escaped_path)
         }
         DatabaseType::SQLite => {
-            format!(
-                "json_extract({}, '{}') IS NOT NULL",
-                column, escaped_path
-            )
+            format!("json_extract({}, '{}') IS NOT NULL", column, escaped_path)
         }
     }
 }
@@ -171,7 +168,10 @@ pub fn json_path_not_exists(db_type: DatabaseType, column: &str, path: &str) -> 
             format!("NOT ({} @? '{}')", column, escaped_path)
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!("NOT JSON_CONTAINS_PATH({}, 'one', '{}')", column, escaped_path)
+            format!(
+                "NOT JSON_CONTAINS_PATH({}, 'one', '{}')",
+                column, escaped_path
+            )
         }
         DatabaseType::SQLite => {
             format!("json_extract({}, '{}') IS NULL", column, escaped_path)
@@ -203,7 +203,11 @@ pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) ->
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            format!("JSON_CONTAINS({}, '{}')", column, json_array.replace("'", "''"))
+            format!(
+                "JSON_CONTAINS({}, '{}')",
+                column,
+                json_array.replace("'", "''")
+            )
         }
         DatabaseType::SQLite => {
             let conditions: Vec<String> = values
@@ -242,7 +246,11 @@ pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]
                     .collect::<Vec<_>>()
                     .join(",")
             );
-            format!("JSON_CONTAINS('{}', {})", json_array.replace("'", "''"), column)
+            format!(
+                "JSON_CONTAINS('{}', {})",
+                json_array.replace("'", "''"),
+                column
+            )
         }
         DatabaseType::SQLite => {
             let value_list = values
@@ -303,7 +311,11 @@ pub fn format_column(db_type: DatabaseType, column: &str) -> String {
     } else if column.contains('.') {
         let parts: Vec<&str> = column.split('.').collect();
         if parts.len() == 2 {
-            format!("{}.{}", quote_ident(db_type, parts[0]), quote_ident(db_type, parts[1]))
+            format!(
+                "{}.{}",
+                quote_ident(db_type, parts[0]),
+                quote_ident(db_type, parts[1])
+            )
         } else {
             column.to_string()
         }

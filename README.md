@@ -192,15 +192,15 @@ tideorm = { version = "0.8.0", features = ["postgres", "fulltext"] }
 | `sqlite` | SQLite support |
 | `runtime-tokio` | Tokio runtime (default) |
 | `runtime-async-std` | async-std runtime |
-| `attachments` | Enables the attachments API and attachment-specific benchmarks/tests |
-| `translations` | Enables the translations API and translation-specific benchmarks/tests |
-| `fulltext` | Enables the full-text search API and fulltext-specific benchmarks/tests |
+| `attachments` | Compile-time-only feature gate for the attachments API and attachment-specific benchmarks/tests; adds no extra dependencies |
+| `translations` | Compile-time-only feature gate for the translations API and translation-specific benchmarks/tests; adds no extra dependencies |
+| `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
 
-Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers.
+Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
-Translations are opt-in. Enable the `translations` feature when you want to use `tideorm::translations`, `HasTranslations`, or `ApplyTranslations`.
+Translations are opt-in. Enable the `translations` feature when you want to use `tideorm::translations`, `HasTranslations`, or `ApplyTranslations`. This is a compile-time API gate only; it does not pull in additional crates.
 
-Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers.
+Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
 ## Relation Types
 
@@ -241,7 +241,7 @@ For runnable applications and broader demos, see **[tideorm-examples](https://gi
 
 ## Testing
 
-TideORM ships with unit, integration, and feature-specific test coverage. The repository CI runs `cargo check` plus `cargo test --lib` across PostgreSQL, MySQL, and SQLite feature sets.
+TideORM ships with unit, integration, and feature-specific test coverage. The repository CI runs cargo fmt, cargo clippy, cargo check, cargo test --lib across PostgreSQL, MySQL, and SQLite feature sets, plus a SQLite end-to-end smoke test.
 
 Common local commands:
 

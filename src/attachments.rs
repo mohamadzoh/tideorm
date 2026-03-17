@@ -434,8 +434,8 @@ pub trait HasAttachments {
         if Self::is_has_one_relation(relation) {
             if attachments.is_empty() {
                 files.remove_one(relation);
-                } else if let Some(first) = attachments.into_iter().next() {
-                    files.set_one(relation, first);
+            } else if let Some(first) = attachments.into_iter().next() {
+                files.set_one(relation, first);
             }
         } else {
             files.clear_many(relation);

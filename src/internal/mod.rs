@@ -18,8 +18,8 @@ pub use sea_orm::{
     ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
     DatabaseTransaction, DbBackend, DbErr, DeleteMany, DeriveEntityModel, DeriveRelation,
     EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden, IntoActiveModel, Iterable,
-    ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait, Statement,
-    TransactionTrait, TryGetable, Value,
+    LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    Related, RelationDef, RelationTrait, Statement, TransactionTrait, TryGetable, Value,
     entity::prelude::*,
     sea_query::{Alias, Asterisk, Expr, ExprTrait},
 };
@@ -36,6 +36,12 @@ pub trait InternalModel: Sized + Send + Sync + Clone {
 
     /// Convert SeaORM Model to TideORM model
     fn from_sea_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
+
+    /// Convert a TideORM model into its generated SeaORM model.
+    fn to_sea_model(&self) -> <Self::Entity as EntityTrait>::Model;
+
+    /// Resolve a SeaORM column enum from either a field name or column name.
+    fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column>;
 
     /// Get SeaORM primary key column (optional, for find_by_id)
     fn primary_key_column() -> Option<<Self::Entity as EntityTrait>::Column> {
@@ -80,6 +86,15 @@ pub(crate) fn translate_error(err: DbErr) -> Error {
     }
 }
 
+fn model_error_context<M>(query: impl Into<String>) -> crate::error::ErrorContext
+where
+    M: crate::model::Model,
+{
+    crate::error::ErrorContext::new()
+        .table(M::table_name())
+        .query(query.into())
+}
+
 /// Internal query executor
 #[doc(hidden)]
 pub struct QueryExecutor;
@@ -88,9 +103,13 @@ impl QueryExecutor {
     /// Find all records
     pub async fn find_all<M>(conn: &DatabaseConnection) -> Result<Vec<M>>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
-        let results = M::Entity::find().all(conn).await.map_err(translate_error)?;
+        let results = M::Entity::find()
+            .all(conn)
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>("find_all()")))?;
 
         Ok(results.into_iter().map(M::from_sea_model).collect())
     }
@@ -98,9 +117,13 @@ impl QueryExecutor {
     /// Get first record
     pub async fn first<M>(conn: &DatabaseConnection) -> Result<Option<M>>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
-        let result = M::Entity::find().one(conn).await.map_err(translate_error)?;
+        let result = M::Entity::find()
+            .one(conn)
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>("first()")))?;
 
         Ok(result.map(M::from_sea_model))
     }
@@ -108,17 +131,23 @@ impl QueryExecutor {
     /// Get last record (by primary key descending)
     pub async fn last<M>(conn: &DatabaseConnection) -> Result<Option<M>>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
         // Order by primary key descending to get the actual last record
         let mut select = M::Entity::find();
+        let mut query_label = String::from("last()");
 
         // Use the primary key column if available, otherwise fall back to unordered
         if let Some(pk_col) = M::primary_key_column() {
             select = select.order_by_desc(pk_col);
+            query_label = format!("last(order_by={} desc)", M::primary_key_name());
         }
 
-        let result = select.one(conn).await.map_err(translate_error)?;
+        let result = select
+            .one(conn)
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>(query_label)))?;
 
         Ok(result.map(M::from_sea_model))
     }
@@ -126,7 +155,7 @@ impl QueryExecutor {
     /// Count records
     pub async fn count<M>(conn: &DatabaseConnection, _condition: Option<Condition>) -> Result<u64>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
         #[derive(Debug, FromQueryResult)]
         struct CountResult {
@@ -139,7 +168,8 @@ impl QueryExecutor {
             .into_model::<CountResult>()
             .one(conn)
             .await
-            .map_err(translate_error)?;
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>("count(*)")))?;
 
         Ok(result.map(|r| r.count as u64).unwrap_or(0))
     }
@@ -147,14 +177,20 @@ impl QueryExecutor {
     /// Paginate records
     pub async fn paginate<M>(conn: &DatabaseConnection, limit: u64, offset: u64) -> Result<Vec<M>>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
         let results = M::Entity::find()
             .offset(offset)
             .limit(limit)
             .all(conn)
             .await
-            .map_err(translate_error)?;
+            .map_err(translate_error)
+            .map_err(|err| {
+                err.with_context(model_error_context::<M>(format!(
+                    "paginate(limit={}, offset={})",
+                    limit, offset
+                )))
+            })?;
 
         Ok(results.into_iter().map(M::from_sea_model).collect())
     }
@@ -162,10 +198,14 @@ impl QueryExecutor {
     /// Delete a record
     pub async fn delete<M>(conn: &DatabaseConnection, model: M) -> Result<u64>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
     {
         let active = model.into_active_model();
-        let result = active.delete(conn).await.map_err(translate_error)?;
+        let result = active
+            .delete(conn)
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>("delete(model)")))?;
         Ok(result.rows_affected)
     }
 
@@ -179,17 +219,25 @@ impl QueryExecutor {
     /// support multi-row `INSERT ... RETURNING`.
     pub async fn insert_many<M>(conn: &DatabaseConnection, models: Vec<M>) -> Result<Vec<M>>
     where
-        M: InternalModel,
+        M: InternalModel + crate::model::Model,
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
     {
         if models.is_empty() {
             return Ok(Vec::new());
         }
 
+        let batch_size = models.len();
+        let error_context =
+            model_error_context::<M>(format!("insert_many(batch_size={})", batch_size));
+
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
             let active = models.into_iter().next().unwrap().into_active_model();
-            let result = active.insert(conn).await.map_err(translate_error)?;
+            let result = active
+                .insert(conn)
+                .await
+                .map_err(translate_error)
+                .map_err(|err| err.with_context(error_context.clone()))?;
             return Ok(vec![M::from_sea_model(result)]);
         }
 
@@ -204,7 +252,8 @@ impl QueryExecutor {
             let results = M::Entity::insert_many(active_models)
                 .exec_with_returning(conn)
                 .await
-                .map_err(translate_error)?;
+                .map_err(translate_error)
+                .map_err(|err| err.with_context(error_context.clone()))?;
 
             Ok(results.into_iter().map(M::from_sea_model).collect())
         } else {
@@ -213,7 +262,11 @@ impl QueryExecutor {
             let mut results = Vec::with_capacity(models.len());
             for model in models {
                 let active = model.into_active_model();
-                let result = active.insert(conn).await.map_err(translate_error)?;
+                let result = active
+                    .insert(conn)
+                    .await
+                    .map_err(translate_error)
+                    .map_err(|err| err.with_context(error_context.clone()))?;
                 results.push(M::from_sea_model(result));
             }
             Ok(results)

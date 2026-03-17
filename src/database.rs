@@ -422,13 +422,23 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<T>> {
+        crate::database::require_db()?
+            .__raw_with_params::<T>(sql, params)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn __raw_with_params<T: crate::model::Model>(
+        &self,
+        sql: &str,
+        params: Vec<crate::internal::Value>,
+    ) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let db = crate::database::require_db()?;
-        let backend = db.inner.connection().get_database_backend();
+        let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = db
+        let results = self
             .inner
             .connection()
             .query_all_raw(stmt)
@@ -483,13 +493,23 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<u64> {
+        crate::database::require_db()?
+            .__execute_with_params(sql, params)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn __execute_with_params(
+        &self,
+        sql: &str,
+        params: Vec<crate::internal::Value>,
+    ) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let db = crate::database::require_db()?;
-        let backend = db.inner.connection().get_database_backend();
+        let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let result = db
+        let result = self
             .inner
             .connection()
             .execute_raw(stmt)
@@ -543,13 +563,23 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<serde_json::Value>> {
+        crate::database::require_db()?
+            .__raw_json_with_params(sql, params)
+            .await
+    }
+
+    #[doc(hidden)]
+    pub async fn __raw_json_with_params(
+        &self,
+        sql: &str,
+        params: Vec<crate::internal::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let db = crate::database::require_db()?;
-        let backend = db.inner.connection().get_database_backend();
+        let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = db
+        let results = self
             .inner
             .connection()
             .query_all_raw(stmt)

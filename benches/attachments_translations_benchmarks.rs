@@ -301,7 +301,7 @@ fn bench_files_data_serialization(c: &mut Criterion) {
                 {"key": "img3.jpg", "filename": "img3.jpg", "created_at": "2024-01-01T00:00:00Z"},
             ]
         });
-        
+
         b.iter(|| {
             black_box(FilesData::from_json(&json))
         });
@@ -435,7 +435,7 @@ fn bench_translation_input(c: &mut Criterion) {
             "meta_title": {"en": "Title", "ar": "عنوان", "fr": "Titre", "es": "Título", "de": "Titel"},
             "meta_desc": {"en": "Meta", "ar": "ميتا", "fr": "Méta", "es": "Meta", "de": "Meta"}
         });
-        
+
         b.iter(|| {
             black_box(TranslationInput::from_json(&json).unwrap())
         });

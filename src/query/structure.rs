@@ -193,8 +193,13 @@ impl WindowFunction {
         self
     }
 
-    pub fn order_by(mut self, column: impl crate::columns::IntoColumnName, direction: Order) -> Self {
-        self.order_by.push((column.column_name().to_string(), direction));
+    pub fn order_by(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        direction: Order,
+    ) -> Self {
+        self.order_by
+            .push((column.column_name().to_string(), direction));
         self
     }
 
@@ -212,18 +217,31 @@ impl WindowFunction {
         let mut clauses = Vec::new();
 
         if !self.partition_by.is_empty() {
-            let cols: Vec<String> = self.partition_by.iter().map(|c| format!("\"{}\"", c)).collect();
+            let cols: Vec<String> = self
+                .partition_by
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect();
             clauses.push(format!("PARTITION BY {}", cols.join(", ")));
         }
 
         if !self.order_by.is_empty() {
-            let orders: Vec<String> = self.order_by.iter().map(|(col, dir)| format!("\"{}\" {}", col, dir.as_str())).collect();
+            let orders: Vec<String> = self
+                .order_by
+                .iter()
+                .map(|(col, dir)| format!("\"{}\" {}", col, dir.as_str()))
+                .collect();
             clauses.push(format!("ORDER BY {}", orders.join(", ")));
         }
 
         if let (Some(frame_type), Some(start)) = (&self.frame_type, &self.frame_start) {
             let frame_sql = if let Some(end) = &self.frame_end {
-                format!("{} BETWEEN {} AND {}", frame_type.as_sql(), start.as_sql(), end.as_sql())
+                format!(
+                    "{} BETWEEN {} AND {}",
+                    frame_type.as_sql(),
+                    start.as_sql(),
+                    end.as_sql()
+                )
             } else {
                 format!("{} {}", frame_type.as_sql(), start.as_sql())
             };
@@ -353,10 +371,16 @@ impl JoinResultConsolidator {
             }
         }
 
-        order.into_iter().filter_map(|k| groups.remove(&k)).collect()
+        order
+            .into_iter()
+            .filter_map(|k| groups.remove(&k))
+            .collect()
     }
 
-    pub fn consolidate_two_optional<A, B, K, F>(items: Vec<(A, Option<B>)>, key_fn: F) -> Vec<(A, Vec<B>)>
+    pub fn consolidate_two_optional<A, B, K, F>(
+        items: Vec<(A, Option<B>)>,
+        key_fn: F,
+    ) -> Vec<(A, Vec<B>)>
     where
         A: Clone,
         K: Eq + std::hash::Hash,
@@ -380,7 +404,10 @@ impl JoinResultConsolidator {
             }
         }
 
-        order.into_iter().filter_map(|k| groups.remove(&k)).collect()
+        order
+            .into_iter()
+            .filter_map(|k| groups.remove(&k))
+            .collect()
     }
 
     #[allow(clippy::type_complexity)]
@@ -426,7 +453,10 @@ impl JoinResultConsolidator {
             .into_iter()
             .filter_map(|ka| {
                 a_groups.remove(&ka).map(|(a, mut b_groups, b_order)| {
-                    let bs: Vec<(B, Vec<C>)> = b_order.into_iter().filter_map(|kb| b_groups.remove(&kb)).collect();
+                    let bs: Vec<(B, Vec<C>)> = b_order
+                        .into_iter()
+                        .filter_map(|kb| b_groups.remove(&kb))
+                        .collect();
                     (a, bs)
                 })
             })
@@ -480,7 +510,10 @@ impl JoinResultConsolidator {
             .into_iter()
             .filter_map(|ka| {
                 a_groups.remove(&ka).map(|(a, mut b_groups, b_order)| {
-                    let bs: Vec<(B, Vec<C>)> = b_order.into_iter().filter_map(|kb| b_groups.remove(&kb)).collect();
+                    let bs: Vec<(B, Vec<C>)> = b_order
+                        .into_iter()
+                        .filter_map(|kb| b_groups.remove(&kb))
+                        .collect();
                     (a, bs)
                 })
             })

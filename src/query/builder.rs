@@ -1,4 +1,4 @@
-use super::{db_sql, QueryBuilder, QueryFragment};
+use super::{QueryBuilder, QueryFragment, db_sql};
 use crate::error::{Error, Result};
 use crate::model::Model;
 use std::marker::PhantomData;
@@ -8,6 +8,7 @@ impl<M: Model> QueryBuilder<M> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
+            database: None,
             conditions: Vec::new(),
             or_groups: Vec::new(),
             order_by: Vec::new(),
@@ -26,6 +27,19 @@ impl<M: Model> QueryBuilder<M> {
             ctes: Vec::new(),
             cache_options: None,
             cache_key: None,
+        }
+    }
+
+    pub(crate) fn with_database(mut self, database: crate::database::Database) -> Self {
+        self.database = Some(database);
+        self
+    }
+
+    pub(super) fn current_db(&self) -> Result<&crate::database::Database> {
+        if let Some(database) = &self.database {
+            Ok(database)
+        } else {
+            crate::database::require_db()
         }
     }
 
@@ -53,7 +67,8 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         self.group_by.extend(fragment.group_by.clone());
-        self.having_conditions.extend(fragment.having_conditions.clone());
+        self.having_conditions
+            .extend(fragment.having_conditions.clone());
         self.joins.extend(fragment.joins.clone());
 
         if self.invalid_query_reason.is_none() {

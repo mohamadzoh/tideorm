@@ -38,6 +38,7 @@
 //! struct User { ... }
 //! ```
 
+use std::fs;
 use std::path::Path;
 use std::sync::RwLock;
 
@@ -886,8 +887,7 @@ impl SchemaWriter {
 
         let sql = generator.generate();
 
-        tokio::fs::write(path.as_ref(), sql)
-            .await
+        fs::write(path.as_ref(), sql)
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
 
         Ok(())
@@ -911,8 +911,7 @@ impl SchemaWriter {
 
         let sql = generator.generate();
 
-        tokio::fs::write(path.as_ref(), sql)
-            .await
+        fs::write(path.as_ref(), sql)
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
 
         Ok(())

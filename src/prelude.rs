@@ -15,9 +15,11 @@ pub use crate::error::Error;
 // Note: We don't export Result here to avoid shadowing std::result::Result
 // Use `tideorm::Result` explicitly when needed
 pub use crate::callbacks::{CallbackRunner, Callbacks};
-pub use crate::config::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds, TideConfig};
 #[cfg(feature = "attachments")]
 pub use crate::config::FileUrlGenerator;
+pub use crate::config::{
+    Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds, TideConfig,
+};
 pub use crate::model::{
     BatchUpdateBuilder, CreateBuilder, IndexDefinition, Model, ModelMeta, NestedSave,
     NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,

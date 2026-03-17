@@ -58,6 +58,7 @@ pub(crate) struct BuildContext {
     pub(crate) index_impls: Vec<TokenStream2>,
     pub(crate) unique_index_impls: Vec<TokenStream2>,
     pub(crate) tokenize_enabled: bool,
+    pub(crate) relation_fields: Vec<ModelField>,
     db_fields: Vec<ModelField>,
 }
 
@@ -70,14 +71,22 @@ impl BuildContext {
     ) -> syn::Result<Self> {
         let struct_name = input.ident.clone();
         let struct_name_str = struct_name.to_string();
-        let table_name = input.table.clone().unwrap_or_else(|| pluralize(&struct_name_str.to_case(Case::Snake)));
+        let table_name = input
+            .table
+            .clone()
+            .unwrap_or_else(|| pluralize(&struct_name_str.to_case(Case::Snake)));
         let schema_name = input.schema.clone().unwrap_or_else(|| "public".to_string());
-        let should_gen_debug = !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
-        let should_gen_clone = !input.skip_derives && !input.skip_clone && !existing_derives.has_clone;
+        let should_gen_debug =
+            !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
+        let should_gen_clone =
+            !input.skip_derives && !input.skip_clone && !existing_derives.has_clone;
         let should_gen_default = !existing_derives.has_default;
-        let should_gen_serialize = !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
-        let should_gen_deserialize = !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
-        let hidden_attrs = split_csv(input.hidden.as_ref()).unwrap_or_else(|| vec!["deleted_at".to_string()]);
+        let should_gen_serialize =
+            !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
+        let should_gen_deserialize =
+            !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
+        let hidden_attrs =
+            split_csv(input.hidden.as_ref()).unwrap_or_else(|| vec!["deleted_at".to_string()]);
         let translatable_fields = split_csv(input.translatable.as_ref()).unwrap_or_default();
         let has_custom_languages = input.languages.is_some();
         let allowed_languages = split_csv(input.languages.as_ref()).unwrap_or_default();
@@ -89,7 +98,12 @@ impl BuildContext {
 
         let fields = match &input.data {
             darling::ast::Data::Struct(fields) => fields,
-            _ => return Err(syn::Error::new_spanned(&input.ident, "Model can only be derived for structs with named fields")),
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &input.ident,
+                    "Model can only be derived for structs with named fields",
+                ));
+            }
         };
 
         let db_fields: Vec<ModelField> = fields
@@ -121,7 +135,10 @@ impl BuildContext {
             .map(|field| field.ty.clone())
             .unwrap_or_else(|| syn::parse_quote!(i64));
 
-        let field_names: Vec<_> = db_fields.iter().filter_map(|field| field.ident.as_ref().cloned()).collect();
+        let field_names: Vec<_> = db_fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref().cloned())
+            .collect();
         let field_types: Vec<_> = db_fields.iter().map(|field| field.ty.clone()).collect();
         let column_names: Vec<_> = db_fields.iter().map(Self::column_name).collect();
         let column_variants: Vec<_> = db_fields
@@ -132,19 +149,25 @@ impl BuildContext {
         let column_type_defs = db_fields
             .iter()
             .filter_map(|field| {
-                let variant = format_ident!("{}", field.ident.as_ref()?.to_string().to_case(Case::Pascal));
+                let variant = format_ident!(
+                    "{}",
+                    field.ident.as_ref()?.to_string().to_case(Case::Pascal)
+                );
                 let col_type_expr = field.column_type_expr();
                 Some(quote!(Self::#variant => #col_type_expr))
             })
             .collect();
         let pk_column_variant = format_ident!("{}", pk_ident.to_string().to_case(Case::Pascal));
-        let pk_column_name = pk_field.map(Self::column_name).unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
+        let pk_column_name = pk_field
+            .map(Self::column_name)
+            .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
         let pk_auto_increment = pk_field.map(|field| field.auto_increment).unwrap_or(false);
         let timestamps_enabled = input.timestamps || has_timestamp_pair(&db_fields);
         let sync_column_attrs = build_sync_column_attrs(&db_fields);
         let insert_active_model_setters = build_insert_active_model_setters(&db_fields);
         let update_active_model_setters = build_update_active_model_setters(&db_fields);
-        let internal_entity_mod = format_ident!("__tideorm_internal_{}", struct_name_str.to_lowercase());
+        let internal_entity_mod =
+            format_ident!("__tideorm_internal_{}", struct_name_str.to_lowercase());
         let sea_orm_field_defs = build_sea_orm_field_defs(&db_fields);
         let all_field_names = field_names.clone();
         let relation_field_defaults = build_relation_field_defaults(&relation_fields);
@@ -153,7 +176,10 @@ impl BuildContext {
             .filter_map(|field| field.ident.as_ref())
             .map(|ident| quote!(#ident: Default::default()))
             .collect();
-        let derive_field_names: Vec<_> = fields.iter().filter_map(|field| field.ident.as_ref().cloned()).collect();
+        let derive_field_names: Vec<_> = fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref().cloned())
+            .collect();
         let derive_field_names_str = derive_field_names.iter().map(ToString::to_string).collect();
         let serde_field_names = field_names.clone();
         let serde_field_names_str = serde_field_names.iter().map(ToString::to_string).collect();
@@ -214,6 +240,7 @@ impl BuildContext {
             index_impls,
             unique_index_impls,
             tokenize_enabled: input.tokenize,
+            relation_fields: relation_fields.clone(),
             db_fields,
         };
         ctx.relation_field_inits = build_relation_field_inits(&ctx, &relation_fields)?;
@@ -238,7 +265,11 @@ impl BuildContext {
         }
     }
 
-    pub(crate) fn resolve_required_db_field_ident(&self, key: &str, relation_ident: &Ident) -> syn::Result<Ident> {
+    pub(crate) fn resolve_required_db_field_ident(
+        &self,
+        key: &str,
+        relation_ident: &Ident,
+    ) -> syn::Result<Ident> {
         self.db_fields
             .iter()
             .find_map(|field| {
@@ -250,46 +281,74 @@ impl BuildContext {
                     None
                 }
             })
-            .ok_or_else(|| syn::Error::new_spanned(relation_ident, format!("relation references unknown field or column '{}'", key)))
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    relation_ident,
+                    format!("relation references unknown field or column '{}'", key),
+                )
+            })
     }
 
-    pub(crate) fn resolve_local_key_ident(&self, key: &str, relation_ident: &Ident) -> syn::Result<Ident> {
-        if let Some(ident) = self
-            .db_fields
-            .iter()
-            .find_map(|field| {
-                let ident = field.ident.as_ref()?;
-                let column_name = Self::column_name(field);
-                if ident == key || column_name == key {
-                    Some(ident.clone())
-                } else {
-                    None
-                }
-            })
-        {
+    pub(crate) fn resolve_local_key_ident(
+        &self,
+        key: &str,
+        relation_ident: &Ident,
+    ) -> syn::Result<Ident> {
+        if let Some(ident) = self.db_fields.iter().find_map(|field| {
+            let ident = field.ident.as_ref()?;
+            let column_name = Self::column_name(field);
+            if ident == key || column_name == key {
+                Some(ident.clone())
+            } else {
+                None
+            }
+        }) {
             Ok(ident)
         } else if key == "id" {
             Ok(self.pk_ident.clone())
         } else {
-            Err(syn::Error::new_spanned(relation_ident, format!("relation references unknown local_key '{}'", key)))
+            Err(syn::Error::new_spanned(
+                relation_ident,
+                format!("relation references unknown local_key '{}'", key),
+            ))
         }
     }
 
     fn column_name(field: &ModelField) -> String {
-        field
-            .column
-            .clone()
-            .unwrap_or_else(|| field.ident.as_ref().map(|ident| ident.to_string().to_case(Case::Snake)).unwrap_or_default())
+        field.column.clone().unwrap_or_else(|| {
+            field
+                .ident
+                .as_ref()
+                .map(|ident| ident.to_string().to_case(Case::Snake))
+                .unwrap_or_default()
+        })
     }
 }
 
 fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
-    value.map(|value| value.split(',').map(|part| part.trim().to_string()).collect())
+    value.map(|value| {
+        value
+            .split(',')
+            .map(|part| part.trim().to_string())
+            .collect()
+    })
 }
 
 fn has_timestamp_pair(fields: &[ModelField]) -> bool {
-    let has_created_at = fields.iter().any(|field| field.ident.as_ref().map(|ident| ident == "created_at").unwrap_or(false));
-    let has_updated_at = fields.iter().any(|field| field.ident.as_ref().map(|ident| ident == "updated_at").unwrap_or(false));
+    let has_created_at = fields.iter().any(|field| {
+        field
+            .ident
+            .as_ref()
+            .map(|ident| ident == "created_at")
+            .unwrap_or(false)
+    });
+    let has_updated_at = fields.iter().any(|field| {
+        field
+            .ident
+            .as_ref()
+            .map(|ident| ident == "updated_at")
+            .unwrap_or(false)
+    });
     has_created_at && has_updated_at
 }
 

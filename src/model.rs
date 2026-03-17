@@ -467,6 +467,17 @@ pub trait Model:
         QueryBuilder::new()
     }
 
+    /// Start a query builder for this model using an explicit database connection.
+    ///
+    /// This bypasses the global singleton and is useful for multi-tenant setups,
+    /// parallel tests, and dependency-injected database handles.
+    fn query_with(db: &crate::database::Database) -> QueryBuilder<Self>
+    where
+        Self: Sized,
+    {
+        QueryBuilder::new().with_database(db.clone())
+    }
+
     /// Count all records (uses efficient SQL COUNT)
     ///
     /// # Example
@@ -759,6 +770,14 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Find record by primary key using an explicit database connection.
+    async fn find_with(
+        id: Self::PrimaryKey,
+        db: &crate::database::Database,
+    ) -> Result<Option<Self>>
+    where
+        Self: Sized;
+
     /// Find record by primary key or fail with NotFound error
     async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self>
     where
@@ -865,7 +884,10 @@ pub trait Model:
         }
 
         if Self::primary_key_auto_increment() {
-            return primary_key.parse::<i128>().map(|value| value == 0).unwrap_or(false);
+            return primary_key
+                .parse::<i128>()
+                .map(|value| value == 0)
+                .unwrap_or(false);
         }
 
         false

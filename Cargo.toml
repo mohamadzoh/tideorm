@@ -22,6 +22,8 @@ mysql = ["sea-orm/sqlx-mysql"]
 sqlite = ["sea-orm/sqlx-sqlite"]
 runtime-tokio = ["sea-orm/runtime-tokio-rustls", "dep:tokio"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
+# These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
+# and feature-specific tests/benches only. They do not enable extra dependencies.
 attachments = []
 translations = []
 fulltext = []
@@ -103,3 +105,8 @@ harness = false
 [[bench]]
 name = "tokenization_benchmarks"
 harness = false
+
+[[test]]
+name = "sqlite_ci_smoke_test"
+path = "tests/sqlite_ci_smoke_test.rs"
+required-features = ["sqlite", "runtime-tokio"]

@@ -103,6 +103,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
+use crate::internal::InternalModel;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
 
@@ -504,8 +505,17 @@ impl<E: Model> HasOne<E> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn set_cached(&mut self, model: Option<E>) {
+        self.cached = model.map(Box::new);
+    }
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<E>> {
+        if let Some(cached) = &self.cached {
+            return Ok(Some((**cached).clone()));
+        }
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -629,8 +639,17 @@ impl<E: Model> HasMany<E> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn set_cached(&mut self, models: Vec<E>) {
+        self.cached = Some(models);
+    }
+
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<E>> {
+        if let Some(cached) = &self.cached {
+            return Ok(cached.clone());
+        }
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -766,8 +785,17 @@ impl<E: Model> BelongsTo<E> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn set_cached(&mut self, model: Option<E>) {
+        self.cached = model.map(Box::new);
+    }
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<E>> {
+        if let Some(cached) = &self.cached {
+            return Ok(Some((**cached).clone()));
+        }
+
         let fk = self
             .fk_value
             .as_ref()
@@ -906,8 +934,17 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn set_cached(&mut self, models: Vec<Related>) {
+        self.cached = Some(models);
+    }
+
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<Related>> {
+        if let Some(cached) = &self.cached {
+            return Ok(cached.clone());
+        }
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1768,6 +1805,17 @@ pub struct EagerQueryBuilder<M: Model> {
     relation_tree: RelationTree,
 }
 
+#[async_trait]
+#[doc(hidden)]
+pub trait EagerLoadModel: Model + InternalModel {
+    async fn __eager_load(
+        models: &mut [WithRelations<Self>],
+        relation_tree: &RelationTree,
+    ) -> Result<()>
+    where
+        Self: Sized;
+}
+
 impl<M: Model> EagerQueryBuilder<M> {
     /// Create a new eager query builder
     pub fn new() -> Self {
@@ -1834,16 +1882,25 @@ impl<M: Model> EagerQueryBuilder<M> {
     }
 
     /// Execute and get all results with loaded relations
-    pub async fn get(self) -> Result<Vec<WithRelations<M>>> {
+    pub async fn get(self) -> Result<Vec<WithRelations<M>>>
+    where
+        M: EagerLoadModel,
+    {
         let models = self.query.get().await?;
 
-        let results: Vec<WithRelations<M>> = models.into_iter().map(WithRelations::new).collect();
+        let mut results: Vec<WithRelations<M>> =
+            models.into_iter().map(WithRelations::new).collect();
+
+        M::__eager_load(&mut results, &self.relation_tree).await?;
 
         Ok(results)
     }
 
     /// Execute and get first result with loaded relations
-    pub async fn first(mut self) -> Result<Option<WithRelations<M>>> {
+    pub async fn first(mut self) -> Result<Option<WithRelations<M>>>
+    where
+        M: EagerLoadModel,
+    {
         self.query = self.query.limit(1);
         let results = self.get().await?;
         Ok(results.into_iter().next())
@@ -1853,7 +1910,10 @@ impl<M: Model> EagerQueryBuilder<M> {
     pub async fn find(
         mut self,
         id: impl Into<serde_json::Value>,
-    ) -> Result<Option<WithRelations<M>>> {
+    ) -> Result<Option<WithRelations<M>>>
+    where
+        M: EagerLoadModel,
+    {
         self.query = self.query.where_eq(M::primary_key_name(), id);
         self.first().await
     }

@@ -135,7 +135,8 @@ fn bench_single_insert(c: &mut Criterion) {
         b.iter(|| {
             let unique_id = COUNTER.fetch_add(1, Ordering::SeqCst);
             rt.block_on(async {
-                let user = BenchUser::new(format!("bench_{unique_id}@example.com"), "Benchmark User");
+                let user =
+                    BenchUser::new(format!("bench_{unique_id}@example.com"), "Benchmark User");
                 user.save().await.expect("Insert failed")
             })
         });
@@ -191,11 +192,8 @@ fn bench_find_by_id(c: &mut Criterion) {
     let user_ids: Vec<i64> = rt.block_on(async {
         let mut ids = Vec::new();
         for i in 0..100 {
-            let user = BenchUser::new(
-                format!("find_{i}@example.com"),
-                format!("Find User {i}"),
-            )
-            .with_age(25 + (i % 30));
+            let user = BenchUser::new(format!("find_{i}@example.com"), format!("Find User {i}"))
+                .with_age(25 + (i % 30));
             let saved = user.save().await.expect("Insert failed");
             ids.push(saved.id);
         }

@@ -54,7 +54,11 @@ struct Team {
     #[tideorm(column = "team_uuid")]
     pub uuid: String,
 
-    #[tideorm(has_many = "TeamMember", foreign_key = "team_uuid", local_key = "team_uuid")]
+    #[tideorm(
+        has_many = "TeamMember",
+        foreign_key = "team_uuid",
+        local_key = "team_uuid"
+    )]
     pub members: HasMany<TeamMember>,
 
     pub labels: MorphMany<Role>,
@@ -69,7 +73,11 @@ struct TeamMember {
     #[tideorm(column = "team_uuid")]
     pub team_ref: String,
 
-    #[tideorm(belongs_to = "Team", foreign_key = "team_uuid", owner_key = "team_uuid")]
+    #[tideorm(
+        belongs_to = "Team",
+        foreign_key = "team_uuid",
+        owner_key = "team_uuid"
+    )]
     pub team: BelongsTo<Team>,
 }
 
@@ -87,7 +95,12 @@ struct User {
     #[tideorm(has_many = "Post", foreign_key = "user_id")]
     pub posts: HasMany<Post>,
 
-    #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
+    #[tideorm(
+        has_many_through = "Role",
+        pivot = "user_roles",
+        foreign_key = "user_id",
+        related_key = "role_id"
+    )]
     pub roles: HasManyThrough<Role, UserRole>,
 }
 
@@ -104,11 +117,14 @@ fn generated_serde_skips_relation_fields() {
 
     let value = serde_json::to_value(&user).unwrap();
 
-    assert_eq!(value, serde_json::json!({
-        "id": 1,
-        "email": "alice@example.com",
-        "name": "Alice"
-    }));
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "id": 1,
+            "email": "alice@example.com",
+            "name": "Alice"
+        })
+    );
     assert!(value.get("profile").is_none());
     assert!(value.get("posts").is_none());
 }
@@ -127,11 +143,14 @@ fn generated_serde_restores_relation_fields_with_defaults() {
     assert_eq!(user.name, "Alice");
 
     let reserialized = serde_json::to_value(&user).unwrap();
-    assert_eq!(reserialized, serde_json::json!({
-        "id": 1,
-        "email": "alice@example.com",
-        "name": "Alice"
-    }));
+    assert_eq!(
+        reserialized,
+        serde_json::json!({
+            "id": 1,
+            "email": "alice@example.com",
+            "name": "Alice"
+        })
+    );
 }
 
 #[test]
@@ -186,4 +205,56 @@ fn with_relations_initializes_supported_relation_wrappers() {
 
     assert_eq!(member.team.foreign_key, "team_uuid");
     assert_eq!(member.team.owner_key, "team_uuid");
+}
+
+#[test]
+fn generated_related_impls_expose_relation_defs() {
+    use tideorm::internal::InternalModel;
+    use tideorm::sea_orm::{Related, RelationType};
+
+    let posts = <<User as InternalModel>::Entity as Related<<Post as InternalModel>::Entity>>::to();
+    assert_eq!(posts.rel_type, RelationType::HasMany);
+
+    let profile =
+        <<User as InternalModel>::Entity as Related<<Profile as InternalModel>::Entity>>::to();
+    assert_eq!(profile.rel_type, RelationType::HasOne);
+
+    let author =
+        <<Article as InternalModel>::Entity as Related<<User as InternalModel>::Entity>>::to();
+    assert_eq!(author.rel_type, RelationType::HasOne);
+
+    let roles_via =
+        <<User as InternalModel>::Entity as Related<<Role as InternalModel>::Entity>>::via();
+    assert!(roles_via.is_some());
+}
+
+#[tokio::test]
+async fn eager_loaded_caches_back_wrapper_loads() {
+    let mut user = User {
+        id: 7,
+        email: "alice@example.com".to_string(),
+        name: "Alice".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
+        roles: Default::default(),
+    }
+    .with_relations();
+
+    user.profile.set_cached(Some(Profile {
+        id: 1,
+        user_id: 7,
+        bio: "Hello".to_string(),
+    }));
+    user.posts.set_cached(vec![Post {
+        id: 2,
+        user_id: 7,
+        title: "Cached".to_string(),
+    }]);
+
+    let profile = user.profile.load().await.unwrap();
+    let posts = user.posts.load().await.unwrap();
+
+    assert_eq!(profile.unwrap().bio, "Hello");
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].title, "Cached");
 }

@@ -140,8 +140,8 @@
 
 use std::sync::OnceLock;
 
-use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::random;
 use sha2::{Digest, Sha256};
 
@@ -213,13 +213,12 @@ impl TokenConfig {
 
     /// Get the global encryption key
     ///
-    /// Returns the configured key or a default development key.
-    /// **Warning**: The default key should only be used in development!
-    pub fn get_encryption_key() -> String {
+    /// Returns an error if no encryption key has been configured.
+    pub fn get_encryption_key() -> Result<String> {
         GLOBAL_ENCRYPTION_KEY
             .get()
             .cloned()
-            .unwrap_or_else(|| "tideorm-default-dev-key-32bytes!".to_string())
+            .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
     /// Check if an encryption key has been explicitly configured
@@ -374,7 +373,7 @@ fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
 /// - nonce: 24 bytes - random nonce for XChaCha20-Poly1305
 /// - ciphertext: encrypted record ID plus authentication tag
 pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
-    let key = TokenConfig::get_encryption_key();
+    let key = TokenConfig::get_encryption_key()?;
     let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
     let nonce_bytes: [u8; 24] = random();
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -396,34 +395,44 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
     Ok(base64_url_encode(&token_data))
 }
 
-/// Default token decoder
-pub fn default_decode(token: &str, model_name: &str) -> Option<i64> {
-    let key = TokenConfig::get_encryption_key();
+fn default_decode_checked(token: &str, model_name: &str) -> Result<Option<i64>> {
+    let key = TokenConfig::get_encryption_key()?;
     let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
 
-    let token_data = base64_url_decode(token)?;
+    let Some(token_data) = base64_url_decode(token) else {
+        return Ok(None);
+    };
 
     if token_data.len() <= 24 {
-        return None;
+        return Ok(None);
     }
 
     let nonce = XNonce::from_slice(&token_data[..24]);
-    let plaintext = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: &token_data[24..],
-                aad: model_name.as_bytes(),
-            },
-        )
-        .ok()?;
+    let plaintext = match cipher.decrypt(
+        nonce,
+        Payload {
+            msg: &token_data[24..],
+            aad: model_name.as_bytes(),
+        },
+    ) {
+        Ok(plaintext) => plaintext,
+        Err(_) => return Ok(None),
+    };
 
     if plaintext.len() != 8 {
-        return None;
+        return Ok(None);
     }
 
-    let id_bytes: [u8; 8] = plaintext.try_into().ok()?;
-    Some(i64::from_be_bytes(id_bytes))
+    let Some(id_bytes) = plaintext.try_into().ok() else {
+        return Ok(None);
+    };
+
+    Ok(Some(i64::from_be_bytes(id_bytes)))
+}
+
+/// Default token decoder
+pub fn default_decode(token: &str, model_name: &str) -> Option<i64> {
+    default_decode_checked(token, model_name).ok().flatten()
 }
 
 // =============================================================================
@@ -574,9 +583,12 @@ pub trait Tokenizable: Sized + Send + Sync {
             ));
         }
 
-        let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
+        if let Some(decoder) = Self::token_decoder() {
+            return decoder(token, Self::token_model_name())
+                .ok_or_else(|| Error::invalid_token("Failed to decode token"));
+        }
 
-        decoder(token, Self::token_model_name())
+        default_decode_checked(token, Self::token_model_name())?
             .ok_or_else(|| Error::invalid_token("Failed to decode token"))
     }
 
@@ -605,6 +617,15 @@ pub trait Tokenizable: Sized + Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn init_test_key() {
+        INIT.call_once(|| {
+            TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
+        });
+    }
 
     #[test]
     fn test_base64_url_encode_decode() {
@@ -626,6 +647,8 @@ mod tests {
 
     #[test]
     fn test_default_encode_decode() {
+        init_test_key();
+
         let record_id = 12345i64;
         let model_name = "User";
 
@@ -637,6 +660,8 @@ mod tests {
 
     #[test]
     fn test_encode_decode_negative_id() {
+        init_test_key();
+
         let record_id = -99999i64;
         let model_name = "NegativeModel";
 
@@ -648,6 +673,8 @@ mod tests {
 
     #[test]
     fn test_encode_decode_zero() {
+        init_test_key();
+
         let record_id = 0i64;
         let model_name = "ZeroModel";
 
@@ -659,6 +686,8 @@ mod tests {
 
     #[test]
     fn test_encode_decode_max_i64() {
+        init_test_key();
+
         let record_id = i64::MAX;
         let model_name = "MaxModel";
 
@@ -670,6 +699,8 @@ mod tests {
 
     #[test]
     fn test_wrong_model_fails() {
+        init_test_key();
+
         let record_id = 42i64;
         let token = default_encode(record_id, "User").unwrap();
 
@@ -680,6 +711,8 @@ mod tests {
 
     #[test]
     fn test_tampered_token_fails() {
+        init_test_key();
+
         let record_id = 42i64;
         let token = default_encode(record_id, "User").unwrap();
 
@@ -697,18 +730,24 @@ mod tests {
 
     #[test]
     fn test_invalid_base64_fails() {
+        init_test_key();
+
         let decoded = default_decode("not-valid-base64!!!", "User");
         assert_eq!(decoded, None);
     }
 
     #[test]
     fn test_too_short_token_fails() {
+        init_test_key();
+
         let decoded = default_decode("abc", "User");
         assert_eq!(decoded, None);
     }
 
     #[test]
     fn test_token_is_url_safe() {
+        init_test_key();
+
         let record_id = 999999999i64;
         let token = default_encode(record_id, "User").unwrap();
 
@@ -722,6 +761,8 @@ mod tests {
 
     #[test]
     fn test_different_ids_different_tokens() {
+        init_test_key();
+
         let token1 = default_encode(1, "User").unwrap();
         let token2 = default_encode(2, "User").unwrap();
 
@@ -730,6 +771,8 @@ mod tests {
 
     #[test]
     fn test_same_id_generates_different_tokens() {
+        init_test_key();
+
         let token1 = default_encode(42, "User").unwrap();
         let token2 = default_encode(42, "User").unwrap();
 
@@ -740,6 +783,8 @@ mod tests {
 
     #[test]
     fn test_token_config_encode_decode() {
+        init_test_key();
+
         let token = TokenConfig::encode(123, "TestModel").unwrap();
         let decoded = TokenConfig::decode(&token, "TestModel");
 

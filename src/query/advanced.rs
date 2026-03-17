@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::DatabaseType;
 use crate::error::Result;
 use crate::internal::{
     EntityTrait, Expr, FromQueryResult, QueryFilter, QuerySelect, translate_error,
@@ -454,18 +453,14 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn having_sum_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         self.having(&format!("SUM({}) > {}", col, value))
     }
 
     /// Add HAVING with AVG condition
     pub fn having_avg_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         self.having(&format!("AVG({}) > {}", col, value))
     }
@@ -481,9 +476,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn sum(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         let expr = db_sql::cast_to_float(db_type, &format!("SUM({})", col));
         self.aggregate_f64(&expr, "sum_result").await
@@ -500,9 +493,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn avg(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         let expr = db_sql::cast_to_float(db_type, &format!("AVG({})", col));
         self.aggregate_f64(&expr, "avg_result").await
@@ -519,9 +510,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn min(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         let expr = db_sql::cast_to_float(db_type, &format!("MIN({})", col));
         self.aggregate_f64(&expr, "min_result").await
@@ -537,9 +526,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn max(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
         let expr = db_sql::cast_to_float(db_type, &format!("MAX({})", col));
         self.aggregate_f64(&expr, "max_result").await
@@ -560,12 +547,11 @@ impl<M: Model> QueryBuilder<M> {
             count_result: i64,
         }
 
-        let db_type = crate::database::try_db()
-            .map(|db| db.backend())
-            .unwrap_or(DatabaseType::Postgres);
+        let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
 
-        let conn = crate::database::require_db()?.__internal_connection();
+        let conn = self.current_db()?.__internal_connection();
+        let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
 
@@ -584,7 +570,8 @@ impl<M: Model> QueryBuilder<M> {
             .into_model::<CountResult>()
             .one(conn)
             .await
-            .map_err(translate_error)?;
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(error_context))?;
 
         Ok(result.map(|r| r.count_result as u64).unwrap_or(0))
     }
@@ -596,7 +583,8 @@ impl<M: Model> QueryBuilder<M> {
             agg_result: Option<f64>,
         }
 
-        let conn = crate::database::require_db()?.__internal_connection();
+        let conn = self.current_db()?.__internal_connection();
+        let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
 
@@ -615,7 +603,8 @@ impl<M: Model> QueryBuilder<M> {
             .into_model::<AggResult>()
             .one(conn)
             .await
-            .map_err(translate_error)?;
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(error_context))?;
 
         Ok(result.and_then(|r| r.agg_result).unwrap_or(0.0))
     }

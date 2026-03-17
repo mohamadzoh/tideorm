@@ -3,10 +3,166 @@ use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::{Condition, Expr, ExprTrait, Value};
 use crate::model::Model;
-use sea_orm::sea_query::{Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder};
+use sea_orm::sea_query::{
+    Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
+};
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
+    fn operator_label(operator: &Operator) -> &'static str {
+        match operator {
+            Operator::Eq => "=",
+            Operator::NotEq => "!=",
+            Operator::Gt => ">",
+            Operator::Gte => ">=",
+            Operator::Lt => "<",
+            Operator::Lte => "<=",
+            Operator::Like => "LIKE",
+            Operator::NotLike => "NOT LIKE",
+            Operator::In => "IN",
+            Operator::NotIn => "NOT IN",
+            Operator::IsNull => "IS NULL",
+            Operator::IsNotNull => "IS NOT NULL",
+            Operator::Between => "BETWEEN",
+            Operator::JsonContains => "JSON_CONTAINS",
+            Operator::JsonContainedBy => "JSON_CONTAINED_BY",
+            Operator::JsonKeyExists => "JSON_KEY_EXISTS",
+            Operator::JsonKeyNotExists => "JSON_KEY_NOT_EXISTS",
+            Operator::JsonPathExists => "JSON_PATH_EXISTS",
+            Operator::JsonPathNotExists => "JSON_PATH_NOT_EXISTS",
+            Operator::ArrayContains => "ARRAY_CONTAINS",
+            Operator::ArrayContainedBy => "ARRAY_CONTAINED_BY",
+            Operator::ArrayOverlaps => "ARRAY_OVERLAPS",
+            Operator::ArrayContainsAny => "ARRAY_CONTAINS_ANY",
+            Operator::ArrayContainsAll => "ARRAY_CONTAINS_ALL",
+            Operator::SubqueryIn => "IN SUBQUERY",
+            Operator::SubqueryNotIn => "NOT IN SUBQUERY",
+            Operator::Raw => "RAW",
+            Operator::EqAny => "= ANY",
+            Operator::NeAll => "<> ALL",
+        }
+    }
+
+    fn describe_condition_value(value: &ConditionValue) -> String {
+        match value {
+            ConditionValue::Single(value) => value.to_string(),
+            ConditionValue::List(values) => format!("{:?}", values),
+            ConditionValue::Range(low, high) => format!("{}..{}", low, high),
+            ConditionValue::None => "NULL".to_string(),
+            ConditionValue::Subquery(query_sql) => query_sql.clone(),
+            ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
+        }
+    }
+
+    fn describe_condition(condition: &WhereCondition) -> String {
+        match (&condition.operator, &condition.value) {
+            (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => raw_sql.clone(),
+            (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
+                format!(
+                    "{} {}",
+                    condition.column,
+                    Self::operator_label(&condition.operator)
+                )
+            }
+            _ => format!(
+                "{} {} {}",
+                condition.column,
+                Self::operator_label(&condition.operator),
+                Self::describe_condition_value(&condition.value)
+            ),
+        }
+    }
+
+    fn describe_or_group(group: &OrGroup) -> String {
+        let mut parts: Vec<String> = group
+            .conditions
+            .iter()
+            .map(Self::describe_condition)
+            .collect();
+        parts.extend(group.nested_groups.iter().map(Self::describe_or_group));
+
+        if parts.is_empty() {
+            String::new()
+        } else if parts.len() == 1 {
+            parts[0].clone()
+        } else {
+            format!(
+                "({})",
+                parts.join(&format!(" {} ", group.combine_with.as_sql()))
+            )
+        }
+    }
+
+    fn error_context_conditions(&self) -> Vec<String> {
+        let mut conditions: Vec<String> = self
+            .conditions
+            .iter()
+            .map(Self::describe_condition)
+            .collect();
+        conditions.extend(
+            self.or_groups
+                .iter()
+                .map(Self::describe_or_group)
+                .filter(|group| !group.is_empty()),
+        );
+        conditions.extend(
+            self.having_conditions
+                .iter()
+                .map(|having| format!("HAVING {}", having)),
+        );
+        conditions
+    }
+
+    fn error_context_operator_chain(&self) -> Option<String> {
+        let mut parts = Vec::new();
+
+        if !self.conditions.is_empty() {
+            parts.push(
+                self.conditions
+                    .iter()
+                    .map(Self::describe_condition)
+                    .collect::<Vec<_>>()
+                    .join(" AND "),
+            );
+        }
+
+        parts.extend(
+            self.or_groups
+                .iter()
+                .map(Self::describe_or_group)
+                .filter(|group| !group.is_empty()),
+        );
+
+        if !self.having_conditions.is_empty() {
+            parts.push(format!("HAVING {}", self.having_conditions.join(" AND ")));
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" AND "))
+        }
+    }
+
+    pub(super) fn build_query_error_context(
+        &self,
+        query: Option<String>,
+    ) -> crate::error::ErrorContext {
+        let mut context = crate::error::ErrorContext::new()
+            .table(M::table_name())
+            .conditions(self.error_context_conditions());
+
+        if let Some(operator_chain) = self.error_context_operator_chain() {
+            context = context.operator_chain(operator_chain);
+        }
+
+        if let Some(query) = query {
+            context = context.query(query);
+        }
+
+        context
+    }
+
     fn json_to_sea_value(value: &serde_json::Value) -> Value {
         match value {
             serde_json::Value::Null => Value::String(None),
@@ -53,15 +209,19 @@ impl<M: Model> QueryBuilder<M> {
         condition
     }
 
-    fn db_type_for_sql(&self) -> DatabaseType {
-        crate::database::try_db()
+    pub(super) fn db_type_for_sql(&self) -> DatabaseType {
+        self.database
+            .as_ref()
             .map(|db| db.backend())
+            .or_else(|| crate::database::try_db().map(|db| db.backend()))
             .unwrap_or(DatabaseType::Postgres)
     }
 
     fn current_timestamp_sql(db_type: DatabaseType) -> &'static str {
         match db_type {
-            DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB => "CURRENT_TIMESTAMP",
+            DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB => {
+                "CURRENT_TIMESTAMP"
+            }
             DatabaseType::SQLite => "CURRENT_TIMESTAMP",
         }
     }
@@ -71,7 +231,9 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn placeholder_list(count: usize) -> String {
-        std::iter::repeat_n("?", count).collect::<Vec<_>>().join(", ")
+        std::iter::repeat_n("?", count)
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
@@ -88,20 +250,16 @@ impl<M: Model> QueryBuilder<M> {
             if db_sql::validate_identifier("table", table).is_ok()
                 && db_sql::validate_identifier("column", field).is_ok()
             {
-                return Expr::col((Alias::new(table), Alias::new(field))).into();
+                return Expr::col((Alias::new(table), Alias::new(field)));
             }
         } else if db_sql::validate_identifier("column", column).is_ok() {
-            return Expr::col(Alias::new(column)).into();
+            return Expr::col(Alias::new(column));
         }
 
         Expr::cust(self.format_column_for_db(db_type, column))
     }
 
-    fn build_custom_expression(
-        &self,
-        sql: String,
-        values: Vec<Value>,
-    ) -> SimpleExpr {
+    fn build_custom_expression(&self, sql: String, values: Vec<Value>) -> SimpleExpr {
         if values.is_empty() {
             Expr::cust(sql)
         } else {
@@ -133,27 +291,39 @@ impl<M: Model> QueryBuilder<M> {
 
         match &condition.operator {
             Operator::Eq => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.eq(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.eq(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::NotEq => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.ne(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.ne(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::Gt => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.gt(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.gt(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::Gte => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.gte(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.gte(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::Lt => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.lt(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.lt(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::Lte => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.lte(Self::json_to_sea_value(value))),
+                ConditionValue::Single(value) => {
+                    Some(column_expr.lte(Self::json_to_sea_value(value)))
+                }
                 _ => None,
             },
             Operator::Like => match &condition.value {
@@ -172,32 +342,32 @@ impl<M: Model> QueryBuilder<M> {
             },
             Operator::In | Operator::EqAny => match &condition.value {
                 ConditionValue::List(values) => match condition.operator {
-                    Operator::EqAny if matches!(db_type, DatabaseType::Postgres) => Some(
-                        self.build_custom_expression(
+                    Operator::EqAny if matches!(db_type, DatabaseType::Postgres) => {
+                        Some(self.build_custom_expression(
                             format!(
                                 "{} = ANY(ARRAY[{}])",
                                 column_sql,
                                 Self::placeholder_list(values.len())
                             ),
                             Self::sea_value_list(values),
-                        ),
-                    ),
+                        ))
+                    }
                     _ => Some(column_expr.is_in(Self::sea_value_list(values))),
                 },
                 _ => None,
             },
             Operator::NotIn | Operator::NeAll => match &condition.value {
                 ConditionValue::List(values) => match condition.operator {
-                    Operator::NeAll if matches!(db_type, DatabaseType::Postgres) => Some(
-                        self.build_custom_expression(
+                    Operator::NeAll if matches!(db_type, DatabaseType::Postgres) => {
+                        Some(self.build_custom_expression(
                             format!(
                                 "{} <> ALL(ARRAY[{}])",
                                 column_sql,
                                 Self::placeholder_list(values.len())
                             ),
                             Self::sea_value_list(values),
-                        ),
-                    ),
+                        ))
+                    }
                     _ => Some(column_expr.is_not_in(Self::sea_value_list(values))),
                 },
                 _ => None,
@@ -206,7 +376,8 @@ impl<M: Model> QueryBuilder<M> {
             Operator::IsNotNull => Some(column_expr.is_not_null()),
             Operator::Between => match &condition.value {
                 ConditionValue::Range(low, high) => Some(
-                    column_expr.between(Self::json_to_sea_value(low), Self::json_to_sea_value(high)),
+                    column_expr
+                        .between(Self::json_to_sea_value(low), Self::json_to_sea_value(high)),
                 ),
                 _ => None,
             },
@@ -326,7 +497,10 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn build_where_clause_with_condition_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+    fn build_where_clause_with_condition_for_db(
+        &self,
+        db_type: DatabaseType,
+    ) -> (String, Vec<Value>) {
         let has_filters = !self.conditions.is_empty()
             || !self.or_groups.is_empty()
             || self.build_soft_delete_expression(db_type).is_some();
@@ -492,9 +666,11 @@ impl<M: Model> QueryBuilder<M> {
                 _ => None,
             },
             Operator::NotEq => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} != {}", column, self.format_preview_value(value)))
-                }
+                ConditionValue::Single(value) => Some(format!(
+                    "{} != {}",
+                    column,
+                    self.format_preview_value(value)
+                )),
                 _ => None,
             },
             Operator::Gt => match &condition.value {
@@ -504,9 +680,11 @@ impl<M: Model> QueryBuilder<M> {
                 _ => None,
             },
             Operator::Gte => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} >= {}", column, self.format_preview_value(value)))
-                }
+                ConditionValue::Single(value) => Some(format!(
+                    "{} >= {}",
+                    column,
+                    self.format_preview_value(value)
+                )),
                 _ => None,
             },
             Operator::Lt => match &condition.value {
@@ -516,33 +694,45 @@ impl<M: Model> QueryBuilder<M> {
                 _ => None,
             },
             Operator::Lte => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} <= {}", column, self.format_preview_value(value)))
-                }
+                ConditionValue::Single(value) => Some(format!(
+                    "{} <= {}",
+                    column,
+                    self.format_preview_value(value)
+                )),
                 _ => None,
             },
             Operator::Like => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} LIKE {}", column, self.format_preview_value(value)))
-                }
+                ConditionValue::Single(value) => Some(format!(
+                    "{} LIKE {}",
+                    column,
+                    self.format_preview_value(value)
+                )),
                 _ => None,
             },
             Operator::NotLike => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} NOT LIKE {}", column, self.format_preview_value(value)))
-                }
+                ConditionValue::Single(value) => Some(format!(
+                    "{} NOT LIKE {}",
+                    column,
+                    self.format_preview_value(value)
+                )),
                 _ => None,
             },
             Operator::In => match &condition.value {
                 ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values.iter().map(|value| self.format_preview_value(value)).collect();
+                    let rendered: Vec<String> = values
+                        .iter()
+                        .map(|value| self.format_preview_value(value))
+                        .collect();
                     Some(format!("{} IN ({})", column, rendered.join(", ")))
                 }
                 _ => None,
             },
             Operator::NotIn => match &condition.value {
                 ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values.iter().map(|value| self.format_preview_value(value)).collect();
+                    let rendered: Vec<String> = values
+                        .iter()
+                        .map(|value| self.format_preview_value(value))
+                        .collect();
                     Some(format!("{} NOT IN ({})", column, rendered.join(", ")))
                 }
                 _ => None,
@@ -559,9 +749,11 @@ impl<M: Model> QueryBuilder<M> {
                 _ => None,
             },
             Operator::JsonContains => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(db_sql::json_contains(db_type, &condition.column, &value.to_string()))
-                }
+                ConditionValue::Single(value) => Some(db_sql::json_contains(
+                    db_type,
+                    &condition.column,
+                    &value.to_string(),
+                )),
                 _ => None,
             },
             Operator::JsonContainedBy => match &condition.value {
@@ -591,34 +783,48 @@ impl<M: Model> QueryBuilder<M> {
                 _ => None,
             },
             Operator::JsonPathNotExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(path)) => {
-                    Some(db_sql::json_path_not_exists(db_type, &condition.column, path))
-                }
+                ConditionValue::Single(serde_json::Value::String(path)) => Some(
+                    db_sql::json_path_not_exists(db_type, &condition.column, path),
+                ),
                 _ => None,
             },
             Operator::ArrayContains | Operator::ArrayContainsAll => match &condition.value {
                 ConditionValue::List(values) => {
                     let rendered = self.render_array_values(values);
-                    Some(db_sql::array_contains(db_type, &condition.column, &rendered))
+                    Some(db_sql::array_contains(
+                        db_type,
+                        &condition.column,
+                        &rendered,
+                    ))
                 }
                 _ => None,
             },
             Operator::ArrayContainedBy => match &condition.value {
                 ConditionValue::List(values) => {
                     let rendered = self.render_array_values(values);
-                    Some(db_sql::array_contained_by(db_type, &condition.column, &rendered))
+                    Some(db_sql::array_contained_by(
+                        db_type,
+                        &condition.column,
+                        &rendered,
+                    ))
                 }
                 _ => None,
             },
             Operator::ArrayOverlaps | Operator::ArrayContainsAny => match &condition.value {
                 ConditionValue::List(values) => {
                     let rendered = self.render_array_values(values);
-                    Some(db_sql::array_overlaps(db_type, &condition.column, &rendered))
+                    Some(db_sql::array_overlaps(
+                        db_type,
+                        &condition.column,
+                        &rendered,
+                    ))
                 }
                 _ => None,
             },
             Operator::SubqueryIn => match &condition.value {
-                ConditionValue::Subquery(query_sql) => Some(format!("{} IN ({})", column, query_sql)),
+                ConditionValue::Subquery(query_sql) => {
+                    Some(format!("{} IN ({})", column, query_sql))
+                }
                 _ => None,
             },
             Operator::SubqueryNotIn => match &condition.value {
@@ -721,7 +927,10 @@ impl<M: Model> QueryBuilder<M> {
         sql.trim().to_string()
     }
 
-    fn build_base_select_sql_with_params_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+    fn build_base_select_sql_with_params_for_db(
+        &self,
+        db_type: DatabaseType,
+    ) -> (String, Vec<Value>) {
         let mut sql = String::new();
 
         sql.push_str(&self.build_select_clause_sql(db_type));
@@ -742,7 +951,11 @@ impl<M: Model> QueryBuilder<M> {
 
         if !self.ctes.is_empty() {
             let recursive = self.ctes.iter().any(|cte| cte.recursive);
-            sql.push_str(if recursive { "WITH RECURSIVE " } else { "WITH " });
+            sql.push_str(if recursive {
+                "WITH RECURSIVE "
+            } else {
+                "WITH "
+            });
             let cte_parts: Vec<String> = self.ctes.iter().map(CTE::to_sql).collect();
             sql.push_str(&cte_parts.join(", "));
             sql.push(' ');
@@ -751,7 +964,11 @@ impl<M: Model> QueryBuilder<M> {
         sql.push_str(&self.build_base_select_sql());
 
         for union in &self.unions {
-            sql.push_str(&format!(" {} {}", union.union_type.as_sql(), union.query_sql));
+            sql.push_str(&format!(
+                " {} {}",
+                union.union_type.as_sql(),
+                union.query_sql
+            ));
         }
 
         if !self.order_by.is_empty() {
@@ -780,12 +997,19 @@ impl<M: Model> QueryBuilder<M> {
         sql.trim().to_string()
     }
 
-    pub(crate) fn build_select_sql_with_params_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+    pub(crate) fn build_select_sql_with_params_for_db(
+        &self,
+        db_type: DatabaseType,
+    ) -> (String, Vec<Value>) {
         let mut sql = String::new();
 
         if !self.ctes.is_empty() {
             let recursive = self.ctes.iter().any(|cte| cte.recursive);
-            sql.push_str(if recursive { "WITH RECURSIVE " } else { "WITH " });
+            sql.push_str(if recursive {
+                "WITH RECURSIVE "
+            } else {
+                "WITH "
+            });
             let cte_parts: Vec<String> = self.ctes.iter().map(CTE::to_sql).collect();
             sql.push_str(&cte_parts.join(", "));
             sql.push(' ');
@@ -795,7 +1019,11 @@ impl<M: Model> QueryBuilder<M> {
         sql.push_str(&base_sql);
 
         for union in &self.unions {
-            sql.push_str(&format!(" {} ({})", union.union_type.as_sql(), union.query_sql));
+            sql.push_str(&format!(
+                " {} ({})",
+                union.union_type.as_sql(),
+                union.query_sql
+            ));
         }
 
         if !self.order_by.is_empty() {
@@ -830,7 +1058,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn log_query(&self, sql: &str) {
         if std::env::var("TIDE_LOG_QUERIES")
-                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+            .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
             .unwrap_or(false)
         {
             crate::tide_debug!("Query: {}", sql);
@@ -847,51 +1075,13 @@ impl<M: Model> QueryBuilder<M> {
 
         let (parameterized_sql, params) = self.build_select_sql_with_params();
         let mut info = QueryDebugInfo::new(M::table_name()).with_sql(self.build_sql_preview());
-        info.params = params.into_iter().map(|value| format!("{:?}", value)).collect();
+        info.params = params
+            .into_iter()
+            .map(|value| format!("{:?}", value))
+            .collect();
 
         for condition in &self.conditions {
-            let operator = match condition.operator {
-                Operator::Eq => "=",
-                Operator::NotEq => "!=",
-                Operator::Gt => ">",
-                Operator::Gte => ">=",
-                Operator::Lt => "<",
-                Operator::Lte => "<=",
-                Operator::Like => "LIKE",
-                Operator::NotLike => "NOT LIKE",
-                Operator::In => "IN",
-                Operator::NotIn => "NOT IN",
-                Operator::IsNull => "IS NULL",
-                Operator::IsNotNull => "IS NOT NULL",
-                Operator::Between => "BETWEEN",
-                Operator::JsonContains => "JSON_CONTAINS",
-                Operator::JsonContainedBy => "JSON_CONTAINED_BY",
-                Operator::JsonKeyExists => "JSON_KEY_EXISTS",
-                Operator::JsonKeyNotExists => "JSON_KEY_NOT_EXISTS",
-                Operator::JsonPathExists => "JSON_PATH_EXISTS",
-                Operator::JsonPathNotExists => "JSON_PATH_NOT_EXISTS",
-                Operator::ArrayContains => "ARRAY_CONTAINS",
-                Operator::ArrayContainedBy => "ARRAY_CONTAINED_BY",
-                Operator::ArrayOverlaps => "ARRAY_OVERLAPS",
-                Operator::ArrayContainsAny => "ARRAY_CONTAINS_ANY",
-                Operator::ArrayContainsAll => "ARRAY_CONTAINS_ALL",
-                Operator::SubqueryIn => "IN SUBQUERY",
-                Operator::SubqueryNotIn => "NOT IN SUBQUERY",
-                Operator::Raw => "RAW",
-                Operator::EqAny => "= ANY",
-                Operator::NeAll => "<> ALL",
-            };
-
-            let value = match &condition.value {
-                ConditionValue::Single(value) => value.to_string(),
-                ConditionValue::List(values) => format!("{:?}", values),
-                ConditionValue::Range(low, high) => format!("{}..{}", low, high),
-                ConditionValue::None => "NULL".to_string(),
-                ConditionValue::Subquery(query_sql) => query_sql.clone(),
-                ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
-            };
-
-            info.add_condition(format!("{} {} {}", condition.column, operator, value));
+            info.add_condition(Self::describe_condition(condition));
         }
 
         for (column, direction) in &self.order_by {
@@ -1034,7 +1224,12 @@ impl<M: Model> QueryBuilder<M> {
 
         let (sql, params) = self.build_select_sql_with_params();
         self.log_query(&sql);
-        let results = crate::database::Database::raw_with_params::<M>(&sql, params).await?;
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let results = self
+            .current_db()?
+            .__raw_with_params::<M>(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context.clone()))?;
 
         if let (Some(key), Some(options)) = (cache_key, &self.cache_options) {
             let _ = crate::cache::QueryCache::global().set(
@@ -1055,9 +1250,9 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub async fn first_or_fail(self) -> Result<M> {
-        self.first().await?.ok_or_else(|| {
-            Error::not_found(format!("No {} found matching query", M::table_name()))
-        })
+        self.first()
+            .await?
+            .ok_or_else(|| Error::not_found(format!("No {} found matching query", M::table_name())))
     }
 
     pub async fn count(self) -> Result<u64> {
@@ -1069,15 +1264,27 @@ impl<M: Model> QueryBuilder<M> {
         let sql = if where_sql.is_empty() {
             format!("SELECT COUNT(*) AS count FROM {}", table)
         } else {
-            format!("SELECT COUNT(*) AS count FROM {} WHERE {}", table, where_sql)
+            format!(
+                "SELECT COUNT(*) AS count FROM {} WHERE {}",
+                table, where_sql
+            )
         };
 
         self.log_query(&sql);
-        let rows = crate::database::Database::raw_json_with_params(&sql, params).await?;
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let rows = self
+            .current_db()?
+            .__raw_json_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context.clone()))?;
         let count = rows
             .first()
             .and_then(|row| row.get("count"))
-            .and_then(|value| value.as_u64().or_else(|| value.as_i64().map(|number| number as u64)))
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_i64().map(|number| number as u64))
+            })
             .unwrap_or(0);
 
         Ok(count)
@@ -1123,7 +1330,11 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        crate::database::Database::execute_with_params(&sql, params).await
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__execute_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
     }
 
     pub async fn soft_delete(self) -> Result<u64> {
@@ -1144,11 +1355,18 @@ impl<M: Model> QueryBuilder<M> {
         let sql = if where_sql.is_empty() {
             format!("UPDATE {} SET {} = {}", table, deleted_at, now)
         } else {
-            format!("UPDATE {} SET {} = {} WHERE {}", table, deleted_at, now, where_sql)
+            format!(
+                "UPDATE {} SET {} = {} WHERE {}",
+                table, deleted_at, now, where_sql
+            )
         };
 
         self.log_query(&sql);
-        crate::database::Database::execute_with_params(&sql, params).await
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__execute_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
     }
 
     pub async fn restore(self) -> Result<u64> {
@@ -1178,7 +1396,11 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        crate::database::Database::execute_with_params(&sql, params).await
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__execute_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
     }
 
     pub async fn force_delete(self) -> Result<u64> {
@@ -1195,14 +1417,22 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        crate::database::Database::execute_with_params(&sql, params).await
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__execute_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
     }
 
     pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {
         self.ensure_query_is_valid()?;
         let (sql, params) = self.build_select_sql_with_params();
         self.log_query(&sql);
-        crate::database::Database::raw_json_with_params(&sql, params).await
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__raw_json_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
     }
 }
 

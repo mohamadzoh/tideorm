@@ -14,8 +14,7 @@ mod sql;
 mod structure;
 
 pub use filters::{
-    ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order,
-    WhereCondition,
+    ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order, WhereCondition,
 };
 pub use structure::{
     AggregateFunction, CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType,
@@ -26,6 +25,7 @@ pub use structure::{
 #[derive(Debug, Clone)]
 pub struct QueryBuilder<M: Model> {
     _marker: PhantomData<M>,
+    database: Option<crate::database::Database>,
     /// WHERE conditions combined with AND logic.
     pub conditions: Vec<WhereCondition>,
     /// OR groups for complex boolean expressions.
