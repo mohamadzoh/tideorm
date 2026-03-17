@@ -1252,8 +1252,11 @@ impl TideConfig {
 
         // For MariaDB URLs, rewrite to mysql:// for the connection driver
         // (SeaORM/sqlx only understands mysql:// scheme)
-        let connect_url = if url.to_lowercase().starts_with("mariadb://") {
-            format!("mysql://{}", &url[url.find("://").unwrap() + 3..])
+            let connect_url = if url.to_lowercase().starts_with("mariadb://") {
+                let remainder = url
+                    .strip_prefix("mariadb://")
+                    .unwrap_or(&url);
+                format!("mysql://{}", remainder)
         } else {
             url.clone()
         };
