@@ -528,14 +528,23 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     fn build_postgres_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
-        let language = self.config.language.as_deref().unwrap_or("english");
         let mut params = Vec::new();
+        let language_placeholder = self.push_param(
+            DatabaseType::Postgres,
+            &mut params,
+            Value::String(Some(
+                self.config
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "english".to_string()),
+            )),
+        );
 
         // Build tsvector expression for columns
-        let tsvector_expr = self.build_pg_tsvector_expr(language);
+        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
 
         // Build tsquery based on search mode
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
+        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
 
         let mut sql = format!(
             "SELECT * FROM {} WHERE {} @@ {}",
@@ -543,46 +552,45 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
 
         if self.with_ranking {
-            let weights = self
-                .config
-                .weights
-                .as_ref()
-                .map(|w| w.to_pg_array())
-                .unwrap_or_else(|| "'{0.1,0.2,0.4,1.0}'".to_string());
+            let weights_placeholder = self.pg_weights_placeholder(&mut params);
             sql = format!(
-                "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM {} WHERE {} @@ {} ORDER BY _fts_rank DESC",
-                weights, tsvector_expr, tsquery_expr, table, tsvector_expr, tsquery_expr
+                "SELECT *, ts_rank_cd(CAST({} AS real[]), {}, {}) AS _fts_rank FROM {} WHERE {} @@ {} ORDER BY _fts_rank DESC",
+                weights_placeholder,
+                tsvector_expr,
+                tsquery_expr,
+                table,
+                tsvector_expr,
+                tsquery_expr
             );
         }
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
+        self.append_limit_offset(DatabaseType::Postgres, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
 
     fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
-        let language = self.config.language.as_deref().unwrap_or("english");
         let mut params = Vec::new();
+        let language_placeholder = self.push_param(
+            DatabaseType::Postgres,
+            &mut params,
+            Value::String(Some(
+                self.config
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "english".to_string()),
+            )),
+        );
 
-        let tsvector_expr = self.build_pg_tsvector_expr(language);
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
+        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
+        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
 
-        let weights = self
-            .config
-            .weights
-            .as_ref()
-            .map(|w| w.to_pg_array())
-            .unwrap_or_else(|| "'{0.1,0.2,0.4,1.0}'".to_string());
+        let weights_placeholder = self.pg_weights_placeholder(&mut params);
 
         let mut sql = format!(
-            "SELECT *, ts_rank_cd({}, {}, {}) AS _fts_rank FROM {} WHERE {} @@ {}",
-            weights, tsvector_expr, tsquery_expr, table, tsvector_expr, tsquery_expr
+            "SELECT *, ts_rank_cd(CAST({} AS real[]), {}, {}) AS _fts_rank FROM {} WHERE {} @@ {}",
+            weights_placeholder, tsvector_expr, tsquery_expr, table, tsvector_expr, tsquery_expr
         );
 
         if let Some(min_rank) = self.min_rank {
@@ -592,30 +600,34 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 Value::Double(Some(min_rank)),
             );
             sql.push_str(&format!(
-                " AND ts_rank_cd({}, {}, {}) >= {}",
-                weights, tsvector_expr, tsquery_expr, min_rank_placeholder
+                " AND ts_rank_cd(CAST({} AS real[]), {}, {}) >= {}",
+                weights_placeholder, tsvector_expr, tsquery_expr, min_rank_placeholder
             ));
         }
 
         sql.push_str(" ORDER BY _fts_rank DESC");
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
+        self.append_limit_offset(DatabaseType::Postgres, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
 
     fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
-        let language = self.config.language.as_deref().unwrap_or("english");
         let mut params = Vec::new();
+        let language_placeholder = self.push_param(
+            DatabaseType::Postgres,
+            &mut params,
+            Value::String(Some(
+                self.config
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "english".to_string()),
+            )),
+        );
 
-        let tsvector_expr = self.build_pg_tsvector_expr(language);
-        let tsquery_expr = self.build_pg_tsquery_expr(language, &mut params);
+        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
+        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
 
         Ok((
             format!(
@@ -626,12 +638,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
         ))
     }
 
-    fn build_pg_tsvector_expr(&self, language: &str) -> String {
-        let language = escape_string(language);
+    fn build_pg_tsvector_expr(&self, language_placeholder: &str) -> String {
         if self.columns.len() == 1 {
             format!(
-                "to_tsvector('{}', COALESCE({}, ''))",
-                language,
+                "to_tsvector(CAST({} AS regconfig), COALESCE({}, ''))",
+                language_placeholder,
                 quote_ident(DatabaseType::Postgres, &self.columns[0])
             )
         } else {
@@ -640,12 +651,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 .iter()
                 .map(|c| format!("COALESCE({}, '')", quote_ident(DatabaseType::Postgres, c)))
                 .collect();
-            format!("to_tsvector('{}', {})", language, cols.join(" || ' ' || "))
+            format!(
+                "to_tsvector(CAST({} AS regconfig), {})",
+                language_placeholder,
+                cols.join(" || ' ' || ")
+            )
         }
     }
 
-    fn build_pg_tsquery_expr(&self, language: &str, params: &mut Vec<Value>) -> String {
-        let language = escape_string(language);
+    fn build_pg_tsquery_expr(&self, language_placeholder: &str, params: &mut Vec<Value>) -> String {
         match self.config.mode {
             SearchMode::Natural => {
                 let placeholder = self.push_param(
@@ -653,7 +667,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(self.query.clone())),
                 );
-                format!("plainto_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "plainto_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
             SearchMode::Boolean => {
                 let placeholder = self.push_param(
@@ -661,7 +678,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(self.query.clone())),
                 );
-                format!("to_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "to_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
             SearchMode::Phrase => {
                 let placeholder = self.push_param(
@@ -669,7 +689,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(self.query.clone())),
                 );
-                format!("phraseto_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "phraseto_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
             SearchMode::Prefix => {
                 let words: Vec<&str> = self.query.split_whitespace().collect();
@@ -679,7 +702,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(prefixed.join(" & "))),
                 );
-                format!("to_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "to_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
             SearchMode::Fuzzy => {
                 let placeholder = self.push_param(
@@ -687,7 +713,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(self.query.clone())),
                 );
-                format!("plainto_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "plainto_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
             SearchMode::Proximity(distance) => {
                 let words: Vec<&str> = self.query.split_whitespace().collect();
@@ -697,7 +726,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                     params,
                     Value::String(Some(proximity.join(&format!(" <{}> ", distance)))),
                 );
-                format!("to_tsquery('{}', {})", language, placeholder)
+                format!(
+                    "to_tsquery(CAST({} AS regconfig), {})",
+                    language_placeholder, placeholder
+                )
             }
         }
     }
@@ -734,12 +766,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             table, columns_str, query_placeholder, mode_modifier
         );
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!("LIMIT {} ", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!("OFFSET {} ", offset));
-        }
+        self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
@@ -803,12 +830,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         sql.push_str("ORDER BY _fts_rank DESC ");
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!("LIMIT {} ", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!("OFFSET {} ", offset));
-        }
+        self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
@@ -869,12 +891,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             table, fts_table, fts_table, query_placeholder
         );
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!("LIMIT {} ", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!("OFFSET {} ", offset));
-        }
+        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
@@ -914,12 +931,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         // BM25 returns negative values, so ORDER BY ASC for best matches
         sql.push_str(&format!("ORDER BY bm25({}) ", fts_table));
 
-        if let Some(limit) = self.limit {
-            sql.push_str(&format!("LIMIT {} ", limit));
-        }
-        if let Some(offset) = self.offset {
-            sql.push_str(&format!("OFFSET {} ", offset));
-        }
+        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
@@ -954,6 +966,38 @@ impl<T: Model> FullTextSearchBuilder<T> {
         };
         params.push(value);
         placeholder
+    }
+
+    fn pg_weights_placeholder(&self, params: &mut Vec<Value>) -> String {
+        let weights = self
+            .config
+            .weights
+            .as_ref()
+            .map(|w| w.to_pg_array().trim_matches('\'').to_string())
+            .unwrap_or_else(|| "{0.1,0.2,0.4,1.0}".to_string());
+
+        self.push_param(DatabaseType::Postgres, params, Value::String(Some(weights)))
+    }
+
+    fn append_limit_offset(
+        &self,
+        db_type: DatabaseType,
+        sql: &mut String,
+        params: &mut Vec<Value>,
+    ) -> Result<()> {
+        if let Some(limit) = self.limit {
+            let limit_value = i64::try_from(limit)
+                .map_err(|_| Error::query("Full-text search limit exceeds i64 range"))?;
+            let placeholder = self.push_param(db_type, params, Value::BigInt(Some(limit_value)));
+            sql.push_str(&format!(" LIMIT {}", placeholder));
+        }
+        if let Some(offset) = self.offset {
+            let offset_value = i64::try_from(offset)
+                .map_err(|_| Error::query("Full-text search offset exceeds i64 range"))?;
+            let placeholder = self.push_param(db_type, params, Value::BigInt(Some(offset_value)));
+            sql.push_str(&format!(" OFFSET {}", placeholder));
+        }
+        Ok(())
     }
 }
 

@@ -1,4 +1,19 @@
 use super::*;
+use crate::config::DatabaseType;
+use crate::internal::Value;
+
+mod builder_test_model {
+    #[derive(tideorm::Model)]
+    #[tideorm(table = "fulltext_test_articles")]
+    pub struct FullTextTestArticle {
+        #[tideorm(primary_key, auto_increment)]
+        pub id: i64,
+        pub title: String,
+        pub content: String,
+    }
+}
+
+use builder_test_model::FullTextTestArticle;
 
 #[test]
 fn test_search_mode_display() {
@@ -107,4 +122,95 @@ fn test_fulltext_config() {
     assert_eq!(config.mode, SearchMode::Boolean);
     assert_eq!(config.min_word_length, Some(3));
     assert_eq!(config.max_word_length, Some(50));
+}
+
+#[test]
+fn test_postgres_fulltext_sql_parameterizes_runtime_values() {
+    let builder =
+        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title", "content"], "rust safety")
+            .language("custom_lang")
+            .limit(10)
+            .offset(5);
+
+    let (sql, params) = builder.build_sql(DatabaseType::Postgres).unwrap();
+
+    assert!(sql.contains("CAST($1 AS regconfig)"));
+    assert!(sql.contains("plainto_tsquery(CAST($1 AS regconfig), $2)"));
+    assert!(sql.contains("LIMIT $3"));
+    assert!(sql.contains("OFFSET $4"));
+    assert!(!sql.contains("rust safety"));
+    assert!(!sql.contains("custom_lang"));
+    assert_eq!(
+        params,
+        vec![
+            Value::String(Some("custom_lang".to_string())),
+            Value::String(Some("rust safety".to_string())),
+            Value::BigInt(Some(10)),
+            Value::BigInt(Some(5)),
+        ]
+    );
+}
+
+#[test]
+fn test_postgres_ranked_fulltext_sql_parameterizes_weights_and_thresholds() {
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "ranked query")
+        .config(
+            FullTextConfig::new()
+                .language("simple")
+                .weights(SearchWeights::new(1.5, 0.7, 0.3, 0.05)),
+        )
+        .with_ranking()
+        .min_rank(0.42)
+        .limit(3)
+        .offset(2);
+
+    let (sql, params) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
+
+    assert!(sql.contains("ts_rank_cd(CAST($3 AS real[]),"));
+    assert!(sql.contains(" >= $4"));
+    assert!(sql.contains("LIMIT $5"));
+    assert!(sql.contains("OFFSET $6"));
+    assert!(!sql.contains("{0.05,0.3,0.7,1.5}"));
+    assert_eq!(
+        params,
+        vec![
+            Value::String(Some("simple".to_string())),
+            Value::String(Some("ranked query".to_string())),
+            Value::String(Some("{0.05,0.3,0.7,1.5}".to_string())),
+            Value::Double(Some(0.42)),
+            Value::BigInt(Some(3)),
+            Value::BigInt(Some(2)),
+        ]
+    );
+}
+
+#[test]
+fn test_mysql_and_sqlite_fulltext_sql_parameterize_pagination() {
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "portable query")
+        .limit(7)
+        .offset(4);
+
+    let (mysql_sql, mysql_params) = builder.build_sql(DatabaseType::MySQL).unwrap();
+    assert!(mysql_sql.contains("LIMIT ?"));
+    assert!(mysql_sql.contains("OFFSET ?"));
+    assert_eq!(
+        mysql_params,
+        vec![
+            Value::String(Some("portable query".to_string())),
+            Value::BigInt(Some(7)),
+            Value::BigInt(Some(4)),
+        ]
+    );
+
+    let (sqlite_sql, sqlite_params) = builder.build_sql(DatabaseType::SQLite).unwrap();
+    assert!(sqlite_sql.contains("LIMIT ?"));
+    assert!(sqlite_sql.contains("OFFSET ?"));
+    assert_eq!(
+        sqlite_params,
+        vec![
+            Value::String(Some("portable query".to_string())),
+            Value::BigInt(Some(7)),
+            Value::BigInt(Some(4)),
+        ]
+    );
 }
