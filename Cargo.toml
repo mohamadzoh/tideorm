@@ -57,6 +57,7 @@ async-recursion = "1.1.1"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 rand = "0.10.0"
 sha2 = "0.10.9"
+argon2 = { version = "0.5.3", features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util", "macros"] }

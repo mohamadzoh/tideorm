@@ -226,8 +226,233 @@ pub trait CallbackRunner: Callbacks {
 // Automatically implement CallbackRunner for anything that implements Callbacks
 impl<T: Callbacks> CallbackRunner for T {}
 
-/// Blanket implementation of Callbacks for all types (no-op by default)
-///
-/// This allows models to work without explicitly implementing Callbacks.
-/// Models that want custom callbacks should implement the trait themselves.
-impl<T> Callbacks for T where T: Sized {}
+#[doc(hidden)]
+pub trait BeforeCreateDispatch<T> {
+    fn run_before_create(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> BeforeCreateDispatch<T> for &mut T {
+    fn run_before_create(self) -> Result<()> {
+        self.run_create_callbacks()
+    }
+}
+
+impl<T> BeforeCreateDispatch<T> for &&mut T {
+    fn run_before_create(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait AfterCreateDispatch<T> {
+    fn run_after_create(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> AfterCreateDispatch<T> for &T {
+    fn run_after_create(self) -> Result<()> {
+        self.run_after_create_callbacks()
+    }
+}
+
+impl<T> AfterCreateDispatch<T> for &&T {
+    fn run_after_create(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait BeforeUpdateDispatch<T> {
+    fn run_before_update(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> BeforeUpdateDispatch<T> for &mut T {
+    fn run_before_update(self) -> Result<()> {
+        self.run_update_callbacks()
+    }
+}
+
+impl<T> BeforeUpdateDispatch<T> for &&mut T {
+    fn run_before_update(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait AfterUpdateDispatch<T> {
+    fn run_after_update(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> AfterUpdateDispatch<T> for &T {
+    fn run_after_update(self) -> Result<()> {
+        self.run_after_update_callbacks()
+    }
+}
+
+impl<T> AfterUpdateDispatch<T> for &&T {
+    fn run_after_update(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait BeforeDeleteDispatch<T> {
+    fn run_before_delete(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> BeforeDeleteDispatch<T> for &T {
+    fn run_before_delete(self) -> Result<()> {
+        self.run_delete_callbacks()
+    }
+}
+
+impl<T> BeforeDeleteDispatch<T> for &&T {
+    fn run_before_delete(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait AfterDeleteDispatch<T> {
+    fn run_after_delete(self) -> Result<()>;
+}
+
+impl<T: CallbackRunner> AfterDeleteDispatch<T> for &T {
+    fn run_after_delete(self) -> Result<()> {
+        self.run_after_delete_callbacks()
+    }
+}
+
+impl<T> AfterDeleteDispatch<T> for &&T {
+    fn run_after_delete(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct PlainModel;
+
+    struct HookedModel {
+        events: RefCell<Vec<&'static str>>,
+    }
+
+    impl HookedModel {
+        fn new() -> Self {
+            Self {
+                events: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<&'static str> {
+            self.events.borrow().clone()
+        }
+    }
+
+    impl Callbacks for HookedModel {
+        fn before_validation(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("before_validation");
+            Ok(())
+        }
+
+        fn after_validation(&self) -> Result<()> {
+            self.events.borrow_mut().push("after_validation");
+            Ok(())
+        }
+
+        fn before_save(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("before_save");
+            Ok(())
+        }
+
+        fn after_save(&self) -> Result<()> {
+            self.events.borrow_mut().push("after_save");
+            Ok(())
+        }
+
+        fn before_create(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("before_create");
+            Ok(())
+        }
+
+        fn after_create(&self) -> Result<()> {
+            self.events.borrow_mut().push("after_create");
+            Ok(())
+        }
+
+        fn before_update(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("before_update");
+            Ok(())
+        }
+
+        fn after_update(&self) -> Result<()> {
+            self.events.borrow_mut().push("after_update");
+            Ok(())
+        }
+
+        fn before_delete(&self) -> Result<()> {
+            self.events.borrow_mut().push("before_delete");
+            Ok(())
+        }
+
+        fn after_delete(&self) -> Result<()> {
+            self.events.borrow_mut().push("after_delete");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn callback_dispatch_is_noop_for_models_without_callbacks() {
+        let mut model = PlainModel;
+        assert!((&mut &mut model).run_before_create().is_ok());
+        assert!((&model).run_after_create().is_ok());
+        assert!((&mut &mut model).run_before_update().is_ok());
+        assert!((&model).run_after_update().is_ok());
+        assert!((&model).run_before_delete().is_ok());
+        assert!((&model).run_after_delete().is_ok());
+    }
+
+    #[test]
+    fn callback_dispatch_runs_create_chain_in_order() {
+        let mut model = HookedModel::new();
+        (&mut model).run_before_create().unwrap();
+        (&model).run_after_create().unwrap();
+
+        assert_eq!(
+            model.events(),
+            vec![
+                "before_validation",
+                "after_validation",
+                "before_save",
+                "before_create",
+                "after_create",
+                "after_save"
+            ]
+        );
+    }
+
+    #[test]
+    fn callback_dispatch_runs_update_and_delete_chains() {
+        let mut model = HookedModel::new();
+        (&mut model).run_before_update().unwrap();
+        (&model).run_after_update().unwrap();
+        (&model).run_before_delete().unwrap();
+        (&model).run_after_delete().unwrap();
+
+        assert_eq!(
+            model.events(),
+            vec![
+                "before_validation",
+                "after_validation",
+                "before_save",
+                "before_update",
+                "after_update",
+                "after_save",
+                "before_delete",
+                "after_delete"
+            ]
+        );
+    }
+}

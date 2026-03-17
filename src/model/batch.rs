@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use crate::error::{Error, Result};
+use crate::query::{LogicalOp, OrGroup, QueryBuilder};
 
 use super::Model;
 
@@ -18,6 +19,7 @@ pub struct BatchUpdateBuilder<M: Model> {
 pub enum UpdateValue {
     Value(serde_json::Value),
     Raw(String),
+    UnsafeRaw(String),
     Increment(i64),
     Decrement(i64),
     Multiply(f64),
@@ -48,6 +50,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
     pub fn set_raw(mut self, field: &str, expression: &str) -> Self {
         self.updates
             .insert(field.to_string(), UpdateValue::Raw(expression.to_string()));
+        self
+    }
+
+    pub fn set_trusted_raw(mut self, field: &str, expression: &str) -> Self {
+        self.updates.insert(
+            field.to_string(),
+            UpdateValue::UnsafeRaw(expression.to_string()),
+        );
         self
     }
 
@@ -320,14 +330,312 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
-    fn format_value(v: &serde_json::Value) -> String {
-        match v {
-            serde_json::Value::Null => "NULL".to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
-            _ => format!("'{}'", v.to_string().replace('\'', "''")),
+    fn json_to_db_value(value: &serde_json::Value) -> crate::internal::Value {
+        match value {
+            serde_json::Value::Null => crate::internal::Value::String(None),
+            serde_json::Value::Bool(boolean) => crate::internal::Value::Bool(Some(*boolean)),
+            serde_json::Value::Number(number) => {
+                if let Some(integer) = number.as_i64() {
+                    crate::internal::Value::BigInt(Some(integer))
+                } else if let Some(float) = number.as_f64() {
+                    crate::internal::Value::Double(Some(float))
+                } else {
+                    crate::internal::Value::String(Some(number.to_string()))
+                }
+            }
+            serde_json::Value::String(text) => crate::internal::Value::String(Some(text.clone())),
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                crate::internal::Value::String(Some(value.to_string()))
+            }
         }
+    }
+
+    fn push_param(
+        db_type: crate::config::DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+        value: crate::internal::Value,
+    ) -> String {
+        let placeholder = match db_type {
+            crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
+            crate::config::DatabaseType::MySQL
+            | crate::config::DatabaseType::MariaDB
+            | crate::config::DatabaseType::SQLite => "?".to_string(),
+        };
+        params.push(value);
+        placeholder
+    }
+
+    fn validate_update_column(column: &str) -> Result<()> {
+        let is_safe_identifier = {
+            let mut chars = column.chars();
+            matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+                && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        };
+
+        if is_safe_identifier && M::column_from_str(column).is_some() {
+            Ok(())
+        } else {
+            Err(Error::invalid_query(format!(
+                "unsafe update column '{}': batch updates require a known model field/column name using only ASCII letters, numbers, and underscores",
+                column
+            )))
+        }
+    }
+
+    fn quote_update_column(column: &str, db_type: crate::config::DatabaseType) -> Result<String> {
+        Self::validate_update_column(column)?;
+        Ok(Self::quote_identifier(column, db_type))
+    }
+
+    fn quote_identifier(name: &str, db_type: crate::config::DatabaseType) -> String {
+        let quote = match db_type {
+            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
+            _ => '"',
+        };
+        format!("{0}{1}{0}", quote, name)
+    }
+
+    fn validate_json_path(path: &str) -> Result<Vec<&str>> {
+        let stripped = path.strip_prefix("$.").ok_or_else(|| {
+            Error::invalid_query(format!(
+                "unsafe JSON path '{}': only $.field or $.field.subfield paths are supported",
+                path
+            ))
+        })?;
+
+        let segments: Vec<&str> = stripped.split('.').collect();
+        if segments.is_empty()
+            || segments.iter().any(|segment| {
+                segment.is_empty()
+                    || !segment
+                        .chars()
+                        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                    || segment
+                        .chars()
+                        .next()
+                        .map(|ch| ch.is_ascii_digit())
+                        .unwrap_or(true)
+            })
+        {
+            return Err(Error::invalid_query(format!(
+                "unsafe JSON path '{}': only simple identifier segments are supported",
+                path
+            )));
+        }
+
+        Ok(segments)
+    }
+
+    fn postgres_json_path_literal(segments: &[&str]) -> String {
+        format!(
+            "{{{}}}",
+            segments
+                .iter()
+                .map(|segment| format!("\"{}\"", segment))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
+        if offset == 0 {
+            return sql.to_string();
+        }
+
+        let mut output = String::with_capacity(sql.len());
+        let chars: Vec<char> = sql.chars().collect();
+        let mut index = 0;
+
+        while index < chars.len() {
+            if chars[index] == '$' {
+                let start = index + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end].is_ascii_digit() {
+                    end += 1;
+                }
+
+                if end > start {
+                    let number: usize = chars[start..end]
+                        .iter()
+                        .collect::<String>()
+                        .parse()
+                        .unwrap_or(0);
+                    if number > 0 {
+                        output.push('$');
+                        output.push_str(&(number + offset).to_string());
+                        index = end;
+                        continue;
+                    }
+                }
+            }
+
+            output.push(chars[index]);
+            index += 1;
+        }
+
+        output
+    }
+
+    fn build_assignment_sql(
+        column: &str,
+        value: &UpdateValue,
+        db_type: crate::config::DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+    ) -> Result<String> {
+        let col = Self::quote_update_column(column, db_type)?;
+
+        match value {
+            UpdateValue::Value(value) => {
+                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                Ok(format!("{} = {}", col, placeholder))
+            }
+            UpdateValue::Raw(_) => Err(Error::invalid_query(
+                "set_raw() is disabled because it allows SQL injection; use typed update helpers or set_trusted_raw() only with trusted SQL",
+            )),
+            UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
+            UpdateValue::Increment(by) => {
+                let placeholder =
+                    Self::push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                Ok(format!("{} = {} + {}", col, col, placeholder))
+            }
+            UpdateValue::Decrement(by) => {
+                let placeholder =
+                    Self::push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                Ok(format!("{} = {} - {}", col, col, placeholder))
+            }
+            UpdateValue::Multiply(by) => {
+                let placeholder =
+                    Self::push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                Ok(format!("{} = {} * {}", col, col, placeholder))
+            }
+            UpdateValue::Divide(by) => {
+                let placeholder =
+                    Self::push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                Ok(format!("{} = {} / {}", col, col, placeholder))
+            }
+            UpdateValue::ArrayAppend(value) => {
+                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                Ok(match db_type {
+                    crate::config::DatabaseType::Postgres => {
+                        format!("{} = array_append({}, {})", col, col, placeholder)
+                    }
+                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                        format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, placeholder)
+                    }
+                    crate::config::DatabaseType::SQLite => {
+                        format!("{} = json_insert({}, '$[#]', {})", col, col, placeholder)
+                    }
+                })
+            }
+            UpdateValue::ArrayRemove(value) => {
+                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                Ok(match db_type {
+                    crate::config::DatabaseType::Postgres => {
+                        format!("{} = array_remove({}, {})", col, col, placeholder)
+                    }
+                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                        format!(
+                            "{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))",
+                            col, col, col, placeholder
+                        )
+                    }
+                    crate::config::DatabaseType::SQLite => {
+                        format!(
+                            "{} = (SELECT json_group_array(value) FROM json_each({}) WHERE value != {})",
+                            col, col, placeholder
+                        )
+                    }
+                })
+            }
+            UpdateValue::JsonSet(path, value) => {
+                let segments = Self::validate_json_path(path)?;
+                let path_placeholder = match db_type {
+                    crate::config::DatabaseType::Postgres => Self::push_param(
+                        db_type,
+                        params,
+                        crate::internal::Value::String(Some(Self::postgres_json_path_literal(
+                            &segments,
+                        ))),
+                    ),
+                    crate::config::DatabaseType::MySQL
+                    | crate::config::DatabaseType::MariaDB
+                    | crate::config::DatabaseType::SQLite => Self::push_param(
+                        db_type,
+                        params,
+                        crate::internal::Value::String(Some(path.clone())),
+                    ),
+                };
+                let json_text = serde_json::to_string(value)?;
+                let value_placeholder = Self::push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::String(Some(json_text)),
+                );
+
+                Ok(match db_type {
+                    crate::config::DatabaseType::Postgres => format!(
+                        "{} = jsonb_set({}, {}::text[], CAST({} AS jsonb))",
+                        col, col, path_placeholder, value_placeholder
+                    ),
+                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                        format!(
+                            "{} = JSON_SET({}, {}, CAST({} AS JSON))",
+                            col, col, path_placeholder, value_placeholder
+                        )
+                    }
+                    crate::config::DatabaseType::SQLite => {
+                        format!(
+                            "{} = json_set({}, {}, json({}))",
+                            col, col, path_placeholder, value_placeholder
+                        )
+                    }
+                })
+            }
+            UpdateValue::Coalesce(default) => {
+                let placeholder =
+                    Self::push_param(db_type, params, Self::json_to_db_value(default));
+                Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
+            }
+        }
+    }
+
+    fn build_set_clause_with_params_for_db(
+        &self,
+        db_type: crate::config::DatabaseType,
+    ) -> Result<(Vec<String>, Vec<crate::internal::Value>)> {
+        let mut params = Vec::new();
+        let mut set_parts = Vec::with_capacity(self.updates.len());
+
+        for (column, value) in &self.updates {
+            set_parts.push(Self::build_assignment_sql(column, value, db_type, &mut params)?);
+        }
+
+        Ok((set_parts, params))
+    }
+
+    fn build_where_query(&self) -> QueryBuilder<M> {
+        let mut query = QueryBuilder::new().with_trashed();
+        let mut or_conditions = Vec::new();
+
+        for condition in &self.conditions {
+            if let Some(column) = condition.column.strip_prefix("__OR__") {
+                let mut or_condition = condition.clone();
+                or_condition.column = column.to_string();
+                or_conditions.push(or_condition);
+            } else {
+                query.conditions.push(condition.clone());
+            }
+        }
+
+        if !or_conditions.is_empty() {
+            query.or_groups.push(OrGroup {
+                conditions: or_conditions,
+                nested_groups: Vec::new(),
+                combine_with: LogicalOp::Or,
+            });
+        }
+
+        query
     }
 
     pub async fn execute(self) -> Result<u64> {
@@ -338,207 +646,22 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let _ = self.returning;
 
         let db_type = crate::database::require_db()?.backend();
-        let quote = match db_type {
-            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
-            _ => '"',
-        };
+        let (set_parts, mut params) = self.build_set_clause_with_params_for_db(db_type)?;
 
-        let set_parts: Vec<String> = self
-            .updates
-            .iter()
-            .map(|(k, v)| {
-                let col = format!("{0}{1}{0}", quote, k);
-                match v {
-                    UpdateValue::Value(val) => {
-                        format!("{} = {}", col, Self::format_value(val))
-                    }
-                    UpdateValue::Raw(expr) => {
-                        format!("{} = {}", col, expr)
-                    }
-                    UpdateValue::Increment(by) => {
-                        format!("{} = {} + {}", col, col, by)
-                    }
-                    UpdateValue::Decrement(by) => {
-                        format!("{} = {} - {}", col, col, by)
-                    }
-                    UpdateValue::Multiply(by) => {
-                        format!("{} = {} * {}", col, col, by)
-                    }
-                    UpdateValue::Divide(by) => {
-                        format!("{} = {} / {}", col, col, by)
-                    }
-                    UpdateValue::ArrayAppend(val) => match db_type {
-                        crate::config::DatabaseType::Postgres => {
-                            format!("{} = array_append({}, {})", col, col, Self::format_value(val))
-                        }
-                        crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                            format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, Self::format_value(val))
-                        }
-                        crate::config::DatabaseType::SQLite => {
-                            format!("{} = json_insert({}, '$[#]', {})", col, col, Self::format_value(val))
-                        }
-                    },
-                    UpdateValue::ArrayRemove(val) => match db_type {
-                        crate::config::DatabaseType::Postgres => {
-                            format!("{} = array_remove({}, {})", col, col, Self::format_value(val))
-                        }
-                        crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                            format!("{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))", col, col, col, Self::format_value(val))
-                        }
-                        crate::config::DatabaseType::SQLite => {
-                            format!("{} = (SELECT json_group_array(value) FROM json_each({}) WHERE value != {})", col, col, Self::format_value(val))
-                        }
-                    },
-                    UpdateValue::JsonSet(path, val) => match db_type {
-                        crate::config::DatabaseType::Postgres => {
-                            format!("{} = jsonb_set({}, '{{{}}}', '{}')", col, col, path.trim_start_matches("$."), Self::format_value(val).trim_matches('\''))
-                        }
-                        crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                            format!("{} = JSON_SET({}, '{}', {})", col, col, path, Self::format_value(val))
-                        }
-                        crate::config::DatabaseType::SQLite => {
-                            format!("{} = json_set({}, '{}', {})", col, col, path, Self::format_value(val))
-                        }
-                    },
-                    UpdateValue::Coalesce(default) => {
-                        format!("{} = COALESCE({}, {})", col, col, Self::format_value(default))
-                    }
-                }
-            })
-            .collect();
+        let query = self.build_where_query();
+        let (mut where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
 
-        let mut and_parts: Vec<String> = Vec::new();
-        let mut or_parts: Vec<String> = Vec::new();
-
-        for cond in &self.conditions {
-            let (is_or, actual_column) = if cond.column.starts_with("__OR__") {
-                (
-                    true,
-                    cond.column.strip_prefix("__OR__").unwrap_or(&cond.column),
-                )
-            } else {
-                (false, cond.column.as_str())
-            };
-
-            let col = format!("{0}{1}{0}", quote, actual_column);
-
-            let part = match &cond.operator {
-                crate::query::Operator::Eq => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} = {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::NotEq => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} != {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::Gt => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} > {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::Gte => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} >= {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::Lt => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} < {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::Lte => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} <= {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::In => {
-                    if let crate::query::ConditionValue::List(vals) = &cond.value {
-                        let list = vals
-                            .iter()
-                            .map(Self::format_value)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        Some(format!("{} IN ({})", col, list))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::NotIn => {
-                    if let crate::query::ConditionValue::List(vals) = &cond.value {
-                        let list = vals
-                            .iter()
-                            .map(Self::format_value)
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        Some(format!("{} NOT IN ({})", col, list))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::IsNull => Some(format!("{} IS NULL", col)),
-                crate::query::Operator::IsNotNull => Some(format!("{} IS NOT NULL", col)),
-                crate::query::Operator::Between => {
-                    if let crate::query::ConditionValue::Range(min, max) = &cond.value {
-                        Some(format!(
-                            "{} BETWEEN {} AND {}",
-                            col,
-                            Self::format_value(min),
-                            Self::format_value(max)
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                crate::query::Operator::Like => {
-                    if let crate::query::ConditionValue::Single(v) = &cond.value {
-                        Some(format!("{} LIKE {}", col, Self::format_value(v)))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-
-            if let Some(part) = part {
-                if is_or {
-                    or_parts.push(part);
-                } else {
-                    and_parts.push(part);
-                }
-            }
+        if matches!(db_type, crate::config::DatabaseType::Postgres) {
+            where_sql = Self::offset_postgres_placeholders(&where_sql, params.len());
         }
+        params.extend(where_params);
 
-        let table = format!("{0}{1}{0}", quote, M::table_name());
+        let table = Self::quote_identifier(M::table_name(), db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
 
-        if !and_parts.is_empty() || !or_parts.is_empty() {
+        if !where_sql.is_empty() {
             sql.push_str(" WHERE ");
-
-            if and_parts.is_empty() {
-                sql.push_str(&or_parts.join(" OR "));
-            } else if or_parts.is_empty() {
-                sql.push_str(&and_parts.join(" AND "));
-            } else {
-                sql.push_str(&format!(
-                    "{} AND ({})",
-                    and_parts.join(" AND "),
-                    or_parts.join(" OR ")
-                ));
-            }
+            sql.push_str(&where_sql);
         }
 
         if let Some(limit) = self.limit_value {
@@ -550,7 +673,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             }
         }
 
-        crate::Database::execute(&sql).await
+        crate::Database::execute_with_params(&sql, params).await
     }
 
     pub async fn execute_returning(self) -> Result<Vec<M>> {
@@ -566,64 +689,27 @@ impl<M: Model> BatchUpdateBuilder<M> {
             ));
         }
 
-        let quote = match db_type {
-            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
-            _ => '"',
-        };
+        let (set_parts, mut params) = self.build_set_clause_with_params_for_db(db_type)?;
 
-        let set_parts: Vec<String> = self
-            .updates
-            .iter()
-            .map(|(k, v)| {
-                let col = format!("{0}{1}{0}", quote, k);
-                match v {
-                    UpdateValue::Value(val) => format!("{} = {}", col, Self::format_value(val)),
-                    UpdateValue::Raw(expr) => format!("{} = {}", col, expr),
-                    UpdateValue::Increment(by) => format!("{} = {} + {}", col, col, by),
-                    UpdateValue::Decrement(by) => format!("{} = {} - {}", col, col, by),
-                    UpdateValue::Multiply(by) => format!("{} = {} * {}", col, col, by),
-                    UpdateValue::Divide(by) => format!("{} = {} / {}", col, col, by),
-                    _ => format!("{} = {}", col, col),
-                }
-            })
-            .collect();
+        let query = self.build_where_query();
+        let (mut where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
 
-        let where_parts: Vec<String> = self
-            .conditions
-            .iter()
-            .filter_map(|cond| {
-                let col = format!("{0}{1}{0}", quote, cond.column);
-                match &cond.operator {
-                    crate::query::Operator::Eq => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} = {}", col, Self::format_value(v)))
-                        } else {
-                            None
-                        }
-                    }
-                    crate::query::Operator::NotEq => {
-                        if let crate::query::ConditionValue::Single(v) = &cond.value {
-                            Some(format!("{} != {}", col, Self::format_value(v)))
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-            .collect();
+        if matches!(db_type, crate::config::DatabaseType::Postgres) {
+            where_sql = Self::offset_postgres_placeholders(&where_sql, params.len());
+        }
+        params.extend(where_params);
 
-        let table = format!("{0}{1}{0}", quote, M::table_name());
+        let table = Self::quote_identifier(M::table_name(), db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
 
-        if !where_parts.is_empty() {
+        if !where_sql.is_empty() {
             sql.push_str(" WHERE ");
-            sql.push_str(&where_parts.join(" AND "));
+            sql.push_str(&where_sql);
         }
 
         sql.push_str(" RETURNING *");
 
-        crate::Database::raw::<M>(&sql).await
+        crate::Database::raw_with_params::<M>(&sql, params).await
     }
 }
 

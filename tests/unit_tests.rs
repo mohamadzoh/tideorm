@@ -1324,19 +1324,15 @@ mod relations_tests {
 
 #[cfg(test)]
 mod callbacks_tests {
-    // Note: Callbacks has a blanket implementation for all types,
-    // so we test the trait structure and types rather than custom implementations
-
-    use tideorm::callbacks::Callbacks;
+    use tideorm::callbacks::{CallbackRunner, Callbacks};
 
     #[test]
     fn test_callbacks_trait_exists() {
-        // Verify the trait and its methods exist
-        // Due to blanket impl, any type implements Callbacks
         struct TestType;
 
+        impl Callbacks for TestType {}
+
         let mut model = TestType;
-        // All default implementations should return Ok(())
         assert!(model.before_validation().is_ok());
         assert!(model.after_validation().is_ok());
         assert!(model.before_save().is_ok());
@@ -1351,12 +1347,11 @@ mod callbacks_tests {
 
     #[test]
     fn test_callback_runner_exists() {
-        use tideorm::callbacks::CallbackRunner;
-
         struct TestType;
 
+        impl Callbacks for TestType {}
+
         let mut model = TestType;
-        // CallbackRunner methods should work via blanket impl
         assert!(model.run_create_callbacks().is_ok());
         assert!(model.run_after_create_callbacks().is_ok());
         assert!(model.run_update_callbacks().is_ok());
@@ -2306,14 +2301,14 @@ mod config_edge_cases {
 mod callback_edge_cases {
     use tideorm::callbacks::{CallbackRunner, Callbacks};
 
-    // Due to blanket impl, we can't customize callbacks in tests
-    // But we can verify the trait structure
+    struct TestType;
+
+    impl Callbacks for TestType {}
 
     #[test]
     fn test_multiple_callback_invocations() {
-        let mut model = ();
+        let mut model = TestType;
 
-        // Multiple invocations should all succeed
         for _ in 0..100 {
             assert!(model.before_save().is_ok());
             assert!(model.after_save().is_ok());
@@ -2322,42 +2317,30 @@ mod callback_edge_cases {
 
     #[test]
     fn test_callback_runner_chain() {
-        let mut model = ();
+        let mut model = TestType;
 
-        // Full create lifecycle
         assert!(model.run_create_callbacks().is_ok());
         assert!(model.run_after_create_callbacks().is_ok());
 
-        // Full update lifecycle
         assert!(model.run_update_callbacks().is_ok());
         assert!(model.run_after_update_callbacks().is_ok());
 
-        // Full delete lifecycle
         assert!(model.run_delete_callbacks().is_ok());
         assert!(model.run_after_delete_callbacks().is_ok());
     }
 
     #[test]
     fn test_all_callback_methods_exist() {
-        let mut model = ();
+        let mut model = TestType;
 
-        // Validation callbacks
         let _ = model.before_validation();
         let _ = model.after_validation();
-
-        // Save callbacks
         let _ = model.before_save();
         let _ = model.after_save();
-
-        // Create callbacks
         let _ = model.before_create();
         let _ = model.after_create();
-
-        // Update callbacks
         let _ = model.before_update();
         let _ = model.after_update();
-
-        // Delete callbacks
         let _ = model.before_delete();
         let _ = model.after_delete();
     }
@@ -4103,6 +4086,7 @@ mod batch_update_value_tests {
         // Test all UpdateValue variants can be created
         let _value = UpdateValue::Value(json!("hello"));
         let _raw = UpdateValue::Raw("NOW()".to_string());
+        let _trusted_raw = UpdateValue::UnsafeRaw("NOW()".to_string());
         let _inc = UpdateValue::Increment(5);
         let _dec = UpdateValue::Decrement(3);
         let _mul = UpdateValue::Multiply(2.5);
@@ -4164,6 +4148,15 @@ mod batch_update_value_tests {
         match value {
             UpdateValue::Raw(s) => assert_eq!(s, "NOW()"),
             _ => panic!("Expected UpdateValue::Raw"),
+        }
+    }
+
+    #[test]
+    fn test_update_value_unsafe_raw() {
+        let value = UpdateValue::UnsafeRaw("NOW()".to_string());
+        match value {
+            UpdateValue::UnsafeRaw(s) => assert_eq!(s, "NOW()"),
+            _ => panic!("Expected UpdateValue::UnsafeRaw"),
         }
     }
 
@@ -4322,6 +4315,51 @@ mod relation_constraints_tests {
         assert_eq!(constraints.limit, Some(10));
         assert_eq!(constraints.offset, Some(0));
         assert!(constraints.with_trashed);
+    }
+}
+
+#[cfg(test)]
+mod hashed_type_tests {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    use tideorm::types::Hashed;
+
+    fn legacy_hash(input: &str) -> String {
+        let mut hasher = DefaultHasher::new();
+        input.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
+
+    #[test]
+    fn test_hashed_uses_argon2_format() {
+        let hashed = Hashed::new("secret123");
+        assert!(hashed.hash().starts_with("$argon2"));
+    }
+
+    #[test]
+    fn test_hashed_verify_accepts_matching_password() {
+        let hashed = Hashed::new("secret123");
+        assert!(hashed.verify("secret123"));
+        assert!(!hashed.verify("wrong-password"));
+    }
+
+    #[test]
+    fn test_hashed_is_salted() {
+        let first = Hashed::new("secret123");
+        let second = Hashed::new("secret123");
+
+        assert_ne!(first.hash(), second.hash());
+        assert!(first.verify("secret123"));
+        assert!(second.verify("secret123"));
+    }
+
+    #[test]
+    fn test_hashed_verify_supports_legacy_hashes() {
+        let hashed = Hashed::from_hash(legacy_hash("secret123"));
+
+        assert!(hashed.verify("secret123"));
+        assert!(!hashed.verify("wrong-password"));
     }
 }
 

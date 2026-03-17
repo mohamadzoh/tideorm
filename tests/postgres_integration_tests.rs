@@ -11,6 +11,7 @@
 
 use tideorm::prelude::*;
 use tideorm::{Database, TideConfig};
+use std::sync::{LazyLock, Mutex};
 
 #[path = "support/postgres_test_config.rs"]
 mod test_config;
@@ -29,6 +30,71 @@ pub struct TestUser {
     pub name: String,
     pub age: i32,
     pub active: bool,
+}
+
+static CALLBACK_EVENTS: LazyLock<Mutex<Vec<&'static str>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+#[derive(Model, PartialEq)]
+#[tideorm(table = "callback_users")]
+pub struct CallbackUser {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+}
+
+impl Callbacks for CallbackUser {
+    fn before_validation(&mut self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("before_validation");
+        Ok(())
+    }
+
+    fn after_validation(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("after_validation");
+        Ok(())
+    }
+
+    fn before_save(&mut self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("before_save");
+        self.email = self.email.to_lowercase();
+        Ok(())
+    }
+
+    fn after_save(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("after_save");
+        Ok(())
+    }
+
+    fn before_create(&mut self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("before_create");
+        Ok(())
+    }
+
+    fn after_create(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("after_create");
+        Ok(())
+    }
+
+    fn before_update(&mut self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("before_update");
+        Ok(())
+    }
+
+    fn after_update(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("after_update");
+        Ok(())
+    }
+
+    fn before_delete(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("before_delete");
+        Ok(())
+    }
+
+    fn after_delete(&self) -> tideorm::Result<()> {
+        CALLBACK_EVENTS.lock().unwrap().push("after_delete");
+        Ok(())
+    }
 }
 
 #[tideorm::model(table = "test_posts")]
@@ -82,6 +148,7 @@ async fn postgres_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_soft_deletes CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_posts CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_users CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS callback_users CASCADE").await;
 
     Database::execute(
         r#"
@@ -122,6 +189,18 @@ async fn postgres_integration_tests() {
     )
     .await
     .expect("Failed to create test_soft_deletes table");
+
+    Database::execute(
+        r#"
+        CREATE TABLE callback_users (
+            id BIGSERIAL PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            name VARCHAR(255) NOT NULL
+        )
+    "#,
+    )
+    .await
+    .expect("Failed to create callback_users table");
 
     println!(" Database setup complete\n");
 
@@ -865,6 +944,20 @@ async fn postgres_integration_tests() {
             !reloaded.active,
             "Active should be preserved when not updated"
         );
+
+        let quoted_payload = "Robert'); DROP TABLE test_users; --";
+        let injected_like = TestUser {
+            id: 1,
+            email: "upsert@example.com".into(),
+            name: quoted_payload.into(),
+            age: 32,
+            active: true,
+        };
+        let quoted = TestUser::insert_or_update(injected_like, vec!["id"])
+            .await
+            .expect("upsert should treat quoted payload as data");
+        assert_eq!(quoted.name, quoted_payload);
+
         println!("   ✓ insert_or_update and on_conflict");
     }
     println!();
@@ -910,7 +1003,81 @@ async fn postgres_integration_tests() {
             .await
             .expect("Count active failed");
         assert_eq!(active, 3, "Three users should remain active");
+
+        let err = TestUser::update_all()
+            .set_raw("name", "NOW(); DROP TABLE test_users; --")
+            .where_eq("id", 1)
+            .execute()
+            .await
+            .expect_err("set_raw should be rejected by default");
+        assert!(
+            err.to_string().contains("set_raw() is disabled"),
+            "unexpected error: {err}"
+        );
+
         println!("   ✓ batch update builder");
+    }
+    println!();
+
+    // =========================================================================
+    // CALLBACK TESTS
+    // =========================================================================
+    println!("🪝 Testing: Callbacks");
+    {
+        CALLBACK_EVENTS.lock().unwrap().clear();
+        let created = CallbackUser {
+            id: 0,
+            email: "UPPER@EXAMPLE.COM".into(),
+            name: "Callback User".into(),
+        }
+        .save()
+        .await
+        .expect("Callback save should succeed");
+
+        assert_eq!(created.email, "upper@example.com");
+        assert_eq!(
+            CALLBACK_EVENTS.lock().unwrap().clone(),
+            vec![
+                "before_validation",
+                "after_validation",
+                "before_save",
+                "before_create",
+                "after_create",
+                "after_save"
+            ]
+        );
+
+        CALLBACK_EVENTS.lock().unwrap().clear();
+        let updated = CallbackUser {
+            id: created.id,
+            email: "SECOND@EXAMPLE.COM".into(),
+            name: "Callback User Updated".into(),
+        }
+        .update()
+        .await
+        .expect("Callback update should succeed");
+
+        assert_eq!(updated.email, "second@example.com");
+        assert_eq!(
+            CALLBACK_EVENTS.lock().unwrap().clone(),
+            vec![
+                "before_validation",
+                "after_validation",
+                "before_save",
+                "before_update",
+                "after_update",
+                "after_save"
+            ]
+        );
+
+        CALLBACK_EVENTS.lock().unwrap().clear();
+        let deleted = updated.delete().await.expect("Callback delete should succeed");
+        assert_eq!(deleted, 1);
+        assert_eq!(
+            CALLBACK_EVENTS.lock().unwrap().clone(),
+            vec!["before_delete", "after_delete"]
+        );
+        println!("   ✓ save/update/delete callbacks");
     }
     println!();
 

@@ -45,6 +45,7 @@
 //! }
 //! ```
 
+use argon2::password_hash::PasswordVerifier;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -621,7 +622,6 @@ pub struct Hashed {
 impl Hashed {
     /// Create a new hashed value from plain text
     pub fn new(plain_text: &str) -> Self {
-        // Simple hash for demonstration - in production use bcrypt/argon2
         Self {
             hash: Self::compute_hash(plain_text),
         }
@@ -639,12 +639,28 @@ impl Hashed {
 
     /// Verify a plain text value against the hash
     pub fn verify(&self, plain_text: &str) -> bool {
-        // Simple comparison - in production use bcrypt_verify/argon2_verify
-        Self::compute_hash(plain_text) == self.hash
+        if let Ok(parsed_hash) = argon2::password_hash::PasswordHash::new(&self.hash) {
+            return argon2::Argon2::default()
+                .verify_password(plain_text.as_bytes(), &parsed_hash)
+                .is_ok();
+        }
+
+        // Legacy compatibility for hashes created before Argon2 migration.
+        Self::compute_legacy_hash(plain_text) == self.hash
     }
 
-    /// Compute hash of a string (placeholder - use proper hashing in production)
+    /// Compute an Argon2 hash suitable for password storage.
     fn compute_hash(input: &str) -> String {
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+
+        let salt = SaltString::generate(&mut OsRng);
+        argon2::Argon2::default()
+            .hash_password(input.as_bytes(), &salt)
+            .map(|hash| hash.to_string())
+            .expect("argon2 hashing should succeed with generated salt")
+    }
+
+    fn compute_legacy_hash(input: &str) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 

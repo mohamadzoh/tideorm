@@ -126,6 +126,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_column_name = &ctx.pk_column_name;
     let pk_auto_increment = ctx.pk_auto_increment;
     let column_names = &ctx.column_names;
+    let column_variants = &ctx.column_variants;
     let field_names = &ctx.field_names;
 
     quote! {
@@ -180,39 +181,53 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
             async fn delete(self) -> ::tideorm::Result<u64> {
                 use ::tideorm::sea_orm::ActiveModelTrait;
-                let error_context = Self::__primary_key_error_context(&self.#pk_ident)
-                    .query(format!("delete where {} = {}", #pk_column_name, self.#pk_ident));
-                let active = self.__into_delete_active_model();
+                use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
+                let model = self;
+                (&model).run_before_delete()?;
+                let error_context = Self::__primary_key_error_context(&model.#pk_ident)
+                    .query(format!("delete where {} = {}", #pk_column_name, model.#pk_ident));
+                let active = model.clone().__into_delete_active_model();
                 let result = active.delete(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
+                (&model).run_after_delete()?;
                 Ok(result.rows_affected)
             }
 
             async fn save(self) -> ::tideorm::Result<Self> {
+                use ::tideorm::callbacks::{AfterCreateDispatch, BeforeCreateDispatch};
                 use ::tideorm::internal::InternalModel;
                 use ::tideorm::sea_orm::ActiveModelTrait;
+                let mut model = self;
+                (&mut model).run_before_create()?;
                 let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
-                let active = <Self as InternalModel>::into_active_model(self);
+                let active = <Self as InternalModel>::into_active_model(model);
                 let result = active.insert(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                Ok(<Self as InternalModel>::from_sea_model(result))
+                let model = <Self as InternalModel>::from_sea_model(result);
+                (&model).run_after_create()?;
+                Ok(model)
             }
 
             async fn update(self) -> ::tideorm::Result<Self> {
+                use ::tideorm::callbacks::{AfterUpdateDispatch, BeforeUpdateDispatch};
                 use ::tideorm::internal::InternalModel;
                 use ::tideorm::sea_orm::ActiveModelTrait;
-                let error_context = Self::__primary_key_error_context(&self.#pk_ident)
-                    .query(format!("update where {} = {}", #pk_column_name, self.#pk_ident));
-                let active = self.__into_update_active_model();
+                let mut model = self;
+                (&mut model).run_before_update()?;
+                let error_context = Self::__primary_key_error_context(&model.#pk_ident)
+                    .query(format!("update where {} = {}", #pk_column_name, model.#pk_ident));
+                let active = model.__into_update_active_model();
                 let result = active.update(::tideorm::require_db()?.__internal_connection())
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                Ok(<Self as InternalModel>::from_sea_model(result))
+                let model = <Self as InternalModel>::from_sea_model(result);
+                (&model).run_after_update()?;
+                Ok(model)
             }
 
             async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> ::tideorm::Result<Self> {
@@ -225,54 +240,222 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 model: Self,
                 builder: ::tideorm::model::OnConflictBuilder<Self>,
             ) -> ::tideorm::Result<Self> {
-                use ::tideorm::Database;
                 use ::tideorm::internal::InternalModel;
+                use ::tideorm::sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
                 use serde_json::json;
 
-                let all_columns: Vec<&str> = vec![#(#column_names),*];
-                let model_clone = model.clone();
-                let all_values: Vec<serde_json::Value> = vec![#(json!(model_clone.#field_names)),*];
-                let include_pk = builder.conflict_columns.contains(&#pk_column_name.to_string()) || !#pk_auto_increment;
-                let (columns, values): (Vec<&str>, Vec<serde_json::Value>) = all_columns
-                    .iter()
-                    .zip(all_values.into_iter())
-                    .filter(|(column, _)| !(**column == #pk_column_name && #pk_auto_increment && !include_pk))
-                    .map(|(column, value)| (*column, value))
-                    .unzip();
+                fn json_to_db_value(value: &serde_json::Value) -> ::tideorm::internal::Value {
+                    match value {
+                        serde_json::Value::Null => ::tideorm::internal::Value::String(None),
+                        serde_json::Value::Bool(boolean) => ::tideorm::internal::Value::Bool(Some(*boolean)),
+                        serde_json::Value::Number(number) => {
+                            if let Some(integer) = number.as_i64() {
+                                ::tideorm::internal::Value::BigInt(Some(integer))
+                            } else if let Some(float) = number.as_f64() {
+                                ::tideorm::internal::Value::Double(Some(float))
+                            } else {
+                                ::tideorm::internal::Value::String(Some(number.to_string()))
+                            }
+                        }
+                        serde_json::Value::String(text) => {
+                            ::tideorm::internal::Value::String(Some(text.clone()))
+                        }
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                            ::tideorm::internal::Value::String(Some(value.to_string()))
+                        }
+                    }
+                }
 
-                let column_list = columns.iter().map(|column| format!("\"{}\"", column)).collect::<Vec<_>>().join(", ");
-                let value_list = values.iter()
-                    .map(|value| match value {
-                        serde_json::Value::Null => "NULL".to_string(),
-                        serde_json::Value::Bool(value) => value.to_string(),
-                        serde_json::Value::Number(value) => value.to_string(),
-                        serde_json::Value::String(value) => format!("'{}'", value.replace('\'', "''")),
-                        _ => format!("'{}'", serde_json::to_string(value).unwrap_or_default().replace('\'', "''")),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                fn push_param(
+                    backend: ::tideorm::sea_orm::DbBackend,
+                    params: &mut Vec<::tideorm::internal::Value>,
+                    value: ::tideorm::internal::Value,
+                ) -> String {
+                    let placeholder = match backend {
+                        ::tideorm::sea_orm::DbBackend::Postgres => format!("${}", params.len() + 1),
+                        ::tideorm::sea_orm::DbBackend::MySql | ::tideorm::sea_orm::DbBackend::Sqlite => {
+                            "?".to_string()
+                        }
+                        _ => "?".to_string(),
+                    };
+                    params.push(value);
+                    placeholder
+                }
+
+                let connection = ::tideorm::require_db()?.__internal_connection();
+                let backend = connection.get_database_backend();
+                let quote = match backend {
+                    ::tideorm::sea_orm::DbBackend::Postgres | ::tideorm::sea_orm::DbBackend::Sqlite => '"',
+                    ::tideorm::sea_orm::DbBackend::MySql => '`',
+                    _ => '"',
+                };
+                let quoted = |name: &str| format!("{0}{1}{0}", quote, name);
+
+                let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
-                let conflict_list = conflict_cols.iter().map(|column| format!("\"{}\"", column)).collect::<Vec<_>>().join(", ");
+                let include_pk = conflict_cols.contains(&#pk_column_name.to_string()) || !#pk_auto_increment;
+                let insertable_columns: Vec<&str> = vec![#(#column_names),*]
+                    .into_iter()
+                    .filter(|column| !(*column == #pk_column_name && #pk_auto_increment && !include_pk))
+                    .collect();
+                let conflict_columns: Vec<_> = conflict_cols
+                    .iter()
+                    .map(|column| {
+                        Self::column_from_str(column).ok_or_else(|| {
+                            ::tideorm::Error::invalid_query(format!(
+                                "unknown conflict column '{}' for {}",
+                                column,
+                                #table_name
+                            ))
+                        })
+                    })
+                    .collect::<::tideorm::Result<Vec<_>>>()?;
+                let _ = conflict_columns;
                 let update_cols: Vec<String> = if let Some(cols) = builder.update_columns {
                     cols
                 } else if let Some(exclude) = builder.exclude_columns {
-                    columns.iter().filter(|column| !exclude.contains(&column.to_string())).map(|column| column.to_string()).collect()
+                    insertable_columns
+                        .iter()
+                        .filter(|column| !exclude.contains(&column.to_string()))
+                        .map(|column| column.to_string())
+                        .collect()
                 } else {
-                    columns.iter().filter(|column| {
+                    insertable_columns.iter().filter(|column| {
                         let column = column.to_string();
                         !conflict_cols.contains(&column) && column != #pk_column_name
                     }).map(|column| column.to_string()).collect()
                 };
-                let update_list = update_cols.iter().map(|column| format!("\"{}\" = EXCLUDED.\"{}\"", column, column)).collect::<Vec<_>>().join(", ");
+                for column in &update_cols {
+                    let _ = Self::column_from_str(column).ok_or_else(|| {
+                        ::tideorm::Error::invalid_query(format!(
+                            "unknown update column '{}' for {}",
+                            column,
+                            #table_name
+                        ))
+                    })?;
+                }
+
+                let all_columns: Vec<&str> = vec![#(#column_names),*];
+                let all_values: Vec<serde_json::Value> = vec![#(json!(model.clone().#field_names)),*];
+                let values: Vec<serde_json::Value> = all_columns
+                    .iter()
+                    .zip(all_values.into_iter())
+                    .filter(|(column, _)| insertable_columns.contains(column))
+                    .map(|(_, value)| value)
+                    .collect();
+
+                let column_list = insertable_columns
+                    .iter()
+                    .map(|column| quoted(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let mut params = Vec::new();
+                let value_list = values
+                    .iter()
+                    .map(|value| push_param(backend, &mut params, json_to_db_value(value)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let conflict_list = conflict_cols
+                    .iter()
+                    .map(|column| quoted(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let update_list = match backend {
+                    ::tideorm::sea_orm::DbBackend::Postgres | ::tideorm::sea_orm::DbBackend::Sqlite => {
+                        update_cols
+                            .iter()
+                            .map(|column| {
+                                let col = quoted(column);
+                                format!("{} = EXCLUDED.{}", col, col)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                    ::tideorm::sea_orm::DbBackend::MySql => {
+                        update_cols
+                            .iter()
+                            .map(|column| {
+                                let col = quoted(column);
+                                format!("{} = VALUES({})", col, col)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                    _ => {
+                        update_cols
+                            .iter()
+                            .map(|column| {
+                                let col = quoted(column);
+                                format!("{} = EXCLUDED.{}", col, col)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                };
+
+                let conflict_clause = match backend {
+                    ::tideorm::sea_orm::DbBackend::Postgres | ::tideorm::sea_orm::DbBackend::Sqlite => {
+                        if update_list.is_empty() {
+                            format!("ON CONFLICT ({}) DO NOTHING", conflict_list)
+                        } else {
+                            format!("ON CONFLICT ({}) DO UPDATE SET {}", conflict_list, update_list)
+                        }
+                    }
+                    ::tideorm::sea_orm::DbBackend::MySql => {
+                        if update_list.is_empty() {
+                            "ON DUPLICATE KEY UPDATE id = id".to_string()
+                        } else {
+                            format!("ON DUPLICATE KEY UPDATE {}", update_list)
+                        }
+                    }
+                    _ => {
+                        if update_list.is_empty() {
+                            format!("ON CONFLICT ({}) DO NOTHING", conflict_list)
+                        } else {
+                            format!("ON CONFLICT ({}) DO UPDATE SET {}", conflict_list, update_list)
+                        }
+                    }
+                };
+
                 let sql = format!(
-                    "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING *",
-                    #table_name, column_list, value_list, conflict_list, update_list
+                    "INSERT INTO {} ({}) VALUES ({}) {}",
+                    quoted(#table_name),
+                    column_list,
+                    value_list,
+                    conflict_clause
                 );
                 let error_context = Self::__base_error_context().query(sql.clone());
-                let results: Vec<Self> = ::tideorm::Database::raw(&sql)
+
+                ::tideorm::Database::execute_with_params(&sql, params)
                     .await
+                    .map_err(|err| err.with_context(error_context.clone()))?;
+
+                let mut finder = #internal_entity_mod::Entity::find();
+                for conflict_column in &conflict_cols {
+                    finder = match conflict_column.as_str() {
+                        #(#column_names | stringify!(#field_names) => finder.filter(#internal_entity_mod::Column::#column_variants.eq(model_for_lookup.#field_names.clone())),)*
+                        _ => {
+                            return Err(::tideorm::Error::invalid_query(format!(
+                                "unknown conflict column '{}' for {}",
+                                conflict_column,
+                                #table_name
+                            )));
+                        }
+                    };
+                }
+
+                let result = finder
+                    .one(connection)
+                    .await
+                    .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                results.into_iter().next().ok_or_else(|| ::tideorm::Error::query("INSERT ... ON CONFLICT returned no rows".to_string()))
+
+                result
+                    .map(<Self as InternalModel>::from_sea_model)
+                    .ok_or_else(|| ::tideorm::Error::query("upsert completed but no matching row could be reloaded".to_string()))
             }
         }
     }

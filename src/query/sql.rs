@@ -497,7 +497,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn build_where_clause_with_condition_for_db(
+    pub(crate) fn build_where_clause_with_condition_for_db(
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
