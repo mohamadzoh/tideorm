@@ -604,8 +604,20 @@ impl<T: Default> Default for Encrypted<T> {
     }
 }
 
+fn encrypted_field_missing_key_error(operation: &str) -> crate::Error {
+    crate::Error::configuration(format!(
+        "Encrypted<T> {} requires an encryption key. Configure one during startup with TideConfig::init().encryption_key(\"...\") or TokenConfig::set_encryption_key(\"...\") before using encrypted fields.",
+        operation
+    ))
+}
+
+fn encrypted_field_encryption_key(operation: &str) -> crate::error::Result<String> {
+    crate::tokenization::TokenConfig::get_encryption_key()
+        .map_err(|_| encrypted_field_missing_key_error(operation))
+}
+
 fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
-    let key = crate::tokenization::TokenConfig::get_encryption_key()?;
+    let key = encrypted_field_encryption_key("serialization")?;
     let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
     let nonce_bytes: [u8; 24] = random();
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -632,7 +644,7 @@ fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
 }
 
 fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
-    let key = crate::tokenization::TokenConfig::get_encryption_key()?;
+    let key = encrypted_field_encryption_key("deserialization")?;
     let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
     let payload = crate::tokenization::base64_url_decode(encoded)
         .ok_or_else(|| crate::Error::tokenization("Invalid encrypted field payload"))?;
@@ -917,6 +929,36 @@ impl<T: fmt::Display> fmt::Display for CommaSeparated<T> {
             .collect::<Vec<_>>()
             .join(",");
         write!(f, "{}", s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encrypted_field_missing_key_error, Encrypted};
+
+    #[test]
+    fn encrypted_missing_key_error_mentions_startup_configuration_for_serialization() {
+        let err = encrypted_field_missing_key_error("serialization");
+        let message = err.to_string();
+
+        assert!(message.contains("Encrypted<T> serialization requires an encryption key"));
+        assert!(message.contains("Configure one during startup"));
+        assert!(message.contains("TideConfig::init().encryption_key"));
+        assert!(message.contains("TokenConfig::set_encryption_key"));
+    }
+
+    #[test]
+    fn encrypted_missing_key_error_mentions_deserialization() {
+        let err = encrypted_field_missing_key_error("deserialization");
+        let message = err.to_string();
+
+        assert!(message.contains("Encrypted<T> deserialization requires an encryption key"));
+    }
+
+    #[test]
+    fn encrypted_wrapper_preserves_inner_value() {
+        let encrypted = Encrypted::new(String::from("secret"));
+        assert_eq!(encrypted.inner(), "secret");
     }
 }
 
