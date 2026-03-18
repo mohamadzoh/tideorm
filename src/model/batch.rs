@@ -395,6 +395,21 @@ impl<M: Model> BatchUpdateBuilder<M> {
         format!("{0}{1}{0}", quote, name)
     }
 
+    fn has_explicit_filters(&self) -> bool {
+        !self.conditions.is_empty()
+    }
+
+    fn ensure_explicit_filters(&self, operation: &str) -> Result<()> {
+        if self.has_explicit_filters() {
+            Ok(())
+        } else {
+            Err(Error::invalid_query(format!(
+                "{} requires at least one explicit filter; unfiltered bulk mutations are blocked",
+                operation
+            )))
+        }
+    }
+
     fn validate_json_path(path: &str) -> Result<Vec<&str>> {
         let stripped = path.strip_prefix("$.").ok_or_else(|| {
             Error::invalid_query(format!(
@@ -643,6 +658,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
             return Ok(0);
         }
 
+        self.ensure_explicit_filters("update")?;
+
         let _ = self.returning;
 
         let db_type = crate::database::require_db()?.backend();
@@ -681,6 +698,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
             return Ok(vec![]);
         }
 
+        self.ensure_explicit_filters("update")?;
+
         let db_type = crate::database::require_db()?.backend();
 
         if db_type == crate::config::DatabaseType::MySQL {
@@ -716,5 +735,56 @@ impl<M: Model> BatchUpdateBuilder<M> {
 impl<M: Model> Default for BatchUpdateBuilder<M> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BatchUpdateBuilder;
+    use crate::model::Model;
+
+    #[derive(tideorm::Model)]
+    #[tideorm(table = "batch_update_guard_users")]
+    struct BatchUpdateGuardUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+    }
+
+    #[test]
+    fn batch_update_guard_rejects_unfiltered_updates() {
+        let err = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
+            .set("name", "updated")
+            .ensure_explicit_filters("update")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires at least one explicit filter"));
+    }
+
+    #[test]
+    fn batch_update_guard_accepts_where_filters() {
+        assert!(BatchUpdateGuardUser::update_all()
+            .set("name", "updated")
+            .where_eq("id", 1)
+            .ensure_explicit_filters("update")
+            .is_ok());
+    }
+
+    #[test]
+    fn batch_update_guard_accepts_or_filters() {
+        assert!(BatchUpdateGuardUser::update_all()
+            .set("name", "updated")
+            .or_where_eq("name", "alice")
+            .ensure_explicit_filters("update")
+            .is_ok());
+    }
+
+    #[test]
+    fn batch_update_guard_rejects_limit_without_where() {
+        let err = BatchUpdateGuardUser::update_all()
+            .set("name", "updated")
+            .limit(1)
+            .ensure_explicit_filters("update")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires at least one explicit filter"));
     }
 }

@@ -95,6 +95,21 @@ where
         .query(query.into())
 }
 
+fn supports_batch_insert_returning(
+    configured_db_type: Option<crate::config::DatabaseType>,
+    backend: DbBackend,
+) -> bool {
+    if let Some(db_type) = configured_db_type {
+        return match db_type {
+            crate::config::DatabaseType::Postgres => matches!(backend, DbBackend::Postgres),
+            crate::config::DatabaseType::MariaDB => matches!(backend, DbBackend::MySql),
+            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::SQLite => false,
+        };
+    }
+
+    matches!(backend, DbBackend::Postgres)
+}
+
 /// Internal query executor
 #[doc(hidden)]
 pub struct QueryExecutor;
@@ -246,9 +261,14 @@ impl QueryExecutor {
             return Ok(vec![M::from_sea_model(result)]);
         }
 
-        // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+)
+        // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+).
+        // SeaORM exposes both MySQL and MariaDB as DbBackend::MySql, so prefer
+        // TideORM's configured database type when it is available.
         let backend = conn.get_database_backend();
-        let supports_returning = matches!(backend, DbBackend::Postgres);
+        let supports_returning = supports_batch_insert_returning(
+            crate::config::TideConfig::get_database_type(),
+            backend,
+        );
 
         if supports_returning {
             // Build batch insert using SeaORM's insert_many with RETURNING
@@ -276,5 +296,54 @@ impl QueryExecutor {
             }
             Ok(results)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_batch_insert_returning;
+    use crate::config::DatabaseType;
+    use crate::internal::DbBackend;
+
+    #[test]
+    fn batch_insert_returning_supports_postgres_backend_without_config() {
+        assert!(supports_batch_insert_returning(None, DbBackend::Postgres));
+    }
+
+    #[test]
+    fn batch_insert_returning_rejects_mysql_backend_without_mariadb_config() {
+        assert!(!supports_batch_insert_returning(None, DbBackend::MySql));
+        assert!(!supports_batch_insert_returning(
+            Some(DatabaseType::MySQL),
+            DbBackend::MySql,
+        ));
+    }
+
+    #[test]
+    fn batch_insert_returning_accepts_mariadb_config_on_mysql_backend() {
+        assert!(supports_batch_insert_returning(
+            Some(DatabaseType::MariaDB),
+            DbBackend::MySql,
+        ));
+    }
+
+    #[test]
+    fn batch_insert_returning_rejects_sqlite_even_though_it_supports_returning() {
+        assert!(!supports_batch_insert_returning(
+            Some(DatabaseType::SQLite),
+            DbBackend::Sqlite,
+        ));
+    }
+
+    #[test]
+    fn batch_insert_returning_rejects_config_backend_mismatches() {
+        assert!(!supports_batch_insert_returning(
+            Some(DatabaseType::Postgres),
+            DbBackend::MySql,
+        ));
+        assert!(!supports_batch_insert_returning(
+            Some(DatabaseType::MariaDB),
+            DbBackend::Postgres,
+        ));
     }
 }

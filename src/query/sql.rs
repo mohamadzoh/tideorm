@@ -7,6 +7,82 @@ use sea_orm::sea_query::{
     Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
 };
 
+#[derive(Clone, Copy)]
+enum ComparisonOperator {
+    Eq,
+    NotEq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Clone, Copy)]
+enum ListOperator {
+    In,
+    NotIn,
+    EqAny,
+    NeAll,
+}
+
+#[derive(Clone, Copy)]
+enum JsonValueOperator {
+    Contains,
+    ContainedBy,
+}
+
+#[derive(Clone, Copy)]
+enum JsonStringOperator {
+    KeyExists,
+    KeyNotExists,
+    PathExists,
+    PathNotExists,
+}
+
+#[derive(Clone, Copy)]
+enum ArrayOperator {
+    Contains,
+    ContainedBy,
+    Overlaps,
+}
+
+enum ConditionSpec<'a> {
+    Raw { column: &'a str, raw_sql: &'a str },
+    Compare {
+        operator: ComparisonOperator,
+        value: &'a serde_json::Value,
+    },
+    Pattern {
+        negated: bool,
+        value: &'a serde_json::Value,
+    },
+    List {
+        operator: ListOperator,
+        values: &'a [serde_json::Value],
+    },
+    NullCheck { negated: bool },
+    Between {
+        low: &'a serde_json::Value,
+        high: &'a serde_json::Value,
+    },
+    JsonValue {
+        operator: JsonValueOperator,
+        value: &'a serde_json::Value,
+    },
+    JsonString {
+        operator: JsonStringOperator,
+        value: &'a str,
+    },
+    Array {
+        operator: ArrayOperator,
+        values: &'a [serde_json::Value],
+    },
+    Subquery {
+        negated: bool,
+        query_sql: &'a str,
+    },
+}
+
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     fn operator_label(operator: &Operator) -> &'static str {
@@ -267,197 +343,299 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn condition_spec<'a>(condition: &'a WhereCondition) -> Option<ConditionSpec<'a>> {
+        match (&condition.operator, &condition.value) {
+            (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => Some(ConditionSpec::Raw {
+                column: &condition.column,
+                raw_sql,
+            }),
+            (Operator::Eq, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::Eq,
+                value,
+            }),
+            (Operator::NotEq, ConditionValue::Single(value)) => {
+                Some(ConditionSpec::Compare {
+                    operator: ComparisonOperator::NotEq,
+                    value,
+                })
+            }
+            (Operator::Gt, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::Gt,
+                value,
+            }),
+            (Operator::Gte, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::Gte,
+                value,
+            }),
+            (Operator::Lt, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::Lt,
+                value,
+            }),
+            (Operator::Lte, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::Lte,
+                value,
+            }),
+            (Operator::Like, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
+                negated: false,
+                value,
+            }),
+            (Operator::NotLike, ConditionValue::Single(value)) => {
+                Some(ConditionSpec::Pattern {
+                    negated: true,
+                    value,
+                })
+            }
+            (Operator::In, ConditionValue::List(values)) => Some(ConditionSpec::List {
+                operator: ListOperator::In,
+                values,
+            }),
+            (Operator::NotIn, ConditionValue::List(values)) => Some(ConditionSpec::List {
+                operator: ListOperator::NotIn,
+                values,
+            }),
+            (Operator::EqAny, ConditionValue::List(values)) => Some(ConditionSpec::List {
+                operator: ListOperator::EqAny,
+                values,
+            }),
+            (Operator::NeAll, ConditionValue::List(values)) => Some(ConditionSpec::List {
+                operator: ListOperator::NeAll,
+                values,
+            }),
+            (Operator::IsNull, ConditionValue::None) => {
+                Some(ConditionSpec::NullCheck { negated: false })
+            }
+            (Operator::IsNotNull, ConditionValue::None) => {
+                Some(ConditionSpec::NullCheck { negated: true })
+            }
+            (Operator::Between, ConditionValue::Range(low, high)) => {
+                Some(ConditionSpec::Between { low, high })
+            }
+            (Operator::JsonContains, ConditionValue::Single(value)) => {
+                Some(ConditionSpec::JsonValue {
+                    operator: JsonValueOperator::Contains,
+                    value,
+                })
+            }
+            (Operator::JsonContainedBy, ConditionValue::Single(value)) => {
+                Some(ConditionSpec::JsonValue {
+                    operator: JsonValueOperator::ContainedBy,
+                    value,
+                })
+            }
+            (Operator::JsonKeyExists, ConditionValue::Single(serde_json::Value::String(value))) => {
+                Some(ConditionSpec::JsonString {
+                    operator: JsonStringOperator::KeyExists,
+                    value,
+                })
+            }
+            (
+                Operator::JsonKeyNotExists,
+                ConditionValue::Single(serde_json::Value::String(value)),
+            ) => Some(ConditionSpec::JsonString {
+                operator: JsonStringOperator::KeyNotExists,
+                value,
+            }),
+            (
+                Operator::JsonPathExists,
+                ConditionValue::Single(serde_json::Value::String(value)),
+            ) => Some(ConditionSpec::JsonString {
+                operator: JsonStringOperator::PathExists,
+                value,
+            }),
+            (
+                Operator::JsonPathNotExists,
+                ConditionValue::Single(serde_json::Value::String(value)),
+            ) => Some(ConditionSpec::JsonString {
+                operator: JsonStringOperator::PathNotExists,
+                value,
+            }),
+            (Operator::ArrayContains, ConditionValue::List(values))
+            | (Operator::ArrayContainsAll, ConditionValue::List(values)) => {
+                Some(ConditionSpec::Array {
+                    operator: ArrayOperator::Contains,
+                    values,
+                })
+            }
+            (Operator::ArrayContainedBy, ConditionValue::List(values)) => {
+                Some(ConditionSpec::Array {
+                    operator: ArrayOperator::ContainedBy,
+                    values,
+                })
+            }
+            (Operator::ArrayOverlaps, ConditionValue::List(values))
+            | (Operator::ArrayContainsAny, ConditionValue::List(values)) => {
+                Some(ConditionSpec::Array {
+                    operator: ArrayOperator::Overlaps,
+                    values,
+                })
+            }
+            (Operator::SubqueryIn, ConditionValue::Subquery(query_sql)) => {
+                Some(ConditionSpec::Subquery {
+                    negated: false,
+                    query_sql,
+                })
+            }
+            (Operator::SubqueryNotIn, ConditionValue::Subquery(query_sql)) => {
+                Some(ConditionSpec::Subquery {
+                    negated: true,
+                    query_sql,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn preview_values(&self, values: &[serde_json::Value]) -> Vec<String> {
+        values
+            .iter()
+            .map(|value| self.format_preview_value(value))
+            .collect()
+    }
+
+    fn pattern_value(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(text) => text.clone(),
+            _ => value.to_string(),
+        }
+    }
+
+    fn comparison_sql(operator: ComparisonOperator) -> &'static str {
+        match operator {
+            ComparisonOperator::Eq => "=",
+            ComparisonOperator::NotEq => "!=",
+            ComparisonOperator::Gt => ">",
+            ComparisonOperator::Gte => ">=",
+            ComparisonOperator::Lt => "<",
+            ComparisonOperator::Lte => "<=",
+        }
+    }
+
     fn build_condition_expression(
         &self,
         condition: &WhereCondition,
         db_type: DatabaseType,
     ) -> Option<SimpleExpr> {
-        if matches!(condition.operator, Operator::Raw) {
-            return match &condition.value {
-                ConditionValue::RawExpr(raw_sql) => {
-                    if condition.column.is_empty() {
-                        Some(Expr::cust(raw_sql.clone()))
-                    } else {
-                        let column = self.format_column_for_db(db_type, &condition.column);
-                        Some(Expr::cust(format!("{} {}", column, raw_sql)))
-                    }
-                }
-                _ => None,
+        let spec = Self::condition_spec(condition)?;
+
+        if let ConditionSpec::Raw { column, raw_sql } = spec {
+            return if column.is_empty() {
+                Some(Expr::cust(raw_sql.to_string()))
+            } else {
+                let column = self.format_column_for_db(db_type, column);
+                Some(Expr::cust(format!("{} {}", column, raw_sql)))
             };
         }
 
         let column_expr = self.sea_column_expr(db_type, &condition.column);
         let column_sql = self.format_column_for_db(db_type, &condition.column);
 
-        match &condition.operator {
-            Operator::Eq => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.eq(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::NotEq => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.ne(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::Gt => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.gt(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::Gte => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.gte(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::Lt => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.lt(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::Lte => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(column_expr.lte(Self::json_to_sea_value(value)))
-                }
-                _ => None,
-            },
-            Operator::Like => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.like(match value {
-                    serde_json::Value::String(text) => text.clone(),
-                    _ => value.to_string(),
-                })),
-                _ => None,
-            },
-            Operator::NotLike => match &condition.value {
-                ConditionValue::Single(value) => Some(column_expr.not_like(match value {
-                    serde_json::Value::String(text) => text.clone(),
-                    _ => value.to_string(),
-                })),
-                _ => None,
-            },
-            Operator::In | Operator::EqAny => match &condition.value {
-                ConditionValue::List(values) => match condition.operator {
-                    Operator::EqAny if matches!(db_type, DatabaseType::Postgres) => {
-                        Some(self.build_custom_expression(
+        match spec {
+            ConditionSpec::Raw { .. } => None,
+            ConditionSpec::Compare { operator, value } => {
+                let value = Self::json_to_sea_value(value);
+                Some(match operator {
+                    ComparisonOperator::Eq => column_expr.eq(value),
+                    ComparisonOperator::NotEq => column_expr.ne(value),
+                    ComparisonOperator::Gt => column_expr.gt(value),
+                    ComparisonOperator::Gte => column_expr.gte(value),
+                    ComparisonOperator::Lt => column_expr.lt(value),
+                    ComparisonOperator::Lte => column_expr.lte(value),
+                })
+            }
+            ConditionSpec::Pattern { negated, value } => {
+                let pattern = Self::pattern_value(value);
+                Some(if negated {
+                    column_expr.not_like(pattern)
+                } else {
+                    column_expr.like(pattern)
+                })
+            }
+            ConditionSpec::List { operator, values } => {
+                let sea_values = Self::sea_value_list(values);
+                Some(match operator {
+                    ListOperator::In => column_expr.is_in(sea_values),
+                    ListOperator::NotIn => column_expr.is_not_in(sea_values),
+                    ListOperator::EqAny if matches!(db_type, DatabaseType::Postgres) => {
+                        self.build_custom_expression(
                             format!(
                                 "{} = ANY(ARRAY[{}])",
                                 column_sql,
                                 Self::placeholder_list(values.len())
                             ),
-                            Self::sea_value_list(values),
-                        ))
+                            sea_values,
+                        )
                     }
-                    _ => Some(column_expr.is_in(Self::sea_value_list(values))),
-                },
-                _ => None,
-            },
-            Operator::NotIn | Operator::NeAll => match &condition.value {
-                ConditionValue::List(values) => match condition.operator {
-                    Operator::NeAll if matches!(db_type, DatabaseType::Postgres) => {
-                        Some(self.build_custom_expression(
+                    ListOperator::EqAny => column_expr.is_in(sea_values),
+                    ListOperator::NeAll if matches!(db_type, DatabaseType::Postgres) => {
+                        self.build_custom_expression(
                             format!(
                                 "{} <> ALL(ARRAY[{}])",
                                 column_sql,
                                 Self::placeholder_list(values.len())
                             ),
-                            Self::sea_value_list(values),
-                        ))
+                            sea_values,
+                        )
                     }
-                    _ => Some(column_expr.is_not_in(Self::sea_value_list(values))),
-                },
-                _ => None,
-            },
-            Operator::IsNull => Some(column_expr.is_null()),
-            Operator::IsNotNull => Some(column_expr.is_not_null()),
-            Operator::Between => match &condition.value {
-                ConditionValue::Range(low, high) => Some(
-                    column_expr
-                        .between(Self::json_to_sea_value(low), Self::json_to_sea_value(high)),
-                ),
-                _ => None,
-            },
-            Operator::JsonContains => match &condition.value {
-                ConditionValue::Single(value) => Some(Expr::cust(db_sql::json_contains(
-                    db_type,
-                    &condition.column,
-                    &value.to_string(),
-                ))),
-                _ => None,
-            },
-            Operator::JsonContainedBy => match &condition.value {
-                ConditionValue::Single(value) => Some(Expr::cust(db_sql::json_contained_by(
-                    db_type,
-                    &condition.column,
-                    &value.to_string(),
-                ))),
-                _ => None,
-            },
-            Operator::JsonKeyExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(key)) => Some(Expr::cust(
-                    db_sql::json_key_exists(db_type, &condition.column, key),
-                )),
-                _ => None,
-            },
-            Operator::JsonKeyNotExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(key)) => Some(Expr::cust(
-                    db_sql::json_key_not_exists(db_type, &condition.column, key),
-                )),
-                _ => None,
-            },
-            Operator::JsonPathExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(path)) => Some(Expr::cust(
-                    db_sql::json_path_exists(db_type, &condition.column, path),
-                )),
-                _ => None,
-            },
-            Operator::JsonPathNotExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(path)) => Some(Expr::cust(
-                    db_sql::json_path_not_exists(db_type, &condition.column, path),
-                )),
-                _ => None,
-            },
-            Operator::ArrayContains | Operator::ArrayContainsAll => match &condition.value {
-                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_contains(
-                    db_type,
-                    &condition.column,
-                    &self.render_array_values(values),
-                ))),
-                _ => None,
-            },
-            Operator::ArrayContainedBy => match &condition.value {
-                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_contained_by(
-                    db_type,
-                    &condition.column,
-                    &self.render_array_values(values),
-                ))),
-                _ => None,
-            },
-            Operator::ArrayOverlaps | Operator::ArrayContainsAny => match &condition.value {
-                ConditionValue::List(values) => Some(Expr::cust(db_sql::array_overlaps(
-                    db_type,
-                    &condition.column,
-                    &self.render_array_values(values),
-                ))),
-                _ => None,
-            },
-            Operator::SubqueryIn => match &condition.value {
-                ConditionValue::Subquery(query_sql) => {
-                    Some(Expr::cust(format!("{} IN ({})", column_sql, query_sql)))
-                }
-                _ => None,
-            },
-            Operator::SubqueryNotIn => match &condition.value {
-                ConditionValue::Subquery(query_sql) => {
-                    Some(Expr::cust(format!("{} NOT IN ({})", column_sql, query_sql)))
-                }
-                _ => None,
-            },
-            Operator::Raw => None,
+                    ListOperator::NeAll => column_expr.is_not_in(sea_values),
+                })
+            }
+            ConditionSpec::NullCheck { negated } => Some(if negated {
+                column_expr.is_not_null()
+            } else {
+                column_expr.is_null()
+            }),
+            ConditionSpec::Between { low, high } => Some(
+                column_expr.between(Self::json_to_sea_value(low), Self::json_to_sea_value(high)),
+            ),
+            ConditionSpec::JsonValue { operator, value } => {
+                let sql = match operator {
+                    JsonValueOperator::Contains => {
+                        db_sql::json_contains(db_type, &condition.column, &value.to_string())
+                    }
+                    JsonValueOperator::ContainedBy => {
+                        db_sql::json_contained_by(db_type, &condition.column, &value.to_string())
+                    }
+                };
+                Some(Expr::cust(sql))
+            }
+            ConditionSpec::JsonString { operator, value } => {
+                let sql = match operator {
+                    JsonStringOperator::KeyExists => {
+                        db_sql::json_key_exists(db_type, &condition.column, value)
+                    }
+                    JsonStringOperator::KeyNotExists => {
+                        db_sql::json_key_not_exists(db_type, &condition.column, value)
+                    }
+                    JsonStringOperator::PathExists => {
+                        db_sql::json_path_exists(db_type, &condition.column, value)
+                    }
+                    JsonStringOperator::PathNotExists => {
+                        db_sql::json_path_not_exists(db_type, &condition.column, value)
+                    }
+                };
+                Some(Expr::cust(sql))
+            }
+            ConditionSpec::Array { operator, values } => {
+                let rendered = self.render_array_values(values);
+                let sql = match operator {
+                    ArrayOperator::Contains => {
+                        db_sql::array_contains(db_type, &condition.column, &rendered)
+                    }
+                    ArrayOperator::ContainedBy => {
+                        db_sql::array_contained_by(db_type, &condition.column, &rendered)
+                    }
+                    ArrayOperator::Overlaps => {
+                        db_sql::array_overlaps(db_type, &condition.column, &rendered)
+                    }
+                };
+                Some(Expr::cust(sql))
+            }
+            ConditionSpec::Subquery { negated, query_sql } => Some(Expr::cust(format!(
+                "{} {}IN ({})",
+                column_sql,
+                if negated { "NOT " } else { "" },
+                query_sql
+            ))),
         }
     }
 
@@ -639,215 +817,100 @@ impl<M: Model> QueryBuilder<M> {
         condition: &WhereCondition,
         db_type: DatabaseType,
     ) -> Option<String> {
-        if matches!(condition.operator, Operator::Raw) {
-            return match &condition.value {
-                ConditionValue::RawExpr(raw_sql) => {
-                    if condition.column.is_empty() {
-                        Some(raw_sql.clone())
-                    } else {
-                        Some(format!(
-                            "{} {}",
-                            self.format_column_for_db(db_type, &condition.column),
-                            raw_sql
-                        ))
-                    }
-                }
-                _ => None,
+        let spec = Self::condition_spec(condition)?;
+
+        if let ConditionSpec::Raw { column, raw_sql } = spec {
+            return if column.is_empty() {
+                Some(raw_sql.to_string())
+            } else {
+                Some(format!(
+                    "{} {}",
+                    self.format_column_for_db(db_type, column),
+                    raw_sql
+                ))
             };
         }
 
         let column = self.format_column_for_db(db_type, &condition.column);
 
-        match &condition.operator {
-            Operator::Eq => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} = {}", column, self.format_preview_value(value)))
+        match spec {
+            ConditionSpec::Raw { .. } => None,
+            ConditionSpec::Compare { operator, value } => Some(format!(
+                "{} {} {}",
+                column,
+                Self::comparison_sql(operator),
+                self.format_preview_value(value)
+            )),
+            ConditionSpec::Pattern { negated, value } => Some(format!(
+                "{} {}LIKE {}",
+                column,
+                if negated { "NOT " } else { "" },
+                self.format_preview_value(value)
+            )),
+            ConditionSpec::List { operator, values } => {
+                let rendered = self.preview_values(values);
+                Some(match operator {
+                    ListOperator::In => format!("{} IN ({})", column, rendered.join(", ")),
+                    ListOperator::NotIn => {
+                        format!("{} NOT IN ({})", column, rendered.join(", "))
+                    }
+                    ListOperator::EqAny => db_sql::eq_any(db_type, &column, &rendered),
+                    ListOperator::NeAll => db_sql::ne_all(db_type, &column, &rendered),
+                })
+            }
+            ConditionSpec::NullCheck { negated } => Some(format!(
+                "{} IS {}NULL",
+                column,
+                if negated { "NOT " } else { "" }
+            )),
+            ConditionSpec::Between { low, high } => Some(format!(
+                "{} BETWEEN {} AND {}",
+                column,
+                self.format_preview_value(low),
+                self.format_preview_value(high)
+            )),
+            ConditionSpec::JsonValue { operator, value } => Some(match operator {
+                JsonValueOperator::Contains => {
+                    db_sql::json_contains(db_type, &condition.column, &value.to_string())
                 }
-                _ => None,
-            },
-            Operator::NotEq => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} != {}",
-                    column,
-                    self.format_preview_value(value)
-                )),
-                _ => None,
-            },
-            Operator::Gt => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} > {}", column, self.format_preview_value(value)))
+                JsonValueOperator::ContainedBy => {
+                    db_sql::json_contained_by(db_type, &condition.column, &value.to_string())
                 }
-                _ => None,
-            },
-            Operator::Gte => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} >= {}",
-                    column,
-                    self.format_preview_value(value)
-                )),
-                _ => None,
-            },
-            Operator::Lt => match &condition.value {
-                ConditionValue::Single(value) => {
-                    Some(format!("{} < {}", column, self.format_preview_value(value)))
+            }),
+            ConditionSpec::JsonString { operator, value } => Some(match operator {
+                JsonStringOperator::KeyExists => {
+                    db_sql::json_key_exists(db_type, &condition.column, value)
                 }
-                _ => None,
-            },
-            Operator::Lte => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} <= {}",
-                    column,
-                    self.format_preview_value(value)
-                )),
-                _ => None,
-            },
-            Operator::Like => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} LIKE {}",
-                    column,
-                    self.format_preview_value(value)
-                )),
-                _ => None,
-            },
-            Operator::NotLike => match &condition.value {
-                ConditionValue::Single(value) => Some(format!(
-                    "{} NOT LIKE {}",
-                    column,
-                    self.format_preview_value(value)
-                )),
-                _ => None,
-            },
-            Operator::In => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values
-                        .iter()
-                        .map(|value| self.format_preview_value(value))
-                        .collect();
-                    Some(format!("{} IN ({})", column, rendered.join(", ")))
+                JsonStringOperator::KeyNotExists => {
+                    db_sql::json_key_not_exists(db_type, &condition.column, value)
                 }
-                _ => None,
-            },
-            Operator::NotIn => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered: Vec<String> = values
-                        .iter()
-                        .map(|value| self.format_preview_value(value))
-                        .collect();
-                    Some(format!("{} NOT IN ({})", column, rendered.join(", ")))
+                JsonStringOperator::PathExists => {
+                    db_sql::json_path_exists(db_type, &condition.column, value)
                 }
-                _ => None,
-            },
-            Operator::IsNull => Some(format!("{} IS NULL", column)),
-            Operator::IsNotNull => Some(format!("{} IS NOT NULL", column)),
-            Operator::Between => match &condition.value {
-                ConditionValue::Range(low, high) => Some(format!(
-                    "{} BETWEEN {} AND {}",
-                    column,
-                    self.format_preview_value(low),
-                    self.format_preview_value(high)
-                )),
-                _ => None,
-            },
-            Operator::JsonContains => match &condition.value {
-                ConditionValue::Single(value) => Some(db_sql::json_contains(
-                    db_type,
-                    &condition.column,
-                    &value.to_string(),
-                )),
-                _ => None,
-            },
-            Operator::JsonContainedBy => match &condition.value {
-                ConditionValue::Single(value) => Some(db_sql::json_contained_by(
-                    db_type,
-                    &condition.column,
-                    &value.to_string(),
-                )),
-                _ => None,
-            },
-            Operator::JsonKeyExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(key)) => {
-                    Some(db_sql::json_key_exists(db_type, &condition.column, key))
+                JsonStringOperator::PathNotExists => {
+                    db_sql::json_path_not_exists(db_type, &condition.column, value)
                 }
-                _ => None,
-            },
-            Operator::JsonKeyNotExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(key)) => {
-                    Some(db_sql::json_key_not_exists(db_type, &condition.column, key))
-                }
-                _ => None,
-            },
-            Operator::JsonPathExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(path)) => {
-                    Some(db_sql::json_path_exists(db_type, &condition.column, path))
-                }
-                _ => None,
-            },
-            Operator::JsonPathNotExists => match &condition.value {
-                ConditionValue::Single(serde_json::Value::String(path)) => Some(
-                    db_sql::json_path_not_exists(db_type, &condition.column, path),
-                ),
-                _ => None,
-            },
-            Operator::ArrayContains | Operator::ArrayContainsAll => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered = self.render_array_values(values);
-                    Some(db_sql::array_contains(
-                        db_type,
-                        &condition.column,
-                        &rendered,
-                    ))
-                }
-                _ => None,
-            },
-            Operator::ArrayContainedBy => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered = self.render_array_values(values);
-                    Some(db_sql::array_contained_by(
-                        db_type,
-                        &condition.column,
-                        &rendered,
-                    ))
-                }
-                _ => None,
-            },
-            Operator::ArrayOverlaps | Operator::ArrayContainsAny => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered = self.render_array_values(values);
-                    Some(db_sql::array_overlaps(
-                        db_type,
-                        &condition.column,
-                        &rendered,
-                    ))
-                }
-                _ => None,
-            },
-            Operator::SubqueryIn => match &condition.value {
-                ConditionValue::Subquery(query_sql) => {
-                    Some(format!("{} IN ({})", column, query_sql))
-                }
-                _ => None,
-            },
-            Operator::SubqueryNotIn => match &condition.value {
-                ConditionValue::Subquery(query_sql) => {
-                    Some(format!("{} NOT IN ({})", column, query_sql))
-                }
-                _ => None,
-            },
-            Operator::EqAny => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered = self.render_array_values(values);
-                    Some(db_sql::eq_any(db_type, &column, &rendered))
-                }
-                _ => None,
-            },
-            Operator::NeAll => match &condition.value {
-                ConditionValue::List(values) => {
-                    let rendered = self.render_array_values(values);
-                    Some(db_sql::ne_all(db_type, &column, &rendered))
-                }
-                _ => None,
-            },
-            Operator::Raw => None,
+            }),
+            ConditionSpec::Array { operator, values } => {
+                let rendered = self.render_array_values(values);
+                Some(match operator {
+                    ArrayOperator::Contains => {
+                        db_sql::array_contains(db_type, &condition.column, &rendered)
+                    }
+                    ArrayOperator::ContainedBy => {
+                        db_sql::array_contained_by(db_type, &condition.column, &rendered)
+                    }
+                    ArrayOperator::Overlaps => {
+                        db_sql::array_overlaps(db_type, &condition.column, &rendered)
+                    }
+                })
+            }
+            ConditionSpec::Subquery { negated, query_sql } => Some(format!(
+                "{} {}IN ({})",
+                column,
+                if negated { "NOT " } else { "" },
+                query_sql
+            )),
         }
     }
 
@@ -1316,9 +1379,25 @@ impl<M: Model> QueryBuilder<M> {
         Ok(())
     }
 
+    fn has_explicit_mutation_filters(&self) -> bool {
+        !self.conditions.is_empty() || self.or_groups.iter().any(|group| group.condition_count() > 0)
+    }
+
+    fn ensure_mutation_has_explicit_filters(&self, operation: &str) -> Result<()> {
+        if self.has_explicit_mutation_filters() {
+            Ok(())
+        } else {
+            Err(Error::invalid_query(format!(
+                "{} requires at least one explicit filter; unfiltered bulk mutations are blocked",
+                operation
+            )))
+        }
+    }
+
     pub async fn delete(self) -> Result<u64> {
         self.ensure_query_is_valid()?;
         self.ensure_mutation_query_is_safe("delete")?;
+        self.ensure_mutation_has_explicit_filters("delete")?;
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
@@ -1346,6 +1425,8 @@ impl<M: Model> QueryBuilder<M> {
                 "soft_delete() can only be used on models with soft delete enabled",
             ));
         }
+
+        self.ensure_mutation_has_explicit_filters("soft_delete")?;
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
@@ -1379,6 +1460,8 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
+        self.ensure_mutation_has_explicit_filters("restore")?;
+
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
         let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
@@ -1406,6 +1489,7 @@ impl<M: Model> QueryBuilder<M> {
     pub async fn force_delete(self) -> Result<u64> {
         self.ensure_query_is_valid()?;
         self.ensure_mutation_query_is_safe("force_delete")?;
+        self.ensure_mutation_has_explicit_filters("force_delete")?;
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
@@ -1439,5 +1523,74 @@ impl<M: Model> QueryBuilder<M> {
 impl<M: Model> Default for QueryBuilder<M> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::Model;
+    use crate::query::OrGroup;
+
+    #[derive(tideorm::Model)]
+    #[tideorm(table = "query_mutation_guard_users")]
+    struct MutationGuardUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+    }
+
+    #[derive(tideorm::Model)]
+    #[tideorm(table = "query_mutation_guard_soft_delete_users", soft_delete)]
+    struct SoftDeleteMutationGuardUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+        deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    #[test]
+    fn mutation_guard_rejects_unfiltered_delete() {
+        let err = MutationGuardUser::query()
+            .ensure_mutation_has_explicit_filters("delete")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires at least one explicit filter"));
+    }
+
+    #[test]
+    fn mutation_guard_accepts_basic_where_clause() {
+        assert!(MutationGuardUser::query()
+            .where_eq("id", 1)
+            .ensure_mutation_has_explicit_filters("delete")
+            .is_ok());
+    }
+
+    #[test]
+    fn mutation_guard_accepts_non_empty_or_group() {
+        assert!(MutationGuardUser::query()
+            .begin_or()
+            .or_where_eq("name", "alice")
+            .end_or()
+            .ensure_mutation_has_explicit_filters("delete")
+            .is_ok());
+    }
+
+    #[test]
+    fn mutation_guard_rejects_only_trashed_without_user_filters() {
+        let err = SoftDeleteMutationGuardUser::query()
+            .only_trashed()
+            .ensure_mutation_has_explicit_filters("restore")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires at least one explicit filter"));
+    }
+
+    #[test]
+    fn mutation_guard_rejects_empty_nested_or_groups() {
+        let mut query = MutationGuardUser::query();
+        query.or_groups.push(OrGroup::new().nested_or(|group| group));
+
+        let err = query
+            .ensure_mutation_has_explicit_filters("delete")
+            .unwrap_err();
+        assert!(err.to_string().contains("requires at least one explicit filter"));
     }
 }
