@@ -1,0 +1,170 @@
+use super::*;
+use std::sync::Once;
+
+static INIT: Once = Once::new();
+
+fn init_test_key() {
+    INIT.call_once(|| {
+        TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
+    });
+}
+
+#[test]
+fn test_base64_url_encode_decode() {
+    let data = b"Hello, World!";
+    let encoded = base64_url_encode(data);
+    let decoded = base64_url_decode(&encoded).unwrap();
+    assert_eq!(data.to_vec(), decoded);
+}
+
+#[test]
+fn test_base64_url_various_lengths() {
+    for len in 1..=32 {
+        let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        let encoded = base64_url_encode(&data);
+        let decoded = base64_url_decode(&encoded).unwrap();
+        assert_eq!(data, decoded, "Failed for length {}", len);
+    }
+}
+
+#[test]
+fn test_default_encode_decode() {
+    init_test_key();
+
+    let record_id = 12345i64;
+    let model_name = "User";
+
+    let token = default_encode(record_id, model_name).unwrap();
+    let decoded = default_decode(&token, model_name).unwrap();
+
+    assert_eq!(decoded, Some(record_id));
+}
+
+#[test]
+fn test_encode_decode_negative_id() {
+    init_test_key();
+
+    let record_id = -99999i64;
+    let model_name = "NegativeModel";
+
+    let token = default_encode(record_id, model_name).unwrap();
+    let decoded = default_decode(&token, model_name).unwrap();
+
+    assert_eq!(decoded, Some(record_id));
+}
+
+#[test]
+fn test_encode_decode_zero() {
+    init_test_key();
+
+    let record_id = 0i64;
+    let model_name = "ZeroModel";
+
+    let token = default_encode(record_id, model_name).unwrap();
+    let decoded = default_decode(&token, model_name).unwrap();
+
+    assert_eq!(decoded, Some(record_id));
+}
+
+#[test]
+fn test_encode_decode_max_i64() {
+    init_test_key();
+
+    let record_id = i64::MAX;
+    let model_name = "MaxModel";
+
+    let token = default_encode(record_id, model_name).unwrap();
+    let decoded = default_decode(&token, model_name).unwrap();
+
+    assert_eq!(decoded, Some(record_id));
+}
+
+#[test]
+fn test_wrong_model_fails() {
+    init_test_key();
+
+    let record_id = 42i64;
+    let token = default_encode(record_id, "User").unwrap();
+
+    let decoded = default_decode(&token, "Product").unwrap();
+    assert_eq!(decoded, None);
+}
+
+#[test]
+fn test_tampered_token_fails() {
+    init_test_key();
+
+    let record_id = 42i64;
+    let token = default_encode(record_id, "User").unwrap();
+
+    let mut chars: Vec<char> = token.chars().collect();
+    if let Some(c) = chars.get_mut(10) {
+        *c = if *c == 'A' { 'B' } else { 'A' };
+    }
+    let tampered: String = chars.into_iter().collect();
+
+    let decoded = default_decode(&tampered, "User").unwrap();
+    assert_eq!(decoded, None);
+}
+
+#[test]
+fn test_invalid_base64_fails() {
+    init_test_key();
+
+    let decoded = default_decode("not-valid-base64!!!", "User").unwrap();
+    assert_eq!(decoded, None);
+}
+
+#[test]
+fn test_too_short_token_fails() {
+    init_test_key();
+
+    let decoded = default_decode("abc", "User").unwrap();
+    assert_eq!(decoded, None);
+}
+
+#[test]
+fn test_token_is_url_safe() {
+    init_test_key();
+
+    let record_id = 999999999i64;
+    let token = default_encode(record_id, "User").unwrap();
+
+    assert!(
+        token
+            .chars()
+            .all(|c| { c.is_ascii_alphanumeric() || c == '-' || c == '_' })
+    );
+}
+
+#[test]
+fn test_different_ids_different_tokens() {
+    init_test_key();
+
+    let token1 = default_encode(1, "User").unwrap();
+    let token2 = default_encode(2, "User").unwrap();
+
+    assert_ne!(token1, token2);
+}
+
+#[test]
+fn test_same_id_generates_different_tokens() {
+    init_test_key();
+
+    let token1 = default_encode(42, "User").unwrap();
+    let token2 = default_encode(42, "User").unwrap();
+
+    assert_ne!(token1, token2);
+    assert_eq!(default_decode(&token1, "User").unwrap(), Some(42));
+    assert_eq!(default_decode(&token2, "User").unwrap(), Some(42));
+}
+
+#[test]
+fn test_token_config_encode_decode() {
+    init_test_key();
+
+    let token = TokenConfig::encode(123, "TestModel").unwrap();
+    let decoded = TokenConfig::decode(&token, "TestModel").unwrap();
+
+    assert_eq!(decoded, Some(123));
+}
