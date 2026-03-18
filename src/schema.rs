@@ -38,9 +38,9 @@
 //! struct User { ... }
 //! ```
 
+use parking_lot::RwLock;
 use std::fs;
 use std::path::Path;
-use std::sync::RwLock;
 
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
@@ -853,11 +853,10 @@ impl SchemaWriter {
     ///
     /// Called automatically by the Model derive macro
     pub fn register_schema(schema: TableSchema) {
-        if let Ok(mut registry) = SCHEMA_REGISTRY.write() {
-            // Check if table already exists (avoid duplicates)
-            if !registry.iter().any(|t| t.name == schema.name) {
-                registry.push(schema);
-            }
+        let mut registry = SCHEMA_REGISTRY.write();
+        // Check if table already exists (avoid duplicates)
+        if !registry.iter().any(|t| t.name == schema.name) {
+            registry.push(schema);
         }
     }
 
@@ -870,10 +869,7 @@ impl SchemaWriter {
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
         let db_type =
             crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);
-        let schemas = SCHEMA_REGISTRY
-            .read()
-            .map_err(|e| Error::internal(format!("Failed to read schema registry: {}", e)))?
-            .clone();
+        let schemas = SCHEMA_REGISTRY.read().clone();
 
         if schemas.is_empty() {
             // No schemas registered, generate from database introspection
@@ -1325,16 +1321,11 @@ impl SchemaWriter {
 
     /// Get the currently registered schemas
     pub fn get_registered_schemas() -> Vec<TableSchema> {
-        SCHEMA_REGISTRY
-            .read()
-            .map(|r| r.clone())
-            .unwrap_or_default()
+        SCHEMA_REGISTRY.read().clone()
     }
 
     /// Clear the schema registry
     pub fn clear_registry() {
-        if let Ok(mut registry) = SCHEMA_REGISTRY.write() {
-            registry.clear();
-        }
+        SCHEMA_REGISTRY.write().clear();
     }
 }

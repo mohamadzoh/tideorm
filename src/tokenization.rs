@@ -118,8 +118,8 @@
 //!     
 //!     fn token_decoder() -> Option<TokenDecoder> {
 //!         Some(|token, _model_name| {
-//!             token.strip_prefix("DOC-")
-//!                 .and_then(|id| id.parse().ok())
+//!             Ok(token.strip_prefix("DOC-")
+//!                 .and_then(|id| id.parse().ok()))
 //!         })
 //!     }
 //!     
@@ -173,8 +173,9 @@ pub type TokenEncoder = fn(record_id: i64, model_name: &str) -> Result<String>;
 /// * `model_name` - The name of the model (e.g., "User", "Product")
 ///
 /// # Returns
-/// The decoded primary key (i64), or None if decoding fails
-pub type TokenDecoder = fn(token: &str, model_name: &str) -> Option<i64>;
+/// The decoded primary key (i64), or None if decoding fails validation.
+/// Returns an error when decoding cannot proceed due to misconfiguration.
+pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<i64>>;
 
 // =============================================================================
 // GLOBAL STATE
@@ -250,8 +251,8 @@ impl TokenConfig {
     /// ```rust,ignore
     /// TokenConfig::set_decoder(|token, model_name| {
     ///     let prefix = format!("{}-", model_name.to_lowercase());
-    ///     token.strip_prefix(&prefix)
-    ///         .and_then(|id| id.parse().ok())
+    ///     Ok(token.strip_prefix(&prefix)
+    ///         .and_then(|id| id.parse().ok()))
     /// });
     /// ```
     pub fn set_decoder(decoder: TokenDecoder) {
@@ -290,10 +291,10 @@ impl TokenConfig {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let id = TokenConfig::decode(&token, "User")
+    /// let id = TokenConfig::decode(&token, "User")?
     ///     .ok_or_else(|| Error::invalid_token("Invalid token"))?;
     /// ```
-    pub fn decode(token: &str, model_name: &str) -> Option<i64> {
+    pub fn decode(token: &str, model_name: &str) -> Result<Option<i64>> {
         Self::get_decoder()(token, model_name)
     }
 }
@@ -302,14 +303,14 @@ impl TokenConfig {
 // ENCRYPTION UTILITIES
 // =============================================================================
 
-fn derive_encryption_key(key: &str) -> [u8; 32] {
+pub(crate) fn derive_encryption_key(key: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(key.as_bytes());
     hasher.finalize().into()
 }
 
 /// Base64-URL safe encoding (no padding)
-fn base64_url_encode(data: &[u8]) -> String {
+pub(crate) fn base64_url_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut result = String::new();
@@ -334,7 +335,7 @@ fn base64_url_encode(data: &[u8]) -> String {
 }
 
 /// Base64-URL safe decoding
-fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
     fn char_to_value(c: char) -> Option<u8> {
         match c {
             'A'..='Z' => Some(c as u8 - b'A'),
@@ -395,7 +396,11 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
     Ok(base64_url_encode(&token_data))
 }
 
-fn default_decode_checked(token: &str, model_name: &str) -> Result<Option<i64>> {
+/// Default token decoder.
+///
+/// Returns `Ok(None)` for invalid or tampered tokens and `Err(...)` when
+/// tokenization is misconfigured, such as when no encryption key is set.
+pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
     let key = TokenConfig::get_encryption_key()?;
     let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
 
@@ -428,11 +433,6 @@ fn default_decode_checked(token: &str, model_name: &str) -> Result<Option<i64>> 
     };
 
     Ok(Some(i64::from_be_bytes(id_bytes)))
-}
-
-/// Default token decoder
-pub fn default_decode(token: &str, model_name: &str) -> Option<i64> {
-    default_decode_checked(token, model_name).ok().flatten()
 }
 
 // =============================================================================
@@ -584,11 +584,11 @@ pub trait Tokenizable: Sized + Send + Sync {
         }
 
         if let Some(decoder) = Self::token_decoder() {
-            return decoder(token, Self::token_model_name())
+            return decoder(token, Self::token_model_name())?
                 .ok_or_else(|| Error::invalid_token("Failed to decode token"));
         }
 
-        default_decode_checked(token, Self::token_model_name())?
+        default_decode(token, Self::token_model_name())?
             .ok_or_else(|| Error::invalid_token("Failed to decode token"))
     }
 
@@ -653,7 +653,7 @@ mod tests {
         let model_name = "User";
 
         let token = default_encode(record_id, model_name).unwrap();
-        let decoded = default_decode(&token, model_name);
+        let decoded = default_decode(&token, model_name).unwrap();
 
         assert_eq!(decoded, Some(record_id));
     }
@@ -666,7 +666,7 @@ mod tests {
         let model_name = "NegativeModel";
 
         let token = default_encode(record_id, model_name).unwrap();
-        let decoded = default_decode(&token, model_name);
+        let decoded = default_decode(&token, model_name).unwrap();
 
         assert_eq!(decoded, Some(record_id));
     }
@@ -679,7 +679,7 @@ mod tests {
         let model_name = "ZeroModel";
 
         let token = default_encode(record_id, model_name).unwrap();
-        let decoded = default_decode(&token, model_name);
+        let decoded = default_decode(&token, model_name).unwrap();
 
         assert_eq!(decoded, Some(record_id));
     }
@@ -692,7 +692,7 @@ mod tests {
         let model_name = "MaxModel";
 
         let token = default_encode(record_id, model_name).unwrap();
-        let decoded = default_decode(&token, model_name);
+        let decoded = default_decode(&token, model_name).unwrap();
 
         assert_eq!(decoded, Some(record_id));
     }
@@ -705,7 +705,7 @@ mod tests {
         let token = default_encode(record_id, "User").unwrap();
 
         // Trying to decode with different model should fail
-        let decoded = default_decode(&token, "Product");
+        let decoded = default_decode(&token, "Product").unwrap();
         assert_eq!(decoded, None);
     }
 
@@ -724,7 +724,7 @@ mod tests {
         let tampered: String = chars.into_iter().collect();
 
         // Should fail to decode
-        let decoded = default_decode(&tampered, "User");
+        let decoded = default_decode(&tampered, "User").unwrap();
         assert_eq!(decoded, None);
     }
 
@@ -732,7 +732,7 @@ mod tests {
     fn test_invalid_base64_fails() {
         init_test_key();
 
-        let decoded = default_decode("not-valid-base64!!!", "User");
+        let decoded = default_decode("not-valid-base64!!!", "User").unwrap();
         assert_eq!(decoded, None);
     }
 
@@ -740,7 +740,7 @@ mod tests {
     fn test_too_short_token_fails() {
         init_test_key();
 
-        let decoded = default_decode("abc", "User");
+        let decoded = default_decode("abc", "User").unwrap();
         assert_eq!(decoded, None);
     }
 
@@ -777,8 +777,8 @@ mod tests {
         let token2 = default_encode(42, "User").unwrap();
 
         assert_ne!(token1, token2);
-        assert_eq!(default_decode(&token1, "User"), Some(42));
-        assert_eq!(default_decode(&token2, "User"), Some(42));
+        assert_eq!(default_decode(&token1, "User").unwrap(), Some(42));
+        assert_eq!(default_decode(&token2, "User").unwrap(), Some(42));
     }
 
     #[test]
@@ -786,7 +786,7 @@ mod tests {
         init_test_key();
 
         let token = TokenConfig::encode(123, "TestModel").unwrap();
-        let decoded = TokenConfig::decode(&token, "TestModel");
+        let decoded = TokenConfig::decode(&token, "TestModel").unwrap();
 
         assert_eq!(decoded, Some(123));
     }

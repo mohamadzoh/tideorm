@@ -334,10 +334,7 @@ impl Schema {
 
     /// Quote an identifier for the current database type
     fn quote_identifier(&self, name: &str) -> String {
-        match self.database_type {
-            DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
-        }
+        quote_identifier_for_db(name, self.database_type)
     }
 
     /// Get the database type
@@ -889,10 +886,7 @@ impl TableBuilder {
 
     /// Quote an identifier
     fn quote_identifier(&self, name: &str) -> String {
-        match self.database_type {
-            DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
-        }
+        quote_identifier_for_db(name, self.database_type)
     }
 }
 
@@ -1214,10 +1208,7 @@ impl AlterTableBuilder {
     }
 
     fn quote_identifier(&self, name: &str) -> String {
-        match self.database_type {
-            DatabaseType::Postgres | DatabaseType::SQLite => format!("\"{}\"", name),
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
-        }
+        quote_identifier_for_db(name, self.database_type)
     }
 }
 
@@ -1969,9 +1960,15 @@ fn detect_database_type(db: &Database) -> DatabaseType {
 
 /// Quote an identifier for the given database type (standalone helper for Migrator)
 fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> String {
+    quote_identifier_for_db(name, db_type)
+}
+
+fn quote_identifier_for_db(name: &str, db_type: DatabaseType) -> String {
     match db_type {
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
-        _ => format!(r#""{}""#, name), // Postgres & SQLite use double quotes
+        DatabaseType::MySQL | DatabaseType::MariaDB => {
+            format!("`{}`", name.replace('`', "``"))
+        }
+        _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
 

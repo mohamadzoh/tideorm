@@ -72,11 +72,12 @@
 //!
 //! All cache implementations are thread-safe and can be shared across async tasks.
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -324,18 +325,14 @@ impl QueryCache {
 
     /// Enable the cache
     pub fn enable(&self) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.enabled = true;
-        }
+        self.config.write().enabled = true;
         self.enabled.store(true, Ordering::Release);
         self
     }
 
     /// Disable the cache
     pub fn disable(&self) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.enabled = false;
-        }
+        self.config.write().enabled = false;
         self.enabled.store(false, Ordering::Release);
         self
     }
@@ -347,47 +344,37 @@ impl QueryCache {
 
     /// Set the maximum number of cache entries
     pub fn set_max_entries(&self, max: usize) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.max_entries = max;
-        }
+        self.config.write().max_entries = max;
         self
     }
 
     /// Set the default TTL for cache entries
     pub fn set_default_ttl(&self, ttl: Duration) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.default_ttl = ttl;
-        }
+        self.config.write().default_ttl = ttl;
         self
     }
 
     /// Set the cache eviction strategy
     pub fn set_strategy(&self, strategy: CacheStrategy) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.strategy = strategy;
-        }
+        self.config.write().strategy = strategy;
         self
     }
 
     /// Set the key prefix
     pub fn set_key_prefix(&self, prefix: &str) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.key_prefix = Some(prefix.to_string());
-        }
+        self.config.write().key_prefix = Some(prefix.to_string());
         self
     }
 
     /// Set whether to cache empty results
     pub fn set_cache_empty_results(&self, cache_empty: bool) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.cache_empty_results = cache_empty;
-        }
+        self.config.write().cache_empty_results = cache_empty;
         self
     }
 
     /// Get current configuration
     pub fn config(&self) -> Option<CacheConfig> {
-        self.config.read().ok().map(|c| c.clone())
+        Some(self.config.read().clone())
     }
 
     // =========================================================================
@@ -399,8 +386,8 @@ impl QueryCache {
         let prefix = self
             .config
             .read()
-            .ok()
-            .and_then(|c| c.key_prefix.clone())
+            .key_prefix
+            .clone()
             .unwrap_or_default();
 
         if prefix.is_empty() {
@@ -417,7 +404,7 @@ impl QueryCache {
         }
 
         // Check if entry exists and is not expired
-        let mut cache = self.cache.write().ok()?;
+        let mut cache = self.cache.write();
 
         if let Some(entry) = cache.get_mut(key) {
             if entry.is_expired() {
@@ -454,8 +441,7 @@ impl QueryCache {
 
         let config = self
             .config
-            .read()
-            .map_err(|_| Error::internal("Failed to read cache config"))?;
+            .read();
 
         let ttl = ttl.unwrap_or(config.default_ttl);
         let max_entries = config.max_entries;
@@ -470,8 +456,7 @@ impl QueryCache {
                 let should_cache = self
                     .config
                     .read()
-                    .map(|c| c.cache_empty_results)
-                    .unwrap_or(true);
+                    .cache_empty_results;
                 if !should_cache {
                     return Ok(());
                 }
@@ -483,8 +468,7 @@ impl QueryCache {
 
         let mut cache = self
             .cache
-            .write()
-            .map_err(|_| Error::internal("Failed to acquire cache write lock"))?;
+            .write();
 
         // Evict if necessary
         while cache.len() >= max_entries {
@@ -511,15 +495,12 @@ impl QueryCache {
 
     /// Remove a specific cache entry
     pub fn invalidate(&self, key: &str) -> bool {
-        if let Ok(mut cache) = self.cache.write() {
-            if let Some(removed) = cache.remove(key) {
-                self.invalidations.fetch_add(1, Ordering::Relaxed);
-                self.record_entries_len(cache.len());
-                self.subtract_size_bytes(removed.size_bytes);
-                true
-            } else {
-                false
-            }
+        let mut cache = self.cache.write();
+        if let Some(removed) = cache.remove(key) {
+            self.invalidations.fetch_add(1, Ordering::Relaxed);
+            self.record_entries_len(cache.len());
+            self.subtract_size_bytes(removed.size_bytes);
+            true
         } else {
             false
         }
@@ -527,48 +508,41 @@ impl QueryCache {
 
     /// Invalidate all cache entries for a specific model/table
     pub fn invalidate_model(&self, model_name: &str) {
-        if let Ok(mut cache) = self.cache.write() {
-            let keys_to_remove: Vec<String> = cache
-                .iter()
-                .filter(|(_, entry)| entry.model_name == model_name)
-                .map(|(key, _)| key.clone())
-                .collect();
+        let mut cache = self.cache.write();
+        let keys_to_remove: Vec<String> = cache
+            .iter()
+            .filter(|(_, entry)| entry.model_name == model_name)
+            .map(|(key, _)| key.clone())
+            .collect();
 
-            let count = keys_to_remove.len();
-            let mut removed_size = 0;
-            for key in keys_to_remove {
-                if let Some(entry) = cache.remove(&key) {
-                    removed_size += entry.size_bytes;
-                }
+        let count = keys_to_remove.len();
+        let mut removed_size = 0;
+        for key in keys_to_remove {
+            if let Some(entry) = cache.remove(&key) {
+                removed_size += entry.size_bytes;
             }
+        }
 
-            if count > 0 {
-                self.invalidations
-                    .fetch_add(count as u64, Ordering::Relaxed);
-                self.record_entries_len(cache.len());
-                self.subtract_size_bytes(removed_size);
-            }
+        if count > 0 {
+            self.invalidations
+                .fetch_add(count as u64, Ordering::Relaxed);
+            self.record_entries_len(cache.len());
+            self.subtract_size_bytes(removed_size);
         }
     }
 
     /// Clear the entire cache
     pub fn clear(&self) {
-        let count = if let Ok(mut cache) = self.cache.write() {
-            let count = cache.len();
-            let removed_size = cache.values().map(|entry| entry.size_bytes).sum::<usize>();
-            let old_cache = std::mem::take(&mut *cache);
-            drop(cache);
-            drop(old_cache);
-            (count, removed_size)
-        } else {
-            (0, 0)
-        };
+        let mut cache = self.cache.write();
+        let count = cache.len();
+        let removed_size = cache.values().map(|entry| entry.size_bytes).sum::<usize>();
+        cache.clear();
 
-        if count.0 > 0 {
+        if count > 0 {
             self.invalidations
-                .fetch_add(count.0 as u64, Ordering::Relaxed);
+                .fetch_add(count as u64, Ordering::Relaxed);
             self.record_entries_len(0);
-            self.subtract_size_bytes(count.1);
+            self.subtract_size_bytes(removed_size);
         }
     }
 
@@ -584,37 +558,32 @@ impl QueryCache {
         self.evictions.store(0, Ordering::Relaxed);
         self.invalidations.store(0, Ordering::Relaxed);
 
-        if let Ok(cache) = self.cache.read() {
-            self.record_entries_len(cache.len());
-            self.overwrite_size_bytes(cache.values().map(|entry| entry.size_bytes).sum());
-        } else {
-            self.record_entries_len(0);
-            self.overwrite_size_bytes(0);
-        }
+        let cache = self.cache.read();
+        self.record_entries_len(cache.len());
+        self.overwrite_size_bytes(cache.values().map(|entry| entry.size_bytes).sum());
     }
 
     /// Evict expired entries
     pub fn evict_expired(&self) {
-        if let Ok(mut cache) = self.cache.write() {
-            let keys_to_remove: Vec<String> = cache
-                .iter()
-                .filter(|(_, entry)| entry.is_expired())
-                .map(|(key, _)| key.clone())
-                .collect();
+        let mut cache = self.cache.write();
+        let keys_to_remove: Vec<String> = cache
+            .iter()
+            .filter(|(_, entry)| entry.is_expired())
+            .map(|(key, _)| key.clone())
+            .collect();
 
-            let count = keys_to_remove.len();
-            let mut removed_size = 0;
-            for key in keys_to_remove {
-                if let Some(entry) = cache.remove(&key) {
-                    removed_size += entry.size_bytes;
-                }
+        let count = keys_to_remove.len();
+        let mut removed_size = 0;
+        for key in keys_to_remove {
+            if let Some(entry) = cache.remove(&key) {
+                removed_size += entry.size_bytes;
             }
+        }
 
-            if count > 0 {
-                self.evictions.fetch_add(count as u64, Ordering::Relaxed);
-                self.record_entries_len(cache.len());
-                self.subtract_size_bytes(removed_size);
-            }
+        if count > 0 {
+            self.evictions.fetch_add(count as u64, Ordering::Relaxed);
+            self.record_entries_len(cache.len());
+            self.subtract_size_bytes(removed_size);
         }
     }
 
@@ -623,8 +592,7 @@ impl QueryCache {
         let strategy = self
             .config
             .read()
-            .map(|c| c.strategy)
-            .unwrap_or(CacheStrategy::LRU);
+            .strategy;
 
         let key_to_remove = match strategy {
             CacheStrategy::LRU => cache
@@ -660,10 +628,9 @@ impl QueryCache {
 
     /// Check if a key exists in the cache (without updating access time)
     pub fn contains(&self, key: &str) -> bool {
-        if let Ok(cache) = self.cache.read() {
-            if let Some(entry) = cache.get(key) {
-                return !entry.is_expired();
-            }
+        let cache = self.cache.read();
+        if let Some(entry) = cache.get(key) {
+            return !entry.is_expired();
         }
         false
     }
@@ -828,18 +795,14 @@ impl PreparedStatementCache {
 
     /// Enable the cache
     pub fn enable(&self) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.enabled = true;
-        }
+        self.config.write().enabled = true;
         self.enabled.store(true, Ordering::Release);
         self
     }
 
     /// Disable the cache
     pub fn disable(&self) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.enabled = false;
-        }
+        self.config.write().enabled = false;
         self.enabled.store(false, Ordering::Release);
         self
     }
@@ -851,23 +814,19 @@ impl PreparedStatementCache {
 
     /// Set the maximum number of cached statements
     pub fn set_max_statements(&self, max: usize) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.max_statements = max;
-        }
+        self.config.write().max_statements = max;
         self
     }
 
     /// Set the maximum age for cached statements
     pub fn set_max_age(&self, age: Duration) -> &Self {
-        if let Ok(mut config) = self.config.write() {
-            config.max_age = age;
-        }
+        self.config.write().max_age = age;
         self
     }
 
     /// Get current configuration
     pub fn config(&self) -> Option<PreparedStatementConfig> {
-        self.config.read().ok().map(|c| c.clone())
+        Some(self.config.read().clone())
     }
 
     // =========================================================================
@@ -893,34 +852,29 @@ impl PreparedStatementCache {
         let max_age = self
             .config
             .read()
-            .map(|c| c.max_age)
-            .unwrap_or(Duration::from_secs(3600));
+            .max_age;
 
         // Fast path: read-only cache hit without taking the write lock.
-        if let Ok(statements) = self.statements.read() {
+        {
+            let statements = self.statements.read();
             if let Some(stmt) = statements.get(&hash) {
                 if stmt.prepared_at.elapsed() < max_age {
                     let sql = stmt.sql.clone();
                     drop(statements);
-
-                    if let Ok(mut stats) = self.stats.write() {
-                        stats.hits += 1;
-                    }
+                    self.stats.write().hits += 1;
                     return (sql, true);
                 }
             }
         }
 
         // Remove expired entries or resolve races under the write lock.
-        if let Ok(mut statements) = self.statements.write() {
+        {
+            let mut statements = self.statements.write();
             if let Some(stmt) = statements.get(&hash) {
                 if stmt.prepared_at.elapsed() < max_age {
                     let sql = stmt.sql.clone();
                     drop(statements);
-
-                    if let Ok(mut stats) = self.stats.write() {
-                        stats.hits += 1;
-                    }
+                    self.stats.write().hits += 1;
                     return (sql, true);
                 }
 
@@ -931,9 +885,7 @@ impl PreparedStatementCache {
         // Cache miss - prepare and cache
         self.cache_statement(sql);
 
-        if let Ok(mut stats) = self.stats.write() {
-            stats.misses += 1;
-        }
+        self.stats.write().misses += 1;
 
         (sql.to_string(), false)
     }
@@ -941,30 +893,25 @@ impl PreparedStatementCache {
     /// Cache a statement
     fn cache_statement(&self, sql: &str) {
         let hash = Self::hash_sql(sql);
-        let max_statements = self.config.read().map(|c| c.max_statements).unwrap_or(500);
+        let max_statements = self.config.read().max_statements;
 
-        if let Ok(mut statements) = self.statements.write() {
-            // Evict if necessary (LRU)
-            while statements.len() >= max_statements {
-                let oldest_key = statements
-                    .iter()
-                    .min_by_key(|(_, stmt)| stmt.last_used)
-                    .map(|(key, _)| *key);
+        let mut statements = self.statements.write();
+        // Evict if necessary (LRU)
+        while statements.len() >= max_statements {
+            let oldest_key = statements
+                .iter()
+                .min_by_key(|(_, stmt)| stmt.last_used)
+                .map(|(key, _)| *key);
 
-                if let Some(key) = oldest_key {
-                    statements.remove(&key);
-                    if let Ok(mut stats) = self.stats.write() {
-                        stats.evictions += 1;
-                    }
-                }
-            }
-
-            statements.insert(hash, PreparedStatement::new(sql.to_string()));
-
-            if let Ok(mut stats) = self.stats.write() {
-                stats.cached_count = statements.len();
+            if let Some(key) = oldest_key {
+                statements.remove(&key);
+                self.stats.write().evictions += 1;
             }
         }
+
+        statements.insert(hash, PreparedStatement::new(sql.to_string()));
+
+        self.stats.write().cached_count = statements.len();
     }
 
     /// Record execution of a statement
@@ -975,61 +922,49 @@ impl PreparedStatementCache {
 
         let hash = Self::hash_sql(sql);
 
-        if let Ok(mut statements) = self.statements.write() {
+        {
+            let mut statements = self.statements.write();
             if let Some(stmt) = statements.get_mut(&hash) {
                 stmt.record_execution(execution_time_us);
             }
         }
 
-        if let Ok(mut stats) = self.stats.write() {
-            stats.total_executions += 1;
-        }
+        self.stats.write().total_executions += 1;
     }
 
     /// Invalidate a specific statement
     pub fn invalidate(&self, sql: &str) -> bool {
         let hash = Self::hash_sql(sql);
-        if let Ok(mut statements) = self.statements.write() {
-            let removed = statements.remove(&hash).is_some();
-            if removed {
-                if let Ok(mut stats) = self.stats.write() {
-                    stats.cached_count = statements.len();
-                }
-            }
-            removed
-        } else {
-            false
+        let mut statements = self.statements.write();
+        let removed = statements.remove(&hash).is_some();
+        if removed {
+            self.stats.write().cached_count = statements.len();
         }
+        removed
     }
 
     /// Clear all cached statements
     pub fn clear(&self) {
-        if let Ok(mut statements) = self.statements.write() {
-            statements.clear();
-            if let Ok(mut stats) = self.stats.write() {
-                stats.cached_count = 0;
-            }
-        }
+        let mut statements = self.statements.write();
+        statements.clear();
+        self.stats.write().cached_count = 0;
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> PreparedStatementStats {
-        self.stats.read().map(|s| s.clone()).unwrap_or_default()
+        self.stats.read().clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        if let Ok(mut stats) = self.stats.write() {
-            *stats = PreparedStatementStats::default();
-            if let Ok(statements) = self.statements.read() {
-                stats.cached_count = statements.len();
-            }
-        }
+        let mut stats = self.stats.write();
+        *stats = PreparedStatementStats::default();
+        stats.cached_count = self.statements.read().len();
     }
 
     /// Get the number of cached statements
     pub fn len(&self) -> usize {
-        self.statements.read().map(|s| s.len()).unwrap_or(0)
+        self.statements.read().len()
     }
 
     /// Check if cache is empty
@@ -1039,24 +974,21 @@ impl PreparedStatementCache {
 
     /// Get information about cached statements
     pub fn cached_statements_info(&self) -> Vec<CachedStatementInfo> {
-        if let Ok(statements) = self.statements.read() {
-            statements
-                .iter()
-                .map(|(hash, stmt)| CachedStatementInfo {
-                    hash: *hash,
-                    sql_preview: if stmt.sql.len() > 100 {
-                        format!("{}...", &stmt.sql[..100])
-                    } else {
-                        stmt.sql.clone()
-                    },
-                    execution_count: stmt.execution_count,
-                    avg_execution_time_us: stmt.avg_execution_time_us,
-                    age_secs: stmt.prepared_at.elapsed().as_secs(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        }
+        let statements = self.statements.read();
+        statements
+            .iter()
+            .map(|(hash, stmt)| CachedStatementInfo {
+                hash: *hash,
+                sql_preview: if stmt.sql.len() > 100 {
+                    format!("{}...", &stmt.sql[..100])
+                } else {
+                    stmt.sql.clone()
+                },
+                execution_count: stmt.execution_count,
+                avg_execution_time_us: stmt.avg_execution_time_us,
+                age_secs: stmt.prepared_at.elapsed().as_secs(),
+            })
+            .collect()
     }
 }
 

@@ -18,8 +18,8 @@
 //! - `DateTimeCaster` - DateTime values
 //! - `UuidCaster` - UUID values
 //! - `DecimalCaster` - Decimal numbers
-//! - `EncryptedCaster` - Encrypted string storage
-//! - `HashCaster` - Hashed values (one-way)
+//! - `EncryptedCaster` - Encrypted string storage using TideORM's encrypted payload format
+//! - `HashCaster` - Hashed values (one-way) stored as Argon2 hashes
 //! - `EnumCaster` - Database enum types
 //! - `ArrayCaster` - Array columns (PostgreSQL)
 //! - `CommaSeparatedCaster` - Store arrays as comma-separated strings
@@ -46,6 +46,9 @@
 //! ```
 
 use argon2::password_hash::PasswordVerifier;
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+use rand::random;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::marker::PhantomData;
@@ -502,12 +505,14 @@ pub trait AttributeCaster<T>: Sized {
 // ENCRYPTED TYPE
 // =============================================================================
 
-/// Encrypted string wrapper
+/// Encrypted value wrapper.
 ///
-/// Values are encrypted when stored in the database and decrypted when read.
-/// Uses AES-256-GCM encryption by default.
+/// Values are serialized to TideORM's encrypted payload format and must be
+/// deserialized from that same encrypted format.
+/// Uses XChaCha20-Poly1305 authenticated encryption.
 ///
 /// **Note**: You must configure an encryption key in TideConfig for this to work.
+/// Plaintext values are not accepted during deserialization.
 ///
 /// # Example
 ///
@@ -522,6 +527,9 @@ pub trait AttributeCaster<T>: Sized {
 pub struct Encrypted<T> {
     value: T,
 }
+
+const ENCRYPTED_PAYLOAD_AAD: &[u8] = b"tideorm:encrypted-field:v1";
+const ENCRYPTED_PAYLOAD_PREFIX: &str = "enc::";
 
 impl<T> Encrypted<T> {
     /// Create a new encrypted value
@@ -558,17 +566,27 @@ impl<T: Serialize> Serialize for Encrypted<T> {
     where
         S: serde::Serializer,
     {
-        // Serialize the value directly - encryption happens in the caster
-        self.value.serialize(serializer)
+        let plaintext = serde_json::to_vec(&self.value).map_err(serde::ser::Error::custom)?;
+        let encoded = encrypt_encrypted_payload(&plaintext).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&encoded)
     }
 }
 
-impl<'de, T: Deserialize<'de>> Deserialize<'de> for Encrypted<T> {
+impl<'de, T> Deserialize<'de> for Encrypted<T>
+where
+    T: serde::de::DeserializeOwned,
+{
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        T::deserialize(deserializer).map(|v| Self { value: v })
+        let text = String::deserialize(deserializer)?;
+        let ciphertext = text.strip_prefix(ENCRYPTED_PAYLOAD_PREFIX).ok_or_else(|| {
+            serde::de::Error::custom("Encrypted fields must use the encrypted payload format")
+        })?;
+        let plaintext = decrypt_encrypted_payload(ciphertext).map_err(serde::de::Error::custom)?;
+        let value = serde_json::from_slice(&plaintext).map_err(serde::de::Error::custom)?;
+        Ok(Self { value })
     }
 }
 
@@ -586,14 +604,65 @@ impl<T: Default> Default for Encrypted<T> {
     }
 }
 
+fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
+    let key = crate::tokenization::TokenConfig::get_encryption_key()?;
+    let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
+    let nonce_bytes: [u8; 24] = random();
+    let nonce = XNonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad: ENCRYPTED_PAYLOAD_AAD,
+            },
+        )
+        .map_err(|_| crate::Error::tokenization("Failed to encrypt field payload"))?;
+
+    let mut payload = Vec::with_capacity(24 + ciphertext.len());
+    payload.extend_from_slice(&nonce_bytes);
+    payload.extend_from_slice(&ciphertext);
+
+    Ok(format!(
+        "{}{}",
+        ENCRYPTED_PAYLOAD_PREFIX,
+        crate::tokenization::base64_url_encode(&payload)
+    ))
+}
+
+fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
+    let key = crate::tokenization::TokenConfig::get_encryption_key()?;
+    let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
+    let payload = crate::tokenization::base64_url_decode(encoded)
+        .ok_or_else(|| crate::Error::tokenization("Invalid encrypted field payload"))?;
+
+    if payload.len() <= 24 {
+        return Err(crate::Error::tokenization(
+            "Invalid encrypted field payload",
+        ));
+    }
+
+    let nonce = XNonce::from_slice(&payload[..24]);
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &payload[24..],
+                aad: ENCRYPTED_PAYLOAD_AAD,
+            },
+        )
+        .map_err(|_| crate::Error::tokenization("Failed to decrypt field payload"))
+}
+
 // =============================================================================
 // HASHED TYPE
 // =============================================================================
 
-/// Hashed string wrapper (one-way hash, e.g., for passwords)
+/// Hashed string wrapper (one-way hash, e.g., for passwords).
 ///
-/// Values are hashed when stored in the database. Provides verify method
-/// for checking against plain text values.
+/// Values are stored as Argon2 hashes. `verify` accepts only Argon2 hashes and
+/// returns `false` for any other hash format.
 ///
 /// # Example
 ///
@@ -627,7 +696,7 @@ impl Hashed {
         }
     }
 
-    /// Create from an existing hash (when reading from DB)
+    /// Create from an existing Argon2 hash.
     pub fn from_hash(hash: String) -> Self {
         Self { hash }
     }
@@ -637,16 +706,15 @@ impl Hashed {
         &self.hash
     }
 
-    /// Verify a plain text value against the hash
+    /// Verify a plain text value against the stored Argon2 hash.
     pub fn verify(&self, plain_text: &str) -> bool {
-        if let Ok(parsed_hash) = argon2::password_hash::PasswordHash::new(&self.hash) {
-            return argon2::Argon2::default()
-                .verify_password(plain_text.as_bytes(), &parsed_hash)
-                .is_ok();
-        }
+        let Ok(parsed_hash) = argon2::password_hash::PasswordHash::new(&self.hash) else {
+            return false;
+        };
 
-        // Legacy compatibility for hashes created before Argon2 migration.
-        Self::compute_legacy_hash(plain_text) == self.hash
+        argon2::Argon2::default()
+            .verify_password(plain_text.as_bytes(), &parsed_hash)
+            .is_ok()
     }
 
     /// Compute an Argon2 hash suitable for password storage.
@@ -658,15 +726,6 @@ impl Hashed {
             .hash_password(input.as_bytes(), &salt)
             .map(|hash| hash.to_string())
             .expect("argon2 hashing should succeed with generated salt")
-    }
-
-    fn compute_legacy_hash(input: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        input.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
     }
 }
 

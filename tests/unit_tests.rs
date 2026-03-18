@@ -4320,16 +4320,7 @@ mod relation_constraints_tests {
 
 #[cfg(test)]
 mod hashed_type_tests {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     use tideorm::types::Hashed;
-
-    fn legacy_hash(input: &str) -> String {
-        let mut hasher = DefaultHasher::new();
-        input.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
-    }
 
     #[test]
     fn test_hashed_uses_argon2_format() {
@@ -4355,10 +4346,10 @@ mod hashed_type_tests {
     }
 
     #[test]
-    fn test_hashed_verify_supports_legacy_hashes() {
-        let hashed = Hashed::from_hash(legacy_hash("secret123"));
+    fn test_hashed_verify_rejects_non_argon2_hashes() {
+        let hashed = Hashed::from_hash("legacy-hash-value".to_string());
 
-        assert!(hashed.verify("secret123"));
+        assert!(!hashed.verify("secret123"));
         assert!(!hashed.verify("wrong-password"));
     }
 }
@@ -4369,10 +4360,21 @@ mod hashed_type_tests {
 
 #[cfg(test)]
 mod attribute_casting_tests {
+    use std::sync::Once;
+
     use serde_json::json;
+    use tideorm::tokenization::TokenConfig;
     use tideorm::types::{
         CastType, CastValue, Collection, CommaSeparated, Encrypted, Hashed, WithDefault,
     };
+
+    static ENCRYPTED_INIT: Once = Once::new();
+
+    fn init_encrypted_test_key() {
+        ENCRYPTED_INIT.call_once(|| {
+            TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
+        });
+    }
 
     // Encrypted type tests
     #[test]
@@ -4405,6 +4407,56 @@ mod attribute_casting_tests {
     fn test_encrypted_from() {
         let encrypted: Encrypted<String> = "secret".to_string().into();
         assert_eq!(encrypted.get(), "secret");
+    }
+
+    #[test]
+    fn test_encrypted_serializes_to_ciphertext() {
+        init_encrypted_test_key();
+
+        let encrypted = Encrypted::new("secret".to_string());
+        let serialized = serde_json::to_value(&encrypted).unwrap();
+
+        let ciphertext = serialized.as_str().unwrap();
+        assert!(ciphertext.starts_with("enc::"));
+        assert_ne!(ciphertext, "secret");
+        assert!(!ciphertext.contains("secret"));
+    }
+
+    #[test]
+    fn test_encrypted_round_trips_from_ciphertext() {
+        init_encrypted_test_key();
+
+        let encrypted = Encrypted::new("secret".to_string());
+        let serialized = serde_json::to_value(&encrypted).unwrap();
+        let round_trip: Encrypted<String> = serde_json::from_value(serialized).unwrap();
+
+        assert_eq!(round_trip.get(), "secret");
+    }
+
+    #[test]
+    fn test_encrypted_rejects_plaintext_payloads() {
+        let err = serde_json::from_value::<Encrypted<String>>(serde_json::json!("secret"))
+            .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("Encrypted fields must use the encrypted payload format"));
+    }
+
+    #[test]
+    fn test_encrypted_rejects_tampered_ciphertext() {
+        init_encrypted_test_key();
+
+        let encrypted = Encrypted::new("secret".to_string());
+        let serialized = serde_json::to_value(&encrypted).unwrap();
+        let ciphertext = serialized.as_str().unwrap();
+        let mut chars: Vec<char> = ciphertext.chars().collect();
+        let tamper_index = chars.len().saturating_sub(4);
+        chars[tamper_index] = if chars[tamper_index] == 'A' { 'B' } else { 'A' };
+        let tampered: String = chars.into_iter().collect();
+
+        let err = serde_json::from_value::<Encrypted<String>>(serde_json::json!(tampered)).unwrap_err();
+        assert!(err.to_string().contains("Failed to decrypt field payload") || err.to_string().contains("Invalid encrypted field payload"));
     }
 
     // Hashed type tests
@@ -4761,6 +4813,48 @@ mod attribute_casting_tests {
 
         let wd_none: WithDefault<String> = WithDefault::none();
         assert_eq!(wd_none.into_option(), None);
+    }
+}
+
+#[cfg(test)]
+mod soft_delete_query_tests {
+    use tideorm::prelude::*;
+
+    #[derive(Model)]
+    #[tideorm(table = "query_soft_delete_override", soft_delete)]
+    struct CustomSoftDeleteModel {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+        archived_on: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    impl SoftDelete for CustomSoftDeleteModel {
+        fn deleted_at_column() -> &'static str {
+            "archived_on"
+        }
+
+        fn deleted_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+            self.archived_on
+        }
+
+        fn set_deleted_at(&mut self, timestamp: Option<chrono::DateTime<chrono::Utc>>) {
+            self.archived_on = timestamp;
+        }
+    }
+
+    #[test]
+    fn test_soft_delete_query_uses_overridden_column() {
+        let sql = CustomSoftDeleteModel::query().build_sql_preview();
+        assert!(sql.contains("\"archived_on\" IS NULL"));
+        assert!(!sql.contains("\"deleted_at\" IS NULL"));
+    }
+
+    #[test]
+    fn test_only_trashed_query_uses_overridden_column() {
+        let sql = CustomSoftDeleteModel::query().only_trashed().build_sql_preview();
+        assert!(sql.contains("\"archived_on\" IS NOT NULL"));
+        assert!(!sql.contains("\"deleted_at\" IS NOT NULL"));
     }
 }
 

@@ -46,8 +46,15 @@ fn default_encode_fails_without_configured_key() {
 }
 
 #[test]
-fn default_decode_without_configured_key_returns_none() {
-    assert_eq!(default_decode("not-a-real-token", "MissingKeyModel"), None);
+fn default_decode_fails_without_configured_key() {
+    let err = default_decode("not-a-real-token", "MissingKeyModel").unwrap_err();
+
+    match err {
+        Error::Tokenization { message } => {
+            assert!(message.contains("No encryption key configured"));
+        }
+        other => panic!("expected tokenization error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -487,7 +487,7 @@ impl<M: Model> QueryBuilder<M> {
             return None;
         }
 
-        let deleted_at = self.sea_column_expr(db_type, "deleted_at");
+        let deleted_at = self.sea_column_expr(db_type, M::deleted_at_column());
         if self.only_trashed {
             Some(deleted_at.is_not_null())
         } else if !self.include_trashed {
@@ -900,7 +900,7 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         if M::soft_delete_enabled() {
-            let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
+            let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
             if self.only_trashed {
                 clauses.push(format!("{} IS NOT NULL", deleted_at));
             } else if !self.include_trashed {
@@ -1349,7 +1349,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
-        let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
+        let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
         let now = Self::current_timestamp_sql(db_type);
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
@@ -1381,7 +1381,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let table = db_sql::quote_ident(db_type, M::table_name());
-        let deleted_at = db_sql::quote_ident(db_type, "deleted_at");
+        let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
         let sql = if where_sql.is_empty() {
             format!(

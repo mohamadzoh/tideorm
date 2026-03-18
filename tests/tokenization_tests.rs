@@ -47,7 +47,7 @@ mod unit_tests {
         let model = "User";
 
         let token = default_encode(id, model).unwrap();
-        let decoded = default_decode(&token, model);
+        let decoded = default_decode(&token, model).unwrap();
 
         assert_eq!(decoded, Some(id));
     }
@@ -69,7 +69,7 @@ mod unit_tests {
 
         for (id, model) in test_cases {
             let token = default_encode(id, model).unwrap();
-            let decoded = default_decode(&token, model);
+            let decoded = default_decode(&token, model).unwrap();
             assert_eq!(decoded, Some(id), "Failed for id={}, model={}", id, model);
         }
     }
@@ -114,9 +114,9 @@ mod unit_tests {
         assert_ne!(product_token, order_token);
 
         // But each decodes correctly with its own model
-        assert_eq!(default_decode(&user_token, "User"), Some(id));
-        assert_eq!(default_decode(&product_token, "Product"), Some(id));
-        assert_eq!(default_decode(&order_token, "Order"), Some(id));
+        assert_eq!(default_decode(&user_token, "User").unwrap(), Some(id));
+        assert_eq!(default_decode(&product_token, "Product").unwrap(), Some(id));
+        assert_eq!(default_decode(&order_token, "Order").unwrap(), Some(id));
     }
 
     #[test]
@@ -127,9 +127,9 @@ mod unit_tests {
         let user_token = default_encode(id, "User").unwrap();
 
         // Trying to decode a User token as a Product should fail
-        assert_eq!(default_decode(&user_token, "Product"), None);
-        assert_eq!(default_decode(&user_token, "Order"), None);
-        assert_eq!(default_decode(&user_token, "SomeOtherModel"), None);
+        assert_eq!(default_decode(&user_token, "Product").unwrap(), None);
+        assert_eq!(default_decode(&user_token, "Order").unwrap(), None);
+        assert_eq!(default_decode(&user_token, "SomeOtherModel").unwrap(), None);
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod unit_tests {
                 let tampered: String = chars.into_iter().collect();
 
                 assert_eq!(
-                    default_decode(&tampered, "User"),
+                    default_decode(&tampered, "User").unwrap(),
                     None,
                     "Tampered token at position {} should fail to decode",
                     pos
@@ -173,7 +173,7 @@ mod unit_tests {
 
         for invalid in invalid_tokens {
             assert_eq!(
-                default_decode(invalid, "User"),
+                default_decode(invalid, "User").unwrap(),
                 None,
                 "Invalid token '{}' should fail to decode",
                 invalid
@@ -198,9 +198,9 @@ mod unit_tests {
         assert_ne!(token2, token3);
         assert_ne!(token1, token3);
 
-        assert_eq!(default_decode(&token1, model), Some(id));
-        assert_eq!(default_decode(&token2, model), Some(id));
-        assert_eq!(default_decode(&token3, model), Some(id));
+        assert_eq!(default_decode(&token1, model).unwrap(), Some(id));
+        assert_eq!(default_decode(&token2, model).unwrap(), Some(id));
+        assert_eq!(default_decode(&token3, model).unwrap(), Some(id));
     }
 
     #[test]
@@ -244,7 +244,7 @@ mod unit_tests {
         let model = "TestModel";
 
         let token = TokenConfig::encode(id, model).unwrap();
-        let decoded = TokenConfig::decode(&token, model);
+        let decoded = TokenConfig::decode(&token, model).unwrap();
 
         assert_eq!(decoded, Some(id));
     }
@@ -465,9 +465,9 @@ mod custom_encoder_tests {
         Ok(format!("{}-{}", model.to_lowercase(), id))
     }
 
-    fn simple_decoder(token: &str, model: &str) -> Option<i64> {
+    fn simple_decoder(token: &str, model: &str) -> Result<Option<i64>> {
         let prefix = format!("{}-", model.to_lowercase());
-        token.strip_prefix(&prefix)?.parse().ok()
+        Ok(token.strip_prefix(&prefix).and_then(|id| id.parse().ok()))
     }
 
     // Model with custom encoder
@@ -633,7 +633,7 @@ mod edge_cases {
 
         // Empty model name should still work
         let token = default_encode(42, "").unwrap();
-        let decoded = default_decode(&token, "");
+        let decoded = default_decode(&token, "").unwrap();
 
         assert_eq!(decoded, Some(42));
     }
@@ -644,7 +644,7 @@ mod edge_cases {
 
         let long_name = "A".repeat(1000);
         let token = default_encode(42, &long_name).unwrap();
-        let decoded = default_decode(&token, &long_name);
+        let decoded = default_decode(&token, &long_name).unwrap();
 
         assert_eq!(decoded, Some(42));
     }
@@ -655,7 +655,7 @@ mod edge_cases {
 
         let unicode_name = "用户模型🔐";
         let token = default_encode(42, unicode_name).unwrap();
-        let decoded = default_decode(&token, unicode_name);
+        let decoded = default_decode(&token, unicode_name).unwrap();
 
         assert_eq!(decoded, Some(42));
     }
@@ -671,7 +671,7 @@ mod edge_cases {
             "model_with_underscores",
         ] {
             let token = default_encode(42, name).unwrap();
-            let decoded = default_decode(&token, name);
+            let decoded = default_decode(&token, name).unwrap();
             assert_eq!(decoded, Some(42), "Failed for model name: {}", name);
         }
     }
@@ -684,7 +684,7 @@ mod edge_cases {
 
         for id in boundary_ids {
             let token = default_encode(id, "Boundary").unwrap();
-            let decoded = default_decode(&token, "Boundary");
+            let decoded = default_decode(&token, "Boundary").unwrap();
             assert_eq!(decoded, Some(id), "Failed for boundary ID: {}", id);
         }
     }

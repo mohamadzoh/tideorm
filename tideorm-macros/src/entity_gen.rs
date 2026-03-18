@@ -38,6 +38,15 @@ fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
     let index_impls = &ctx.index_impls;
     let unique_index_impls = &ctx.unique_index_impls;
     let soft_delete_enabled = ctx.soft_delete_enabled;
+    let deleted_at_column_impl = if soft_delete_enabled {
+        quote! {
+            fn deleted_at_column() -> &'static str {
+                <Self as ::tideorm::SoftDelete>::deleted_at_column()
+            }
+        }
+    } else {
+        quote! {}
+    };
     let timestamps_enabled = ctx.timestamps_enabled;
     let allowed_languages_impl = ctx.allowed_languages_impl();
     let fallback_language_impl = ctx.fallback_language_impl();
@@ -138,6 +147,7 @@ fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
             fn has_one_attached_file() -> Vec<&'static str> { vec![#(#has_one_files),*] }
             fn has_many_attached_files() -> Vec<&'static str> { vec![#(#has_many_files),*] }
             fn soft_delete_enabled() -> bool { #soft_delete_enabled }
+            #deleted_at_column_impl
             fn has_timestamps() -> bool { #timestamps_enabled }
             fn indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#index_impls),*] }
             fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#unique_index_impls),*] }

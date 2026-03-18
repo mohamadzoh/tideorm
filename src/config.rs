@@ -253,6 +253,14 @@ impl DatabaseType {
     }
 }
 
+fn rewrite_driver_url(url: &str) -> String {
+    if let Some(remainder) = url.strip_prefix("mariadb://") {
+        format!("mysql://{}", remainder)
+    } else {
+        url.to_string()
+    }
+}
+
 impl std::fmt::Display for DatabaseType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1163,10 +1171,10 @@ impl TideConfig {
     ///
     /// ```rust,ignore
     /// // Matching decoder for the prefix-based encoder
-    /// fn custom_decoder(token: &str, model_name: &str) -> Option<i64> {
+    /// fn custom_decoder(token: &str, model_name: &str) -> tideorm::Result<Option<i64>> {
     ///     let prefix = format!("{}-", model_name.to_lowercase());
-    ///     token.strip_prefix(&prefix)
-    ///         .and_then(|id_str| id_str.parse().ok())
+    ///     Ok(token.strip_prefix(&prefix)
+    ///         .and_then(|id_str| id_str.parse().ok()))
     /// }
     ///
     /// TideConfig::init()
@@ -1252,14 +1260,7 @@ impl TideConfig {
 
         // For MariaDB URLs, rewrite to mysql:// for the connection driver
         // (SeaORM/sqlx only understands mysql:// scheme)
-            let connect_url = if url.to_lowercase().starts_with("mariadb://") {
-                let remainder = url
-                    .strip_prefix("mariadb://")
-                    .unwrap_or(&url);
-                format!("mysql://{}", remainder)
-        } else {
-            url.clone()
-        };
+        let connect_url = rewrite_driver_url(&url);
 
         // Store pool config globally
         let _ = GLOBAL_POOL_CONFIG.set(self.pool.clone());

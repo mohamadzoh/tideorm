@@ -629,7 +629,7 @@ impl Tokenizable for Document {
     // Custom decoder
     fn token_decoder() -> Option<TokenDecoder> {
         Some(|token, _model| {
-            token.strip_prefix("DOC-")?.parse().ok()
+            Ok(token.strip_prefix("DOC-")?.parse().ok())
         })
     }
     
@@ -654,7 +654,7 @@ TokenConfig::set_encoder(|id, model| {
 
 TokenConfig::set_decoder(|token, model| {
     let prefix = format!("{}-", model.to_lowercase());
-    token.strip_prefix(&prefix)?.parse().ok()
+    Ok(token.strip_prefix(&prefix)?.parse().ok())
 });
 ```
 

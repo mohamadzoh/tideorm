@@ -154,6 +154,10 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         false
     }
 
+    fn deleted_at_column() -> &'static str {
+        "deleted_at"
+    }
+
     fn has_timestamps() -> bool {
         false
     }

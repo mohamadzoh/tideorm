@@ -49,6 +49,26 @@ fn test_database_type_from_url() {
 }
 
 #[test]
+fn test_rewrite_driver_url_for_mariadb() {
+    assert_eq!(
+        rewrite_driver_url("mariadb://localhost/test"),
+        "mysql://localhost/test"
+    );
+}
+
+#[test]
+fn test_rewrite_driver_url_leaves_malformed_mariadb_urls_unchanged() {
+    assert_eq!(
+        rewrite_driver_url("mariadb:/localhost/test"),
+        "mariadb:/localhost/test"
+    );
+    assert_eq!(
+        rewrite_driver_url("mariadb:localhost/test"),
+        "mariadb:localhost/test"
+    );
+}
+
+#[test]
 fn test_database_type_supports_json() {
     assert!(DatabaseType::Postgres.supports_json());
     assert!(DatabaseType::MySQL.supports_json());
