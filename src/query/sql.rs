@@ -1410,6 +1410,17 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn ensure_mutation_has_no_explicit_filters(&self, operation: &str) -> Result<()> {
+        if self.has_explicit_mutation_filters() {
+            Err(Error::invalid_query(format!(
+                "{} does not accept WHERE filters; use delete() when you intend to target specific rows",
+                operation
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     pub async fn delete(self) -> Result<u64> {
         self.ensure_query_is_valid()?;
         self.ensure_mutation_query_is_safe("delete")?;
@@ -1428,6 +1439,27 @@ impl<M: Model> QueryBuilder<M> {
         let error_context = self.build_query_error_context(Some(sql.clone()));
         self.current_db()?
             .__execute_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context))
+    }
+
+    /// Delete every row in the table represented by this query.
+    ///
+    /// This is an explicit opt-in escape hatch for full-table deletion and is kept
+    /// separate from `delete()` so accidental unfiltered bulk deletes remain blocked.
+    pub async fn delete_all(self) -> Result<u64> {
+        self.ensure_query_is_valid()?;
+        self.ensure_mutation_query_is_safe("delete_all")?;
+        self.ensure_mutation_has_no_explicit_filters("delete_all")?;
+
+        let db_type = self.db_type_for_sql();
+        let table = db_sql::quote_ident(db_type, M::table_name());
+        let sql = format!("DELETE FROM {}", table);
+
+        self.log_query(&sql);
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        self.current_db()?
+            .__execute_with_params(&sql, Vec::new())
             .await
             .map_err(|err| err.with_context(error_context))
     }

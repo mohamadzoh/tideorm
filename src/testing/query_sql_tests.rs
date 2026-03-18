@@ -65,6 +65,22 @@ fn mutation_guard_rejects_empty_nested_or_groups() {
     assert!(err.to_string().contains("requires at least one explicit filter"));
 }
 
+#[test]
+fn delete_all_accepts_unfiltered_queries() {
+    assert!(MutationGuardUser::query()
+        .ensure_mutation_has_no_explicit_filters("delete_all")
+        .is_ok());
+}
+
+#[test]
+fn delete_all_rejects_filtered_queries() {
+    let err = MutationGuardUser::query()
+        .where_eq("id", 1)
+        .ensure_mutation_has_no_explicit_filters("delete_all")
+        .unwrap_err();
+    assert!(err.to_string().contains("does not accept WHERE filters"));
+}
+
 #[derive(tideorm::Model)]
 #[tideorm(table = "query_count_guard_users")]
 struct QueryCountGuardUser {

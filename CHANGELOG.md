@@ -5,6 +5,23 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-03-18
+
+### Fixed
+
+- Repaired all-features build breakage after the reconfigurable global-database refactor by updating direct SeaORM call sites to borrow owned internal connections correctly.
+- Restored consistent full-text SQL parameterization coverage across the query and full-text test suites, including PostgreSQL ranked search placeholders and SQLite FTS pagination bindings.
+- Tightened encrypted-field missing-key coverage so integration tests now assert the actionable startup-configuration error message returned by `Encrypted<T>`.
+
+### Changed
+
+- Documented resettable global configuration, tokenization override reset behavior, and the batched nested many-model save/update/delete paths in the README and mdBook chapters.
+
+### Internal
+
+- Removed stale imports left behind by the runtime-global refactor.
+- Verified the release with `cargo test --all-features`.
+
 ## [0.8.0] - 2026-03-16
 
 ### Changed
@@ -526,7 +543,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/mohamadzoh/tideorm/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/mohamadzoh/tideorm/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/mohamadzoh/tideorm/compare/v0.7.0...v0.7.2
