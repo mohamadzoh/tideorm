@@ -1119,6 +1119,27 @@ impl<M: Model> QueryBuilder<M> {
         self.build_select_sql_with_params_for_db(self.db_type_for_sql())
     }
 
+    fn build_count_sql_with_params_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+        let mut count_query = self.clone();
+        count_query.order_by.clear();
+        count_query.limit_value = None;
+        count_query.offset_value = None;
+
+        let (inner_sql, params) = count_query.build_select_sql_with_params_for_db(db_type);
+        (
+            format!(
+                "SELECT COUNT(*) AS count FROM ({}) AS {}",
+                inner_sql,
+                db_sql::quote_ident(db_type, "tideorm_count_subquery")
+            ),
+            params,
+        )
+    }
+
+    fn build_count_sql_with_params(&self) -> (String, Vec<Value>) {
+        self.build_count_sql_with_params_for_db(self.db_type_for_sql())
+    }
+
     fn log_query(&self, sql: &str) {
         if std::env::var("TIDE_LOG_QUERIES")
             .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
@@ -1321,17 +1342,7 @@ impl<M: Model> QueryBuilder<M> {
     pub async fn count(self) -> Result<u64> {
         self.ensure_query_is_valid()?;
 
-        let db_type = self.db_type_for_sql();
-        let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        let sql = if where_sql.is_empty() {
-            format!("SELECT COUNT(*) AS count FROM {}", table)
-        } else {
-            format!(
-                "SELECT COUNT(*) AS count FROM {} WHERE {}",
-                table, where_sql
-            )
-        };
+        let (sql, params) = self.build_count_sql_with_params();
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));

@@ -88,18 +88,18 @@ fn test_json_key_exists_postgres() {
 fn test_json_key_exists_mysql() {
     let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "email");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.email"));
+    assert!(sql.contains("$.\"email\""));
 
     let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "email");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.email"));
+    assert!(sql.contains("$.\"email\""));
 }
 
 #[test]
 fn test_json_key_exists_sqlite() {
     let sql = db_sql::json_key_exists(DatabaseType::SQLite, "data", "email");
     assert!(sql.contains("json_extract"));
-    assert!(sql.contains("$.email"));
+    assert!(sql.contains("$.\"email\""));
     assert!(sql.contains("IS NOT NULL"));
 }
 
@@ -113,15 +113,18 @@ fn test_json_path_exists_postgres() {
 fn test_json_path_exists_mysql() {
     let sql = db_sql::json_path_exists(DatabaseType::MySQL, "data", "$.user.name");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
+    assert!(sql.contains("$.\"user\".\"name\""));
 
     let sql = db_sql::json_path_exists(DatabaseType::MariaDB, "data", "$.user.name");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
+    assert!(sql.contains("$.\"user\".\"name\""));
 }
 
 #[test]
 fn test_json_path_exists_sqlite() {
     let sql = db_sql::json_path_exists(DatabaseType::SQLite, "data", "$.user.name");
     assert!(sql.contains("json_extract"));
+    assert!(sql.contains("$.\"user\".\"name\""));
 }
 
 #[test]
@@ -237,10 +240,65 @@ fn test_sql_injection_prevention() {
     assert!(sql.contains("O''Brien"));
 
     let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "key'; DROP TABLE--");
-    assert!(sql.contains("key''; DROP TABLE--"));
+    assert_eq!(
+        sql,
+        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
+    );
 
     let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "key'; DROP TABLE--");
-    assert!(sql.contains("key''; DROP TABLE--"));
+    assert_eq!(
+        sql,
+        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
+    );
+}
+
+
+#[test]
+fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
+    let path = "$.user') OR 1=1 --";
+
+    assert_eq!(
+        db_sql::json_path_exists(DatabaseType::MySQL, "data", path),
+        "0 = 1"
+    );
+    assert_eq!(
+        db_sql::json_path_not_exists(DatabaseType::MySQL, "data", path),
+        "0 = 1"
+    );
+    assert_eq!(
+        db_sql::json_path_exists(DatabaseType::SQLite, "data", path),
+        "0 = 1"
+    );
+    assert_eq!(
+        db_sql::json_path_not_exists(DatabaseType::SQLite, "data", path),
+        "0 = 1"
+    );
+}
+
+#[test]
+fn test_json_path_special_keys_are_quoted_safely() {
+    let sql = db_sql::json_path_exists(DatabaseType::MySQL, "data", "$['weird.key'][0].name");
+    assert_eq!(
+        sql,
+        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"weird.key\"[0].\"name\"')"
+    );
+}
+
+#[test]
+fn test_mysql_array_literals_are_json_encoded() {
+    let values = vec!["'ad\"min'".to_string(), "'slash\\user'".to_string()];
+
+    let contains_sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
+    assert_eq!(
+        contains_sql,
+        "JSON_CONTAINS(`roles`, '[\"ad\\\"min\",\"slash\\\\user\"]')"
+    );
+
+    let overlaps_sql = db_sql::array_overlaps(DatabaseType::MySQL, "roles", &values);
+    assert_eq!(
+        overlaps_sql,
+        "(JSON_CONTAINS(`roles`, '\"ad\\\"min\"') OR JSON_CONTAINS(`roles`, '\"slash\\\\user\"'))"
+    );
 }
 
 #[test]
