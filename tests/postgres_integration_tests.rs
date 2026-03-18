@@ -115,6 +115,18 @@ pub struct TestSoftDelete {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[derive(Model, PartialEq)]
+#[tideorm(table = "timestamp_users")]
+pub struct TimestampUser {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+    pub name: String,
+    pub login_count: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 // =============================================================================
 // SINGLE INTEGRATION TEST - Runs all scenarios sequentially
 // =============================================================================
@@ -138,6 +150,7 @@ async fn postgres_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS test_soft_deletes CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_posts CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS test_users CASCADE").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS timestamp_users CASCADE").await;
     let _ = Database::execute("DROP TABLE IF EXISTS callback_users CASCADE").await;
 
     Database::execute(
@@ -179,6 +192,21 @@ async fn postgres_integration_tests() {
     )
     .await
     .expect("Failed to create test_soft_deletes table");
+
+    Database::execute(
+        r#"
+        CREATE TABLE timestamp_users (
+            id BIGSERIAL PRIMARY KEY,
+            email VARCHAR(255) NOT NULL UNIQUE,
+            name VARCHAR(255) NOT NULL,
+            login_count INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL
+        )
+    "#,
+    )
+    .await
+    .expect("Failed to create timestamp_users table");
 
     Database::execute(
         r#"
@@ -949,6 +977,57 @@ async fn postgres_integration_tests() {
         assert_eq!(quoted.name, quoted_payload);
 
         println!("   ✓ insert_or_update and on_conflict");
+    }
+    println!();
+
+    println!("🕒  Testing: Upsert With Timestamp Columns");
+    {
+        let _ = Database::execute("TRUNCATE TABLE timestamp_users RESTART IDENTITY CASCADE").await;
+
+        let created_at = chrono::Utc::now();
+        let updated_at = created_at + chrono::TimeDelta::minutes(15);
+
+        let inserted = TimestampUser::insert_or_update(
+            TimestampUser {
+                id: 0,
+                email: "typed-upsert@example.com".into(),
+                name: "Initial Timestamp User".into(),
+                login_count: 1,
+                created_at,
+                updated_at,
+            },
+            vec!["email"],
+        )
+        .await
+        .expect("insert_or_update should preserve timestamp parameter types on insert");
+
+        assert_eq!(inserted.email, "typed-upsert@example.com");
+        assert_eq!(inserted.login_count, 1);
+        assert_eq!(inserted.created_at, created_at);
+        assert_eq!(inserted.updated_at, updated_at);
+
+        let next_updated_at = updated_at + chrono::TimeDelta::minutes(30);
+        let updated = TimestampUser::insert_or_update(
+            TimestampUser {
+                id: inserted.id,
+                email: "typed-upsert@example.com".into(),
+                name: "Updated Timestamp User".into(),
+                login_count: 2,
+                created_at,
+                updated_at: next_updated_at,
+            },
+            vec!["email"],
+        )
+        .await
+        .expect("insert_or_update should preserve timestamp parameter types on conflict update");
+
+        assert_eq!(updated.id, inserted.id);
+        assert_eq!(updated.name, "Updated Timestamp User");
+        assert_eq!(updated.login_count, 2);
+        assert_eq!(updated.created_at, created_at);
+        assert_eq!(updated.updated_at, next_updated_at);
+
+        println!("   ✓ insert_or_update preserves timestamp column types");
     }
     println!();
 

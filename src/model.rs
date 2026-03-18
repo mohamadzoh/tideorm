@@ -131,6 +131,18 @@ pub trait Model:
         crud::count::<Self>().await
     }
 
+    /// Delete every record for this model.
+    ///
+    /// This is an explicit full-table operation. Filtered deletions should keep
+    /// using `Self::query().where_*(...).delete()` so accidental unfiltered bulk
+    /// deletes remain blocked by default.
+    async fn delete_all() -> Result<u64>
+    where
+        Self: Sized,
+    {
+        Self::query().delete_all().await
+    }
+
     /// Check if any records exist
     ///
     /// # Example
