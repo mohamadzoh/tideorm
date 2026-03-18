@@ -562,6 +562,18 @@ let same_user = User::from_token(&token).await?;
 assert_eq!(user.id, same_user.id);
 ```
 
+If no encryption key is configured, tokenization now returns a configuration error instead of panicking at runtime. In most applications, the simplest setup is to provide the key through `TideConfig` during startup:
+
+```rust
+let encryption_key = std::env::var("ENCRYPTION_KEY")?;
+
+TideConfig::init()
+    .database("postgres://localhost/mydb")
+    .encryption_key(&encryption_key)
+    .connect()
+    .await?;
+```
+
 ### Tokenization Methods
 
 When a model has `#[tideorm(tokenize)]`, these methods are available:
@@ -670,6 +682,8 @@ TokenConfig::set_decoder(|token, model| {
     Ok(token.strip_prefix(&prefix)?.parse().ok())
 });
 ```
+
+Calling `TokenConfig::set_encryption_key`, `TokenConfig::set_encoder`, or `TokenConfig::set_decoder` again replaces the previous global override. Use `TokenConfig::reset()` to clear all tokenization overrides and return to the default encoder/decoder configuration.
 
 ### Tokenization Security
 
@@ -881,6 +895,8 @@ let (user, related_json) = NestedSaveBuilder::new(user)
     .save()
     .await?;
 ```
+
+`save_with_many` batches related inserts through TideORM's bulk insert path, and `delete_with_many` removes related rows with a single `WHERE IN` delete. `update_with_many` batches existing related rows through an upsert-style write and then reloads them once. If any related model still looks new, `update_with_many` falls back to per-row updates so create-vs-update semantics stay unchanged.
 
 ### Join Result Consolidation
 

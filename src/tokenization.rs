@@ -138,6 +138,8 @@
 //! - Tokens are model-specific: a User token cannot decode a Product
 //! - The same record may produce different valid tokens with the default encoder
 
+use parking_lot::RwLock;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
@@ -182,13 +184,31 @@ pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<i64>>
 // =============================================================================
 
 /// Global encryption key for tokenization
-static GLOBAL_ENCRYPTION_KEY: OnceLock<String> = OnceLock::new();
+static GLOBAL_ENCRYPTION_KEY: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
 /// Global token encoder override
-static GLOBAL_TOKEN_ENCODER: OnceLock<TokenEncoder> = OnceLock::new();
+static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::new();
 
 /// Global token decoder override
-static GLOBAL_TOKEN_DECODER: OnceLock<TokenDecoder> = OnceLock::new();
+static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::new();
+
+thread_local! {
+    static LOCAL_ENCRYPTION_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LOCAL_TOKEN_ENCODER: Cell<Option<TokenEncoder>> = const { Cell::new(None) };
+    static LOCAL_TOKEN_DECODER: Cell<Option<TokenDecoder>> = const { Cell::new(None) };
+}
+
+fn global_encryption_key_state() -> &'static RwLock<Option<String>> {
+    GLOBAL_ENCRYPTION_KEY.get_or_init(|| RwLock::new(None))
+}
+
+fn global_token_encoder_state() -> &'static RwLock<Option<TokenEncoder>> {
+    GLOBAL_TOKEN_ENCODER.get_or_init(|| RwLock::new(None))
+}
+
+fn global_token_decoder_state() -> &'static RwLock<Option<TokenDecoder>> {
+    GLOBAL_TOKEN_DECODER.get_or_init(|| RwLock::new(None))
+}
 
 // =============================================================================
 // CONFIGURATION
@@ -209,22 +229,24 @@ impl TokenConfig {
     /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
     /// ```
     pub fn set_encryption_key(key: &str) {
-        let _ = GLOBAL_ENCRYPTION_KEY.set(key.to_string());
+        *global_encryption_key_state().write() = Some(key.to_string());
+        LOCAL_ENCRYPTION_KEY.with(|slot| *slot.borrow_mut() = Some(key.to_string()));
     }
 
     /// Get the global encryption key
     ///
     /// Returns an error if no encryption key has been configured.
     pub fn get_encryption_key() -> Result<String> {
-        GLOBAL_ENCRYPTION_KEY
-            .get()
-            .cloned()
+        LOCAL_ENCRYPTION_KEY
+            .with(|slot| slot.borrow().clone())
+            .or_else(|| global_encryption_key_state().read().clone())
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
     /// Check if an encryption key has been explicitly configured
     pub fn has_encryption_key() -> bool {
-        GLOBAL_ENCRYPTION_KEY.get().is_some()
+        LOCAL_ENCRYPTION_KEY.with(|slot| slot.borrow().is_some())
+            || global_encryption_key_state().read().is_some()
     }
 
     /// Set a custom global token encoder
@@ -239,7 +261,8 @@ impl TokenConfig {
     /// });
     /// ```
     pub fn set_encoder(encoder: TokenEncoder) {
-        let _ = GLOBAL_TOKEN_ENCODER.set(encoder);
+        *global_token_encoder_state().write() = Some(encoder);
+        LOCAL_TOKEN_ENCODER.with(|slot| slot.set(Some(encoder)));
     }
 
     /// Set a custom global token decoder
@@ -256,22 +279,33 @@ impl TokenConfig {
     /// });
     /// ```
     pub fn set_decoder(decoder: TokenDecoder) {
-        let _ = GLOBAL_TOKEN_DECODER.set(decoder);
+        *global_token_decoder_state().write() = Some(decoder);
+        LOCAL_TOKEN_DECODER.with(|slot| slot.set(Some(decoder)));
+    }
+
+    /// Reset tokenization globals and current-thread overrides.
+    pub fn reset() {
+        *global_encryption_key_state().write() = None;
+        *global_token_encoder_state().write() = None;
+        *global_token_decoder_state().write() = None;
+        LOCAL_ENCRYPTION_KEY.with(|slot| slot.borrow_mut().take());
+        LOCAL_TOKEN_ENCODER.with(|slot| slot.set(None));
+        LOCAL_TOKEN_DECODER.with(|slot| slot.set(None));
     }
 
     /// Get the global token encoder (or default)
     pub fn get_encoder() -> TokenEncoder {
-        GLOBAL_TOKEN_ENCODER
-            .get()
-            .copied()
+        LOCAL_TOKEN_ENCODER
+            .with(|slot| slot.get())
+            .or_else(|| *global_token_encoder_state().read())
             .unwrap_or(default_encode)
     }
 
     /// Get the global token decoder (or default)
     pub fn get_decoder() -> TokenDecoder {
-        GLOBAL_TOKEN_DECODER
-            .get()
-            .copied()
+        LOCAL_TOKEN_DECODER
+            .with(|slot| slot.get())
+            .or_else(|| *global_token_decoder_state().read())
             .unwrap_or(default_decode)
     }
 

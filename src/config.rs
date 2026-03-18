@@ -24,6 +24,7 @@
 //! ```
 
 use parking_lot::RwLock;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -32,14 +33,12 @@ use crate::database::Database;
 use crate::error::Result;
 use crate::migration::Migration;
 use crate::tide_info;
-#[cfg(feature = "attachments")]
-use crate::tide_warn;
 
 /// Global configuration instance
 static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 
 /// Global schema file path (set via TideConfig::schema_file())
-static SCHEMA_FILE_PATH: OnceLock<String> = OnceLock::new();
+static SCHEMA_FILE_PATH: OnceLock<RwLock<Option<&'static str>>> = OnceLock::new();
 
 /// File URL generator function type
 ///
@@ -58,10 +57,40 @@ pub type FileUrlGenerator =
 
 /// Global file URL generator
 #[cfg(feature = "attachments")]
-static GLOBAL_FILE_URL_GENERATOR: OnceLock<FileUrlGenerator> = OnceLock::new();
+static GLOBAL_FILE_URL_GENERATOR: OnceLock<RwLock<Option<FileUrlGenerator>>> = OnceLock::new();
 
 /// Global pool configuration (set during connect)
-static GLOBAL_POOL_CONFIG: OnceLock<PoolConfig> = OnceLock::new();
+static GLOBAL_POOL_CONFIG: OnceLock<RwLock<Option<PoolConfig>>> = OnceLock::new();
+
+thread_local! {
+    static LOCAL_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
+    static LOCAL_DB_TYPE: Cell<Option<DatabaseType>> = const { Cell::new(None) };
+    static LOCAL_POOL_CONFIG: RefCell<Option<PoolConfig>> = const { RefCell::new(None) };
+    static LOCAL_SCHEMA_FILE_PATH: Cell<Option<&'static str>> = const { Cell::new(None) };
+    #[cfg(feature = "attachments")]
+    static LOCAL_FILE_URL_GENERATOR: Cell<Option<FileUrlGenerator>> = const { Cell::new(None) };
+}
+
+fn global_db_type_state() -> &'static RwLock<Option<DatabaseType>> {
+    GLOBAL_DB_TYPE.get_or_init(|| RwLock::new(None))
+}
+
+fn global_pool_config_state() -> &'static RwLock<Option<PoolConfig>> {
+    GLOBAL_POOL_CONFIG.get_or_init(|| RwLock::new(None))
+}
+
+fn global_schema_file_path_state() -> &'static RwLock<Option<&'static str>> {
+    SCHEMA_FILE_PATH.get_or_init(|| RwLock::new(None))
+}
+
+#[cfg(feature = "attachments")]
+fn global_file_url_generator_state() -> &'static RwLock<Option<FileUrlGenerator>> {
+    GLOBAL_FILE_URL_GENERATOR.get_or_init(|| RwLock::new(None))
+}
+
+fn leak_schema_path(path: String) -> &'static str {
+    Box::leak(path.into_boxed_str())
+}
 
 /// Supported database types
 ///
@@ -317,6 +346,10 @@ impl Config {
 
     /// Get the global configuration (read-only)
     pub fn global() -> Config {
+        if let Some(config) = LOCAL_CONFIG.with(|slot| slot.borrow().clone()) {
+            return config;
+        }
+
         GLOBAL_CONFIG
             .get_or_init(|| RwLock::new(Config::default()))
             .read()
@@ -326,6 +359,10 @@ impl Config {
     /// Read a value from the global config without cloning the entire struct
     #[inline]
     fn with_global<T>(f: impl FnOnce(&Config) -> T) -> T {
+        if let Some(value) = LOCAL_CONFIG.with(|slot| slot.borrow().clone()) {
+            return f(&value);
+        }
+
         let lock = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
         let guard = lock.read();
         f(&guard)
@@ -374,9 +411,9 @@ impl Config {
     /// which uses `file_base_url` to construct URLs.
     #[cfg(feature = "attachments")]
     pub fn get_file_url_generator() -> FileUrlGenerator {
-        GLOBAL_FILE_URL_GENERATOR
-            .get()
-            .copied()
+        LOCAL_FILE_URL_GENERATOR
+            .with(|slot| slot.get())
+            .or_else(|| *global_file_url_generator_state().read())
             .unwrap_or(Self::default_file_url_generator)
     }
 
@@ -399,9 +436,8 @@ impl Config {
     /// ```
     #[cfg(feature = "attachments")]
     pub fn set_file_url_generator(generator: FileUrlGenerator) {
-        if GLOBAL_FILE_URL_GENERATOR.set(generator).is_err() {
-            tide_warn!("File URL generator already set, ignoring subsequent call");
-        }
+        *global_file_url_generator_state().write() = Some(generator);
+        LOCAL_FILE_URL_GENERATOR.with(|slot| slot.set(Some(generator)));
     }
 
     /// Default file URL generator
@@ -534,7 +570,7 @@ pub struct TideConfig {
 }
 
 /// Global database type (set after connect)
-static GLOBAL_DB_TYPE: OnceLock<DatabaseType> = OnceLock::new();
+static GLOBAL_DB_TYPE: OnceLock<RwLock<Option<DatabaseType>>> = OnceLock::new();
 
 impl TideConfig {
     /// Initialize a new configuration builder
@@ -1227,7 +1263,8 @@ impl TideConfig {
     pub async fn connect(self) -> Result<&'static Database> {
         // Apply configuration
         let config = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
-        *config.write() = self.config;
+        *config.write() = self.config.clone();
+        LOCAL_CONFIG.with(|slot| *slot.borrow_mut() = Some(self.config.clone()));
 
         // Apply tokenization settings
         if let Some(key) = &self.encryption_key {
@@ -1263,7 +1300,8 @@ impl TideConfig {
         let connect_url = rewrite_driver_url(&url);
 
         // Store pool config globally
-        let _ = GLOBAL_POOL_CONFIG.set(self.pool.clone());
+        *global_pool_config_state().write() = Some(self.pool.clone());
+        LOCAL_POOL_CONFIG.with(|slot| *slot.borrow_mut() = Some(self.pool.clone()));
 
         // Build and connect to database with pool settings
         let db = Database::builder()
@@ -1287,7 +1325,8 @@ impl TideConfig {
         }
 
         // Store database type globally
-        let _ = GLOBAL_DB_TYPE.set(db_type);
+        *global_db_type_state().write() = Some(db_type);
+        LOCAL_DB_TYPE.with(|slot| slot.set(Some(db_type)));
 
         // Set as global
         let db_ref = Database::set_global(db)?;
@@ -1324,10 +1363,15 @@ impl TideConfig {
         // Generate schema file if configured
         if let Some(path) = &self.schema_file {
             // Store schema path
-            let _ = SCHEMA_FILE_PATH.set(path.clone());
+            let leaked_path = leak_schema_path(path.clone());
+            *global_schema_file_path_state().write() = Some(leaked_path);
+            LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(Some(leaked_path)));
 
             // Auto-generate schema file from database introspection
             crate::schema::SchemaWriter::write_schema(path).await?;
+        } else {
+            *global_schema_file_path_state().write() = None;
+            LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(None));
         }
 
         Ok(db_ref)
@@ -1348,11 +1392,40 @@ impl TideConfig {
     /// ```
     pub fn apply(self) {
         let config = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
-        *config.write() = self.config;
+        *config.write() = self.config.clone();
+        LOCAL_CONFIG.with(|slot| *slot.borrow_mut() = Some(self.config));
 
-        // Store database type if provided
-        if let Some(db_type) = self.database_type {
-            let _ = GLOBAL_DB_TYPE.set(db_type);
+        let database_type = self.database_type;
+        *global_db_type_state().write() = database_type;
+        LOCAL_DB_TYPE.with(|slot| slot.set(database_type));
+
+        *global_pool_config_state().write() = Some(self.pool.clone());
+        LOCAL_POOL_CONFIG.with(|slot| *slot.borrow_mut() = Some(self.pool));
+
+        let leaked_path = self.schema_file.map(leak_schema_path);
+        *global_schema_file_path_state().write() = leaked_path;
+        LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(leaked_path));
+    }
+
+    /// Reset global and current-thread TideORM configuration state.
+    pub fn reset() {
+        let config = GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()));
+        *config.write() = Config::default();
+        LOCAL_CONFIG.with(|slot| slot.borrow_mut().take());
+
+        *global_db_type_state().write() = None;
+        LOCAL_DB_TYPE.with(|slot| slot.set(None));
+
+        *global_pool_config_state().write() = None;
+        LOCAL_POOL_CONFIG.with(|slot| slot.borrow_mut().take());
+
+        *global_schema_file_path_state().write() = None;
+        LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(None));
+
+        #[cfg(feature = "attachments")]
+        {
+            *global_file_url_generator_state().write() = None;
+            LOCAL_FILE_URL_GENERATOR.with(|slot| slot.set(None));
         }
     }
 
@@ -1412,24 +1485,26 @@ impl TideConfig {
     /// }
     /// ```
     pub fn get_database_type() -> Option<DatabaseType> {
-        GLOBAL_DB_TYPE.get().copied()
+        LOCAL_DB_TYPE
+            .with(|slot| slot.get())
+            .or_else(|| *global_db_type_state().read())
     }
 
     /// Check if the database is PostgreSQL
     pub fn is_postgres() -> bool {
-        GLOBAL_DB_TYPE.get() == Some(&DatabaseType::Postgres)
+        Self::get_database_type() == Some(DatabaseType::Postgres)
     }
 
     /// Check if the database is MySQL (strict — returns false for MariaDB)
     ///
     /// Use `is_mysql_compatible()` to check for both MySQL and MariaDB.
     pub fn is_mysql() -> bool {
-        GLOBAL_DB_TYPE.get() == Some(&DatabaseType::MySQL)
+        Self::get_database_type() == Some(DatabaseType::MySQL)
     }
 
     /// Check if the database is MariaDB
     pub fn is_mariadb() -> bool {
-        GLOBAL_DB_TYPE.get() == Some(&DatabaseType::MariaDB)
+        Self::get_database_type() == Some(DatabaseType::MariaDB)
     }
 
     /// Check if the database is MySQL or MariaDB
@@ -1438,14 +1513,14 @@ impl TideConfig {
     /// that applies to both MySQL and MariaDB.
     pub fn is_mysql_compatible() -> bool {
         matches!(
-            GLOBAL_DB_TYPE.get(),
+            Self::get_database_type(),
             Some(DatabaseType::MySQL) | Some(DatabaseType::MariaDB)
         )
     }
 
     /// Check if the database is SQLite
     pub fn is_sqlite() -> bool {
-        GLOBAL_DB_TYPE.get() == Some(&DatabaseType::SQLite)
+        Self::get_database_type() == Some(DatabaseType::SQLite)
     }
 
     /// Get the current configuration (for inspection)
@@ -1455,12 +1530,17 @@ impl TideConfig {
 
     /// Get the current pool configuration
     pub fn pool_config() -> PoolConfig {
-        GLOBAL_POOL_CONFIG.get().cloned().unwrap_or_default()
+        LOCAL_POOL_CONFIG
+            .with(|slot| slot.borrow().clone())
+            .or_else(|| global_pool_config_state().read().clone())
+            .unwrap_or_default()
     }
 
     /// Get the configured schema file path (if any)
     pub fn schema_file_path() -> Option<&'static str> {
-        SCHEMA_FILE_PATH.get().map(|s| s.as_str())
+        LOCAL_SCHEMA_FILE_PATH
+            .with(|slot| slot.get())
+            .or_else(|| *global_schema_file_path_state().read())
     }
 
     /// Write schema to the configured file
@@ -1498,7 +1578,7 @@ impl TideConfig {
     pub fn write_schema_with_generator(
         generator: &crate::schema::SchemaGenerator,
     ) -> std::io::Result<()> {
-        let Some(path) = SCHEMA_FILE_PATH.get() else {
+        let Some(path) = Self::schema_file_path() else {
             return Ok(()); // No schema file configured
         };
 
@@ -1511,7 +1591,7 @@ impl TideConfig {
     ///
     /// Use this for simple cases where you have the SQL already.
     pub fn write_schema_sql(sql: &str) -> std::io::Result<()> {
-        let Some(path) = SCHEMA_FILE_PATH.get() else {
+        let Some(path) = Self::schema_file_path() else {
             return Ok(()); // No schema file configured
         };
 

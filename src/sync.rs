@@ -471,13 +471,13 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         if force_sync {
             tide_debug!("  Using SeaORM SchemaBuilder.apply() - fresh schema creation");
             schema_builder
-                .apply(conn)
+                .apply(&conn)
                 .await
                 .map_err(|e| Error::query(format!("Schema apply failed: {}", e)))?;
         } else {
             tide_debug!("  Using SeaORM SchemaBuilder.sync() - incremental sync");
             schema_builder
-                .sync(conn)
+                .sync(&conn)
                 .await
                 .map_err(|e| Error::query(format!("Schema sync failed: {}", e)))?;
         }
@@ -509,7 +509,7 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
     for model in models {
         let table_exists =
-            check_table_exists(conn, &model.schema_name, &model.table_name, backend).await?;
+            check_table_exists(&conn, &model.schema_name, &model.table_name, backend).await?;
 
         if force_sync && table_exists {
             // Drop existing table for force sync
@@ -533,7 +533,7 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
         if !table_exists || force_sync {
             // Create new table
-            create_table_from_model_schema(conn, &model, backend).await?;
+            create_table_from_model_schema(&conn, &model, backend).await?;
             tide_info!("Created TideORM table: {}", model.table_name);
         } else {
             tide_debug!("TideORM table exists: {}", model.table_name);

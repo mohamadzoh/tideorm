@@ -48,6 +48,8 @@
 //! let user = user.save().await?;
 //! ```
 
+use parking_lot::RwLock;
+use std::cell::RefCell;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -62,6 +64,14 @@ use crate::tide_warn;
 
 /// Global database connection instance
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
+
+thread_local! {
+    static THREAD_DB_OVERRIDE: RefCell<Option<Database>> = const { RefCell::new(None) };
+}
+
+fn global_db_handle() -> &'static Database {
+    GLOBAL_DB.get_or_init(Database::disconnected)
+}
 
 /// Get a reference to the global database connection
 ///
@@ -80,7 +90,7 @@ static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 /// let users = User::all().await?;
 /// ```
 pub fn db() -> &'static Database {
-    GLOBAL_DB.get().expect(
+    require_db().expect(
         "Global database connection not initialized. \
          Call Database::init() or Database::set_global() before using models. \
          Use try_db() for a non-panicking alternative.",
@@ -91,13 +101,16 @@ pub fn db() -> &'static Database {
 ///
 /// Prefer this over `db()` inside functions that already return `Result`.
 pub fn require_db() -> Result<&'static Database> {
-    GLOBAL_DB.get().ok_or_else(|| {
-        Error::connection(
+    let db = global_db_handle();
+    if db.is_connected() {
+        Ok(db)
+    } else {
+        Err(Error::connection(
             "Global database connection not initialized. \
              Call Database::init() or Database::set_global() before using models."
                 .to_string(),
-        )
-    })
+        ))
+    }
 }
 
 /// Try to get a reference to the global database connection
@@ -112,7 +125,8 @@ pub fn require_db() -> Result<&'static Database> {
 /// }
 /// ```
 pub fn try_db() -> Option<&'static Database> {
-    GLOBAL_DB.get()
+    let db = global_db_handle();
+    db.is_connected().then_some(db)
 }
 
 /// Check if a global database connection has been initialized
@@ -125,7 +139,16 @@ pub fn try_db() -> Option<&'static Database> {
 /// }
 /// ```
 pub fn has_global_db() -> bool {
-    GLOBAL_DB.get().is_some()
+    global_db_handle().is_connected()
+}
+
+#[doc(hidden)]
+pub fn __current_db() -> Result<Database> {
+    if let Some(db) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(db);
+    }
+
+    require_db().cloned()
 }
 
 /// Database connection handle
@@ -139,10 +162,48 @@ pub fn has_global_db() -> bool {
 /// threads and cloned without duplicating the underlying connection pool.
 #[derive(Clone)]
 pub struct Database {
-    inner: Arc<InternalConnection>,
+    inner: Arc<RwLock<Option<Arc<InternalConnection>>>>,
 }
 
 impl Database {
+    fn disconnected() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    fn from_internal_connection(inner: InternalConnection) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(Arc::new(inner)))),
+        }
+    }
+
+    fn current_inner(&self) -> Result<Arc<InternalConnection>> {
+        self.inner.read().as_ref().cloned().ok_or_else(|| {
+            Error::connection(
+                "Global database connection not initialized. \
+                 Call Database::init() or Database::set_global() before using models."
+                    .to_string(),
+            )
+        })
+    }
+
+    fn replace_inner(&self, inner: Arc<InternalConnection>) {
+        *self.inner.write() = Some(inner);
+    }
+
+    fn clear_inner(&self) {
+        self.inner.write().take();
+    }
+
+    fn set_thread_override(db: Option<Self>) {
+        THREAD_DB_OVERRIDE.with(|slot| *slot.borrow_mut() = db);
+    }
+
+    fn is_connected(&self) -> bool {
+        self.inner.read().is_some()
+    }
+
     /// Connect to a database using a connection URL
     ///
     /// # Example
@@ -158,9 +219,7 @@ impl Database {
     /// - SQLite: `sqlite:./path/to/db.sqlite` or `sqlite::memory:`
     pub async fn connect(url: &str) -> Result<Self> {
         let inner = InternalConnection::connect(url).await?;
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
+        Ok(Self::from_internal_connection(inner))
     }
 
     /// Initialize the global database connection
@@ -187,7 +246,6 @@ impl Database {
     /// Returns an error if:
     /// - The connection URL is invalid
     /// - The database connection fails
-    /// - A global connection has already been initialized
     pub async fn init(url: &str) -> Result<&'static Self> {
         let db = Self::connect(url).await?;
         Self::set_global(db)
@@ -210,14 +268,18 @@ impl Database {
     /// Database::set_global(db)?;
     /// ```
     ///
-    /// # Errors
-    ///
-    /// Returns an error if a global connection has already been initialized.
     pub fn set_global(db: Self) -> Result<&'static Self> {
-        GLOBAL_DB
-            .set(db)
-            .map_err(|_| Error::configuration("Global database connection already initialized"))?;
-        Ok(GLOBAL_DB.get().unwrap())
+        let inner = db.current_inner()?;
+        let global = global_db_handle();
+        global.replace_inner(inner);
+        Self::set_thread_override(Some(db));
+        Ok(global)
+    }
+
+    /// Clear the global database connection and current thread override.
+    pub fn reset_global() {
+        global_db_handle().clear_inner();
+        Self::set_thread_override(None);
     }
 
     /// Get a reference to the global database connection
@@ -284,9 +346,8 @@ impl Database {
     {
         use crate::internal::TransactionTrait;
 
-        let txn = self
-            .inner
-            .connection()
+        let conn = self.__internal_connection();
+        let txn = conn
             .begin()
             .await
             .map_err(|e| Error::transaction(e.to_string()))?;
@@ -322,8 +383,8 @@ impl Database {
     pub async fn ping(&self) -> Result<bool> {
         use crate::internal::ConnectionTrait;
 
-        self.inner
-            .connection()
+        let conn = self.__internal_connection();
+        conn
             .execute_unprepared("SELECT 1")
             .await
             .map(|_| true)
@@ -383,14 +444,11 @@ impl Database {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
         let db = crate::database::require_db()?;
-        let backend = db.inner.connection().get_database_backend();
+        let conn = db.__internal_connection();
+        let backend = conn.get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = db
-            .inner
-            .connection();
-
-        let results = crate::profiling::__profile_future(results.query_all_raw(stmt))
+        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -436,10 +494,11 @@ impl Database {
     ) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let backend = self.inner.connection().get_database_backend();
+        let conn = self.__internal_connection();
+        let backend = conn.get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = crate::profiling::__profile_future(self.inner.connection().query_all_raw(stmt))
+        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -467,7 +526,8 @@ impl Database {
         use crate::internal::ConnectionTrait;
 
         let db = crate::database::require_db()?;
-        let result = crate::profiling::__profile_future(db.inner.connection().execute_unprepared(sql))
+        let conn = db.__internal_connection();
+        let result = crate::profiling::__profile_future(conn.execute_unprepared(sql))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -501,10 +561,11 @@ impl Database {
     ) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let backend = self.inner.connection().get_database_backend();
+        let conn = self.__internal_connection();
+        let backend = conn.get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let result = crate::profiling::__profile_future(self.inner.connection().execute_raw(stmt))
+        let result = crate::profiling::__profile_future(conn.execute_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -537,10 +598,11 @@ impl Database {
         use crate::internal::{ConnectionTrait, Statement};
 
         let db = crate::database::require_db()?;
-        let backend = db.inner.connection().get_database_backend();
+        let conn = db.__internal_connection();
+        let backend = conn.get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = crate::profiling::__profile_future(db.inner.connection().query_all_raw(stmt))
+        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -565,10 +627,11 @@ impl Database {
     ) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let backend = self.inner.connection().get_database_backend();
+        let conn = self.__internal_connection();
+        let backend = conn.get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = crate::profiling::__profile_future(self.inner.connection().query_all_raw(stmt))
+        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -618,8 +681,11 @@ impl Database {
 
     /// Get the raw internal connection (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_connection(&self) -> &crate::internal::DatabaseConnection {
-        self.inner.connection()
+    pub fn __internal_connection(&self) -> crate::internal::DatabaseConnection {
+        self.current_inner()
+            .expect("database connection should be initialized before use")
+            .connection()
+            .clone()
     }
 
     /// Get the database backend type
@@ -647,7 +713,12 @@ impl Database {
         }
         // Fallback to SeaORM backend detection
         use crate::internal::DbBackend;
-        match self.inner.connection().get_database_backend() {
+        let Ok(inner) = self.current_inner() else {
+            tide_warn!("Database backend requested before a connection was initialized");
+            return crate::config::DatabaseType::Postgres;
+        };
+
+        match inner.connection().get_database_backend() {
             DbBackend::Postgres => crate::config::DatabaseType::Postgres,
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
@@ -664,7 +735,7 @@ impl Database {
     /// Get the raw SeaORM database backend (for internal use only)
     #[doc(hidden)]
     pub fn __internal_backend(&self) -> crate::internal::DbBackend {
-        self.inner.connection().get_database_backend()
+        self.__internal_connection().get_database_backend()
     }
 }
 
@@ -819,9 +890,7 @@ impl DatabaseBuilder {
             .await
             .map_err(|e| Error::connection(e.to_string()))?;
 
-        Ok(Database {
-            inner: Arc::new(InternalConnection { conn }),
-        })
+        Ok(Database::from_internal_connection(InternalConnection { conn }))
     }
 }
 
@@ -844,7 +913,7 @@ pub trait Connection: Send + Sync {
 /// Internal connection reference (hidden from users)
 #[doc(hidden)]
 pub enum ConnectionRef<'a> {
-    Database(&'a crate::internal::DatabaseConnection),
+    Database(crate::internal::DatabaseConnection),
     Transaction(&'a crate::internal::DatabaseTransaction),
 }
 

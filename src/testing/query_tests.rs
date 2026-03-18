@@ -592,8 +592,9 @@ fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers(
 
     assert!(sql.contains("SELECT * FROM \"query_test_users\""));
     assert!(sql.contains("COALESCE(\"na\"\"me\", '')"));
-    assert!(sql.contains("plainto_tsquery('en''g\"lish', $1)"));
-    assert!(matches!(params.first(), Some(Value::String(Some(query))) if query == "o'hai"));
+    assert!(sql.contains("plainto_tsquery(CAST($1 AS regconfig), $2)"));
+    assert!(matches!(params.first(), Some(Value::String(Some(language))) if language == "en'g\"lish"));
+    assert!(matches!(params.get(1), Some(Value::String(Some(query))) if query == "o'hai"));
 }
 
 #[cfg(feature = "fulltext")]
@@ -606,13 +607,16 @@ fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
 
     let (sql, params) = builder.build_ranked_sql(DatabaseType::Postgres).unwrap();
 
-    assert!(sql.contains("to_tsquery('english', $1)"));
-    assert!(sql.contains(" >= $2"));
+    assert!(sql.contains("to_tsquery(CAST($1 AS regconfig), $2)"));
+    assert!(sql.contains(" >= $4"));
     assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "quick:* & fox:*")
+        matches!(params.first(), Some(Value::String(Some(language))) if language == "english")
     );
     assert!(
-        matches!(params.get(1), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON)
+        matches!(params.get(1), Some(Value::String(Some(query))) if query == "quick:* & fox:*")
+    );
+    assert!(
+        matches!(params.get(3), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON)
     );
 }
 
@@ -650,8 +654,10 @@ fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
     assert!(sql.contains("SELECT t.* FROM \"query_test_users\" t"));
     assert!(sql.contains("INNER JOIN \"query_test_users_fts\" fts"));
     assert!(sql.contains("WHERE \"query_test_users_fts\" MATCH ?"));
-    assert!(sql.contains("LIMIT 5 OFFSET 2"));
+    assert!(sql.contains("LIMIT ? OFFSET ?"));
     assert!(
         matches!(params.first(), Some(Value::String(Some(query))) if query == "say \"\"hello\"\" to it''s")
     );
+    assert!(matches!(params.get(1), Some(Value::BigInt(Some(limit))) if *limit == 5));
+    assert!(matches!(params.get(2), Some(Value::BigInt(Some(offset))) if *offset == 2));
 }

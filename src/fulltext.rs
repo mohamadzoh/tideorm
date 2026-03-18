@@ -43,7 +43,6 @@ use std::fmt;
 use std::marker::PhantomData;
 
 use crate::config::DatabaseType;
-use crate::database::try_db;
 use crate::error::{Error, Result};
 use crate::internal::{ConnectionTrait, FromQueryResult, Statement, Value};
 use crate::model::Model;
@@ -409,16 +408,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
     where
         T: FromQueryResult,
     {
-        let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
+        let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_sql(db_type)?;
 
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let results = db
-            .__internal_connection()
-            .query_all_raw(statement);
+        let conn = db.__internal_connection();
+        let results = conn.query_all_raw(statement);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -438,16 +436,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
     where
         T: FromQueryResult,
     {
-        let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
+        let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_ranked_sql(db_type)?;
 
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let results = db
-            .__internal_connection()
-            .query_all_raw(statement);
+        let conn = db.__internal_connection();
+        let results = conn.query_all_raw(statement);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -476,23 +473,22 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Count matching results
     pub async fn count(self) -> Result<u64> {
-        let db = try_db().ok_or_else(|| Error::connection("Database not initialized"))?;
+        let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_count_sql(db_type)?;
 
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let result = db
-            .__internal_connection()
-            .query_one_raw(statement);
+        let conn = db.__internal_connection();
+        let result = conn.query_one_raw(statement);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
         if let Some(row) = result {
             let count: i64 = row.try_get("", "count").unwrap_or(0);
-            Ok(count as u64)
+            crate::internal::count_to_u64(count, "fulltext count")
         } else {
             Ok(0)
         }

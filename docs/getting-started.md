@@ -41,6 +41,26 @@ TideConfig::init()
     .await?;
 ```
 
+### Resetting Global State
+
+TideORM keeps its active database handle, global configuration, and tokenization settings in process-global state so models can run without threading a connection through every call. That state is now intentionally resettable, which is useful for tests, benchmarks, and applications that need to reconfigure TideORM during the same process lifetime.
+
+```rust
+use tideorm::prelude::*;
+
+Database::reset_global();
+TideConfig::reset();
+TokenConfig::reset();
+
+TideConfig::init()
+    .database("sqlite::memory:")
+    .database_type(DatabaseType::SQLite)
+    .connect()
+    .await?;
+```
+
+`TideConfig::apply()` and `TideConfig::connect()` overwrite previously applied TideORM configuration. If a new configuration omits the database type, the stored type is cleared instead of leaving the old backend classification behind.
+
 ---
 
 ## Data Type Mappings
@@ -209,6 +229,9 @@ cargo test query_builder --features postgres
 
 # Cross-backend compile/test coverage
 cargo test --all-features
+
+# Rebuild the book after documentation changes
+mdbook build
 ```
 
-The CI matrix covers PostgreSQL, MySQL, and SQLite feature sets. For local work, `cargo test --lib` is the fastest smoke test and `cargo test --all-features` is the broadest compatibility check.
+The CI matrix covers PostgreSQL, MySQL, and SQLite feature sets. For local work, `cargo test --lib` is the fastest smoke test and `cargo test --all-features` is the broadest compatibility check. When a test needs a fresh TideORM setup, clear global state first with `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()`.

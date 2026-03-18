@@ -35,11 +35,11 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    pub(super) fn current_db(&self) -> Result<&crate::database::Database> {
+    pub(super) fn current_db(&self) -> Result<crate::database::Database> {
         if let Some(database) = &self.database {
-            Ok(database)
+            Ok(database.clone())
         } else {
-            crate::database::require_db()
+            crate::database::__current_db()
         }
     }
 

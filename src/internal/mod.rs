@@ -110,6 +110,29 @@ fn supports_batch_insert_returning(
     matches!(backend, DbBackend::Postgres)
 }
 
+pub(crate) fn count_to_u64(count: i64, context: &str) -> Result<u64> {
+    u64::try_from(count).map_err(|_| {
+        Error::query(format!(
+            "Database returned a negative count ({count}) for {context}"
+        ))
+    })
+}
+
+fn build_count_select<M>(condition: Option<Condition>) -> Select<M::Entity>
+where
+    M: InternalModel + crate::model::Model,
+{
+    let mut select = M::Entity::find()
+        .select_only()
+        .column_as(Expr::col(Asterisk).count(), "count");
+
+    if let Some(condition) = condition {
+        select = select.filter(condition);
+    }
+
+    select
+}
+
 /// Internal query executor
 #[doc(hidden)]
 pub struct QueryExecutor;
@@ -171,7 +194,7 @@ impl QueryExecutor {
     }
 
     /// Count records
-    pub async fn count<M>(conn: &DatabaseConnection, _condition: Option<Condition>) -> Result<u64>
+    pub async fn count<M>(conn: &DatabaseConnection, condition: Option<Condition>) -> Result<u64>
     where
         M: InternalModel + crate::model::Model,
     {
@@ -180,9 +203,7 @@ impl QueryExecutor {
             count: i64,
         }
 
-        let result = M::Entity::find()
-            .select_only()
-            .column_as(Expr::col(Asterisk).count(), "count")
+        let result = build_count_select::<M>(condition)
             .into_model::<CountResult>()
             .one(conn);
         let result: Option<CountResult> = crate::profiling::__profile_future(result)
@@ -190,7 +211,10 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("count(*)")))?;
 
-        Ok(result.map(|r| r.count as u64).unwrap_or(0))
+        result
+            .map(|r| count_to_u64(r.count, "count(*)"))
+            .transpose()
+            .map(|count| count.unwrap_or(0))
     }
 
     /// Paginate records

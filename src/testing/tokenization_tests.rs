@@ -1,12 +1,7 @@
 use super::*;
-use std::sync::Once;
-
-static INIT: Once = Once::new();
 
 fn init_test_key() {
-    INIT.call_once(|| {
-        TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
-    });
+    TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
 }
 
 #[test]
@@ -167,4 +162,49 @@ fn test_token_config_encode_decode() {
     let decoded = TokenConfig::decode(&token, "TestModel").unwrap();
 
     assert_eq!(decoded, Some(123));
+}
+
+#[test]
+fn test_token_config_setters_overwrite_previous_values() {
+    TokenConfig::reset();
+
+    TokenConfig::set_encryption_key("first-key");
+    TokenConfig::set_encryption_key("second-key");
+    assert_eq!(TokenConfig::get_encryption_key().unwrap(), "second-key");
+
+    fn encoder_one(record_id: i64, _model_name: &str) -> Result<String> {
+        Ok(format!("one-{record_id}"))
+    }
+
+    fn encoder_two(record_id: i64, _model_name: &str) -> Result<String> {
+        Ok(format!("two-{record_id}"))
+    }
+
+    fn decoder_one(token: &str, _model_name: &str) -> Result<Option<i64>> {
+        Ok(token.strip_prefix("one-").and_then(|value| value.parse().ok()))
+    }
+
+    fn decoder_two(token: &str, _model_name: &str) -> Result<Option<i64>> {
+        Ok(token.strip_prefix("two-").and_then(|value| value.parse().ok()))
+    }
+
+    TokenConfig::set_encoder(encoder_one);
+    TokenConfig::set_encoder(encoder_two);
+    TokenConfig::set_decoder(decoder_one);
+    TokenConfig::set_decoder(decoder_two);
+
+    let token = TokenConfig::encode(7, "User").unwrap();
+    assert_eq!(token, "two-7");
+    assert_eq!(TokenConfig::decode(&token, "User").unwrap(), Some(7));
+}
+
+#[test]
+fn test_token_config_reset_clears_global_state() {
+    TokenConfig::set_encryption_key("transient-key");
+    assert!(TokenConfig::has_encryption_key());
+
+    TokenConfig::reset();
+
+    assert!(!TokenConfig::has_encryption_key());
+    assert!(TokenConfig::get_encryption_key().is_err());
 }

@@ -19,21 +19,18 @@ pub(crate) async fn all<M>() -> Result<Vec<M>>
 where
     M: Model + Sized,
 {
-    crate::internal::QueryExecutor::find_all::<M>(
-        crate::database::require_db()?.__internal_connection(),
-    )
-    .await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::find_all::<M>(&conn).await
 }
 
 pub(crate) async fn count<M>() -> Result<u64>
 where
     M: Model + Sized,
 {
-    crate::internal::QueryExecutor::count::<M>(
-        crate::database::require_db()?.__internal_connection(),
-        None,
-    )
-    .await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::count::<M>(&conn, None).await
 }
 
 pub(crate) async fn exists_any<M>() -> Result<bool>
@@ -53,8 +50,9 @@ where
         return Ok(Vec::new());
     }
 
-    let conn = crate::database::require_db()?.__internal_connection();
-    crate::internal::QueryExecutor::insert_many::<M>(conn, models).await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::insert_many::<M>(&conn, models).await
 }
 
 pub(crate) async fn insert_many_returning<M>(models: Vec<M>) -> Result<Vec<M>>
@@ -92,27 +90,25 @@ where
         + Send,
     T: Send,
 {
-    crate::database::require_db()?.transaction(f).await
+    crate::database::__current_db()?.transaction(f).await
 }
 
 pub(crate) async fn first<M>() -> Result<Option<M>>
 where
     M: Model + Sized,
 {
-    crate::internal::QueryExecutor::first::<M>(
-        crate::database::require_db()?.__internal_connection(),
-    )
-    .await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::first::<M>(&conn).await
 }
 
 pub(crate) async fn last<M>() -> Result<Option<M>>
 where
     M: Model + Sized,
 {
-    crate::internal::QueryExecutor::last::<M>(
-        crate::database::require_db()?.__internal_connection(),
-    )
-    .await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::last::<M>(&conn).await
 }
 
 pub(crate) async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
@@ -120,12 +116,9 @@ where
     M: Model + Sized,
 {
     let offset = (page.saturating_sub(1)) * per_page;
-    crate::internal::QueryExecutor::paginate::<M>(
-        crate::database::require_db()?.__internal_connection(),
-        per_page,
-        offset,
-    )
-    .await
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::paginate::<M>(&conn, per_page, offset).await
 }
 
 pub(crate) async fn reload<M>(model: &M) -> Result<M>

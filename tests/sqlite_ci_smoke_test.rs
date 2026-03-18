@@ -81,8 +81,9 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
+    let conn = db.__internal_connection();
 
-    db.__internal_connection()
+    conn
         .execute_unprepared(
             r#"
             CREATE TABLE ci_users (
@@ -103,7 +104,7 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
         active: true,
     }
     .into_active_model()
-    .insert(db.__internal_connection())
+    .insert(&conn)
     .await
     .expect("failed to seed local user");
 
@@ -129,8 +130,9 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
+    let conn = db.__internal_connection();
 
-    db.__internal_connection()
+    conn
         .execute_unprepared(
             r#"
             CREATE TABLE ci_users (
@@ -151,7 +153,7 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         active: true,
     }
     .into_active_model()
-    .insert(db.__internal_connection())
+    .insert(&conn)
     .await
     .expect("failed to seed first local user");
 
@@ -162,7 +164,7 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         active: true,
     }
     .into_active_model()
-    .insert(db.__internal_connection())
+    .insert(&conn)
     .await
     .expect("failed to seed second local user");
 
@@ -173,7 +175,7 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         active: false,
     }
     .into_active_model()
-    .insert(db.__internal_connection())
+    .insert(&conn)
     .await
     .expect("failed to seed third local user");
 
@@ -206,8 +208,9 @@ async fn sqlite_query_errors_include_query_builder_context() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
+    let conn = db.__internal_connection();
 
-    db.__internal_connection()
+    conn
         .execute_unprepared(
             r#"
             CREATE TABLE ci_users (
@@ -279,8 +282,9 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
+    let conn = db.__internal_connection();
 
-    db.__internal_connection()
+    conn
         .execute_unprepared(
             r#"
             CREATE TABLE ci_users (
@@ -301,7 +305,7 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
         active: true,
     }
     .into_active_model()
-    .insert(db.__internal_connection())
+    .insert(&conn)
     .await
     .expect("failed to seed uncached user");
 

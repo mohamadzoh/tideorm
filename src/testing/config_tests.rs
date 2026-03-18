@@ -9,6 +9,7 @@ fn test_default_config() {
 
 #[test]
 fn test_config_builder() {
+    TideConfig::reset();
     TideConfig::init()
         .languages(&["en", "fr"])
         .fallback_language("fr")
@@ -219,6 +220,7 @@ fn test_tide_config_no_schema_file() {
 
 #[test]
 fn test_tide_config_file_base_url_for_builder() {
+    TideConfig::reset();
     let config = TideConfig::init()
         .file_base_url("https://cdn.example.com/uploads")
         .file_base_url_for("thumbnail", "https://thumbs.example.com/uploads")
@@ -256,6 +258,60 @@ fn test_config_resolve_file_base_url_prefers_field_match() {
         Some("https://cdn.example.com/uploads")
     );
     assert_eq!(Config::default().resolve_file_base_url("gallery"), None);
+}
+
+#[test]
+fn test_tide_config_apply_overwrites_existing_global_state() {
+    TideConfig::reset();
+
+    TideConfig::init()
+        .database_type(DatabaseType::Postgres)
+        .max_connections(3)
+        .fallback_language("fr")
+        .apply();
+
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .max_connections(9)
+        .fallback_language("ar")
+        .apply();
+
+    assert_eq!(TideConfig::get_database_type(), Some(DatabaseType::SQLite));
+    assert_eq!(TideConfig::pool_config().max_connections, 9);
+    assert_eq!(Config::global().fallback_language, "ar");
+}
+
+#[test]
+fn test_tide_config_reset_restores_defaults() {
+    TideConfig::reset();
+
+    TideConfig::init()
+        .database_type(DatabaseType::MariaDB)
+        .max_connections(17)
+        .fallback_language("fr")
+        .apply();
+
+    TideConfig::reset();
+
+    assert_eq!(TideConfig::get_database_type(), None);
+    assert_eq!(TideConfig::pool_config().max_connections, PoolConfig::default().max_connections);
+    assert_eq!(Config::global().fallback_language, "en");
+}
+
+#[test]
+fn test_tide_config_apply_clears_database_type_when_omitted() {
+    TideConfig::reset();
+
+    TideConfig::init()
+        .database_type(DatabaseType::Postgres)
+        .apply();
+
+    TideConfig::init()
+        .fallback_language("ar")
+        .apply();
+
+    assert_eq!(TideConfig::get_database_type(), None);
+    assert_eq!(Config::global().fallback_language, "ar");
 }
 
 #[test]

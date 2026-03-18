@@ -1354,11 +1354,16 @@ impl<M: Model> QueryBuilder<M> {
         let count = rows
             .first()
             .and_then(|row| row.get("count"))
-            .and_then(|value| {
-                value
-                    .as_u64()
-                    .or_else(|| value.as_i64().map(|number| number as u64))
+            .map(|value| {
+                if let Some(count) = value.as_u64() {
+                    Ok(count)
+                } else if let Some(count) = value.as_i64() {
+                    crate::internal::count_to_u64(count, "query count")
+                } else {
+                    Ok(0)
+                }
             })
+            .transpose()?
             .unwrap_or(0);
 
         Ok(count)

@@ -550,7 +550,8 @@ impl<M: Model> QueryBuilder<M> {
         let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
 
-        let conn = self.current_db()?.__internal_connection();
+        let db = self.current_db()?;
+        let conn = db.__internal_connection();
         let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
@@ -568,13 +569,16 @@ impl<M: Model> QueryBuilder<M> {
             .select_only()
             .column_as(count_expr, "count_result")
             .into_model::<CountResult>()
-            .one(conn);
+            .one(&conn);
         let result: Option<CountResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(error_context))?;
 
-        Ok(result.map(|r| r.count_result as u64).unwrap_or(0))
+        result
+            .map(|r| crate::internal::count_to_u64(r.count_result, "COUNT(DISTINCT ...)"))
+            .transpose()
+            .map(|count| count.unwrap_or(0))
     }
 
     /// Internal helper for f64 aggregations
@@ -584,7 +588,8 @@ impl<M: Model> QueryBuilder<M> {
             agg_result: Option<f64>,
         }
 
-        let conn = self.current_db()?.__internal_connection();
+        let db = self.current_db()?;
+        let conn = db.__internal_connection();
         let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
@@ -602,7 +607,7 @@ impl<M: Model> QueryBuilder<M> {
             .select_only()
             .column_as(agg_expr, "agg_result")
             .into_model::<AggResult>()
-            .one(conn);
+            .one(&conn);
         let result: Option<AggResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)

@@ -105,6 +105,8 @@ async fn main() -> tideorm::Result<()> {
 
 Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
 
+For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
+
 ## Profiling
 
 TideORM ships with two profiling layers:
@@ -245,6 +247,7 @@ The docs now ship as an mdBook.
 - Read the book locally in the repo: [docs/introduction.md](docs/introduction.md)
 - Published site: **[tideorm.com](https://tideorm.com)**
 - Lightweight markdown index: [DOCUMENTATION.md](DOCUMENTATION.md)
+- Rebuild the generated site locally with `mdbook build` or preview it with `mdbook serve --open`
 
 Core chapters:
 - [Getting Started](docs/getting-started.md) - Configuration, type mappings, examples, and testing
