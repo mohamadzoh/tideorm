@@ -9,12 +9,50 @@ pub(crate) fn generate_model_support(ctx: &BuildContext) -> TokenStream2 {
     let internal_model_impl = generate_internal_model_impl(ctx);
     let helper_methods_impl = generate_helper_methods_impl(ctx);
     let model_trait_impl = generate_model_trait_impl(ctx);
+    let soft_delete_impl = generate_soft_delete_impl(ctx);
     let eager_loader_impl = generate_eager_loader_impl(ctx);
     quote! {
         #internal_model_impl
         #helper_methods_impl
         #model_trait_impl
+        #soft_delete_impl
         #eager_loader_impl
+    }
+}
+
+fn generate_soft_delete_impl(ctx: &BuildContext) -> TokenStream2 {
+    if !ctx.soft_delete_enabled {
+        return quote! {};
+    }
+
+    let struct_name = &ctx.struct_name;
+    let deleted_at_ident = ctx
+        .soft_delete_field_ident
+        .as_ref()
+        .expect("soft delete field should be resolved when soft_delete is enabled");
+    let deleted_at_column = ctx
+        .soft_delete_column_name
+        .as_ref()
+        .expect("soft delete column should be resolved when soft_delete is enabled");
+
+    quote! {
+        #[::tideorm::async_trait::async_trait]
+        impl ::tideorm::SoftDelete for #struct_name {
+            fn deleted_at_column() -> &'static str {
+                #deleted_at_column
+            }
+
+            fn deleted_at(&self) -> Option<::tideorm::chrono::DateTime<::tideorm::chrono::Utc>> {
+                self.#deleted_at_ident.clone()
+            }
+
+            fn set_deleted_at(
+                &mut self,
+                timestamp: Option<::tideorm::chrono::DateTime<::tideorm::chrono::Utc>>,
+            ) {
+                self.#deleted_at_ident = timestamp;
+            }
+        }
     }
 }
 
@@ -77,10 +115,43 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_ident = &ctx.pk_ident;
     let table_name = &ctx.table_name;
     let pk_column_name = &ctx.pk_column_name;
+    let field_names = &ctx.field_names;
+    let column_names = &ctx.column_names;
     let with_relations_method = generate_with_relations_method(ctx);
 
     quote! {
         impl #struct_name {
+            #[doc(hidden)]
+            pub(crate) const fn __column_name_eq(left: &str, right: &str) -> bool {
+                let left_bytes = left.as_bytes();
+                let right_bytes = right.as_bytes();
+
+                if left_bytes.len() != right_bytes.len() {
+                    return false;
+                }
+
+                let mut index = 0;
+                while index < left_bytes.len() {
+                    if left_bytes[index] != right_bytes[index] {
+                        return false;
+                    }
+                    index += 1;
+                }
+
+                true
+            }
+
+            #[doc(hidden)]
+            pub(crate) const fn __has_column_name(name: &str) -> bool {
+                #(
+                    if Self::__column_name_eq(name, #column_names) || Self::__column_name_eq(name, stringify!(#field_names)) {
+                        return true;
+                    }
+                )*
+
+                false
+            }
+
             #[doc(hidden)]
             fn __base_error_context() -> ::tideorm::error::ErrorContext {
                 ::tideorm::error::ErrorContext::new().table(#table_name)

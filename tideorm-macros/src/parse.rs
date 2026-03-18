@@ -451,6 +451,8 @@ pub(crate) struct ModelInput {
     #[darling(default)]
     pub(crate) soft_delete: bool,
     #[darling(default)]
+    pub(crate) deleted_at_column: Option<String>,
+    #[darling(default)]
     pub(crate) timestamps: bool,
     #[darling(default)]
     pub(crate) hidden: Option<String>,

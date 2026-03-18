@@ -13,6 +13,8 @@ pub(crate) struct BuildContext {
     pub(crate) table_name: String,
     pub(crate) schema_name: String,
     pub(crate) soft_delete_enabled: bool,
+    pub(crate) soft_delete_field_ident: Option<Ident>,
+    pub(crate) soft_delete_column_name: Option<String>,
     pub(crate) should_gen_debug: bool,
     pub(crate) should_gen_clone: bool,
     pub(crate) should_gen_default: bool,
@@ -76,6 +78,7 @@ impl BuildContext {
             .clone()
             .unwrap_or_else(|| pluralize(&struct_name_str.to_case(Case::Snake)));
         let schema_name = input.schema.clone().unwrap_or_else(|| "public".to_string());
+        let soft_delete_key = input.deleted_at_column.as_deref().unwrap_or("deleted_at");
         let should_gen_debug =
             !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
         let should_gen_clone =
@@ -162,6 +165,47 @@ impl BuildContext {
             .map(Self::column_name)
             .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
         let pk_auto_increment = pk_field.map(|field| field.auto_increment).unwrap_or(false);
+        let (soft_delete_field_ident, soft_delete_column_name) = if input.soft_delete {
+            let field = db_fields
+                .iter()
+                .find(|field| {
+                    field.ident.as_ref().is_some_and(|ident| ident == soft_delete_key)
+                        || Self::column_name(field) == soft_delete_key
+                })
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        &input.ident,
+                        format!(
+                            "soft_delete requires a field or column named '{}'; set #[tideorm(deleted_at_column = \"...\")] to override",
+                            soft_delete_key
+                        ),
+                    )
+                })?;
+
+            let ty = &field.ty;
+            let ty_str = quote!(#ty).to_string().replace(' ', "");
+            let is_supported_type = matches!(
+                ty_str.as_str(),
+                "Option<DateTime<Utc>>"
+                    | "Option<DateTime<chrono::Utc>>"
+                    | "Option<chrono::DateTime<Utc>>"
+                    | "Option<chrono::DateTime<chrono::Utc>>"
+            );
+
+            if !is_supported_type {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "soft_delete field must have type Option<chrono::DateTime<chrono::Utc>>",
+                ));
+            }
+
+            (
+                field.ident.clone(),
+                Some(Self::column_name(field)),
+            )
+        } else {
+            (None, None)
+        };
         let timestamps_enabled = input.timestamps || has_timestamp_pair(&db_fields);
         let sync_column_attrs = build_sync_column_attrs(&db_fields);
         let insert_active_model_setters = build_insert_active_model_setters(&db_fields);
@@ -195,6 +239,8 @@ impl BuildContext {
             table_name,
             schema_name,
             soft_delete_enabled: input.soft_delete,
+            soft_delete_field_ident,
+            soft_delete_column_name,
             should_gen_debug,
             should_gen_clone,
             should_gen_default,

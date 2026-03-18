@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: relation 'author' references an unknown remote column 'uuid'
+  --> tests/ui/invalid_relation_remote_column.rs:11:10
+   |
+11 | #[derive(Model)]
+   |          ^^^^^ evaluation of `<__tideorm_internal_article::Relation as tideorm::sea_orm::RelationTrait>::def::_` failed here
+
+error[E0080]: evaluation panicked: relation 'author' references an unknown remote column 'uuid'
+  --> tests/ui/invalid_relation_remote_column.rs:11:10
+   |
+11 | #[derive(Model)]
+   |          ^^^^^ evaluation of `<__tideorm_internal_article::Entity as tideorm::sea_orm::Related<<User as tideorm::internal::InternalModel>::Entity>>::to::_` failed here

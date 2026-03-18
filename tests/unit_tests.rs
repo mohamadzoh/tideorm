@@ -4821,26 +4821,12 @@ mod soft_delete_query_tests {
     use tideorm::prelude::*;
 
     #[derive(Model)]
-    #[tideorm(table = "query_soft_delete_override", soft_delete)]
+    #[tideorm(table = "query_soft_delete_override", soft_delete, deleted_at_column = "archived_on")]
     struct CustomSoftDeleteModel {
         #[tideorm(primary_key, auto_increment)]
         id: i64,
         name: String,
         archived_on: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    impl SoftDelete for CustomSoftDeleteModel {
-        fn deleted_at_column() -> &'static str {
-            "archived_on"
-        }
-
-        fn deleted_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-            self.archived_on
-        }
-
-        fn set_deleted_at(&mut self, timestamp: Option<chrono::DateTime<chrono::Utc>>) {
-            self.archived_on = timestamp;
-        }
     }
 
     #[test]

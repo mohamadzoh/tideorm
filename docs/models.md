@@ -186,6 +186,19 @@ pub struct Post {
 }
 ```
 
+The `SoftDelete` impl is generated automatically. If your field or column uses a
+different name, declare it on the model:
+
+```rust
+#[tideorm::model(table = "posts", soft_delete, deleted_at_column = "archived_on")]
+pub struct Post {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub title: String,
+    pub archived_on: Option<DateTime<Utc>>,
+}
+```
+
 ### Querying Soft-Deleted Records
 
 ```rust

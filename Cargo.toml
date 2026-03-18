@@ -63,6 +63,7 @@ argon2 = { version = "0.5.3", features = ["std"] }
 tokio = { version = "1.49.0", features = ["full", "test-util", "macros"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
+trybuild = "1.0.112"
 
 # Benchmarks run with: cargo bench
 [[bench]]

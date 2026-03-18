@@ -115,16 +115,6 @@ pub struct TestSoftDelete {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-impl SoftDelete for TestSoftDelete {
-    fn deleted_at(&self) -> Option<DateTime<Utc>> {
-        self.deleted_at
-    }
-
-    fn set_deleted_at(&mut self, timestamp: Option<DateTime<Utc>>) {
-        self.deleted_at = timestamp;
-    }
-}
-
 // =============================================================================
 // SINGLE INTEGRATION TEST - Runs all scenarios sequentially
 // =============================================================================

@@ -6,18 +6,18 @@ use quote::quote;
 use crate::context::BuildContext;
 use crate::parse::relation_generic_types;
 
-pub(crate) fn generate_entity_support(ctx: &BuildContext) -> TokenStream2 {
-    let base_impl = generate_base_impl(ctx);
+pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
+    let base_impl = generate_base_impl(ctx)?;
     let sync_impl = generate_sync_impl(ctx);
     let columns_impl = generate_columns_impl(ctx);
-    quote! {
+    Ok(quote! {
         #base_impl
         #sync_impl
         #columns_impl
-    }
+    })
 }
 
-fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
+fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let internal_entity_mod = &ctx.internal_entity_mod;
     let table_name = &ctx.table_name;
     let struct_name = &ctx.struct_name;
@@ -51,8 +51,8 @@ fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
     let allowed_languages_impl = ctx.allowed_languages_impl();
     let fallback_language_impl = ctx.fallback_language_impl();
     let relation_variants = build_relation_variants(ctx);
-    let relation_defs = build_relation_defs(ctx);
-    let related_impls = build_related_impls(ctx);
+    let relation_defs = build_relation_defs(ctx)?;
+    let related_impls = build_related_impls(ctx)?;
     let relation_trait_impl = if relation_variants.is_empty() {
         quote! {
             impl RelationTrait for Relation {
@@ -73,7 +73,7 @@ fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
         }
     };
 
-    quote! {
+    Ok(quote! {
         #[doc(hidden)]
         #[allow(non_snake_case, dead_code, unused_imports, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
         mod #internal_entity_mod {
@@ -152,7 +152,7 @@ fn generate_base_impl(ctx: &BuildContext) -> TokenStream2 {
             fn indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#index_impls),*] }
             fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#unique_index_impls),*] }
         }
-    }
+    })
 }
 
 fn build_relation_variants(ctx: &BuildContext) -> Vec<syn::Ident> {
@@ -163,19 +163,45 @@ fn build_relation_variants(ctx: &BuildContext) -> Vec<syn::Ident> {
         .collect()
 }
 
-fn build_relation_defs(ctx: &BuildContext) -> Vec<TokenStream2> {
+fn build_relation_defs(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
     ctx.relation_fields
         .iter()
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
-        .filter_map(|(field, ident)| {
+        .map(|(field, ident)| -> syn::Result<TokenStream2> {
             let variant = format_ident!("{}", ident.to_string().to_case(Case::Pascal));
             let related_types = relation_generic_types(&field.ty);
-            let related_ty = related_types.first()?.clone();
+            let related_ty = related_types.first().cloned().ok_or_else(|| {
+                syn::Error::new_spanned(&field.ty, "relation field must specify a related model type")
+            })?;
 
             if field.has_many_through.is_some() {
-                return Some(quote! {
-                    Self::#variant => <Entity as ::tideorm::sea_orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity>>::via()
-                        .expect("many-to-many relation must define a via RelationDef")
+                let pivot_ty = related_types.get(1).cloned().ok_or_else(|| {
+                    syn::Error::new_spanned(&field.ty, "has_many_through relations must specify both related and pivot model types")
+                })?;
+                let pivot_entity = build_related_entity_value(&pivot_ty);
+                let local_ident = ctx.resolve_local_key_ident(
+                    field.local_key.as_deref().unwrap_or("id"),
+                    ident,
+                )?;
+                let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
+                let foreign_key = field.foreign_key.as_deref().unwrap_or("id");
+                let pivot_error = format!(
+                    "many-to-many relation '{}' references an unknown pivot foreign key '{}'",
+                    ident, foreign_key
+                );
+                let pivot_assert = compile_time_column_assert(&pivot_ty, foreign_key, &pivot_error);
+
+                return Ok(quote! {
+                    Self::#variant => {
+                        #pivot_assert
+                        let mut relation: RelationDef = Entity::belongs_to(#pivot_entity)
+                            .from(Column::#local_column_variant)
+                            .to(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#foreign_key)
+                                .unwrap_or_else(|| unreachable!(#pivot_error)))
+                            .into();
+                        relation.rel_type = ::tideorm::sea_orm::RelationType::HasMany;
+                        relation
+                    }
                 });
             }
 
@@ -190,9 +216,9 @@ fn build_relation_defs(ctx: &BuildContext) -> Vec<TokenStream2> {
                 field.foreign_key.as_deref().unwrap_or("id")
             };
             let local_ident = if field.belongs_to.is_some() {
-                ctx.resolve_required_db_field_ident(local_key, ident).ok()?
+                ctx.resolve_required_db_field_ident(local_key, ident)?
             } else {
-                ctx.resolve_local_key_ident(local_key, ident).ok()?
+                ctx.resolve_local_key_ident(local_key, ident)?
             };
             let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
             let relation_type = if field.has_many.is_some() {
@@ -200,13 +226,19 @@ fn build_relation_defs(ctx: &BuildContext) -> Vec<TokenStream2> {
             } else {
                 quote!(::tideorm::sea_orm::RelationType::HasOne)
             };
+            let remote_error = format!(
+                "relation '{}' references an unknown remote column '{}'",
+                ident, remote_key
+            );
+            let remote_assert = compile_time_column_assert(&related_ty, remote_key, &remote_error);
 
-            Some(quote! {
+            Ok(quote! {
                 Self::#variant => {
+                    #remote_assert
                     let mut relation: RelationDef = Entity::belongs_to(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as Default>::default())
                         .from(Column::#local_column_variant)
                         .to(<#related_ty as ::tideorm::internal::InternalModel>::column_from_str(#remote_key)
-                            .expect("relation references an unknown remote column"))
+                            .unwrap_or_else(|| unreachable!(#remote_error)))
                         .into();
                     relation.rel_type = #relation_type;
                     relation
@@ -220,42 +252,63 @@ fn build_related_entity_value(ty: &syn::Type) -> TokenStream2 {
     quote!(<<#ty as ::tideorm::internal::InternalModel>::Entity as Default>::default())
 }
 
-fn build_related_impls(ctx: &BuildContext) -> Vec<TokenStream2> {
+fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
     ctx.relation_fields
         .iter()
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
-        .filter_map(|(field, ident)| {
+        .map(|(field, ident)| -> syn::Result<TokenStream2> {
             let related_types = relation_generic_types(&field.ty);
-            let related_ty = related_types.first()?.clone();
+            let related_ty = related_types.first().cloned().ok_or_else(|| {
+                syn::Error::new_spanned(&field.ty, "relation field must specify a related model type")
+            })?;
             let related_entity = build_related_entity_value(&related_ty);
 
             if field.has_many_through.is_some() {
-                let pivot_ty = related_types.get(1)?.clone();
+                let pivot_ty = related_types.get(1).cloned().ok_or_else(|| {
+                    syn::Error::new_spanned(&field.ty, "has_many_through relations must specify both related and pivot model types")
+                })?;
                 let pivot_entity = build_related_entity_value(&pivot_ty);
                 let local_ident = ctx
-                    .resolve_local_key_ident(field.local_key.as_deref().unwrap_or("id"), ident)
-                    .ok()?;
+                    .resolve_local_key_ident(field.local_key.as_deref().unwrap_or("id"), ident)?;
                 let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
                 let foreign_key = field.foreign_key.as_deref().unwrap_or("id");
                 let related_key = field.related_key.as_deref().unwrap_or("id");
                 let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+                let pivot_related_error = format!(
+                    "many-to-many relation '{}' references an unknown pivot related column '{}'",
+                    ident, related_key
+                );
+                let related_column_error = format!(
+                    "many-to-many relation '{}' references an unknown related column '{}'",
+                    ident, related_local_key
+                );
+                let pivot_foreign_error = format!(
+                    "many-to-many relation '{}' references an unknown pivot foreign key '{}'",
+                    ident, foreign_key
+                );
+                let pivot_related_assert = compile_time_column_assert(&pivot_ty, related_key, &pivot_related_error);
+                let related_column_assert = compile_time_column_assert(&related_ty, related_local_key, &related_column_error);
+                let pivot_foreign_assert = compile_time_column_assert(&pivot_ty, foreign_key, &pivot_foreign_error);
 
-                return Some(quote! {
+                return Ok(quote! {
                     impl ::tideorm::sea_orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
                         fn to() -> RelationDef {
+                            #pivot_related_assert
+                            #related_column_assert
                             <#pivot_ty as ::tideorm::internal::InternalModel>::Entity::belongs_to(#related_entity)
                                 .from(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#related_key)
-                                    .expect("many-to-many relation references an unknown pivot related column"))
+                                    .unwrap_or_else(|| unreachable!(#pivot_related_error)))
                                 .to(<#related_ty as ::tideorm::internal::InternalModel>::column_from_str(#related_local_key)
-                                    .expect("many-to-many relation references an unknown related column"))
+                                    .unwrap_or_else(|| unreachable!(#related_column_error)))
                                 .into()
                         }
 
                         fn via() -> Option<RelationDef> {
+                            #pivot_foreign_assert
                             let mut relation: RelationDef = Entity::belongs_to(#pivot_entity)
                                 .from(Column::#local_column_variant)
                                 .to(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#foreign_key)
-                                    .expect("many-to-many relation references an unknown pivot foreign key"))
+                                    .unwrap_or_else(|| unreachable!(#pivot_foreign_error)))
                                 .into();
                             relation.rel_type = ::tideorm::sea_orm::RelationType::HasMany;
                             Some(relation)
@@ -275,9 +328,9 @@ fn build_related_impls(ctx: &BuildContext) -> Vec<TokenStream2> {
                 field.foreign_key.as_deref().unwrap_or("id")
             };
             let local_ident = if field.belongs_to.is_some() {
-                ctx.resolve_required_db_field_ident(local_key, ident).ok()?
+                ctx.resolve_required_db_field_ident(local_key, ident)?
             } else {
-                ctx.resolve_local_key_ident(local_key, ident).ok()?
+                ctx.resolve_local_key_ident(local_key, ident)?
             };
             let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
             let relation_type = if field.has_many.is_some() {
@@ -285,14 +338,20 @@ fn build_related_impls(ctx: &BuildContext) -> Vec<TokenStream2> {
             } else {
                 quote!(::tideorm::sea_orm::RelationType::HasOne)
             };
+            let remote_error = format!(
+                "relation '{}' references an unknown remote column '{}'",
+                ident, remote_key
+            );
+            let remote_assert = compile_time_column_assert(&related_ty, remote_key, &remote_error);
 
-            Some(quote! {
+            Ok(quote! {
                 impl ::tideorm::sea_orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
                     fn to() -> RelationDef {
+                        #remote_assert
                         let mut relation: RelationDef = Entity::belongs_to(#related_entity)
                             .from(Column::#local_column_variant)
                             .to(<#related_ty as ::tideorm::internal::InternalModel>::column_from_str(#remote_key)
-                                .expect("relation references an unknown remote column"))
+                                .unwrap_or_else(|| unreachable!(#remote_error)))
                             .into();
                         relation.rel_type = #relation_type;
                         relation
@@ -301,6 +360,16 @@ fn build_related_impls(ctx: &BuildContext) -> Vec<TokenStream2> {
             })
         })
         .collect()
+}
+
+fn compile_time_column_assert(ty: &syn::Type, column: &str, message: &str) -> TokenStream2 {
+    quote! {
+        const _: () = {
+            if !<#ty>::__has_column_name(#column) {
+                panic!(#message);
+            }
+        };
+    }
 }
 
 fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {

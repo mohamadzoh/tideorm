@@ -19,6 +19,9 @@
 //!     pub deleted_at: Option<DateTime<Utc>>,
 //! }
 //!
+//! // `#[tideorm(soft_delete)]` generates the `SoftDelete` impl automatically.
+//! // Use `deleted_at_column = "archived_on"` when the field/column name is not `deleted_at`.
+//!
 //! // Soft delete a post
 //! post.soft_delete(&db).await?;
 //!
@@ -40,8 +43,9 @@ use crate::model::Model;
 
 /// Trait for models that support soft deletion
 ///
-/// Models implementing this trait can be "soft deleted" - marked as deleted
-/// without actually removing them from the database.
+/// `#[tideorm(soft_delete)]` models receive an implementation automatically as long
+/// as they expose a `deleted_at` field/column, or declare a custom
+/// `deleted_at_column = "..."` override on the model.
 #[async_trait]
 pub trait SoftDelete: Model {
     /// The name of the deleted_at column

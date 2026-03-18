@@ -49,7 +49,10 @@ fn generate_model_impl(
 ) -> TokenStream2 {
     match BuildContext::new(input, indexes, unique_indexes, existing_derives) {
         Ok(ctx) => {
-            let entity_support = generate_entity_support(&ctx);
+            let entity_support = match generate_entity_support(&ctx) {
+                Ok(tokens) => tokens,
+                Err(error) => return error.to_compile_error(),
+            };
             let model_support = generate_model_support(&ctx);
             let validation_impl = generate_validation_impl(&ctx);
             let trait_impls = generate_trait_impls(&ctx);
