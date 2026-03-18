@@ -388,8 +388,9 @@ impl Database {
 
         let results = db
             .inner
-            .connection()
-            .query_all_raw(stmt)
+            .connection();
+
+        let results = crate::profiling::__profile_future(results.query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -438,10 +439,7 @@ impl Database {
         let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = self
-            .inner
-            .connection()
-            .query_all_raw(stmt)
+        let results = crate::profiling::__profile_future(self.inner.connection().query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -469,10 +467,7 @@ impl Database {
         use crate::internal::ConnectionTrait;
 
         let db = crate::database::require_db()?;
-        let result = db
-            .inner
-            .connection()
-            .execute_unprepared(sql)
+        let result = crate::profiling::__profile_future(db.inner.connection().execute_unprepared(sql))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -509,10 +504,7 @@ impl Database {
         let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let result = self
-            .inner
-            .connection()
-            .execute_raw(stmt)
+        let result = crate::profiling::__profile_future(self.inner.connection().execute_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -548,10 +540,7 @@ impl Database {
         let backend = db.inner.connection().get_database_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = db
-            .inner
-            .connection()
-            .query_all_raw(stmt)
+        let results = crate::profiling::__profile_future(db.inner.connection().query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -579,10 +568,7 @@ impl Database {
         let backend = self.inner.connection().get_database_backend();
         let stmt = Statement::from_sql_and_values(backend, sql, params);
 
-        let results = self
-            .inner
-            .connection()
-            .query_all_raw(stmt)
+        let results = crate::profiling::__profile_future(self.inner.connection().query_all_raw(stmt))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -597,12 +583,12 @@ impl Database {
             let mut obj = serde_json::Map::new();
 
             for col_name in row.column_names() {
-                let json_val = if let Ok(val) = row.try_get::<Option<bool>>("", &col_name) {
+                let json_val = if let Ok(val) = row.try_get::<Option<i64>>("", &col_name) {
                     match val {
                         Some(v) => serde_json::json!(v),
                         None => serde_json::Value::Null,
                     }
-                } else if let Ok(val) = row.try_get::<Option<i64>>("", &col_name) {
+                } else if let Ok(val) = row.try_get::<Option<bool>>("", &col_name) {
                     match val {
                         Some(v) => serde_json::json!(v),
                         None => serde_json::Value::Null,

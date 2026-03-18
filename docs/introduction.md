@@ -7,6 +7,7 @@ Use the chapter list on the left to move through the core areas of the library:
 - Getting Started
 - Models
 - Queries
+- Profiling
 - Relations
 - Migrations
 

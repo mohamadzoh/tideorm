@@ -564,11 +564,12 @@ impl<M: Model> QueryBuilder<M> {
         // Build COUNT(DISTINCT column) expression
         let count_expr = Expr::cust(format!("COUNT(DISTINCT {})", col));
 
-        let result: Option<CountResult> = select
+        let result = select
             .select_only()
             .column_as(count_expr, "count_result")
             .into_model::<CountResult>()
-            .one(conn)
+            .one(conn);
+        let result: Option<CountResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(error_context))?;
@@ -597,11 +598,12 @@ impl<M: Model> QueryBuilder<M> {
         // Build aggregate expression
         let agg_expr = Expr::cust(expr_sql.to_string());
 
-        let result: Option<AggResult> = select
+        let result = select
             .select_only()
             .column_as(agg_expr, "agg_result")
             .into_model::<AggResult>()
-            .one(conn)
+            .one(conn);
+        let result: Option<AggResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(error_context))?;

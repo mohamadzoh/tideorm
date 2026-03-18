@@ -14,6 +14,7 @@ A developer-friendly ORM for Rust with clean, expressive syntax.
 - **Auto Schema Sync** - Automatic table management during development
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
+- **Profiling & Logging** - Built-in query logging plus execution counters and slow-query stats
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Optional Modules** - Attachments, translations, and full-text search are available behind feature flags
 - **Tokenization** - Secure record ID encoding/decoding helpers
@@ -103,6 +104,30 @@ async fn main() -> tideorm::Result<()> {
 ```
 
 Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
+
+## Profiling
+
+TideORM ships with two profiling layers:
+
+- `GlobalProfiler` records aggregate timings for real executed queries when enabled.
+- `Profiler` builds manual profiling reports from queries you record explicitly.
+
+```rust
+use tideorm::prelude::*;
+use tideorm::profiling::GlobalProfiler;
+
+GlobalProfiler::enable();
+GlobalProfiler::reset();
+
+let _ = User::query().where_eq("active", true).get().await?;
+
+let stats = GlobalProfiler::stats();
+println!("{}", stats);
+
+GlobalProfiler::disable();
+```
+
+The global profiler now observes the main TideORM execution paths, including query-builder reads, raw SQL helpers, aggregate queries, full-text search, and macro-generated CRUD methods.
 
 ## Model Relations
 
@@ -225,6 +250,7 @@ Core chapters:
 - [Getting Started](docs/getting-started.md) - Configuration, type mappings, examples, and testing
 - [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and SeaORM 2.0-inspired helpers
 - [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
+- [Profiling](docs/profiling.md) - Global query timing, slow-query stats, manual reports, and query analysis
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
 - [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
 

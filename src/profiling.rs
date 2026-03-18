@@ -5,18 +5,36 @@
 //!
 //! # Quick Start
 //!
+//! Use `GlobalProfiler` when you want aggregate statistics for real executed
+//! TideORM queries:
+//!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
-//! use tideorm::profiling::{Profiler, ProfileReport};
+//! use tideorm::profiling::GlobalProfiler;
 //!
-//! // Start profiling
-//! let profiler = Profiler::start();
+//! GlobalProfiler::enable();
+//! GlobalProfiler::reset();
 //!
-//! // Execute queries
-//! let users = User::all().await?;
-//! let posts = Post::where_eq("published", true).get().await?;
+//! let users = User::query().where_eq("active", true).get().await?;
+//! let stats = GlobalProfiler::stats();
+//! println!("{}", stats);
 //!
-//! // Get profiling report
+//! GlobalProfiler::disable();
+//! ```
+//!
+//! Use `Profiler` when you want to construct a detailed report manually:
+//!
+//! ```rust,ignore
+//! use std::time::Duration;
+//! use tideorm::profiling::{ProfiledQuery, Profiler};
+//!
+//! let mut profiler = Profiler::start();
+//! profiler.record("SELECT * FROM users", Duration::from_millis(8));
+//! profiler.record_full(
+//!     ProfiledQuery::new("SELECT * FROM posts WHERE user_id = 1", Duration::from_millis(12))
+//!         .with_table("posts")
+//!         .with_rows(3),
+//! );
 //! let report = profiler.stop();
 //! println!("{}", report);
 //! ```
@@ -46,6 +64,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -450,6 +469,17 @@ impl GlobalProfiler {
     pub fn set_slow_threshold(ms: u64) {
         *GLOBAL_SLOW_THRESHOLD_MS.write() = ms;
     }
+}
+
+#[doc(hidden)]
+pub async fn __profile_future<T, F>(future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    let start = Instant::now();
+    let output = future.await;
+    GlobalProfiler::record(start.elapsed());
+    output
 }
 
 /// Global profiling statistics
@@ -871,6 +901,31 @@ mod tests {
         assert_eq!(stats.slow_queries, 1);
 
         GlobalProfiler::disable();
+    }
+
+    #[tokio::test]
+    async fn test_profile_future_records_enabled_queries() {
+        GlobalProfiler::enable();
+        GlobalProfiler::reset();
+
+        let value = __profile_future(async { 42_u64 }).await;
+
+        assert_eq!(value, 42);
+        assert_eq!(GlobalProfiler::stats().total_queries, 1);
+
+        GlobalProfiler::disable();
+        GlobalProfiler::reset();
+    }
+
+    #[tokio::test]
+    async fn test_profile_future_does_not_record_when_disabled() {
+        GlobalProfiler::disable();
+        GlobalProfiler::reset();
+
+        let value = __profile_future(async { 7_u64 }).await;
+
+        assert_eq!(value, 7);
+        assert_eq!(GlobalProfiler::stats().total_queries, 0);
     }
 
     #[test]

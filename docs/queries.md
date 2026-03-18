@@ -2,6 +2,8 @@
 
 This chapter covers the query builder, full-text search, database-specific behavior, raw SQL, logging, and error handling.
 
+For execution metrics and slow-query counters, see [Profiling](profiling.md).
+
 ## Query Builder
 
 TideORM provides a fluent query builder with all common operations.

@@ -213,7 +213,8 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("find_by_id({})", id));
                 let result = #internal_entity_mod::Entity::find_by_id(id)
-                    .one(::tideorm::require_db()?.__internal_connection())
+                    .one(::tideorm::require_db()?.__internal_connection());
+                let result = ::tideorm::profiling::__profile_future(result)
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
@@ -229,7 +230,8 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("find_by_id({})", id));
                 let result = #internal_entity_mod::Entity::find_by_id(id)
-                    .one(db.__internal_connection())
+                    .one(db.__internal_connection());
+                let result = ::tideorm::profiling::__profile_future(result)
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
@@ -241,7 +243,8 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("delete_by_id({})", id));
                 let result = #internal_entity_mod::Entity::delete_by_id(id)
-                    .exec(::tideorm::require_db()?.__internal_connection())
+                    .exec(::tideorm::require_db()?.__internal_connection());
+                let result = ::tideorm::profiling::__profile_future(result)
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
@@ -258,7 +261,8 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&model.#pk_ident)
                     .query(format!("delete where {} = {}", #pk_column_name, model.#pk_ident));
                 let active = model.clone().__into_delete_active_model();
-                let result = active.delete(::tideorm::require_db()?.__internal_connection())
+                let result = active.delete(::tideorm::require_db()?.__internal_connection());
+                let result = ::tideorm::profiling::__profile_future(result)
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
@@ -274,7 +278,10 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&mut model).run_before_create()?;
                 let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
                 let active = <Self as InternalModel>::into_active_model(model);
-                let result = active.insert(::tideorm::require_db()?.__internal_connection())
+                let conn = ::tideorm::require_db()?.__internal_connection();
+                let result = ::tideorm::profiling::__profile_future(
+                    async move { active.insert(conn).await }
+                )
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
@@ -292,7 +299,10 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&model.#pk_ident)
                     .query(format!("update where {} = {}", #pk_column_name, model.#pk_ident));
                 let active = model.__into_update_active_model();
-                let result = active.update(::tideorm::require_db()?.__internal_connection())
+                let conn = ::tideorm::require_db()?.__internal_connection();
+                let result = ::tideorm::profiling::__profile_future(
+                    async move { active.update(conn).await }
+                )
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;

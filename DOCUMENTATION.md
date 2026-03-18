@@ -13,6 +13,7 @@ Chapter map:
 - [Getting Started](docs/getting-started.md)
 - [Models](docs/models.md)
 - [Queries](docs/queries.md)
+- [Profiling](docs/profiling.md)
 - [Relations](docs/relations.md)
 - [Migrations](docs/migrations.md)
 

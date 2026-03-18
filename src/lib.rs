@@ -97,21 +97,26 @@
 //!
 //! ## Performance Profiling
 //!
-//! Profile query performance:
+//! For lightweight application-wide query timing, enable `GlobalProfiler` before
+//! executing TideORM queries:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
+//! use tideorm::profiling::GlobalProfiler;
 //!
-//! // Start profiling
-//! let profiler = Profiler::start();
+//! GlobalProfiler::enable();
+//! GlobalProfiler::reset();
 //!
-//! // Execute queries
-//! let users = User::all().await?;
+//! let users = User::query().where_eq("active", true).get().await?;
 //!
-//! // Get report
-//! let report = profiler.stop();
-//! println!("{}", report);
+//! let stats = GlobalProfiler::stats();
+//! println!("{}", stats);
+//!
+//! GlobalProfiler::disable();
 //! ```
+//!
+//! For a detailed report with custom SQL strings or metadata, build it manually
+//! with `Profiler` and `ProfiledQuery`.
 //!
 //! ## Model Definition
 //!

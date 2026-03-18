@@ -106,7 +106,8 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
     {
         let results = M::Entity::find()
-            .all(conn)
+            .all(conn);
+        let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("find_all()")))?;
@@ -120,7 +121,8 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
     {
         let result = M::Entity::find()
-            .one(conn)
+            .one(conn);
+        let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("first()")))?;
@@ -144,7 +146,8 @@ impl QueryExecutor {
         }
 
         let result = select
-            .one(conn)
+            .one(conn);
+        let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>(query_label)))?;
@@ -162,11 +165,12 @@ impl QueryExecutor {
             count: i64,
         }
 
-        let result: Option<CountResult> = M::Entity::find()
+        let result = M::Entity::find()
             .select_only()
             .column_as(Expr::col(Asterisk).count(), "count")
             .into_model::<CountResult>()
-            .one(conn)
+            .one(conn);
+        let result: Option<CountResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("count(*)")))?;
@@ -182,7 +186,8 @@ impl QueryExecutor {
         let results = M::Entity::find()
             .offset(offset)
             .limit(limit)
-            .all(conn)
+            .all(conn);
+        let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)
             .map_err(|err| {
@@ -202,7 +207,8 @@ impl QueryExecutor {
     {
         let active = model.into_active_model();
         let result = active
-            .delete(conn)
+            .delete(conn);
+        let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("delete(model)")))?;
@@ -233,8 +239,7 @@ impl QueryExecutor {
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
             let active = models.into_iter().next().unwrap().into_active_model();
-            let result = active
-                .insert(conn)
+            let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
                 .await
                 .map_err(translate_error)
                 .map_err(|err| err.with_context(error_context.clone()))?;
@@ -250,7 +255,8 @@ impl QueryExecutor {
             let active_models: Vec<_> = models.into_iter().map(|m| m.into_active_model()).collect();
 
             let results = M::Entity::insert_many(active_models)
-                .exec_with_returning(conn)
+                .exec_with_returning(conn);
+            let results = crate::profiling::__profile_future(results)
                 .await
                 .map_err(translate_error)
                 .map_err(|err| err.with_context(error_context.clone()))?;
@@ -262,8 +268,7 @@ impl QueryExecutor {
             let mut results = Vec::with_capacity(models.len());
             for model in models {
                 let active = model.into_active_model();
-                let result = active
-                    .insert(conn)
+                let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
                     .await
                     .map_err(translate_error)
                     .map_err(|err| err.with_context(error_context.clone()))?;

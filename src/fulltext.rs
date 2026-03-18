@@ -418,7 +418,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let results = db
             .__internal_connection()
-            .query_all_raw(statement)
+            .query_all_raw(statement);
+        let results = crate::profiling::__profile_future(results)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -446,7 +447,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let results = db
             .__internal_connection()
-            .query_all_raw(statement)
+            .query_all_raw(statement);
+        let results = crate::profiling::__profile_future(results)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
@@ -483,7 +485,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let result = db
             .__internal_connection()
-            .query_one_raw(statement)
+            .query_one_raw(statement);
+        let result = crate::profiling::__profile_future(result)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 
