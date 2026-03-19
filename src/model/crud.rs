@@ -108,9 +108,8 @@ where
     insert_all::<M>(models).await
 }
 
-pub(crate) async fn transaction<M, F, T>(f: F) -> Result<T>
+pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
 where
-    M: Model + Sized,
     F: for<'c> FnOnce(
             &'c crate::database::Transaction,
         ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>

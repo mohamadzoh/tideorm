@@ -199,10 +199,7 @@ impl BuildContext {
                 ));
             }
 
-            (
-                field.ident.clone(),
-                Some(Self::column_name(field)),
-            )
+            (field.ident.clone(), Some(Self::column_name(field)))
         } else {
             (None, None)
         };

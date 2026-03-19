@@ -31,7 +31,8 @@ async fn setup_nested_test_db() -> Database {
         .expect("failed to connect to SQLite for nested model tests");
     Database::set_global(db.clone()).expect("failed to register nested test database");
 
-    db.__internal_connection().unwrap()
+    db.__internal_connection()
+        .unwrap()
         .execute_unprepared(
             r#"
             CREATE TABLE nested_test_parents (
@@ -79,7 +80,11 @@ async fn save_with_many_persists_children_with_parent_fk() {
 
     assert!(saved_parent.id > 0);
     assert_eq!(saved_children.len(), 2);
-    assert!(saved_children.iter().all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        saved_children
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
     assert!(saved_children.iter().all(|child| child.id > 0));
 
     let fetched = NestedTestChild::query()
@@ -119,13 +124,20 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
     assert_eq!(fetched.len(), 2);
     assert_eq!(fetched[0].name, "alpha");
     assert_eq!(fetched[1].name, "beta");
-    assert!(fetched.iter().all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        fetched
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
 
     let returned_parent_ids: Vec<_> = saved_related
         .iter()
         .map(|value| value.get("parent_id").and_then(serde_json::Value::as_i64))
         .collect();
-    assert_eq!(returned_parent_ids, vec![Some(saved_parent.id), Some(saved_parent.id)]);
+    assert_eq!(
+        returned_parent_ids,
+        vec![Some(saved_parent.id), Some(saved_parent.id)]
+    );
 }
 
 #[tokio::test]
@@ -153,8 +165,22 @@ async fn delete_with_many_uses_bulk_delete_for_related_models() {
 
     assert_eq!(deleted, 4);
     assert_eq!(GlobalProfiler::stats().total_queries, 2);
-    assert_eq!(NestedTestChild::query().get().await.expect("child query should succeed").len(), 0);
-    assert_eq!(NestedTestParent::query().get().await.expect("parent query should succeed").len(), 0);
+    assert_eq!(
+        NestedTestChild::query()
+            .get()
+            .await
+            .expect("child query should succeed")
+            .len(),
+        0
+    );
+    assert_eq!(
+        NestedTestParent::query()
+            .get()
+            .await
+            .expect("parent query should succeed")
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]

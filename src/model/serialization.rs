@@ -64,12 +64,8 @@ where
             if let Some(files_obj) = files.as_object() {
                 for relation in &file_relations {
                     if let Some(file_data) = files_obj.get(*relation) {
-                        let processed = process_file_for_json(
-                            relation,
-                            file_data,
-                            &hidden,
-                            url_generator,
-                        );
+                        let processed =
+                            process_file_for_json(relation, file_data, &hidden, url_generator);
                         json.insert(relation.to_string(), processed);
                     }
                 }
@@ -217,11 +213,13 @@ pub(crate) fn extract_translations<M>(
 where
     M: Model,
 {
+    let _ = std::marker::PhantomData::<M>;
     let _ = data;
     Ok(serde_json::json!({}))
 }
 
-pub(crate) fn get_files_attribute<M>() -> std::result::Result<HashMap<String, serde_json::Value>, String>
+pub(crate) fn get_files_attribute<M>()
+-> std::result::Result<HashMap<String, serde_json::Value>, String>
 where
     M: Model,
 {
@@ -290,7 +288,10 @@ where
     }
 
     if !M::has_many_attached_files().contains(&relation_type) {
-        return Err(format!("Relation '{}' is not a hasMany relation", relation_type));
+        return Err(format!(
+            "Relation '{}' is not a hasMany relation",
+            relation_type
+        ));
     }
 
     for file_key in file_keys {
@@ -326,7 +327,10 @@ where
                     .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(key))
                     .cloned()
                     .collect();
-                files.insert(relation_type.to_string(), serde_json::Value::Array(filtered));
+                files.insert(
+                    relation_type.to_string(),
+                    serde_json::Value::Array(filtered),
+                );
             }
         }
     } else if M::has_one_attached_file().contains(&relation_type) {
@@ -377,7 +381,10 @@ where
                 })
             })
             .collect();
-        files.insert(relation_type.to_string(), serde_json::Value::Array(file_array));
+        files.insert(
+            relation_type.to_string(),
+            serde_json::Value::Array(file_array),
+        );
     } else {
         return Err(format!("Unknown file relation: {}", relation_type));
     }
@@ -415,6 +422,7 @@ pub(crate) fn extract_files<M>(
 where
     M: Model,
 {
+    let _ = std::marker::PhantomData::<M>;
     let _ = data;
     Ok(serde_json::json!({}))
 }
@@ -426,13 +434,19 @@ mod tests {
 
     #[test]
     fn hash_map_output_key_hides_structured_presenter_params() {
-        assert_eq!(hash_map_output_key("params", &json!({"view": "minimal"})), None);
+        assert_eq!(
+            hash_map_output_key("params", &json!({"view": "minimal"})),
+            None
+        );
         assert_eq!(hash_map_output_key("params", &json!(["minimal"])), None);
         assert_eq!(hash_map_output_key("title", &json!("title")), Some("title"));
     }
 
     #[test]
     fn hash_map_output_key_preserves_scalar_params_values() {
-        assert_eq!(hash_map_output_key("params", &json!("keep me")), Some("params"));
+        assert_eq!(
+            hash_map_output_key("params", &json!("keep me")),
+            Some("params")
+        );
     }
 }

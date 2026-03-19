@@ -76,8 +76,8 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
@@ -383,12 +383,7 @@ impl QueryCache {
 
     /// Generate a cache key from a query
     pub fn generate_key(&self, table: &str, query_hash: u64) -> String {
-        let prefix = self
-            .config
-            .read()
-            .key_prefix
-            .clone()
-            .unwrap_or_default();
+        let prefix = self.config.read().key_prefix.clone().unwrap_or_default();
 
         if prefix.is_empty() {
             format!("{}:{}", table, query_hash)
@@ -439,9 +434,7 @@ impl QueryCache {
             return Ok(());
         }
 
-        let config = self
-            .config
-            .read();
+        let config = self.config.read();
 
         let ttl = ttl.unwrap_or(config.default_ttl);
         let max_entries = config.max_entries;
@@ -453,10 +446,7 @@ impl QueryCache {
         // Check if we should cache empty results
         if let serde_json::Value::Array(arr) = &data {
             if arr.is_empty() {
-                let should_cache = self
-                    .config
-                    .read()
-                    .cache_empty_results;
+                let should_cache = self.config.read().cache_empty_results;
                 if !should_cache {
                     return Ok(());
                 }
@@ -466,9 +456,7 @@ impl QueryCache {
         let entry_size = data.to_string().len();
         let entry = CacheEntry::new(data, entry_size, ttl, model_name);
 
-        let mut cache = self
-            .cache
-            .write();
+        let mut cache = self.cache.write();
 
         // Evict if necessary
         while cache.len() >= max_entries {
@@ -589,10 +577,7 @@ impl QueryCache {
 
     /// Evict one entry based on the configured strategy
     fn evict_one(&self, cache: &mut HashMap<String, CacheEntry>) {
-        let strategy = self
-            .config
-            .read()
-            .strategy;
+        let strategy = self.config.read().strategy;
 
         let key_to_remove = match strategy {
             CacheStrategy::LRU => cache
@@ -849,10 +834,7 @@ impl PreparedStatementCache {
         }
 
         let hash = Self::hash_sql(sql);
-        let max_age = self
-            .config
-            .read()
-            .max_age;
+        let max_age = self.config.read().max_age;
 
         // Fast path: read-only cache hit without taking the write lock.
         {

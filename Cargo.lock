@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "argon2",
  "async-recursion",

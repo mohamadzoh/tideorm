@@ -181,11 +181,15 @@ fn test_token_config_setters_overwrite_previous_values() {
     }
 
     fn decoder_one(token: &str, _model_name: &str) -> Result<Option<i64>> {
-        Ok(token.strip_prefix("one-").and_then(|value| value.parse().ok()))
+        Ok(token
+            .strip_prefix("one-")
+            .and_then(|value| value.parse().ok()))
     }
 
     fn decoder_two(token: &str, _model_name: &str) -> Result<Option<i64>> {
-        Ok(token.strip_prefix("two-").and_then(|value| value.parse().ok()))
+        Ok(token
+            .strip_prefix("two-")
+            .and_then(|value| value.parse().ok()))
     }
 
     TokenConfig::set_encoder(encoder_one);

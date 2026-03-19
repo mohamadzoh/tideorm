@@ -1,4 +1,6 @@
-use super::{build_count_select, build_exists_statement, count_to_u64, supports_batch_insert_returning};
+use super::{
+    build_count_select, build_exists_statement, count_to_u64, supports_batch_insert_returning,
+};
 use crate::config::DatabaseType;
 use crate::internal::{ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
 
@@ -80,7 +82,8 @@ fn count_select_applies_optional_condition() {
             .expect("generated model should expose the name column")
             .eq("alice"),
     );
-    let statement = build_count_select::<InternalCountUser>(Some(condition)).build(DbBackend::Postgres);
+    let statement =
+        build_count_select::<InternalCountUser>(Some(condition)).build(DbBackend::Postgres);
 
     assert!(
         statement

@@ -253,7 +253,6 @@ fn test_sql_injection_prevention() {
     );
 }
 
-
 #[test]
 fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
     let path = "$.user') OR 1=1 --";
@@ -324,8 +323,8 @@ fn test_join_identifier_validation_rejects_injection() {
 
 #[test]
 fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
-    let err = db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1; DROP TABLE users")
-        .unwrap_err();
+    let err =
+        db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1; DROP TABLE users").unwrap_err();
     assert!(err.contains("unsafe WHERE raw SQL"));
 
     let comment_err =
@@ -376,9 +375,10 @@ async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() 
         .await
         .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("invalid subquery for where_in_subquery()"));
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for where_in_subquery()")
+    );
 }
 
 #[test]
@@ -653,7 +653,9 @@ fn test_fulltext_build_postgres_sql_parameterizes_query_and_escapes_identifiers(
     assert!(sql.contains("SELECT * FROM \"query_test_users\""));
     assert!(sql.contains("COALESCE(\"na\"\"me\", '')"));
     assert!(sql.contains("plainto_tsquery(CAST($1 AS regconfig), $2)"));
-    assert!(matches!(params.first(), Some(Value::String(Some(language))) if language == "en'g\"lish"));
+    assert!(
+        matches!(params.first(), Some(Value::String(Some(language))) if language == "en'g\"lish")
+    );
     assert!(matches!(params.get(1), Some(Value::String(Some(query))) if query == "o'hai"));
 }
 
@@ -669,9 +671,7 @@ fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
 
     assert!(sql.contains("to_tsquery(CAST($1 AS regconfig), $2)"));
     assert!(sql.contains(" >= $4"));
-    assert!(
-        matches!(params.first(), Some(Value::String(Some(language))) if language == "english")
-    );
+    assert!(matches!(params.first(), Some(Value::String(Some(language))) if language == "english"));
     assert!(
         matches!(params.get(1), Some(Value::String(Some(query))) if query == "quick:* & fox:*")
     );

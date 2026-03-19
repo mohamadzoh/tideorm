@@ -451,13 +451,18 @@ async fn sqlite_integration_tests() {
             .expect("Query failed")
             .expect("Expected at least one seeded user");
 
-        let _ = assert_profiled_operation("TestUser::query().count()", TestUser::query().count()).await;
+        let _ =
+            assert_profiled_operation("TestUser::query().count()", TestUser::query().count()).await;
         let _ = assert_profiled_operation(
             "TestUser::query().count_distinct(\"active\")",
             TestUser::query().count_distinct("active"),
         )
         .await;
-        let _ = assert_profiled_operation("TestUser::query().sum(\"age\")", TestUser::query().sum("age")).await;
+        let _ = assert_profiled_operation(
+            "TestUser::query().sum(\"age\")",
+            TestUser::query().sum("age"),
+        )
+        .await;
         let _ = assert_profiled_operation(
             "Database::raw::<TestUser>()",
             Database::raw::<TestUser>(
@@ -487,14 +492,11 @@ async fn sqlite_integration_tests() {
         )
         .await;
 
-        let updated_user = assert_profiled_operation(
-            "TestUser::update()",
-            async move {
-                let mut user = first_user;
-                user.name = format!("{} (profiled)", user.name);
-                user.update().await
-            },
-        )
+        let updated_user = assert_profiled_operation("TestUser::update()", async move {
+            let mut user = first_user;
+            user.name = format!("{} (profiled)", user.name);
+            user.update().await
+        })
         .await;
         assert!(updated_user.name.ends_with("(profiled)"));
 
@@ -522,11 +524,9 @@ async fn sqlite_integration_tests() {
         .save()
         .await
         .expect("Failed to create destroy target");
-        let _ = assert_profiled_operation(
-            "TestUser::destroy()",
-            TestUser::destroy(destroy_target.id),
-        )
-        .await;
+        let _ =
+            assert_profiled_operation("TestUser::destroy()", TestUser::destroy(destroy_target.id))
+                .await;
 
         println!("   ✓ profiler records raw SQL, parameterized SQL, aggregates, and CRUD paths");
     }

@@ -431,26 +431,48 @@ fn test_mariadb_quoting() {
 fn test_postgres_identifier_quoting_escapes_inner_quotes() {
     let schema = Schema::new(DatabaseType::Postgres);
     assert_eq!(schema.quote_identifier("user\"roles"), "\"user\"\"roles\"");
-    assert_eq!(quote_migration_identifier("col\"name", DatabaseType::Postgres), "\"col\"\"name\"");
+    assert_eq!(
+        quote_migration_identifier("col\"name", DatabaseType::Postgres),
+        "\"col\"\"name\""
+    );
 
     let mut builder = TableBuilder::new("user\"roles", DatabaseType::Postgres);
     builder.string("display\"name");
     let sql = builder.build_create();
 
-    assert!(sql.contains("CREATE TABLE \"user\"\"roles\""), "SQL should escape embedded double quotes in table names. Got: {}", sql);
-    assert!(sql.contains("\"display\"\"name\" VARCHAR(255)"), "SQL should escape embedded double quotes in column names. Got: {}", sql);
+    assert!(
+        sql.contains("CREATE TABLE \"user\"\"roles\""),
+        "SQL should escape embedded double quotes in table names. Got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"display\"\"name\" VARCHAR(255)"),
+        "SQL should escape embedded double quotes in column names. Got: {}",
+        sql
+    );
 }
 
 #[test]
 fn test_mysql_identifier_quoting_escapes_inner_backticks() {
     let schema = Schema::new(DatabaseType::MySQL);
     assert_eq!(schema.quote_identifier("user`roles"), "`user``roles`");
-    assert_eq!(quote_migration_identifier("col`name", DatabaseType::MySQL), "`col``name`");
+    assert_eq!(
+        quote_migration_identifier("col`name", DatabaseType::MySQL),
+        "`col``name`"
+    );
 
     let mut builder = AlterTableBuilder::new("user`roles", DatabaseType::MySQL);
     builder.rename_column("old`name", "new`name");
     let statements = builder.build();
 
-    assert!(statements[0].contains("ALTER TABLE `user``roles`"), "SQL should escape embedded backticks in table names. Got: {}", statements[0]);
-    assert!(statements[0].contains("`old``name` TO `new``name`"), "SQL should escape embedded backticks in column names. Got: {}", statements[0]);
+    assert!(
+        statements[0].contains("ALTER TABLE `user``roles`"),
+        "SQL should escape embedded backticks in table names. Got: {}",
+        statements[0]
+    );
+    assert!(
+        statements[0].contains("`old``name` TO `new``name`"),
+        "SQL should escape embedded backticks in column names. Got: {}",
+        statements[0]
+    );
 }

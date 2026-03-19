@@ -5,15 +5,17 @@ use sea_orm::sea_query::OnConflict;
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::callbacks::{AfterCreateDispatch, AfterDeleteDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeDeleteDispatch, BeforeUpdateDispatch};
+use crate::callbacks::{
+    AfterCreateDispatch, AfterDeleteDispatch, AfterUpdateDispatch, BeforeCreateDispatch,
+    BeforeDeleteDispatch, BeforeUpdateDispatch,
+};
 use crate::error::{Error, Result};
 use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_error};
 
 use super::Model;
 
-type OneRelationSaveOp = Box<
-    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>>>>,
->;
+type OneRelationSaveOp =
+    Box<dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>>>>>;
 
 type ManyRelationSaveOp = Box<
     dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<Vec<serde_json::Value>>>>>,
@@ -162,8 +164,14 @@ where
             .await
         }
     }
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(crate::error::ErrorContext::new().table(R::table_name()).query("nested bulk upsert")))?;
+    .map_err(translate_error)
+    .map_err(|err| {
+        err.with_context(
+            crate::error::ErrorContext::new()
+                .table(R::table_name())
+                .query("nested bulk upsert"),
+        )
+    })?;
 
     let fetched = R::query()
         .where_in(R::primary_key_name(), pk_values)
@@ -187,6 +195,7 @@ where
         .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))
 }
 
+#[allow(clippy::unnecessary_mut_passed)]
 async fn save_related_models_as_json<R>(
     related: Vec<R>,
     foreign_key: String,
@@ -247,14 +256,16 @@ pub trait NestedSave: Model {
             }
         }
 
-        let related: R = serde_json::from_value(related_json)
-            .map_err(|e| Error::conversion(format!("Failed to deserialize related model: {}", e)))?;
+        let related: R = serde_json::from_value(related_json).map_err(|e| {
+            Error::conversion(format!("Failed to deserialize related model: {}", e))
+        })?;
 
         let related = related.save().await?;
 
         Ok((parent, related))
     }
 
+    #[allow(clippy::unnecessary_mut_passed)]
     async fn save_with_many<R: Model>(
         self,
         related: Vec<R>,
@@ -296,6 +307,7 @@ pub trait NestedSave: Model {
         Ok((parent, related))
     }
 
+    #[allow(clippy::unnecessary_mut_passed)]
     async fn update_with_many<R: Model>(self, related: Vec<R>) -> Result<(Self, Vec<R>)>
     where
         Self: Sized,

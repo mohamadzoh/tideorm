@@ -622,7 +622,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let mut set_parts = Vec::with_capacity(self.updates.len());
 
         for (column, value) in &self.updates {
-            set_parts.push(Self::build_assignment_sql(column, value, db_type, &mut params)?);
+            set_parts.push(Self::build_assignment_sql(
+                column,
+                value,
+                db_type,
+                &mut params,
+            )?);
         }
 
         Ok((set_parts, params))

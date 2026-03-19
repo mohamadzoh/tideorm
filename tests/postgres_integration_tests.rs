@@ -9,9 +9,9 @@
 //!
 //! Run with: cargo test --test postgres_integration_tests
 
+use std::sync::{LazyLock, Mutex};
 use tideorm::prelude::*;
 use tideorm::{Database, TideConfig};
-use std::sync::{LazyLock, Mutex};
 
 #[path = "support/postgres_test_config.rs"]
 mod test_config;
@@ -844,7 +844,10 @@ async fn postgres_integration_tests() {
             })
         })
         .await;
-        assert!(update_result.is_err(), "update transaction should roll back");
+        assert!(
+            update_result.is_err(),
+            "update transaction should roll back"
+        );
 
         let unchanged = TestUser::find(baseline.id)
             .await
@@ -868,7 +871,10 @@ async fn postgres_integration_tests() {
             })
         })
         .await;
-        assert!(delete_result.is_err(), "delete transaction should roll back");
+        assert!(
+            delete_result.is_err(),
+            "delete transaction should roll back"
+        );
 
         let still_present = TestUser::find(baseline.id)
             .await
@@ -1243,7 +1249,10 @@ async fn postgres_integration_tests() {
         );
 
         CALLBACK_EVENTS.lock().unwrap().clear();
-        let deleted = updated.delete().await.expect("Callback delete should succeed");
+        let deleted = updated
+            .delete()
+            .await
+            .expect("Callback delete should succeed");
         assert_eq!(deleted, 1);
         assert_eq!(
             CALLBACK_EVENTS.lock().unwrap().clone(),

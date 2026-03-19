@@ -4435,12 +4435,13 @@ mod attribute_casting_tests {
 
     #[test]
     fn test_encrypted_rejects_plaintext_payloads() {
-        let err = serde_json::from_value::<Encrypted<String>>(serde_json::json!("secret"))
-            .unwrap_err();
+        let err =
+            serde_json::from_value::<Encrypted<String>>(serde_json::json!("secret")).unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Encrypted fields must use the encrypted payload format"));
+        assert!(
+            err.to_string()
+                .contains("Encrypted fields must use the encrypted payload format")
+        );
     }
 
     #[test]
@@ -4455,8 +4456,12 @@ mod attribute_casting_tests {
         chars[tamper_index] = if chars[tamper_index] == 'A' { 'B' } else { 'A' };
         let tampered: String = chars.into_iter().collect();
 
-        let err = serde_json::from_value::<Encrypted<String>>(serde_json::json!(tampered)).unwrap_err();
-        assert!(err.to_string().contains("Failed to decrypt field payload") || err.to_string().contains("Invalid encrypted field payload"));
+        let err =
+            serde_json::from_value::<Encrypted<String>>(serde_json::json!(tampered)).unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to decrypt field payload")
+                || err.to_string().contains("Invalid encrypted field payload")
+        );
     }
 
     // Hashed type tests
@@ -4519,8 +4524,7 @@ mod attribute_casting_tests {
 
     #[test]
     fn test_hashed_deserialize_rejects_redacted_payload() {
-        let err = serde_json::from_value::<Hashed>(serde_json::json!("***HASHED***"))
-            .unwrap_err();
+        let err = serde_json::from_value::<Hashed>(serde_json::json!("***HASHED***")).unwrap_err();
 
         assert!(err.to_string().contains("redacted serialization format"));
     }
@@ -4860,7 +4864,11 @@ mod soft_delete_query_tests {
     use tideorm::prelude::*;
 
     #[derive(Model)]
-    #[tideorm(table = "query_soft_delete_override", soft_delete, deleted_at_column = "archived_on")]
+    #[tideorm(
+        table = "query_soft_delete_override",
+        soft_delete,
+        deleted_at_column = "archived_on"
+    )]
     struct CustomSoftDeleteModel {
         #[tideorm(primary_key, auto_increment)]
         id: i64,
@@ -4877,7 +4885,9 @@ mod soft_delete_query_tests {
 
     #[test]
     fn test_only_trashed_query_uses_overridden_column() {
-        let sql = CustomSoftDeleteModel::query().only_trashed().build_sql_preview();
+        let sql = CustomSoftDeleteModel::query()
+            .only_trashed()
+            .build_sql_preview();
         assert!(sql.contains("\"archived_on\" IS NOT NULL"));
         assert!(!sql.contains("\"deleted_at\" IS NOT NULL"));
     }
@@ -4890,7 +4900,9 @@ mod soft_delete_query_tests {
 #[cfg(test)]
 mod relation_field_type_tests {
     use serde_json::json;
-    use tideorm::relations::{BelongsTo, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, RelationConstraints};
+    use tideorm::relations::{
+        BelongsTo, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, RelationConstraints,
+    };
 
     #[derive(tideorm::Model)]
     #[tideorm(table = "relation_field_test_models")]
@@ -4934,7 +4946,10 @@ mod relation_field_type_tests {
         let relation = HasOne::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err.to_string().contains("HasOne relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasOne relation is not configured")
+        );
     }
 
     // =========================================================================
@@ -4955,7 +4970,10 @@ mod relation_field_type_tests {
         let relation = HasMany::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err.to_string().contains("HasMany relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasMany relation is not configured")
+        );
     }
 
     // =========================================================================
@@ -4976,12 +4994,16 @@ mod relation_field_type_tests {
         let relation = BelongsTo::<RelationFieldTestModel>::default().with_fk_value(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err.to_string().contains("BelongsTo relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("BelongsTo relation is not configured")
+        );
     }
 
     #[test]
     fn test_has_many_through_default_has_none_cached() {
-        let relation = HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default();
+        let relation =
+            HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default();
 
         assert_eq!(relation.foreign_key, "");
         assert_eq!(relation.related_key, "");
@@ -4998,9 +5020,10 @@ mod relation_field_type_tests {
                 .with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("HasManyThrough relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasManyThrough relation is not configured")
+        );
     }
 
     #[test]
@@ -5017,7 +5040,10 @@ mod relation_field_type_tests {
         let relation = MorphOne::<RelationFieldTestModel>::default();
 
         let err = relation.load().await.unwrap_err();
-        assert!(err.to_string().contains("MorphOne relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("MorphOne relation is not configured")
+        );
     }
 
     #[test]
@@ -5034,7 +5060,10 @@ mod relation_field_type_tests {
         let relation = MorphMany::<RelationFieldTestModel>::default();
 
         let err = relation.load().await.unwrap_err();
-        assert!(err.to_string().contains("MorphMany relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("MorphMany relation is not configured")
+        );
     }
 
     // =========================================================================

@@ -138,7 +138,10 @@ async fn sqlite_transaction_model_methods_use_transaction_connection() {
         .first()
         .await
         .expect("failed to query rolled back save");
-    assert!(rolled_back_save.is_none(), "saved row should not persist after rollback");
+    assert!(
+        rolled_back_save.is_none(),
+        "saved row should not persist after rollback"
+    );
 
     let update_result: tideorm::Result<()> = CiUser::transaction(|_tx| {
         let baseline = baseline.clone();
@@ -154,7 +157,10 @@ async fn sqlite_transaction_model_methods_use_transaction_connection() {
         })
     })
     .await;
-    assert!(update_result.is_err(), "update transaction should roll back");
+    assert!(
+        update_result.is_err(),
+        "update transaction should roll back"
+    );
 
     let unchanged = CiUser::find(baseline.id)
         .await
@@ -170,7 +176,10 @@ async fn sqlite_transaction_model_methods_use_transaction_connection() {
         })
     })
     .await;
-    assert!(delete_result.is_err(), "delete transaction should roll back");
+    assert!(
+        delete_result.is_err(),
+        "delete transaction should roll back"
+    );
 
     let still_present = CiUser::find(baseline.id)
         .await
@@ -233,9 +242,8 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
         .__internal_connection()
         .expect("local SQLite connection should be available");
 
-    conn
-        .execute_unprepared(
-            r#"
+    conn.execute_unprepared(
+        r#"
             CREATE TABLE ci_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL,
@@ -243,9 +251,9 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
                 active INTEGER NOT NULL DEFAULT 1
             )
         "#,
-        )
-        .await
-        .expect("failed to create ci_users table for local db");
+    )
+    .await
+    .expect("failed to create ci_users table for local db");
 
     let inserted = CiUser {
         id: 0,
@@ -284,9 +292,8 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         .__internal_connection()
         .expect("local SQLite connection should be available");
 
-    conn
-        .execute_unprepared(
-            r#"
+    conn.execute_unprepared(
+        r#"
             CREATE TABLE ci_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL,
@@ -294,9 +301,9 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
                 active INTEGER NOT NULL DEFAULT 1
             )
         "#,
-        )
-        .await
-        .expect("failed to create ci_users table for local db");
+    )
+    .await
+    .expect("failed to create ci_users table for local db");
 
     let first = CiUser {
         id: 0,
@@ -364,9 +371,8 @@ async fn sqlite_query_errors_include_query_builder_context() {
         .__internal_connection()
         .expect("local SQLite connection should be available");
 
-    conn
-        .execute_unprepared(
-            r#"
+    conn.execute_unprepared(
+        r#"
             CREATE TABLE ci_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL,
@@ -374,9 +380,9 @@ async fn sqlite_query_errors_include_query_builder_context() {
                 active INTEGER NOT NULL DEFAULT 1
             )
         "#,
-        )
-        .await
-        .expect("failed to create ci_users table for local db");
+    )
+    .await
+    .expect("failed to create ci_users table for local db");
 
     let err = CiUser::query_with(&db)
         .where_eq("active", true)
@@ -440,9 +446,8 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
         .__internal_connection()
         .expect("local SQLite connection should be available");
 
-    conn
-        .execute_unprepared(
-            r#"
+    conn.execute_unprepared(
+        r#"
             CREATE TABLE ci_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL,
@@ -450,9 +455,9 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
                 active INTEGER NOT NULL DEFAULT 1
             )
         "#,
-        )
-        .await
-        .expect("failed to create ci_users table for local db");
+    )
+    .await
+    .expect("failed to create ci_users table for local db");
 
     CiUser {
         id: 0,

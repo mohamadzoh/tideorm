@@ -246,12 +246,18 @@ fn test_rust_type_to_sql_mysql() {
 #[test]
 fn test_rust_type_to_sql_mariadb() {
     assert_eq!(rust_type_to_sql("i64", DatabaseType::MariaDB), "BIGINT");
-    assert_eq!(rust_type_to_sql("bool", DatabaseType::MariaDB), "TINYINT(1)");
+    assert_eq!(
+        rust_type_to_sql("bool", DatabaseType::MariaDB),
+        "TINYINT(1)"
+    );
     assert_eq!(rust_type_to_sql("f64", DatabaseType::MariaDB), "DOUBLE");
     assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MariaDB), "CHAR(36)");
     assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MariaDB), "JSON");
     assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MariaDB), "JSON");
-    assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MariaDB), "JSON");
+    assert_eq!(
+        rust_type_to_sql("Vec<String>", DatabaseType::MariaDB),
+        "JSON"
+    );
 }
 
 #[test]

@@ -170,8 +170,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let results = M::Entity::find()
-            .all(conn);
+        let results = M::Entity::find().all(conn);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)
@@ -186,8 +185,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let result = M::Entity::find()
-            .one(conn);
+        let result = M::Entity::find().one(conn);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
@@ -212,8 +210,7 @@ impl QueryExecutor {
             query_label = format!("last(order_by={} desc)", M::primary_key_name());
         }
 
-        let result = select
-            .one(conn);
+        let result = select.one(conn);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
@@ -275,10 +272,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let results = M::Entity::find()
-            .offset(offset)
-            .limit(limit)
-            .all(conn);
+        let results = M::Entity::find().offset(offset).limit(limit).all(conn);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)
@@ -299,8 +293,7 @@ impl QueryExecutor {
         C: ConnectionTrait,
     {
         let active = model.into_active_model();
-        let result = active
-            .delete(conn);
+        let result = active.delete(conn);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
@@ -333,10 +326,11 @@ impl QueryExecutor {
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
             let active = models.into_iter().next().unwrap().into_active_model();
-            let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
-                .await
-                .map_err(translate_error)
-                .map_err(|err| err.with_context(error_context.clone()))?;
+            let result =
+                crate::profiling::__profile_future(async move { active.insert(conn).await })
+                    .await
+                    .map_err(translate_error)
+                    .map_err(|err| err.with_context(error_context.clone()))?;
             return Ok(vec![M::from_sea_model(result)]);
         }
 
@@ -353,8 +347,7 @@ impl QueryExecutor {
             // Build batch insert using SeaORM's insert_many with RETURNING
             let active_models: Vec<_> = models.into_iter().map(|m| m.into_active_model()).collect();
 
-            let results = M::Entity::insert_many(active_models)
-                .exec_with_returning(conn);
+            let results = M::Entity::insert_many(active_models).exec_with_returning(conn);
             let results = crate::profiling::__profile_future(results)
                 .await
                 .map_err(translate_error)
@@ -367,10 +360,11 @@ impl QueryExecutor {
             let mut results = Vec::with_capacity(models.len());
             for model in models {
                 let active = model.into_active_model();
-                let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
-                    .await
-                    .map_err(translate_error)
-                    .map_err(|err| err.with_context(error_context.clone()))?;
+                let result =
+                    crate::profiling::__profile_future(async move { active.insert(conn).await })
+                        .await
+                        .map_err(translate_error)
+                        .map_err(|err| err.with_context(error_context.clone()))?;
                 results.push(M::from_sea_model(result));
             }
             Ok(results)

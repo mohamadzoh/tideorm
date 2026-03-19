@@ -1242,7 +1242,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_raw(mut self, raw_sql: &str) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_raw_sql_fragment("WHERE raw SQL", raw_sql)
+        if let Err(reason) =
+            crate::query::db_sql::validate_raw_sql_fragment("WHERE raw SQL", raw_sql)
         {
             self.invalidate_query(reason);
         }
@@ -1271,10 +1272,9 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_column_raw(mut self, column: &str, raw_expr: &str) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_raw_sql_fragment(
-            "WHERE raw column expression",
-            raw_expr,
-        ) {
+        if let Err(reason) =
+            crate::query::db_sql::validate_raw_sql_fragment("WHERE raw column expression", raw_expr)
+        {
             self.invalidate_query(reason);
         }
 

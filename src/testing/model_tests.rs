@@ -91,7 +91,10 @@ fn test_to_hash_map_preserves_structured_params_field() {
     let map = model.to_hash_map();
 
     assert_eq!(map.get("id").map(String::as_str), Some("8"));
-    assert_eq!(map.get("title").map(String::as_str), Some("Presenter Output"));
+    assert_eq!(
+        map.get("title").map(String::as_str),
+        Some("Presenter Output")
+    );
     assert_eq!(map.get("params"), None);
     assert_eq!(map.get("_params"), None);
 }

@@ -294,7 +294,10 @@ fn test_tide_config_reset_restores_defaults() {
     TideConfig::reset();
 
     assert_eq!(TideConfig::get_database_type(), None);
-    assert_eq!(TideConfig::pool_config().max_connections, PoolConfig::default().max_connections);
+    assert_eq!(
+        TideConfig::pool_config().max_connections,
+        PoolConfig::default().max_connections
+    );
     assert_eq!(Config::global().fallback_language, "en");
 }
 
@@ -306,9 +309,7 @@ fn test_tide_config_apply_clears_database_type_when_omitted() {
         .database_type(DatabaseType::Postgres)
         .apply();
 
-    TideConfig::init()
-        .fallback_language("ar")
-        .apply();
+    TideConfig::init().fallback_language("ar").apply();
 
     assert_eq!(TideConfig::get_database_type(), None);
     assert_eq!(Config::global().fallback_language, "ar");
@@ -319,10 +320,16 @@ fn test_tide_config_schema_file_path_replaced_without_leak_prone_static_refs() {
     TideConfig::reset();
 
     TideConfig::init().schema_file("first_schema.sql").apply();
-    assert_eq!(TideConfig::schema_file_path().as_deref(), Some("first_schema.sql"));
+    assert_eq!(
+        TideConfig::schema_file_path().as_deref(),
+        Some("first_schema.sql")
+    );
 
     TideConfig::init().schema_file("second_schema.sql").apply();
-    assert_eq!(TideConfig::schema_file_path().as_deref(), Some("second_schema.sql"));
+    assert_eq!(
+        TideConfig::schema_file_path().as_deref(),
+        Some("second_schema.sql")
+    );
 
     TideConfig::reset();
     assert_eq!(TideConfig::schema_file_path(), None);

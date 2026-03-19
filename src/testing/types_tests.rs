@@ -1,4 +1,4 @@
-use super::{encrypted_field_missing_key_error, Encrypted};
+use super::{Encrypted, encrypted_field_missing_key_error};
 
 #[test]
 fn encrypted_missing_key_error_mentions_startup_configuration_for_serialization() {

@@ -103,8 +103,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
-use crate::internal::Value;
 use crate::internal::InternalModel;
+use crate::internal::Value;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
 
@@ -156,7 +156,11 @@ fn json_to_db_value(value: &serde_json::Value) -> Value {
     }
 }
 
-fn push_param(db_type: crate::config::DatabaseType, params: &mut Vec<Value>, value: Value) -> String {
+fn push_param(
+    db_type: crate::config::DatabaseType,
+    params: &mut Vec<Value>,
+    value: Value,
+) -> String {
     let placeholder = match db_type {
         crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
         crate::config::DatabaseType::MySQL
@@ -174,10 +178,17 @@ fn quote_ident(db_type: crate::config::DatabaseType, name: &str) -> String {
 }
 
 fn scoped_column(db_type: crate::config::DatabaseType, scope: &str, column: &str) -> String {
-    format!("{}.{}", quote_ident(db_type, scope), quote_ident(db_type, column))
+    format!(
+        "{}.{}",
+        quote_ident(db_type, scope),
+        quote_ident(db_type, column)
+    )
 }
 
-fn soft_delete_clause<E: Model>(db_type: crate::config::DatabaseType, scope: &str) -> Option<String> {
+fn soft_delete_clause<E: Model>(
+    db_type: crate::config::DatabaseType,
+    scope: &str,
+) -> Option<String> {
     if E::soft_delete_enabled() {
         Some(format!(
             "{} IS NULL",
@@ -224,7 +235,8 @@ fn build_self_ref_tree_sql<E: Model>(
         base_predicates.push(clause);
     }
 
-    let mut recursive_predicates = vec![format!("{}.{} < {}", tree, depth_alias, depth_placeholder)];
+    let mut recursive_predicates =
+        vec![format!("{}.{} < {}", tree, depth_alias, depth_placeholder)];
     if let Some(clause) = soft_delete_clause::<E>(db_type, "child") {
         recursive_predicates.push(clause);
     }
@@ -591,7 +603,7 @@ impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_self_ref_tree_sql, Value};
+    use super::{Value, build_self_ref_tree_sql};
     use crate::config::DatabaseType;
 
     #[derive(tideorm::Model)]
@@ -652,7 +664,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("Unknown self-reference column 'missing_column'"));
+        assert!(
+            err.to_string()
+                .contains("Unknown self-reference column 'missing_column'")
+        );
     }
 }
 

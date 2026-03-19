@@ -33,10 +33,10 @@ enum JsonValueOperator {
 
 #[derive(Clone, Copy)]
 enum JsonStringOperator {
-    KeyExists,
-    KeyNotExists,
-    PathExists,
-    PathNotExists,
+    KeyPresent,
+    KeyAbsent,
+    PathPresent,
+    PathAbsent,
 }
 
 #[derive(Clone, Copy)]
@@ -47,7 +47,10 @@ enum ArrayOperator {
 }
 
 enum ConditionSpec<'a> {
-    Raw { column: &'a str, raw_sql: &'a str },
+    Raw {
+        column: &'a str,
+        raw_sql: &'a str,
+    },
     Compare {
         operator: ComparisonOperator,
         value: &'a serde_json::Value,
@@ -60,7 +63,9 @@ enum ConditionSpec<'a> {
         operator: ListOperator,
         values: &'a [serde_json::Value],
     },
-    NullCheck { negated: bool },
+    NullCheck {
+        negated: bool,
+    },
     Between {
         low: &'a serde_json::Value,
         high: &'a serde_json::Value,
@@ -348,12 +353,10 @@ impl<M: Model> QueryBuilder<M> {
                 operator: ComparisonOperator::Eq,
                 value,
             }),
-            (Operator::NotEq, ConditionValue::Single(value)) => {
-                Some(ConditionSpec::Compare {
-                    operator: ComparisonOperator::NotEq,
-                    value,
-                })
-            }
+            (Operator::NotEq, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::NotEq,
+                value,
+            }),
             (Operator::Gt, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
                 operator: ComparisonOperator::Gt,
                 value,
@@ -374,12 +377,10 @@ impl<M: Model> QueryBuilder<M> {
                 negated: false,
                 value,
             }),
-            (Operator::NotLike, ConditionValue::Single(value)) => {
-                Some(ConditionSpec::Pattern {
-                    negated: true,
-                    value,
-                })
-            }
+            (Operator::NotLike, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
+                negated: true,
+                value,
+            }),
             (Operator::In, ConditionValue::List(values)) => Some(ConditionSpec::List {
                 operator: ListOperator::In,
                 values,
@@ -419,7 +420,7 @@ impl<M: Model> QueryBuilder<M> {
             }
             (Operator::JsonKeyExists, ConditionValue::Single(serde_json::Value::String(value))) => {
                 Some(ConditionSpec::JsonString {
-                    operator: JsonStringOperator::KeyExists,
+                    operator: JsonStringOperator::KeyPresent,
                     value,
                 })
             }
@@ -427,21 +428,21 @@ impl<M: Model> QueryBuilder<M> {
                 Operator::JsonKeyNotExists,
                 ConditionValue::Single(serde_json::Value::String(value)),
             ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::KeyNotExists,
+                operator: JsonStringOperator::KeyAbsent,
                 value,
             }),
             (
                 Operator::JsonPathExists,
                 ConditionValue::Single(serde_json::Value::String(value)),
             ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::PathExists,
+                operator: JsonStringOperator::PathPresent,
                 value,
             }),
             (
                 Operator::JsonPathNotExists,
                 ConditionValue::Single(serde_json::Value::String(value)),
             ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::PathNotExists,
+                operator: JsonStringOperator::PathAbsent,
                 value,
             }),
             (Operator::ArrayContains, ConditionValue::List(values))
@@ -519,7 +520,12 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn build_raw_condition_sql(&self, db_type: DatabaseType, column: &str, raw_sql: &str) -> String {
+    fn build_raw_condition_sql(
+        &self,
+        db_type: DatabaseType,
+        column: &str,
+        raw_sql: &str,
+    ) -> String {
         if column.is_empty() {
             raw_sql.to_string()
         } else {
@@ -675,7 +681,9 @@ impl<M: Model> QueryBuilder<M> {
         value: &serde_json::Value,
     ) -> String {
         match operator {
-            JsonValueOperator::Contains => db_sql::json_contains(db_type, column, &value.to_string()),
+            JsonValueOperator::Contains => {
+                db_sql::json_contains(db_type, column, &value.to_string())
+            }
             JsonValueOperator::ContainedBy => {
                 db_sql::json_contained_by(db_type, column, &value.to_string())
             }
@@ -690,10 +698,12 @@ impl<M: Model> QueryBuilder<M> {
         value: &str,
     ) -> String {
         match operator {
-            JsonStringOperator::KeyExists => db_sql::json_key_exists(db_type, column, value),
-            JsonStringOperator::KeyNotExists => db_sql::json_key_not_exists(db_type, column, value),
-            JsonStringOperator::PathExists => db_sql::json_path_exists(db_type, column, value),
-            JsonStringOperator::PathNotExists => db_sql::json_path_not_exists(db_type, column, value),
+            JsonStringOperator::KeyPresent => db_sql::json_key_exists(db_type, column, value),
+            JsonStringOperator::KeyAbsent => db_sql::json_key_not_exists(db_type, column, value),
+            JsonStringOperator::PathPresent => db_sql::json_path_exists(db_type, column, value),
+            JsonStringOperator::PathAbsent => {
+                db_sql::json_path_not_exists(db_type, column, value)
+            }
         }
     }
 
@@ -712,7 +722,12 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn build_subquery_expression(&self, column_sql: &str, negated: bool, query_sql: &str) -> SimpleExpr {
+    fn build_subquery_expression(
+        &self,
+        column_sql: &str,
+        negated: bool,
+        query_sql: &str,
+    ) -> SimpleExpr {
         Expr::cust(format!(
             "{} {}IN ({})",
             column_sql,
@@ -771,9 +786,12 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::JsonString { operator, value } => Some(Expr::cust(
                 self.build_json_string_sql(db_type, &condition.column, operator, value),
             )),
-            ConditionSpec::Array { operator, values } => Some(Expr::cust(
-                self.build_array_sql(db_type, &condition.column, operator, values),
-            )),
+            ConditionSpec::Array { operator, values } => Some(Expr::cust(self.build_array_sql(
+                db_type,
+                &condition.column,
+                operator,
+                values,
+            ))),
             ConditionSpec::Subquery { negated, query_sql } => {
                 Some(self.build_subquery_expression(&column_sql, negated, query_sql))
             }
@@ -977,16 +995,18 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::List { operator, values } => {
                 Some(self.build_list_sql(db_type, &column, operator, values))
             }
-            ConditionSpec::NullCheck { negated } => Some(self.build_null_check_sql(&column, negated)),
+            ConditionSpec::NullCheck { negated } => {
+                Some(self.build_null_check_sql(&column, negated))
+            }
             ConditionSpec::Between { low, high } => {
                 Some(self.build_between_sql(&column, low, high))
             }
-            ConditionSpec::JsonValue { operator, value } => Some(
-                self.build_json_value_sql(db_type, &condition.column, operator, value),
-            ),
-            ConditionSpec::JsonString { operator, value } => Some(
-                self.build_json_string_sql(db_type, &condition.column, operator, value),
-            ),
+            ConditionSpec::JsonValue { operator, value } => {
+                Some(self.build_json_value_sql(db_type, &condition.column, operator, value))
+            }
+            ConditionSpec::JsonString { operator, value } => {
+                Some(self.build_json_string_sql(db_type, &condition.column, operator, value))
+            }
             ConditionSpec::Array { operator, values } => {
                 Some(self.build_array_sql(db_type, &condition.column, operator, values))
             }
@@ -1478,7 +1498,11 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn has_explicit_mutation_filters(&self) -> bool {
-        !self.conditions.is_empty() || self.or_groups.iter().any(|group| group.condition_count() > 0)
+        !self.conditions.is_empty()
+            || self
+                .or_groups
+                .iter()
+                .any(|group| group.condition_count() > 0)
     }
 
     fn ensure_mutation_has_explicit_filters(&self, operation: &str) -> Result<()> {

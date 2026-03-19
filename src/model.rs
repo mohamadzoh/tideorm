@@ -336,7 +336,7 @@ pub trait Model:
             > + Send,
         T: Send,
     {
-        crud::transaction::<Self, F, T>(f).await
+        crud::transaction::<F, T>(f).await
     }
 
     /// Get the first record

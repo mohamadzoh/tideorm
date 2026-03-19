@@ -189,7 +189,9 @@ impl Database {
 
     fn from_internal_connection(inner: InternalConnection) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Connection(Arc::new(inner))))),
+            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Connection(Arc::new(
+                inner,
+            ))))),
         }
     }
 
@@ -445,8 +447,7 @@ impl Database {
         use crate::internal::ConnectionTrait;
 
         let conn = self.__internal_connection()?;
-        conn
-            .execute_unprepared("SELECT 1")
+        conn.execute_unprepared("SELECT 1")
             .await
             .map(|_| true)
             .map_err(|e| Error::connection(e.to_string()))
@@ -509,10 +510,12 @@ impl Database {
         let stmt = Statement::from_string(backend, sql.to_string());
 
         let results = match db.__get_connection()? {
-            ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
-                .await,
-            ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
-                .await,
+            ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
+            }
         }
         .map_err(|e| Error::query(e.to_string()))?;
 
@@ -564,7 +567,8 @@ impl Database {
                 crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
-                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                let stmt =
+                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
             }
         }
@@ -640,7 +644,8 @@ impl Database {
                 crate::profiling::__profile_future(conn.execute_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
-                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                let stmt =
+                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().execute_raw(stmt)).await
             }
         }
@@ -679,10 +684,12 @@ impl Database {
         let stmt = Statement::from_string(backend, sql.to_string());
 
         let results = match db.__get_connection()? {
-            ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
-                .await,
-            ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
-                .await,
+            ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
+            }
         }
         .map_err(|e| Error::query(e.to_string()))?;
 
@@ -713,7 +720,8 @@ impl Database {
                 crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
-                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                let stmt =
+                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
             }
         }
@@ -978,7 +986,9 @@ impl DatabaseBuilder {
             .await
             .map_err(|e| Error::connection(e.to_string()))?;
 
-        Ok(Database::from_internal_connection(InternalConnection { conn }))
+        Ok(Database::from_internal_connection(InternalConnection {
+            conn,
+        }))
     }
 }
 
@@ -1008,7 +1018,9 @@ pub enum ConnectionRef {
 impl Connection for Database {
     fn __get_connection(&self) -> Result<ConnectionRef> {
         Ok(match self.current_handle()? {
-            DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner.connection().clone()),
+            DatabaseHandle::Connection(inner) => {
+                ConnectionRef::Database(inner.connection().clone())
+            }
             DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
         })
     }

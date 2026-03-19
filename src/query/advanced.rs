@@ -590,8 +590,8 @@ impl<M: Model> QueryBuilder<M> {
                 .await
             }
         }
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(error_context))?;
+        .map_err(translate_error)
+        .map_err(|err| err.with_context(error_context))?;
 
         result
             .map(|r| crate::internal::count_to_u64(r.count_result, "COUNT(DISTINCT ...)"))
@@ -646,8 +646,8 @@ impl<M: Model> QueryBuilder<M> {
                 .await
             }
         }
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(error_context))?;
+        .map_err(translate_error)
+        .map_err(|err| err.with_context(error_context))?;
 
         Ok(result.and_then(|r| r.agg_result).unwrap_or(0.0))
     }

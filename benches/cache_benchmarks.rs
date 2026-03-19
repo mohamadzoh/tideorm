@@ -473,9 +473,8 @@ fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
     rt.block_on(async {
         let conn = db.__internal_connection();
 
-        conn
-            .execute_unprepared(
-                r#"
+        conn.execute_unprepared(
+            r#"
                 CREATE TABLE bench_cache_users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT NOT NULL,
@@ -483,9 +482,9 @@ fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
                     active INTEGER NOT NULL DEFAULT 1
                 )
             "#,
-            )
-            .await
-            .expect("failed to create benchmark table");
+        )
+        .await
+        .expect("failed to create benchmark table");
 
         for i in 0..100 {
             BenchCacheUser {
@@ -565,13 +564,11 @@ fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
     rt.block_on(async {
         let conn = db.__internal_connection();
 
-        conn
-            .execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
+        conn.execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
             .await
             .expect("failed to drop benchmark table");
-        conn
-            .execute_unprepared(
-                r#"
+        conn.execute_unprepared(
+            r#"
                 CREATE TABLE bench_cache_users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     email TEXT NOT NULL,
@@ -579,9 +576,9 @@ fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
                     active INTEGER NOT NULL DEFAULT 1
                 )
             "#,
-            )
-            .await
-            .expect("failed to create benchmark table");
+        )
+        .await
+        .expect("failed to create benchmark table");
 
         for i in 0..200 {
             BenchCacheUser {

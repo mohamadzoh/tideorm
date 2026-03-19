@@ -1,6 +1,6 @@
+use crate::config::DatabaseType;
 use crate::model::Model;
 use crate::query::OrGroup;
-use crate::config::DatabaseType;
 
 #[derive(tideorm::Model)]
 #[tideorm(table = "query_mutation_guard_users")]
@@ -24,25 +24,32 @@ fn mutation_guard_rejects_unfiltered_delete() {
     let err = MutationGuardUser::query()
         .ensure_mutation_has_explicit_filters("delete")
         .unwrap_err();
-    assert!(err.to_string().contains("requires at least one explicit filter"));
+    assert!(
+        err.to_string()
+            .contains("requires at least one explicit filter")
+    );
 }
 
 #[test]
 fn mutation_guard_accepts_basic_where_clause() {
-    assert!(MutationGuardUser::query()
-        .where_eq("id", 1)
-        .ensure_mutation_has_explicit_filters("delete")
-        .is_ok());
+    assert!(
+        MutationGuardUser::query()
+            .where_eq("id", 1)
+            .ensure_mutation_has_explicit_filters("delete")
+            .is_ok()
+    );
 }
 
 #[test]
 fn mutation_guard_accepts_non_empty_or_group() {
-    assert!(MutationGuardUser::query()
-        .begin_or()
-        .or_where_eq("name", "alice")
-        .end_or()
-        .ensure_mutation_has_explicit_filters("delete")
-        .is_ok());
+    assert!(
+        MutationGuardUser::query()
+            .begin_or()
+            .or_where_eq("name", "alice")
+            .end_or()
+            .ensure_mutation_has_explicit_filters("delete")
+            .is_ok()
+    );
 }
 
 #[test]
@@ -51,25 +58,35 @@ fn mutation_guard_rejects_only_trashed_without_user_filters() {
         .only_trashed()
         .ensure_mutation_has_explicit_filters("restore")
         .unwrap_err();
-    assert!(err.to_string().contains("requires at least one explicit filter"));
+    assert!(
+        err.to_string()
+            .contains("requires at least one explicit filter")
+    );
 }
 
 #[test]
 fn mutation_guard_rejects_empty_nested_or_groups() {
     let mut query = MutationGuardUser::query();
-    query.or_groups.push(OrGroup::new().nested_or(|group| group));
+    query
+        .or_groups
+        .push(OrGroup::new().nested_or(|group| group));
 
     let err = query
         .ensure_mutation_has_explicit_filters("delete")
         .unwrap_err();
-    assert!(err.to_string().contains("requires at least one explicit filter"));
+    assert!(
+        err.to_string()
+            .contains("requires at least one explicit filter")
+    );
 }
 
 #[test]
 fn delete_all_accepts_unfiltered_queries() {
-    assert!(MutationGuardUser::query()
-        .ensure_mutation_has_no_explicit_filters("delete_all")
-        .is_ok());
+    assert!(
+        MutationGuardUser::query()
+            .ensure_mutation_has_no_explicit_filters("delete_all")
+            .is_ok()
+    );
 }
 
 #[test]
