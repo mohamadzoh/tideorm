@@ -97,12 +97,13 @@ where
     R: Model,
     <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
 {
+    use crate::database::Connection;
+
     if related.is_empty() {
         return Ok(Vec::new());
     }
 
     let db = crate::database::__current_db()?;
-    let conn = db.__internal_connection();
     let pk_column = R::primary_key_column().ok_or_else(|| {
         Error::invalid_query(format!(
             "bulk nested update requires a primary key column for {}",
@@ -133,11 +134,24 @@ where
             .to_owned()
     };
 
-    let result = R::Entity::insert_many(active_models)
-        .on_conflict(on_conflict)
-        .exec(&conn);
-    crate::profiling::__profile_future(result)
-        .await
+    match db.__get_connection() {
+        crate::database::ConnectionRef::Database(conn) => {
+            crate::profiling::__profile_future(
+                R::Entity::insert_many(active_models)
+                    .on_conflict(on_conflict)
+                    .exec(&conn),
+            )
+            .await
+        }
+        crate::database::ConnectionRef::Transaction(tx) => {
+            crate::profiling::__profile_future(
+                R::Entity::insert_many(active_models)
+                    .on_conflict(on_conflict)
+                    .exec(tx.as_ref()),
+            )
+            .await
+        }
+    }
         .map_err(translate_error)
         .map_err(|err| err.with_context(crate::error::ErrorContext::new().table(R::table_name()).query("nested bulk upsert")))?;
 

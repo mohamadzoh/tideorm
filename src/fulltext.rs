@@ -408,6 +408,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
     where
         T: FromQueryResult,
     {
+        use crate::database::Connection;
+
         let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_sql(db_type)?;
@@ -415,11 +417,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let conn = db.__internal_connection();
-        let results = conn.query_all_raw(statement);
-        let results = crate::profiling::__profile_future(results)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match db.__get_connection() {
+            crate::database::ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.query_all_raw(statement)).await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(statement)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         let mut records = Vec::new();
         for row in results {
@@ -436,6 +442,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
     where
         T: FromQueryResult,
     {
+        use crate::database::Connection;
+
         let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_ranked_sql(db_type)?;
@@ -443,11 +451,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let conn = db.__internal_connection();
-        let results = conn.query_all_raw(statement);
-        let results = crate::profiling::__profile_future(results)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match db.__get_connection() {
+            crate::database::ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.query_all_raw(statement)).await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(statement)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         let mut records = Vec::new();
         for row in results {
@@ -473,6 +485,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Count matching results
     pub async fn count(self) -> Result<u64> {
+        use crate::database::Connection;
+
         let db = crate::database::__current_db()?;
         let db_type = db.backend();
         let (sql, params) = self.build_count_sql(db_type)?;
@@ -480,11 +494,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let backend = db.__internal_backend();
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let conn = db.__internal_connection();
-        let result = conn.query_one_raw(statement);
-        let result = crate::profiling::__profile_future(result)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let result = match db.__get_connection() {
+            crate::database::ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.query_one_raw(statement)).await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().query_one_raw(statement)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         if let Some(row) = result {
             let count: i64 = row.try_get("", "count").unwrap_or(0);

@@ -75,6 +75,104 @@ async fn sqlite_ci_smoke_test() {
 }
 
 #[tokio::test]
+async fn sqlite_transaction_model_methods_use_transaction_connection() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_users table");
+
+    let baseline = CiUser {
+        id: 0,
+        email: "baseline@example.com".to_string(),
+        name: "Baseline".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert baseline user");
+
+    let save_result: tideorm::Result<()> = CiUser::transaction(|_tx| {
+        Box::pin(async move {
+            CiUser {
+                id: 0,
+                email: "tx-save@example.com".to_string(),
+                name: "Transaction Save".to_string(),
+                active: true,
+            }
+            .save()
+            .await?;
+
+            Err(tideorm::Error::query("rollback save transaction"))
+        })
+    })
+    .await;
+    assert!(save_result.is_err(), "save transaction should roll back");
+
+    let rolled_back_save = CiUser::query()
+        .where_eq("email", "tx-save@example.com")
+        .first()
+        .await
+        .expect("failed to query rolled back save");
+    assert!(rolled_back_save.is_none(), "saved row should not persist after rollback");
+
+    let update_result: tideorm::Result<()> = CiUser::transaction(|_tx| {
+        let baseline = baseline.clone();
+        Box::pin(async move {
+            CiUser {
+                name: "Updated In Transaction".to_string(),
+                ..baseline
+            }
+            .update()
+            .await?;
+
+            Err(tideorm::Error::query("rollback update transaction"))
+        })
+    })
+    .await;
+    assert!(update_result.is_err(), "update transaction should roll back");
+
+    let unchanged = CiUser::find(baseline.id)
+        .await
+        .expect("failed to reload baseline user")
+        .expect("baseline user should still exist");
+    assert_eq!(unchanged.name, "Baseline");
+
+    let delete_result: tideorm::Result<()> = CiUser::transaction(|_tx| {
+        let baseline = unchanged.clone();
+        Box::pin(async move {
+            baseline.delete().await?;
+            Err(tideorm::Error::query("rollback delete transaction"))
+        })
+    })
+    .await;
+    assert!(delete_result.is_err(), "delete transaction should roll back");
+
+    let still_present = CiUser::find(baseline.id)
+        .await
+        .expect("failed to check rolled back delete")
+        .expect("baseline user should remain after rollback");
+    assert_eq!(still_present.email, "baseline@example.com");
+}
+
+#[tokio::test]
 async fn sqlite_query_with_and_find_with_work_without_global_db() {
     use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
 

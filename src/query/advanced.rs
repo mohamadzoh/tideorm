@@ -542,16 +542,19 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
+        use crate::database::Connection;
+
         #[derive(Debug, FromQueryResult)]
         struct CountResult {
             count_result: i64,
         }
 
+        self.ensure_query_is_valid()?;
+
         let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
 
         let db = self.current_db()?;
-        let conn = db.__internal_connection();
         let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
@@ -565,13 +568,28 @@ impl<M: Model> QueryBuilder<M> {
         // Build COUNT(DISTINCT column) expression
         let count_expr = Expr::cust(format!("COUNT(DISTINCT {})", col));
 
-        let result = select
-            .select_only()
-            .column_as(count_expr, "count_result")
-            .into_model::<CountResult>()
-            .one(&conn);
-        let result: Option<CountResult> = crate::profiling::__profile_future(result)
-            .await
+        let result: Option<CountResult> = match db.__get_connection() {
+            crate::database::ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(
+                    select
+                        .select_only()
+                        .column_as(count_expr, "count_result")
+                        .into_model::<CountResult>()
+                        .one(&conn),
+                )
+                .await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(
+                    select
+                        .select_only()
+                        .column_as(count_expr, "count_result")
+                        .into_model::<CountResult>()
+                        .one(tx.as_ref()),
+                )
+                .await
+            }
+        }
             .map_err(translate_error)
             .map_err(|err| err.with_context(error_context))?;
 
@@ -583,13 +601,16 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Internal helper for f64 aggregations
     async fn aggregate_f64(self, expr_sql: &str, _alias: &str) -> Result<f64> {
+        use crate::database::Connection;
+
         #[derive(Debug, FromQueryResult)]
         struct AggResult {
             agg_result: Option<f64>,
         }
 
+        self.ensure_query_is_valid()?;
+
         let db = self.current_db()?;
-        let conn = db.__internal_connection();
         let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
 
         let mut select = M::Entity::find();
@@ -603,13 +624,28 @@ impl<M: Model> QueryBuilder<M> {
         // Build aggregate expression
         let agg_expr = Expr::cust(expr_sql.to_string());
 
-        let result = select
-            .select_only()
-            .column_as(agg_expr, "agg_result")
-            .into_model::<AggResult>()
-            .one(&conn);
-        let result: Option<AggResult> = crate::profiling::__profile_future(result)
-            .await
+        let result: Option<AggResult> = match db.__get_connection() {
+            crate::database::ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(
+                    select
+                        .select_only()
+                        .column_as(agg_expr, "agg_result")
+                        .into_model::<AggResult>()
+                        .one(&conn),
+                )
+                .await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(
+                    select
+                        .select_only()
+                        .column_as(agg_expr, "agg_result")
+                        .into_model::<AggResult>()
+                        .one(tx.as_ref()),
+                )
+                .await
+            }
+        }
             .map_err(translate_error)
             .map_err(|err| err.with_context(error_context))?;
 

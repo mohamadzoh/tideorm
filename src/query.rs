@@ -919,6 +919,10 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_in_subquery<N: Model>(mut self, column: &str, subquery: QueryBuilder<N>) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for where_in_subquery(): {}", err));
+        }
+
         let subquery_sql = subquery.to_subquery_sql();
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -946,6 +950,13 @@ impl<M: Model> QueryBuilder<M> {
         column: &str,
         subquery: QueryBuilder<N>,
     ) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!(
+                "invalid subquery for where_not_in_subquery(): {}",
+                err
+            ));
+        }
+
         let subquery_sql = subquery.to_subquery_sql();
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -969,6 +980,10 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for where_exists(): {}", err));
+        }
+
         let subquery_sql = subquery.to_subquery_sql();
         self.conditions.push(WhereCondition {
             column: String::new(),
@@ -992,6 +1007,10 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_not_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for where_not_exists(): {}", err));
+        }
+
         let subquery_sql = subquery.to_subquery_sql();
         self.conditions.push(WhereCondition {
             column: String::new(),
@@ -1203,7 +1222,9 @@ impl<M: Model> QueryBuilder<M> {
     /// Use this when you need complex SQL conditions that can't be expressed
     /// with the standard query builder methods.
     ///
-    /// âš ï¸ **Warning**: Raw SQL is not escaped. Only use with trusted input.
+    /// Warning: raw SQL fragments bypass parameterization. TideORM rejects
+    /// obvious injection markers such as `;`, `--`, and `/* ... */`, but you
+    /// should still only pass trusted SQL here.
     ///
     /// # Example
     ///
@@ -1221,6 +1242,11 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_raw(mut self, raw_sql: &str) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_raw_sql_fragment("WHERE raw SQL", raw_sql)
+        {
+            self.invalidate_query(reason);
+        }
+
         self.conditions.push(WhereCondition {
             column: String::new(),
             operator: Operator::Raw,
@@ -1230,6 +1256,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw WHERE condition with a column comparison
+    ///
+    /// Warning: the right-hand fragment bypasses parameterization. TideORM rejects
+    /// obvious injection markers such as `;`, `--`, and `/* ... */`, but you
+    /// should still only pass trusted SQL here.
     ///
     /// # Example
     ///
@@ -1241,6 +1271,13 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     pub fn where_column_raw(mut self, column: &str, raw_expr: &str) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_raw_sql_fragment(
+            "WHERE raw column expression",
+            raw_expr,
+        ) {
+            self.invalidate_query(reason);
+        }
+
         self.conditions.push(WhereCondition {
             column: column.to_string(),
             operator: Operator::Raw,

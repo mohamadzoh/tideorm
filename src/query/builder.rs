@@ -1,9 +1,51 @@
-use super::{QueryBuilder, QueryFragment, db_sql};
+use super::{ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, WhereCondition, db_sql};
 use crate::error::{Error, Result};
 use crate::model::Model;
 use std::marker::PhantomData;
 
 impl<M: Model> QueryBuilder<M> {
+    fn validate_condition(condition: &WhereCondition) -> std::result::Result<(), String> {
+        match (&condition.operator, &condition.value) {
+            (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => {
+                let kind = if condition.column.is_empty() {
+                    "WHERE raw SQL"
+                } else {
+                    "WHERE raw column expression"
+                };
+                db_sql::validate_raw_sql_fragment(kind, raw_sql)
+            }
+            (Operator::SubqueryIn, ConditionValue::Subquery(query_sql))
+            | (Operator::SubqueryNotIn, ConditionValue::Subquery(query_sql)) => {
+                db_sql::validate_subquery_sql(query_sql)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_or_group(group: &OrGroup) -> std::result::Result<(), String> {
+        for condition in &group.conditions {
+            Self::validate_condition(condition)?;
+        }
+
+        for nested_group in &group.nested_groups {
+            Self::validate_or_group(nested_group)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_query_fragments(&self) -> Result<()> {
+        for condition in &self.conditions {
+            Self::validate_condition(condition).map_err(Error::invalid_query)?;
+        }
+
+        for group in &self.or_groups {
+            Self::validate_or_group(group).map_err(Error::invalid_query)?;
+        }
+
+        Ok(())
+    }
+
     /// Create a new query builder
     pub fn new() -> Self {
         Self {
@@ -95,6 +137,8 @@ impl<M: Model> QueryBuilder<M> {
         if let Some(reason) = &self.invalid_query_reason {
             return Err(Error::invalid_query(reason.clone()));
         }
+
+        self.validate_query_fragments()?;
 
         Ok(())
     }

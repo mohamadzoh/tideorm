@@ -69,6 +69,12 @@ thread_local! {
     static THREAD_DB_OVERRIDE: RefCell<Option<Database>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone)]
+enum DatabaseHandle {
+    Connection(Arc<InternalConnection>),
+    Transaction(Arc<crate::internal::DatabaseTransaction>),
+}
+
 fn global_db_handle() -> &'static Database {
     GLOBAL_DB.get_or_init(Database::disconnected)
 }
@@ -168,7 +174,7 @@ pub fn __current_db() -> Result<Database> {
 /// threads and cloned without duplicating the underlying connection pool.
 #[derive(Clone)]
 pub struct Database {
-    inner: Arc<RwLock<Option<Arc<InternalConnection>>>>,
+    inner: Arc<RwLock<Option<DatabaseHandle>>>,
 }
 
 impl Database {
@@ -180,11 +186,17 @@ impl Database {
 
     fn from_internal_connection(inner: InternalConnection) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Some(Arc::new(inner)))),
+            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Connection(Arc::new(inner))))),
         }
     }
 
-    fn current_inner(&self) -> Result<Arc<InternalConnection>> {
+    fn from_internal_transaction(inner: Arc<crate::internal::DatabaseTransaction>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Transaction(inner)))),
+        }
+    }
+
+    fn current_handle(&self) -> Result<DatabaseHandle> {
         self.inner.read().as_ref().cloned().ok_or_else(|| {
             Error::connection(
                 "Global database connection not initialized. \
@@ -194,12 +206,26 @@ impl Database {
         })
     }
 
+    fn current_inner(&self) -> Result<Arc<InternalConnection>> {
+        match self.current_handle()? {
+            DatabaseHandle::Connection(inner) => Ok(inner),
+            DatabaseHandle::Transaction(_) => Err(Error::connection(
+                "Current database context is a transaction, not a pooled database connection"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn replace_inner(&self, inner: Arc<InternalConnection>) {
-        *self.inner.write() = Some(inner);
+        *self.inner.write() = Some(DatabaseHandle::Connection(inner));
     }
 
     fn clear_inner(&self) {
         self.inner.write().take();
+    }
+
+    fn replace_thread_override(db: Option<Self>) -> Option<Self> {
+        THREAD_DB_OVERRIDE.with(|slot| slot.replace(db))
     }
 
     fn set_thread_override(db: Option<Self>) {
@@ -354,26 +380,44 @@ impl Database {
     {
         use crate::internal::TransactionTrait;
 
-        let conn = self.__internal_connection();
-        let txn = conn
-            .begin()
-            .await
-            .map_err(|e| Error::transaction(e.to_string()))?;
+        let txn = match self.__get_connection() {
+            ConnectionRef::Database(conn) => conn
+                .begin()
+                .await
+                .map_err(|e| Error::transaction(e.to_string()))?,
+            ConnectionRef::Transaction(tx) => tx
+                .as_ref()
+                .begin()
+                .await
+                .map_err(|e| Error::transaction(e.to_string()))?,
+        };
 
-        let tx = Transaction { inner: txn };
+        let txn = Arc::new(txn);
+        let tx = Transaction { inner: txn.clone() };
+        let previous_override =
+            Self::replace_thread_override(Some(Self::from_internal_transaction(txn.clone())));
 
-        match f(&tx).await {
+        let outcome = f(&tx).await;
+
+        Self::set_thread_override(previous_override);
+        drop(tx);
+
+        match outcome {
             Ok(result) => {
-                // Commit the transaction — we still own tx since we only lent a reference
-                tx.inner
-                    .commit()
+                let txn = Arc::try_unwrap(txn).map_err(|_| {
+                    Error::transaction(
+                        "transaction handle leaked outside the transaction scope".to_string(),
+                    )
+                })?;
+                txn.commit()
                     .await
                     .map_err(|e| Error::transaction(e.to_string()))?;
                 Ok(result)
             }
             Err(e) => {
-                // Explicitly rollback (also happens on drop, but let's be explicit)
-                let _ = tx.inner.rollback().await;
+                if let Ok(txn) = Arc::try_unwrap(txn) {
+                    let _ = txn.rollback().await;
+                }
                 Err(e)
             }
         }
@@ -451,14 +495,17 @@ impl Database {
     pub async fn raw<T: crate::model::Model>(sql: &str) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let db = crate::database::require_db()?;
-        let conn = db.__internal_connection();
-        let backend = conn.get_database_backend();
+        let db = crate::database::__current_db()?;
+        let backend = db.__internal_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match db.__get_connection() {
+            ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
+                .await,
+            ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
+                .await,
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         let mut models = Vec::new();
         for row in results {
@@ -489,7 +536,7 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<T>> {
-        crate::database::require_db()?
+        crate::database::__current_db()?
             .__raw_with_params::<T>(sql, params)
             .await
     }
@@ -502,13 +549,17 @@ impl Database {
     ) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let conn = self.__internal_connection();
-        let backend = conn.get_database_backend();
-        let stmt = Statement::from_sql_and_values(backend, sql, params);
-
-        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match self.__get_connection() {
+            ConnectionRef::Database(conn) => {
+                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
+                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         let mut models = Vec::new();
         for row in results {
@@ -533,11 +584,16 @@ impl Database {
     pub async fn execute(sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
 
-        let db = crate::database::require_db()?;
-        let conn = db.__internal_connection();
-        let result = crate::profiling::__profile_future(conn.execute_unprepared(sql))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let db = crate::database::__current_db()?;
+        let result = match db.__get_connection() {
+            ConnectionRef::Database(conn) => {
+                crate::profiling::__profile_future(conn.execute_unprepared(sql)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                crate::profiling::__profile_future(tx.as_ref().execute_unprepared(sql)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         Ok(result.rows_affected())
     }
@@ -556,7 +612,7 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<u64> {
-        crate::database::require_db()?
+        crate::database::__current_db()?
             .__execute_with_params(sql, params)
             .await
     }
@@ -569,13 +625,17 @@ impl Database {
     ) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let conn = self.__internal_connection();
-        let backend = conn.get_database_backend();
-        let stmt = Statement::from_sql_and_values(backend, sql, params);
-
-        let result = crate::profiling::__profile_future(conn.execute_raw(stmt))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let result = match self.__get_connection() {
+            ConnectionRef::Database(conn) => {
+                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
+                crate::profiling::__profile_future(conn.execute_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                crate::profiling::__profile_future(tx.as_ref().execute_raw(stmt)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         Ok(result.rows_affected())
     }
@@ -605,14 +665,17 @@ impl Database {
     pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let db = crate::database::require_db()?;
-        let conn = db.__internal_connection();
-        let backend = conn.get_database_backend();
+        let db = crate::database::__current_db()?;
+        let backend = db.__internal_backend();
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match db.__get_connection() {
+            ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
+                .await,
+            ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
+                .await,
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         Self::query_rows_to_json(results)
     }
@@ -622,7 +685,7 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<serde_json::Value>> {
-        crate::database::require_db()?
+        crate::database::__current_db()?
             .__raw_json_with_params(sql, params)
             .await
     }
@@ -635,13 +698,17 @@ impl Database {
     ) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let conn = self.__internal_connection();
-        let backend = conn.get_database_backend();
-        let stmt = Statement::from_sql_and_values(backend, sql, params);
-
-        let results = crate::profiling::__profile_future(conn.query_all_raw(stmt))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+        let results = match self.__get_connection() {
+            ConnectionRef::Database(conn) => {
+                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
+                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                let stmt = Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
 
         Self::query_rows_to_json(results)
     }
@@ -721,12 +788,7 @@ impl Database {
         }
         // Fallback to SeaORM backend detection
         use crate::internal::DbBackend;
-        let Ok(inner) = self.current_inner() else {
-            tide_warn!("Database backend requested before a connection was initialized");
-            return crate::config::DatabaseType::Postgres;
-        };
-
-        match inner.connection().get_database_backend() {
+        match self.__internal_backend() {
             DbBackend::Postgres => crate::config::DatabaseType::Postgres,
             DbBackend::MySql => crate::config::DatabaseType::MySQL,
             DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
@@ -743,7 +805,15 @@ impl Database {
     /// Get the raw SeaORM database backend (for internal use only)
     #[doc(hidden)]
     pub fn __internal_backend(&self) -> crate::internal::DbBackend {
-        self.__internal_connection().get_database_backend()
+        use crate::internal::ConnectionTrait;
+
+        match self
+            .current_handle()
+            .expect("database connection should be initialized before use")
+        {
+            DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
+            DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+        }
     }
 }
 
@@ -765,7 +835,7 @@ impl std::fmt::Debug for Database {
 /// - If the transaction closure returns `Ok`, the transaction is committed
 /// - If it returns `Err` or panics, the transaction is rolled back
 pub struct Transaction {
-    inner: crate::internal::DatabaseTransaction,
+    inner: Arc<crate::internal::DatabaseTransaction>,
 }
 
 impl Transaction {
@@ -784,13 +854,13 @@ impl Transaction {
     /// })).await?;
     /// ```
     pub fn connection(&self) -> &crate::internal::DatabaseTransaction {
-        &self.inner
+        self.inner.as_ref()
     }
 
     /// Get the raw internal transaction (for internal use only)
     #[doc(hidden)]
     pub fn __internal_transaction(&self) -> &crate::internal::DatabaseTransaction {
-        &self.inner
+        self.inner.as_ref()
     }
 }
 
@@ -915,24 +985,30 @@ impl Default for DatabaseBuilder {
 pub trait Connection: Send + Sync {
     /// Get the internal connection for query execution
     #[doc(hidden)]
-    fn __get_connection(&self) -> ConnectionRef<'_>;
+    fn __get_connection(&self) -> ConnectionRef;
 }
 
 /// Internal connection reference (hidden from users)
 #[doc(hidden)]
-pub enum ConnectionRef<'a> {
+pub enum ConnectionRef {
     Database(crate::internal::DatabaseConnection),
-    Transaction(&'a crate::internal::DatabaseTransaction),
+    Transaction(Arc<crate::internal::DatabaseTransaction>),
 }
 
 impl Connection for Database {
-    fn __get_connection(&self) -> ConnectionRef<'_> {
-        ConnectionRef::Database(self.__internal_connection())
+    fn __get_connection(&self) -> ConnectionRef {
+        match self
+            .current_handle()
+            .expect("database connection should be initialized before use")
+        {
+            DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner.connection().clone()),
+            DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
+        }
     }
 }
 
 impl Connection for Transaction {
-    fn __get_connection(&self) -> ConnectionRef<'_> {
-        ConnectionRef::Transaction(self.__internal_transaction())
+    fn __get_connection(&self) -> ConnectionRef {
+        ConnectionRef::Transaction(self.inner.clone())
     }
 }

@@ -165,9 +165,10 @@ pub struct QueryExecutor;
 
 impl QueryExecutor {
     /// Find all records
-    pub async fn find_all<M>(conn: &DatabaseConnection) -> Result<Vec<M>>
+    pub async fn find_all<M, C>(conn: &C) -> Result<Vec<M>>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         let results = M::Entity::find()
             .all(conn);
@@ -180,9 +181,10 @@ impl QueryExecutor {
     }
 
     /// Get first record
-    pub async fn first<M>(conn: &DatabaseConnection) -> Result<Option<M>>
+    pub async fn first<M, C>(conn: &C) -> Result<Option<M>>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         let result = M::Entity::find()
             .one(conn);
@@ -195,9 +197,10 @@ impl QueryExecutor {
     }
 
     /// Get last record (by primary key descending)
-    pub async fn last<M>(conn: &DatabaseConnection) -> Result<Option<M>>
+    pub async fn last<M, C>(conn: &C) -> Result<Option<M>>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         // Order by primary key descending to get the actual last record
         let mut select = M::Entity::find();
@@ -220,9 +223,10 @@ impl QueryExecutor {
     }
 
     /// Count records
-    pub async fn count<M>(conn: &DatabaseConnection, condition: Option<Condition>) -> Result<u64>
+    pub async fn count<M, C>(conn: &C, condition: Option<Condition>) -> Result<u64>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         #[derive(Debug, FromQueryResult)]
         struct CountResult {
@@ -244,9 +248,10 @@ impl QueryExecutor {
     }
 
     /// Check whether any records exist.
-    pub async fn exists_any<M>(conn: &DatabaseConnection) -> Result<bool>
+    pub async fn exists_any<M, C>(conn: &C) -> Result<bool>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         #[derive(Debug, FromQueryResult)]
         struct ExistsResult {
@@ -265,9 +270,10 @@ impl QueryExecutor {
     }
 
     /// Paginate records
-    pub async fn paginate<M>(conn: &DatabaseConnection, limit: u64, offset: u64) -> Result<Vec<M>>
+    pub async fn paginate<M, C>(conn: &C, limit: u64, offset: u64) -> Result<Vec<M>>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         let results = M::Entity::find()
             .offset(offset)
@@ -287,9 +293,10 @@ impl QueryExecutor {
     }
 
     /// Delete a record
-    pub async fn delete<M>(conn: &DatabaseConnection, model: M) -> Result<u64>
+    pub async fn delete<M, C>(conn: &C, model: M) -> Result<u64>
     where
         M: InternalModel + crate::model::Model,
+        C: ConnectionTrait,
     {
         let active = model.into_active_model();
         let result = active
@@ -309,10 +316,11 @@ impl QueryExecutor {
     /// On PostgreSQL and MariaDB, uses `INSERT ... RETURNING` for efficiency.
     /// On MySQL and SQLite, falls back to individual inserts since they don't
     /// support multi-row `INSERT ... RETURNING`.
-    pub async fn insert_many<M>(conn: &DatabaseConnection, models: Vec<M>) -> Result<Vec<M>>
+    pub async fn insert_many<M, C>(conn: &C, models: Vec<M>) -> Result<Vec<M>>
     where
         M: InternalModel + crate::model::Model,
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
+        C: ConnectionTrait,
     {
         if models.is_empty() {
             return Ok(Vec::new());

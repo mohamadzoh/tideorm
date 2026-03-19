@@ -8,6 +8,7 @@ use crate::config::DatabaseType;
 use crate::fulltext::{FullTextSearchBuilder, SearchMode};
 #[cfg(feature = "fulltext")]
 use crate::internal::Value;
+use crate::model::Model;
 
 #[derive(tideorm::Model)]
 #[tideorm(table = "query_test_users")]
@@ -319,6 +320,65 @@ fn test_join_identifier_validation_rejects_injection() {
 
     let column_err = db_sql::validate_join_column("posts.user_id OR 1=1").unwrap_err();
     assert!(column_err.contains("unsafe JOIN column reference"));
+}
+
+#[test]
+fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
+    let err = db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1; DROP TABLE users")
+        .unwrap_err();
+    assert!(err.contains("unsafe WHERE raw SQL"));
+
+    let comment_err =
+        db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1 -- comment").unwrap_err();
+    assert!(comment_err.contains("unsafe WHERE raw SQL"));
+}
+
+#[test]
+fn test_subquery_validation_rejects_non_select_sql() {
+    let err = db_sql::validate_subquery_sql("DELETE FROM users").unwrap_err();
+    assert!(err.contains("unsafe subquery"));
+}
+
+#[tokio::test]
+async fn test_where_raw_rejects_unsafe_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .where_raw("1 = 1; DROP TABLE users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe WHERE raw SQL"));
+}
+
+#[tokio::test]
+async fn test_or_where_raw_rejects_unsafe_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .begin_or()
+        .or_where_raw("1 = 1; DROP TABLE users")
+        .end_or()
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe WHERE raw SQL"));
+}
+
+#[tokio::test]
+async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .where_in_subquery(
+            "id",
+            QueryTestUser::query()
+                .select(vec!["id"])
+                .where_raw("1 = 1; DROP TABLE users"),
+        )
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err
+        .to_string()
+        .contains("invalid subquery for where_in_subquery()"));
 }
 
 #[test]

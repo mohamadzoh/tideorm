@@ -782,6 +782,100 @@ async fn postgres_integration_tests() {
             .expect("Query failed");
         assert!(found.is_none(), "User should not exist after rollback");
         println!("   ✓ transaction rollback");
+
+        let baseline = TestUser {
+            id: 0,
+            email: "tx_baseline@example.com".to_string(),
+            name: "Baseline User".to_string(),
+            age: 41,
+            active: true,
+        }
+        .save()
+        .await
+        .expect("Failed to save baseline transaction user");
+
+        let save_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
+            Box::pin(async move {
+                TestUser {
+                    id: 0,
+                    email: "tx_model_save@example.com".to_string(),
+                    name: "Transaction Save".to_string(),
+                    age: 22,
+                    active: true,
+                }
+                .save()
+                .await?;
+
+                Err(tideorm::Error::query("Intentional rollback after save"))
+            })
+        })
+        .await;
+        assert!(save_result.is_err(), "save transaction should roll back");
+
+        let rolled_back_save = TestUser::query()
+            .where_eq("email", "tx_model_save@example.com")
+            .first()
+            .await
+            .expect("Failed to query rolled back save");
+        assert!(
+            rolled_back_save.is_none(),
+            "saved model row should not persist after rollback"
+        );
+        println!("   ✓ transaction rollback via model save");
+
+        let update_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
+            let baseline = TestUser {
+                id: baseline.id,
+                email: baseline.email.clone(),
+                name: baseline.name.clone(),
+                age: baseline.age,
+                active: baseline.active,
+            };
+            Box::pin(async move {
+                TestUser {
+                    name: "Updated In Transaction".to_string(),
+                    age: 99,
+                    ..baseline
+                }
+                .update()
+                .await?;
+
+                Err(tideorm::Error::query("Intentional rollback after update"))
+            })
+        })
+        .await;
+        assert!(update_result.is_err(), "update transaction should roll back");
+
+        let unchanged = TestUser::find(baseline.id)
+            .await
+            .expect("Failed to reload baseline user")
+            .expect("Baseline user should still exist");
+        assert_eq!(unchanged.name, "Baseline User");
+        assert_eq!(unchanged.age, 41);
+        println!("   ✓ transaction rollback via model update");
+
+        let delete_result: tideorm::Result<()> = TestUser::transaction(|_tx| {
+            let baseline = TestUser {
+                id: unchanged.id,
+                email: unchanged.email.clone(),
+                name: unchanged.name.clone(),
+                age: unchanged.age,
+                active: unchanged.active,
+            };
+            Box::pin(async move {
+                baseline.delete().await?;
+                Err(tideorm::Error::query("Intentional rollback after delete"))
+            })
+        })
+        .await;
+        assert!(delete_result.is_err(), "delete transaction should roll back");
+
+        let still_present = TestUser::find(baseline.id)
+            .await
+            .expect("Failed to reload baseline user after delete rollback")
+            .expect("Baseline user should remain after delete rollback");
+        assert_eq!(still_present.email, "tx_baseline@example.com");
+        println!("   ✓ transaction rollback via model delete");
     }
     println!();
 
