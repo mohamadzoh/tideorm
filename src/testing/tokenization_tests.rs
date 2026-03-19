@@ -208,3 +208,19 @@ fn test_token_config_reset_clears_global_state() {
     assert!(!TokenConfig::has_encryption_key());
     assert!(TokenConfig::get_encryption_key().is_err());
 }
+
+#[test]
+fn test_derive_encryption_key_is_deterministic_for_same_secret() {
+    let first = derive_encryption_key("same-secret");
+    let second = derive_encryption_key("same-secret");
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn test_derive_encryption_key_changes_with_secret() {
+    let first = derive_encryption_key("first-secret");
+    let second = derive_encryption_key("second-secret");
+
+    assert_ne!(first, second);
+}

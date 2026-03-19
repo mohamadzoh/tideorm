@@ -142,10 +142,10 @@ use parking_lot::RwLock;
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::random;
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -184,7 +184,7 @@ pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<i64>>
 // =============================================================================
 
 /// Global encryption key for tokenization
-static GLOBAL_ENCRYPTION_KEY: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+static GLOBAL_ENCRYPTION_KEY: OnceLock<RwLock<Option<ConfiguredEncryptionKey>>> = OnceLock::new();
 
 /// Global token encoder override
 static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::new();
@@ -193,12 +193,27 @@ static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::
 static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::new();
 
 thread_local! {
-    static LOCAL_ENCRYPTION_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LOCAL_ENCRYPTION_KEY: RefCell<Option<ConfiguredEncryptionKey>> = const { RefCell::new(None) };
     static LOCAL_TOKEN_ENCODER: Cell<Option<TokenEncoder>> = const { Cell::new(None) };
     static LOCAL_TOKEN_DECODER: Cell<Option<TokenDecoder>> = const { Cell::new(None) };
 }
 
-fn global_encryption_key_state() -> &'static RwLock<Option<String>> {
+#[derive(Clone)]
+struct ConfiguredEncryptionKey {
+    raw: String,
+    derived: [u8; 32],
+}
+
+impl ConfiguredEncryptionKey {
+    fn new(raw: &str) -> Self {
+        Self {
+            raw: raw.to_string(),
+            derived: derive_encryption_key(raw),
+        }
+    }
+}
+
+fn global_encryption_key_state() -> &'static RwLock<Option<ConfiguredEncryptionKey>> {
     GLOBAL_ENCRYPTION_KEY.get_or_init(|| RwLock::new(None))
 }
 
@@ -229,17 +244,23 @@ impl TokenConfig {
     /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
     /// ```
     pub fn set_encryption_key(key: &str) {
-        *global_encryption_key_state().write() = Some(key.to_string());
-        LOCAL_ENCRYPTION_KEY.with(|slot| *slot.borrow_mut() = Some(key.to_string()));
+        let configured_key = ConfiguredEncryptionKey::new(key);
+        *global_encryption_key_state().write() = Some(configured_key.clone());
+        LOCAL_ENCRYPTION_KEY.with(|slot| *slot.borrow_mut() = Some(configured_key));
     }
 
     /// Get the global encryption key
     ///
     /// Returns an error if no encryption key has been configured.
     pub fn get_encryption_key() -> Result<String> {
-        LOCAL_ENCRYPTION_KEY
-            .with(|slot| slot.borrow().clone())
-            .or_else(|| global_encryption_key_state().read().clone())
+        Self::current_encryption_key()
+            .map(|configured| configured.raw)
+            .ok_or_else(|| Error::tokenization("No encryption key configured"))
+    }
+
+    pub(crate) fn get_derived_encryption_key() -> Result<[u8; 32]> {
+        Self::current_encryption_key()
+            .map(|configured| configured.derived)
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
@@ -247,6 +268,12 @@ impl TokenConfig {
     pub fn has_encryption_key() -> bool {
         LOCAL_ENCRYPTION_KEY.with(|slot| slot.borrow().is_some())
             || global_encryption_key_state().read().is_some()
+    }
+
+    fn current_encryption_key() -> Option<ConfiguredEncryptionKey> {
+        LOCAL_ENCRYPTION_KEY
+            .with(|slot| slot.borrow().clone())
+            .or_else(|| global_encryption_key_state().read().clone())
     }
 
     /// Set a custom global token encoder
@@ -338,9 +365,17 @@ impl TokenConfig {
 // =============================================================================
 
 pub(crate) fn derive_encryption_key(key: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hasher.finalize().into()
+    const DERIVED_KEY_LEN: usize = 32;
+    const TOKENIZATION_KDF_SALT: &[u8] = b"tideorm::xchacha20poly1305-key::v2";
+
+    let params = Params::new(64 * 1024, 3, 1, Some(DERIVED_KEY_LEN))
+        .expect("argon2 params for tokenization key derivation should be valid");
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut derived = [0u8; DERIVED_KEY_LEN];
+    argon2
+        .hash_password_into(key.as_bytes(), TOKENIZATION_KDF_SALT, &mut derived)
+        .expect("argon2 key derivation should succeed with static parameters");
+    derived
 }
 
 /// Base64-URL safe encoding (no padding)
@@ -408,8 +443,8 @@ pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
 /// - nonce: 24 bytes - random nonce for XChaCha20-Poly1305
 /// - ciphertext: encrypted record ID plus authentication tag
 pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
-    let key = TokenConfig::get_encryption_key()?;
-    let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
+    let key = TokenConfig::get_derived_encryption_key()?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
     let nonce_bytes: [u8; 24] = random();
     let nonce = XNonce::from_slice(&nonce_bytes);
 
@@ -435,8 +470,8 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
 /// Returns `Ok(None)` for invalid or tampered tokens and `Err(...)` when
 /// tokenization is misconfigured, such as when no encryption key is set.
 pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
-    let key = TokenConfig::get_encryption_key()?;
-    let cipher = XChaCha20Poly1305::new((&derive_encryption_key(&key)).into());
+    let key = TokenConfig::get_derived_encryption_key()?;
+    let cipher = XChaCha20Poly1305::new((&key).into());
 
     let Some(token_data) = base64_url_decode(token) else {
         return Ok(None);

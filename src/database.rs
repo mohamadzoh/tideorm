@@ -73,6 +73,10 @@ fn global_db_handle() -> &'static Database {
     GLOBAL_DB.get_or_init(Database::disconnected)
 }
 
+fn panic_missing_global_db(message: &str) -> ! {
+    panic!("{}", message)
+}
+
 /// Get a reference to the global database connection
 ///
 /// This function returns the global database connection that was initialized
@@ -90,11 +94,13 @@ fn global_db_handle() -> &'static Database {
 /// let users = User::all().await?;
 /// ```
 pub fn db() -> &'static Database {
-    require_db().expect(
-        "Global database connection not initialized. \
-         Call Database::init() or Database::set_global() before using models. \
-         Use try_db() for a non-panicking alternative.",
-    )
+    try_db().unwrap_or_else(|| {
+        panic_missing_global_db(
+            "Global database connection not initialized. \
+             Call Database::init() or Database::set_global() before using models. \
+             Use try_db() for a non-panicking alternative.",
+        )
+    })
 }
 
 /// Get a reference to the global database, returning an error if not initialized.
@@ -288,10 +294,12 @@ impl Database {
     ///
     /// Panics if the global connection has not been initialized.
     pub fn global() -> &'static Self {
-        require_db().expect(
-            "Global database connection not initialized. \
-             Call Database::init() or Database::set_global() before using models.",
-        )
+        Self::try_global().unwrap_or_else(|| {
+            panic_missing_global_db(
+                "Global database connection not initialized. \
+                 Call Database::init() or Database::set_global() before using models.",
+            )
+        })
     }
 
     /// Try to get a reference to the global database connection

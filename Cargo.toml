@@ -56,7 +56,6 @@ regex = "1.12.3"
 async-recursion = "1.1.1"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 rand = "0.10.0"
-sha2 = "0.10.9"
 argon2 = { version = "0.5.3", features = ["std"] }
 
 [dev-dependencies]

@@ -471,7 +471,9 @@ fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
         .expect("failed to connect to benchmark sqlite database");
 
     rt.block_on(async {
-        db.__internal_connection()
+        let conn = db.__internal_connection();
+
+        conn
             .execute_unprepared(
                 r#"
                 CREATE TABLE bench_cache_users (
@@ -493,7 +495,7 @@ fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
                 active: i % 2 == 0,
             }
             .into_active_model()
-            .insert(db.__internal_connection())
+            .insert(&conn)
             .await
             .expect("failed to seed benchmark row");
         }
@@ -561,11 +563,13 @@ fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
         .expect("failed to connect to concurrency benchmark sqlite database");
 
     rt.block_on(async {
-        db.__internal_connection()
+        let conn = db.__internal_connection();
+
+        conn
             .execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
             .await
             .expect("failed to drop benchmark table");
-        db.__internal_connection()
+        conn
             .execute_unprepared(
                 r#"
                 CREATE TABLE bench_cache_users (
@@ -587,7 +591,7 @@ fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
                 active: i % 2 == 0,
             }
             .into_active_model()
-            .insert(db.__internal_connection())
+            .insert(&conn)
             .await
             .expect("failed to seed concurrency benchmark row");
         }

@@ -37,7 +37,9 @@ pub(crate) async fn exists_any<M>() -> Result<bool>
 where
     M: Model + Sized,
 {
-    Ok(count::<M>().await? > 0)
+    let db = crate::database::__current_db()?;
+    let conn = db.__internal_connection();
+    crate::internal::QueryExecutor::exists_any::<M>(&conn).await
 }
 
 pub(crate) async fn insert_all<M>(models: Vec<M>) -> Result<Vec<M>>

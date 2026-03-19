@@ -118,6 +118,32 @@ pub(crate) fn count_to_u64(count: i64, context: &str) -> Result<u64> {
     })
 }
 
+fn build_exists_statement<M>(backend: DbBackend) -> Statement
+where
+    M: InternalModel + crate::model::Model,
+{
+    use sea_orm::sea_query::{MysqlQueryBuilder, PostgresQueryBuilder, Query, SqliteQueryBuilder};
+
+    let subquery = Query::select()
+        .expr(Expr::val(1))
+        .from(Alias::new(M::table_name()))
+        .limit(1)
+        .to_owned();
+
+    let exists = Query::select()
+        .expr_as(Expr::exists(subquery), Alias::new("exists"))
+        .to_owned();
+
+    let (sql, values) = match backend {
+        DbBackend::Postgres => exists.build(PostgresQueryBuilder),
+        DbBackend::MySql => exists.build(MysqlQueryBuilder),
+        DbBackend::Sqlite => exists.build(SqliteQueryBuilder),
+        _ => exists.build(PostgresQueryBuilder),
+    };
+
+    Statement::from_sql_and_values(backend, sql, values)
+}
+
 fn build_count_select<M>(condition: Option<Condition>) -> Select<M::Entity>
 where
     M: InternalModel + crate::model::Model,
@@ -215,6 +241,27 @@ impl QueryExecutor {
             .map(|r| count_to_u64(r.count, "count(*)"))
             .transpose()
             .map(|count| count.unwrap_or(0))
+    }
+
+    /// Check whether any records exist.
+    pub async fn exists_any<M>(conn: &DatabaseConnection) -> Result<bool>
+    where
+        M: InternalModel + crate::model::Model,
+    {
+        #[derive(Debug, FromQueryResult)]
+        struct ExistsResult {
+            exists: bool,
+        }
+
+        let backend = conn.get_database_backend();
+        let statement = build_exists_statement::<M>(backend);
+        let result = ExistsResult::find_by_statement(statement).one(conn);
+        let result = crate::profiling::__profile_future(result)
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
+
+        Ok(result.map(|row| row.exists).unwrap_or(false))
     }
 
     /// Paginate records

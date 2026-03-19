@@ -488,6 +488,16 @@ pub struct HasOne<E: Model> {
 }
 
 impl<E: Model> HasOne<E> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.foreign_key.is_empty() || self.local_key.is_empty() {
+            Err(Error::query(String::from(
+                "HasOne relation is not configured; use HasOne::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new HasOne relation
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
         Self {
@@ -516,6 +526,8 @@ impl<E: Model> HasOne<E> {
             return Ok(Some((**cached).clone()));
         }
 
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -532,6 +544,8 @@ impl<E: Model> HasOne<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -543,6 +557,8 @@ impl<E: Model> HasOne<E> {
 
     /// Check if the relation exists
     pub async fn exists(&self) -> Result<bool> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -563,8 +579,8 @@ impl<E: Model> HasOne<E> {
 impl<E: Model> Default for HasOne<E> {
     fn default() -> Self {
         Self {
-            foreign_key: "id",
-            local_key: "id",
+            foreign_key: "",
+            local_key: "",
             cached: None,
             parent_pk: None,
             _marker: PhantomData,
@@ -622,6 +638,16 @@ pub struct HasMany<E: Model> {
 }
 
 impl<E: Model> HasMany<E> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.foreign_key.is_empty() || self.local_key.is_empty() {
+            Err(Error::query(String::from(
+                "HasMany relation is not configured; use HasMany::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new HasMany relation
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
         Self {
@@ -650,6 +676,8 @@ impl<E: Model> HasMany<E> {
             return Ok(cached.clone());
         }
 
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -666,6 +694,8 @@ impl<E: Model> HasMany<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -677,6 +707,8 @@ impl<E: Model> HasMany<E> {
 
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -690,6 +722,8 @@ impl<E: Model> HasMany<E> {
 
     /// Check if any related models exist
     pub async fn exists(&self) -> Result<bool> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -710,8 +744,8 @@ impl<E: Model> HasMany<E> {
 impl<E: Model> Default for HasMany<E> {
     fn default() -> Self {
         Self {
-            foreign_key: "id",
-            local_key: "id",
+            foreign_key: "",
+            local_key: "",
             cached: None,
             parent_pk: None,
             _marker: PhantomData,
@@ -768,6 +802,16 @@ pub struct BelongsTo<E: Model> {
 }
 
 impl<E: Model> BelongsTo<E> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.foreign_key.is_empty() || self.owner_key.is_empty() {
+            Err(Error::query(String::from(
+                "BelongsTo relation is not configured; use BelongsTo::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new BelongsTo relation
     pub fn new(foreign_key: &'static str, owner_key: &'static str) -> Self {
         Self {
@@ -796,6 +840,8 @@ impl<E: Model> BelongsTo<E> {
             return Ok(Some((**cached).clone()));
         }
 
+        self.ensure_configured()?;
+
         let fk = self
             .fk_value
             .as_ref()
@@ -812,6 +858,8 @@ impl<E: Model> BelongsTo<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
+        self.ensure_configured()?;
+
         let fk = self
             .fk_value
             .as_ref()
@@ -823,6 +871,8 @@ impl<E: Model> BelongsTo<E> {
 
     /// Check if the relation exists
     pub async fn exists(&self) -> Result<bool> {
+        self.ensure_configured()?;
+
         let fk = self
             .fk_value
             .as_ref()
@@ -843,8 +893,8 @@ impl<E: Model> BelongsTo<E> {
 impl<E: Model> Default for BelongsTo<E> {
     fn default() -> Self {
         Self {
-            foreign_key: "id",
-            owner_key: "id",
+            foreign_key: "",
+            owner_key: "",
             cached: None,
             fk_value: None,
             _marker: PhantomData,
@@ -908,6 +958,21 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
 }
 
 impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.foreign_key.is_empty()
+            || self.related_key.is_empty()
+            || self.local_key.is_empty()
+            || self.related_local_key.is_empty()
+            || self.pivot_table.is_empty()
+        {
+            Err(Error::query(String::from(
+                "HasManyThrough relation is not configured; use HasManyThrough::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new HasManyThrough relation
     pub fn new(
         foreign_key: &'static str,
@@ -945,6 +1010,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             return Ok(cached.clone());
         }
 
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -970,6 +1037,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -991,6 +1060,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1007,6 +1078,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Attach a related model (create pivot entry)
     pub async fn attach(&self, related_id: impl Into<serde_json::Value>) -> Result<()> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1038,6 +1111,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Detach a related model (remove pivot entry)
     pub async fn detach(&self, related_id: impl Into<serde_json::Value>) -> Result<u64> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1052,6 +1127,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Sync related models (replace all with new set)
     pub async fn sync(&self, related_ids: Vec<serde_json::Value>) -> Result<()> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1080,10 +1157,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
     fn default() -> Self {
         Self {
-            foreign_key: "id",
-            related_key: "id",
-            local_key: "id",
-            related_local_key: "id",
+            foreign_key: "",
+            related_key: "",
+            local_key: "",
+            related_local_key: "",
             pivot_table: "",
             cached: None,
             parent_pk: None,
@@ -1235,6 +1312,16 @@ pub struct MorphOne<Related: Model> {
 }
 
 impl<Related: Model> MorphOne<Related> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.morph_name.is_empty() || self.local_key.is_empty() {
+            Err(Error::query(String::from(
+                "MorphOne relation is not configured; use MorphOne::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new MorphOne relation
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
         Self {
@@ -1256,6 +1343,8 @@ impl<Related: Model> MorphOne<Related> {
 
     /// Load the related model
     pub async fn load(&self) -> Result<Option<Related>> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1285,7 +1374,7 @@ impl<Related: Model> Default for MorphOne<Related> {
     fn default() -> Self {
         Self {
             morph_name: "",
-            local_key: "id",
+            local_key: "",
             cached: None,
             parent_pk: None,
             parent_table: None,
@@ -1329,6 +1418,16 @@ pub struct MorphMany<Related: Model> {
 }
 
 impl<Related: Model> MorphMany<Related> {
+    fn ensure_configured(&self) -> Result<()> {
+        if self.morph_name.is_empty() || self.local_key.is_empty() {
+            Err(Error::query(String::from(
+                "MorphMany relation is not configured; use MorphMany::new(...) or a macro-generated relation field",
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new MorphMany relation
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
         Self {
@@ -1350,6 +1449,8 @@ impl<Related: Model> MorphMany<Related> {
 
     /// Load all related models
     pub async fn load(&self) -> Result<Vec<Related>> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1374,6 +1475,8 @@ impl<Related: Model> MorphMany<Related> {
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1395,6 +1498,8 @@ impl<Related: Model> MorphMany<Related> {
 
     /// Count related models
     pub async fn count(&self) -> Result<u64> {
+        self.ensure_configured()?;
+
         let pk = self
             .parent_pk
             .as_ref()
@@ -1424,7 +1529,7 @@ impl<Related: Model> Default for MorphMany<Related> {
     fn default() -> Self {
         Self {
             morph_name: "",
-            local_key: "id",
+            local_key: "",
             cached: None,
             parent_pk: None,
             parent_table: None,

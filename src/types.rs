@@ -617,8 +617,10 @@ fn encrypted_field_encryption_key(operation: &str) -> crate::error::Result<Strin
 }
 
 fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
-    let key = encrypted_field_encryption_key("serialization")?;
-    let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
+    let _ = encrypted_field_encryption_key("serialization")?;
+    let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key()
+        .map_err(|_| encrypted_field_missing_key_error("serialization"))?;
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
     let nonce_bytes: [u8; 24] = random();
     let nonce = XNonce::from_slice(&nonce_bytes);
 
@@ -644,8 +646,10 @@ fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
 }
 
 fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
-    let key = encrypted_field_encryption_key("deserialization")?;
-    let cipher = XChaCha20Poly1305::new((&crate::tokenization::derive_encryption_key(&key)).into());
+    let _ = encrypted_field_encryption_key("deserialization")?;
+    let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key()
+        .map_err(|_| encrypted_field_missing_key_error("deserialization"))?;
+    let cipher = XChaCha20Poly1305::new((&derived_key).into());
     let payload = crate::tokenization::base64_url_decode(encoded)
         .ok_or_else(|| crate::Error::tokenization("Invalid encrypted field payload"))?;
 
@@ -764,7 +768,7 @@ impl Serialize for Hashed {
     where
         S: serde::Serializer,
     {
-        self.hash.serialize(serializer)
+        serializer.serialize_str("***HASHED***")
     }
 }
 
@@ -773,7 +777,14 @@ impl<'de> Deserialize<'de> for Hashed {
     where
         D: serde::Deserializer<'de>,
     {
-        String::deserialize(deserializer).map(|hash| Self { hash })
+        let hash = String::deserialize(deserializer)?;
+        if hash == "***HASHED***" {
+            return Err(serde::de::Error::custom(
+                "Hashed values use a redacted serialization format and cannot be deserialized from ***HASHED***",
+            ));
+        }
+
+        Ok(Self { hash })
     }
 }
 

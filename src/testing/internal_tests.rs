@@ -1,4 +1,4 @@
-use super::{build_count_select, count_to_u64, supports_batch_insert_returning};
+use super::{build_count_select, build_exists_statement, count_to_u64, supports_batch_insert_returning};
 use crate::config::DatabaseType;
 use crate::internal::{ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
 
@@ -60,6 +60,17 @@ fn count_select_omits_where_without_condition() {
         statement.sql,
         "SELECT COUNT(*) AS \"count\" FROM \"internal_count_users\""
     );
+}
+
+#[test]
+fn exists_select_uses_exists_subquery_with_limit() {
+    let statement = build_exists_statement::<InternalCountUser>(DbBackend::Postgres);
+
+    assert_eq!(
+        statement.sql,
+        "SELECT EXISTS(SELECT $1 FROM \"internal_count_users\" LIMIT $2) AS \"exists\""
+    );
+    assert!(statement.values.is_some());
 }
 
 #[test]
