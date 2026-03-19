@@ -443,7 +443,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         tide_warn!("Database sync mode is ENABLED - DO NOT use in production!");
     }
 
-    let conn = db.__internal_connection();
+    let conn = db.__internal_connection()?;
     let backend = conn.get_database_backend();
 
     let entity_count = SyncRegistry::entity_count();
@@ -504,7 +504,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
 /// Sync TideORM ModelSchema definitions.
 async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
     let models = SyncRegistry::get_all_schemas();
-    let conn = db.__internal_connection();
+    let conn = db.__internal_connection()?;
     let backend = conn.get_database_backend();
 
     for model in models {

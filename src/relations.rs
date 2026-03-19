@@ -103,9 +103,169 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
+use crate::internal::Value;
 use crate::internal::InternalModel;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
+
+fn resolve_model_column_name<E: Model>(name: &str) -> Result<&'static str> {
+    if E::column_from_str(name).is_none() {
+        return Err(Error::query(format!(
+            "Unknown self-reference column '{}' for table '{}'",
+            name,
+            E::table_name()
+        )));
+    }
+
+    E::field_names()
+        .iter()
+        .zip(E::column_names().iter())
+        .find_map(|(field_name, column_name)| {
+            if *field_name == name || *column_name == name {
+                Some(*column_name)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            Error::query(format!(
+                "Unknown self-reference column '{}' for table '{}'",
+                name,
+                E::table_name()
+            ))
+        })
+}
+
+fn json_to_db_value(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::String(None),
+        serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Value::BigInt(Some(integer))
+            } else if let Some(float) = number.as_f64() {
+                Value::Double(Some(float))
+            } else {
+                Value::String(Some(number.to_string()))
+            }
+        }
+        serde_json::Value::String(text) => Value::String(Some(text.clone())),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(Some(value.to_string()))
+        }
+    }
+}
+
+fn push_param(db_type: crate::config::DatabaseType, params: &mut Vec<Value>, value: Value) -> String {
+    let placeholder = match db_type {
+        crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
+        crate::config::DatabaseType::MySQL
+        | crate::config::DatabaseType::MariaDB
+        | crate::config::DatabaseType::SQLite => "?".to_string(),
+    };
+    params.push(value);
+    placeholder
+}
+
+fn quote_ident(db_type: crate::config::DatabaseType, name: &str) -> String {
+    let q = db_type.quote_char();
+    let escaped = name.replace(q, &format!("{q}{q}"));
+    format!("{}{}{}", q, escaped, q)
+}
+
+fn scoped_column(db_type: crate::config::DatabaseType, scope: &str, column: &str) -> String {
+    format!("{}.{}", quote_ident(db_type, scope), quote_ident(db_type, column))
+}
+
+fn soft_delete_clause<E: Model>(db_type: crate::config::DatabaseType, scope: &str) -> Option<String> {
+    if E::soft_delete_enabled() {
+        Some(format!(
+            "{} IS NULL",
+            scoped_column(db_type, scope, E::deleted_at_column())
+        ))
+    } else {
+        None
+    }
+}
+
+fn build_self_ref_tree_sql<E: Model>(
+    foreign_key: &str,
+    local_key: &str,
+    parent_pk: &serde_json::Value,
+    max_depth: usize,
+    db_type: crate::config::DatabaseType,
+) -> Result<(String, Vec<Value>)> {
+    let foreign_key = resolve_model_column_name::<E>(foreign_key)?;
+    let local_key = resolve_model_column_name::<E>(local_key)?;
+    let primary_key = resolve_model_column_name::<E>(E::primary_key_name())?;
+
+    let table = quote_ident(db_type, E::table_name());
+    let cte = quote_ident(db_type, "tide_tree");
+    let node = quote_ident(db_type, "node");
+    let child = quote_ident(db_type, "child");
+    let tree = quote_ident(db_type, "tree");
+    let result = quote_ident(db_type, "result_node");
+    let pk_alias = quote_ident(db_type, "pk");
+    let tree_key_alias = quote_ident(db_type, "tree_key");
+    let depth_alias = quote_ident(db_type, "depth");
+
+    let mut params = Vec::with_capacity(2);
+    let parent_placeholder = push_param(db_type, &mut params, json_to_db_value(parent_pk));
+    let max_depth = i64::try_from(max_depth)
+        .map_err(|_| Error::query("Self-reference tree depth exceeds i64 range"))?;
+    let depth_placeholder = push_param(db_type, &mut params, Value::BigInt(Some(max_depth)));
+
+    let mut base_predicates = vec![format!(
+        "{} = {}",
+        scoped_column(db_type, "node", foreign_key),
+        parent_placeholder
+    )];
+    if let Some(clause) = soft_delete_clause::<E>(db_type, "node") {
+        base_predicates.push(clause);
+    }
+
+    let mut recursive_predicates = vec![format!("{}.{} < {}", tree, depth_alias, depth_placeholder)];
+    if let Some(clause) = soft_delete_clause::<E>(db_type, "child") {
+        recursive_predicates.push(clause);
+    }
+
+    let sql = format!(
+        "WITH RECURSIVE {cte} ({pk_alias}, {tree_key_alias}, {depth_alias}) AS ( \
+         SELECT {node_pk} AS {pk_alias}, {node_local_key} AS {tree_key_alias}, 1 AS {depth_alias} \
+         FROM {table} {node} \
+         WHERE {base_where} \
+         UNION ALL \
+         SELECT {child_pk} AS {pk_alias}, {child_local_key} AS {tree_key_alias}, {tree}.{depth_alias} + 1 AS {depth_alias} \
+         FROM {table} {child} \
+         INNER JOIN {cte} {tree} ON {child_foreign_key} = {tree}.{tree_key_alias} \
+         WHERE {recursive_where} \
+         ) \
+         SELECT {result}.* \
+         FROM {table} {result} \
+         INNER JOIN {cte} {result_tree} ON {result_pk} = {result_tree}.{pk_alias} \
+         ORDER BY {result_tree}.{depth_alias}",
+        cte = cte,
+        pk_alias = pk_alias,
+        tree_key_alias = tree_key_alias,
+        depth_alias = depth_alias,
+        node_pk = scoped_column(db_type, "node", primary_key),
+        node_local_key = scoped_column(db_type, "node", local_key),
+        table = table,
+        node = node,
+        base_where = base_predicates.join(" AND "),
+        child_pk = scoped_column(db_type, "child", primary_key),
+        child_local_key = scoped_column(db_type, "child", local_key),
+        child = child,
+        tree = tree,
+        child_foreign_key = scoped_column(db_type, "child", foreign_key),
+        recursive_where = recursive_predicates.join(" AND "),
+        result = result,
+        result_tree = quote_ident(db_type, "result_tree"),
+        result_pk = scoped_column(db_type, "result_node", primary_key),
+    );
+
+    Ok((sql, params))
+}
 
 // =============================================================================
 // SELF-REFERENCING RELATIONS
@@ -366,7 +526,9 @@ impl<E: Model> SelfRefMany<E> {
     /// Load the full tree of descendants (recursive)
     ///
     /// This loads all descendants recursively up to the specified depth.
-    /// Use with caution on large datasets.
+    ///
+    /// The tree is fetched with a single recursive CTE query so it avoids the
+    /// per-node N+1 query pattern of naive recursive loading.
     ///
     /// # Example
     ///
@@ -384,43 +546,16 @@ impl<E: Model> SelfRefMany<E> {
             ))
         })?;
 
-        self.load_tree_recursive(pk.clone(), max_depth).await
-    }
+        let db = crate::database::__current_db()?;
+        let (sql, params) = build_self_ref_tree_sql::<E>(
+            self.foreign_key,
+            self.local_key,
+            pk,
+            max_depth,
+            db.backend(),
+        )?;
 
-    /// Internal recursive tree loading
-    #[async_recursion::async_recursion]
-    async fn load_tree_recursive(
-        &self,
-        parent_pk: serde_json::Value,
-        depth: usize,
-    ) -> Result<Vec<E>> {
-        if depth == 0 {
-            return Ok(Vec::new());
-        }
-
-        let children: Vec<E> = E::query()
-            .where_eq(self.foreign_key, parent_pk)
-            .get()
-            .await?;
-
-        let mut all = children.clone();
-
-        for child in children {
-            // Convert primary key to JSON value using Display trait
-            let pk_string = format!("{}", child.primary_key());
-            let child_pk = if let Ok(num) = pk_string.parse::<i64>() {
-                serde_json::Value::Number(num.into())
-            } else {
-                serde_json::Value::String(pk_string)
-            };
-
-            if !child_pk.is_null() {
-                let descendants = self.load_tree_recursive(child_pk, depth - 1).await?;
-                all.extend(descendants);
-            }
-        }
-
-        Ok(all)
+        db.__raw_with_params::<E>(&sql, params).await
     }
 }
 
@@ -451,6 +586,73 @@ impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
         D: Deserializer<'de>,
     {
         Ok(Self::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_self_ref_tree_sql, Value};
+    use crate::config::DatabaseType;
+
+    #[derive(tideorm::Model)]
+    #[tideorm(table = "relation_test_nodes")]
+    struct RelationTestNode {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        slug: String,
+        parent_slug: Option<String>,
+    }
+
+    #[test]
+    fn self_ref_tree_sql_uses_recursive_cte_and_local_key() {
+        let (sql, params) = build_self_ref_tree_sql::<RelationTestNode>(
+            "parent_slug",
+            "slug",
+            &serde_json::json!("root"),
+            3,
+            DatabaseType::Postgres,
+        )
+        .unwrap();
+
+        assert!(sql.starts_with("WITH RECURSIVE \"tide_tree\""));
+        assert!(sql.contains("\"node\".\"slug\" AS \"tree_key\""));
+        assert!(sql.contains("\"child\".\"parent_slug\" = \"tree\".\"tree_key\""));
+        assert!(sql.contains("\"tree\".\"depth\" < $2"));
+        assert!(sql.contains("SELECT \"result_node\".*"));
+        assert!(matches!(params.first(), Some(Value::String(Some(root))) if root == "root"));
+        assert!(matches!(params.get(1), Some(Value::BigInt(Some(depth))) if *depth == 3));
+    }
+
+    #[test]
+    fn self_ref_tree_sql_uses_backend_specific_placeholders() {
+        let (sql, params) = build_self_ref_tree_sql::<RelationTestNode>(
+            "parent_slug",
+            "slug",
+            &serde_json::json!("root"),
+            2,
+            DatabaseType::MySQL,
+        )
+        .unwrap();
+
+        assert!(sql.starts_with("WITH RECURSIVE `tide_tree`"));
+        assert!(sql.contains("`node`.`parent_slug` = ?"));
+        assert!(sql.contains("`tree`.`depth` < ?"));
+        assert!(matches!(params.first(), Some(Value::String(Some(root))) if root == "root"));
+        assert!(matches!(params.get(1), Some(Value::BigInt(Some(depth))) if *depth == 2));
+    }
+
+    #[test]
+    fn self_ref_tree_sql_rejects_unknown_columns() {
+        let err = build_self_ref_tree_sql::<RelationTestNode>(
+            "parent_slug",
+            "missing_column",
+            &serde_json::json!("root"),
+            2,
+            DatabaseType::MySQL,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("Unknown self-reference column 'missing_column'"));
     }
 }
 

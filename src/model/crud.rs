@@ -8,11 +8,11 @@ use crate::error::Result;
 
 use super::Model;
 
-pub(crate) fn db() -> Result<&'static crate::database::Database> {
+pub(crate) fn db() -> Result<crate::database::Database> {
     crate::database::require_db()
 }
 
-pub(crate) fn database() -> Result<&'static crate::database::Database> {
+pub(crate) fn database() -> Result<crate::database::Database> {
     crate::database::require_db()
 }
 
@@ -21,7 +21,7 @@ where
     M: Model + Sized,
 {
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::find_all::<M, _>(&conn).await
         }
@@ -36,7 +36,7 @@ where
     M: Model + Sized,
 {
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::count::<M, _>(&conn, None).await
         }
@@ -51,7 +51,7 @@ where
     M: Model + Sized,
 {
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::exists_any::<M, _>(&conn).await
         }
@@ -72,7 +72,7 @@ where
     }
 
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::insert_many::<M, _>(&conn, models).await
         }
@@ -125,7 +125,7 @@ where
     M: Model + Sized,
 {
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::first::<M, _>(&conn).await
         }
@@ -140,7 +140,7 @@ where
     M: Model + Sized,
 {
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::last::<M, _>(&conn).await
         }
@@ -156,7 +156,7 @@ where
 {
     let offset = (page.saturating_sub(1)) * per_page;
     let db = crate::database::__current_db()?;
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::paginate::<M, _>(&conn, per_page, offset).await
         }

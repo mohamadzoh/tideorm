@@ -75,6 +75,24 @@ async fn test_profile_future_does_not_record_when_disabled() {
     assert_eq!(GlobalProfiler::stats().total_queries, 0);
 }
 
+#[tokio::test]
+async fn test_profile_future_skips_timing_when_disabled_at_entry() {
+    GlobalProfiler::disable();
+    GlobalProfiler::reset();
+
+    let value = __profile_future(async {
+        GlobalProfiler::enable();
+        9_u64
+    })
+    .await;
+
+    assert_eq!(value, 9);
+    assert_eq!(GlobalProfiler::stats().total_queries, 0);
+
+    GlobalProfiler::disable();
+    GlobalProfiler::reset();
+}
+
 #[test]
 fn test_missing_where_detection() {
     let suggestions = QueryAnalyzer::analyze("DELETE FROM users");

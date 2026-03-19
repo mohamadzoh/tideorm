@@ -138,20 +138,30 @@ where
 
     if let Some(obj) = json.as_object() {
         for (key, value) in obj {
-            if key != "params" {
-                let str_val = match value {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Null => "null".to_string(),
-                    _ => value.to_string(),
-                };
-                map.insert(key.clone(), str_val);
-            }
+            let Some(output_key) = hash_map_output_key(key, value) else {
+                continue;
+            };
+
+            let str_val = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => "null".to_string(),
+                _ => value.to_string(),
+            };
+            map.insert(output_key.to_string(), str_val);
         }
     }
 
     map
+}
+
+fn hash_map_output_key<'a>(key: &'a str, value: &serde_json::Value) -> Option<&'a str> {
+    if key == "params" && (value.is_object() || value.is_array()) {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 pub(crate) fn load_language_translations<M>(_language: &str) -> std::result::Result<(), String>
@@ -407,4 +417,22 @@ where
 {
     let _ = data;
     Ok(serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_map_output_key;
+    use serde_json::json;
+
+    #[test]
+    fn hash_map_output_key_hides_structured_presenter_params() {
+        assert_eq!(hash_map_output_key("params", &json!({"view": "minimal"})), None);
+        assert_eq!(hash_map_output_key("params", &json!(["minimal"])), None);
+        assert_eq!(hash_map_output_key("title", &json!("title")), Some("title"));
+    }
+
+    #[test]
+    fn hash_map_output_key_preserves_scalar_params_values() {
+        assert_eq!(hash_map_output_key("params", &json!("keep me")), Some("params"));
+    }
 }

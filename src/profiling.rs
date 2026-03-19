@@ -476,6 +476,10 @@ pub async fn __profile_future<T, F>(future: F) -> T
 where
     F: Future<Output = T>,
 {
+    if !GlobalProfiler::is_enabled() {
+        return future.await;
+    }
+
     let start = Instant::now();
     let output = future.await;
     GlobalProfiler::record(start.elapsed());

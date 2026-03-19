@@ -58,7 +58,7 @@ pub trait Model:
     /// // or from an instance
     /// let db = user.database()?;
     /// ```
-    fn db() -> crate::error::Result<&'static crate::database::Database> {
+    fn db() -> crate::error::Result<crate::database::Database> {
         crud::db()
     }
 
@@ -69,7 +69,7 @@ pub trait Model:
     /// let user = User::find(1).await?;
     /// let db = user.database()?;
     /// ```
-    fn database(&self) -> crate::error::Result<&'static crate::database::Database> {
+    fn database(&self) -> crate::error::Result<crate::database::Database> {
         crud::database()
     }
 
@@ -518,6 +518,12 @@ pub trait Model:
     ///   - "language": Language code for translations (e.g., "en", "fr", "ar")
     ///   - "presenter": Presenter name (e.g., "default", "minimal", "full")
     ///
+    /// # Reserved Keys
+    /// The key `params` is reserved for presenter payloads. Structured `params`
+    /// values (objects and arrays) are omitted from `to_hash_map()` output, so
+    /// avoid declaring presenter-facing model attributes with that name if you
+    /// need it to appear in the serialized hash map.
+    ///
     /// # Example
     /// ```ignore
     /// // Without options (uses defaults)
@@ -573,6 +579,10 @@ pub trait Model:
     }
 
     /// Convert model to HashMap
+    ///
+    /// The key `params` is reserved for presenter payloads. When serialized
+    /// values under `params` are objects or arrays, TideORM omits them from the
+    /// returned map.
     fn to_hash_map(&self) -> HashMap<String, String>
     where
         Self: serde::Serialize,

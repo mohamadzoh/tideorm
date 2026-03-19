@@ -179,7 +179,9 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
-    let conn = db.__internal_connection();
+    let conn = db
+        .__internal_connection()
+        .expect("local SQLite connection should be available");
 
     conn
         .execute_unprepared(
@@ -228,7 +230,9 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
-    let conn = db.__internal_connection();
+    let conn = db
+        .__internal_connection()
+        .expect("local SQLite connection should be available");
 
     conn
         .execute_unprepared(
@@ -306,7 +310,9 @@ async fn sqlite_query_errors_include_query_builder_context() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
-    let conn = db.__internal_connection();
+    let conn = db
+        .__internal_connection()
+        .expect("local SQLite connection should be available");
 
     conn
         .execute_unprepared(
@@ -380,7 +386,9 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("failed to connect to local SQLite database");
-    let conn = db.__internal_connection();
+    let conn = db
+        .__internal_connection()
+        .expect("local SQLite connection should be available");
 
     conn
         .execute_unprepared(

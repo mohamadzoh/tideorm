@@ -134,7 +134,7 @@ where
             .to_owned()
     };
 
-    match db.__get_connection() {
+    match db.__get_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::profiling::__profile_future(
                 R::Entity::insert_many(active_models)

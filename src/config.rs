@@ -38,7 +38,7 @@ use crate::tide_info;
 static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 
 /// Global schema file path (set via TideConfig::schema_file())
-static SCHEMA_FILE_PATH: OnceLock<RwLock<Option<&'static str>>> = OnceLock::new();
+static SCHEMA_FILE_PATH: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
 /// File URL generator function type
 ///
@@ -66,7 +66,7 @@ thread_local! {
     static LOCAL_CONFIG: RefCell<Option<Config>> = const { RefCell::new(None) };
     static LOCAL_DB_TYPE: Cell<Option<DatabaseType>> = const { Cell::new(None) };
     static LOCAL_POOL_CONFIG: RefCell<Option<PoolConfig>> = const { RefCell::new(None) };
-    static LOCAL_SCHEMA_FILE_PATH: Cell<Option<&'static str>> = const { Cell::new(None) };
+    static LOCAL_SCHEMA_FILE_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
     #[cfg(feature = "attachments")]
     static LOCAL_FILE_URL_GENERATOR: Cell<Option<FileUrlGenerator>> = const { Cell::new(None) };
 }
@@ -79,17 +79,13 @@ fn global_pool_config_state() -> &'static RwLock<Option<PoolConfig>> {
     GLOBAL_POOL_CONFIG.get_or_init(|| RwLock::new(None))
 }
 
-fn global_schema_file_path_state() -> &'static RwLock<Option<&'static str>> {
+fn global_schema_file_path_state() -> &'static RwLock<Option<String>> {
     SCHEMA_FILE_PATH.get_or_init(|| RwLock::new(None))
 }
 
 #[cfg(feature = "attachments")]
 fn global_file_url_generator_state() -> &'static RwLock<Option<FileUrlGenerator>> {
     GLOBAL_FILE_URL_GENERATOR.get_or_init(|| RwLock::new(None))
-}
-
-fn leak_schema_path(path: String) -> &'static str {
-    Box::leak(path.into_boxed_str())
 }
 
 /// Supported database types
@@ -1363,15 +1359,14 @@ impl TideConfig {
         // Generate schema file if configured
         if let Some(path) = &self.schema_file {
             // Store schema path
-            let leaked_path = leak_schema_path(path.clone());
-            *global_schema_file_path_state().write() = Some(leaked_path);
-            LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(Some(leaked_path)));
+            *global_schema_file_path_state().write() = Some(path.clone());
+            LOCAL_SCHEMA_FILE_PATH.with(|slot| *slot.borrow_mut() = Some(path.clone()));
 
             // Auto-generate schema file from database introspection
             crate::schema::SchemaWriter::write_schema(path).await?;
         } else {
             *global_schema_file_path_state().write() = None;
-            LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(None));
+            LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.borrow_mut().take());
         }
 
         Ok(db_ref)
@@ -1402,9 +1397,8 @@ impl TideConfig {
         *global_pool_config_state().write() = Some(self.pool.clone());
         LOCAL_POOL_CONFIG.with(|slot| *slot.borrow_mut() = Some(self.pool));
 
-        let leaked_path = self.schema_file.map(leak_schema_path);
-        *global_schema_file_path_state().write() = leaked_path;
-        LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(leaked_path));
+        *global_schema_file_path_state().write() = self.schema_file.clone();
+        LOCAL_SCHEMA_FILE_PATH.with(|slot| *slot.borrow_mut() = self.schema_file);
     }
 
     /// Reset global and current-thread TideORM configuration state.
@@ -1420,7 +1414,7 @@ impl TideConfig {
         LOCAL_POOL_CONFIG.with(|slot| slot.borrow_mut().take());
 
         *global_schema_file_path_state().write() = None;
-        LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.set(None));
+        LOCAL_SCHEMA_FILE_PATH.with(|slot| slot.borrow_mut().take());
 
         #[cfg(feature = "attachments")]
         {
@@ -1442,7 +1436,7 @@ impl TideConfig {
     /// ```rust,ignore
     /// let db = TideConfig::db()?;
     /// ```
-    pub fn db() -> crate::error::Result<&'static Database> {
+    pub fn db() -> crate::error::Result<Database> {
         crate::database::require_db()
     }
 
@@ -1457,7 +1451,7 @@ impl TideConfig {
     ///     // use db...
     /// }
     /// ```
-    pub fn try_db() -> Option<&'static Database> {
+    pub fn try_db() -> Option<Database> {
         crate::database::try_db()
     }
 
@@ -1536,11 +1530,14 @@ impl TideConfig {
             .unwrap_or_default()
     }
 
-    /// Get the configured schema file path (if any)
-    pub fn schema_file_path() -> Option<&'static str> {
+    /// Get the configured schema file path (if any).
+    ///
+    /// Returns an owned path so repeated `apply()` or `connect()` calls can
+    /// replace the stored schema path without leaking memory.
+    pub fn schema_file_path() -> Option<String> {
         LOCAL_SCHEMA_FILE_PATH
-            .with(|slot| slot.get())
-            .or_else(|| *global_schema_file_path_state().read())
+            .with(|slot| slot.borrow().clone())
+            .or_else(|| global_schema_file_path_state().read().clone())
     }
 
     /// Write schema to the configured file
@@ -1605,7 +1602,7 @@ impl TideConfig {
     async fn detect_server_version(db: &Database) -> Result<String> {
         use crate::internal::{ConnectionTrait, DbBackend, Statement};
 
-        let conn = db.__internal_connection();
+        let conn = db.__internal_connection()?;
         let backend = conn.get_database_backend();
 
         // Only probe MySQL-type connections

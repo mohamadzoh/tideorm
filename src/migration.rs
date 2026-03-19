@@ -319,7 +319,7 @@ impl Schema {
         self.statements.push(sql.to_string());
 
         let db = require_db()?;
-        db.__internal_connection()
+        db.__internal_connection()?
             .execute_unprepared(sql)
             .await
             .map_err(|e| {
@@ -1581,7 +1581,7 @@ impl Migrator {
         let mut result = MigrationResult::new();
 
         let db = require_db()?;
-        let db_type = detect_database_type(db);
+        let db_type = detect_database_type(&db);
 
         // Sort migrations by version
         let mut migrations: Vec<_> = self.migrations.iter().collect();
@@ -1635,7 +1635,7 @@ impl Migrator {
         };
 
         let db = require_db()?;
-        let db_type = detect_database_type(db);
+        let db_type = detect_database_type(&db);
 
         // Find the migration
         for migration in &self.migrations {
@@ -1722,7 +1722,7 @@ impl Migrator {
     /// Ensure the migrations table exists
     async fn ensure_migrations_table(&self) -> Result<()> {
         let db = require_db()?;
-        let db_type = detect_database_type(db);
+        let db_type = detect_database_type(&db);
 
         let sql = match db_type {
             DatabaseType::Postgres => {
@@ -1757,7 +1757,7 @@ impl Migrator {
             }
         };
 
-        db.__internal_connection()
+        db.__internal_connection()?
             .execute_unprepared(sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -1771,8 +1771,8 @@ impl Migrator {
 
         use crate::internal::Statement;
 
-        let backend = db.__internal_connection().get_database_backend();
-        let db_type = detect_database_type(db);
+        let backend = db.__internal_connection()?.get_database_backend();
+        let db_type = detect_database_type(&db);
         let q = |id: &str| quote_migration_identifier(id, db_type);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
@@ -1783,7 +1783,7 @@ impl Migrator {
         let stmt = Statement::from_string(backend, sql);
 
         let results = db
-            .__internal_connection()
+            .__internal_connection()?
             .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -1812,7 +1812,7 @@ impl Migrator {
     /// Record a migration as applied
     async fn record_migration(&self, version: &str, name: &str) -> Result<()> {
         let db = require_db()?;
-        let db_type = detect_database_type(db);
+        let db_type = detect_database_type(&db);
         let q = |id: &str| quote_migration_identifier(id, db_type);
 
         let sql = format!(
@@ -1824,7 +1824,7 @@ impl Migrator {
             name.replace('\'', "''")
         );
 
-        db.__internal_connection()
+        db.__internal_connection()?
             .execute_unprepared(&sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -1835,7 +1835,7 @@ impl Migrator {
     /// Remove a migration record
     async fn remove_migration_record(&self, version: &str) -> Result<()> {
         let db = require_db()?;
-        let db_type = detect_database_type(db);
+        let db_type = detect_database_type(&db);
         let q = |id: &str| quote_migration_identifier(id, db_type);
 
         let sql = format!(
@@ -1845,7 +1845,7 @@ impl Migrator {
             version.replace('\'', "''")
         );
 
-        db.__internal_connection()
+        db.__internal_connection()?
             .execute_unprepared(&sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;

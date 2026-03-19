@@ -9,12 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restored transaction scoping for TideORM model and query helpers so `save()`, `update()`, `delete()`, eager loading, nested operations, full-text reads, and aggregate helpers now honor the active transaction instead of bypassing it through the global pooled connection.
+- Hardened raw SQL builder escape hatches by rejecting obvious injection markers in `where_raw`, raw column expressions, and nested subqueries before execution.
+- Restored the original `Model::to_hash_map()` behavior that hides structured presenter `params` payloads entirely; `params` remains a reserved presenter key and is now documented as such.
+- Removed disabled-path profiling overhead in `__profile_future()` by skipping `Instant::now()` when global profiling is off.
+- Replaced leaked schema-path storage in `TideConfig` so repeated `apply()` and `connect()` calls no longer leak each configured schema file path.
+- Reworked `SelfRefMany::load_tree()` to use a single recursive CTE query, eliminating per-node descendant lookups and honoring the configured `local_key` when walking self-referential trees.
 - Repaired all-features build breakage after the reconfigurable global-database refactor by updating direct SeaORM call sites to borrow owned internal connections correctly.
 - Restored consistent full-text SQL parameterization coverage across the query and full-text test suites, including PostgreSQL ranked search placeholders and SQLite FTS pagination bindings.
 - Tightened encrypted-field missing-key coverage so integration tests now assert the actionable startup-configuration error message returned by `Encrypted<T>`.
 
 ### Changed
 
+- `require_db()`, `try_db()`, `TideConfig::db()`, `TideConfig::try_db()`, `Model::db()`, and `Model::database()` now return owned `Database` handles for consistency with transaction-aware current-connection access.
+- `TideConfig::schema_file_path()` now returns `Option<String>` instead of `Option<&'static str>` so schema path state can be replaced safely without leaking memory across reconfiguration.
 - Documented resettable global configuration, tokenization override reset behavior, and the batched nested many-model save/update/delete paths in the README and mdBook chapters.
 
 ### Internal

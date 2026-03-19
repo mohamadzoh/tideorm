@@ -315,6 +315,20 @@ fn test_tide_config_apply_clears_database_type_when_omitted() {
 }
 
 #[test]
+fn test_tide_config_schema_file_path_replaced_without_leak_prone_static_refs() {
+    TideConfig::reset();
+
+    TideConfig::init().schema_file("first_schema.sql").apply();
+    assert_eq!(TideConfig::schema_file_path().as_deref(), Some("first_schema.sql"));
+
+    TideConfig::init().schema_file("second_schema.sql").apply();
+    assert_eq!(TideConfig::schema_file_path().as_deref(), Some("second_schema.sql"));
+
+    TideConfig::reset();
+    assert_eq!(TideConfig::schema_file_path(), None);
+}
+
+#[test]
 fn test_pool_config_defaults() {
     let pool = PoolConfig::default();
 

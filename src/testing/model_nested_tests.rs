@@ -31,7 +31,7 @@ async fn setup_nested_test_db() -> Database {
         .expect("failed to connect to SQLite for nested model tests");
     Database::set_global(db.clone()).expect("failed to register nested test database");
 
-    db.__internal_connection()
+    db.__internal_connection().unwrap()
         .execute_unprepared(
             r#"
             CREATE TABLE nested_test_parents (

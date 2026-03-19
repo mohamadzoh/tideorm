@@ -568,7 +568,7 @@ impl<M: Model> QueryBuilder<M> {
         // Build COUNT(DISTINCT column) expression
         let count_expr = Expr::cust(format!("COUNT(DISTINCT {})", col));
 
-        let result: Option<CountResult> = match db.__get_connection() {
+        let result: Option<CountResult> = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(
                     select
@@ -624,7 +624,7 @@ impl<M: Model> QueryBuilder<M> {
         // Build aggregate expression
         let agg_expr = Expr::cust(expr_sql.to_string());
 
-        let result: Option<AggResult> = match db.__get_connection() {
+        let result: Option<AggResult> = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(
                     select

@@ -100,22 +100,25 @@ fn panic_missing_global_db(message: &str) -> ! {
 /// let users = User::all().await?;
 /// ```
 pub fn db() -> &'static Database {
-    try_db().unwrap_or_else(|| {
+    let db = global_db_handle();
+    if db.is_connected() {
+        db
+    } else {
         panic_missing_global_db(
             "Global database connection not initialized. \
              Call Database::init() or Database::set_global() before using models. \
              Use try_db() for a non-panicking alternative.",
         )
-    })
+    }
 }
 
-/// Get a reference to the global database, returning an error if not initialized.
+/// Get the global database handle, returning an error if not initialized.
 ///
 /// Prefer this over `db()` inside functions that already return `Result`.
-pub fn require_db() -> Result<&'static Database> {
+pub fn require_db() -> Result<Database> {
     let db = global_db_handle();
     if db.is_connected() {
-        Ok(db)
+        Ok(db.clone())
     } else {
         Err(Error::connection(
             "Global database connection not initialized. \
@@ -125,7 +128,7 @@ pub fn require_db() -> Result<&'static Database> {
     }
 }
 
-/// Try to get a reference to the global database connection
+/// Try to get the global database handle
 ///
 /// Returns `None` if the global connection has not been initialized.
 ///
@@ -136,9 +139,9 @@ pub fn require_db() -> Result<&'static Database> {
 ///     // use db...
 /// }
 /// ```
-pub fn try_db() -> Option<&'static Database> {
+pub fn try_db() -> Option<Database> {
     let db = global_db_handle();
-    db.is_connected().then_some(db)
+    db.is_connected().then(|| db.clone())
 }
 
 /// Check if a global database connection has been initialized
@@ -160,7 +163,7 @@ pub fn __current_db() -> Result<Database> {
         return Ok(db);
     }
 
-    require_db().cloned()
+    require_db()
 }
 
 /// Database connection handle
@@ -320,18 +323,21 @@ impl Database {
     ///
     /// Panics if the global connection has not been initialized.
     pub fn global() -> &'static Self {
-        Self::try_global().unwrap_or_else(|| {
+        let db = global_db_handle();
+        if db.is_connected() {
+            db
+        } else {
             panic_missing_global_db(
                 "Global database connection not initialized. \
                  Call Database::init() or Database::set_global() before using models.",
             )
-        })
+        }
     }
 
-    /// Try to get a reference to the global database connection
+    /// Try to get the global database connection
     ///
     /// Returns `None` if the global connection has not been initialized.
-    pub fn try_global() -> Option<&'static Self> {
+    pub fn try_global() -> Option<Self> {
         try_db()
     }
 
@@ -380,7 +386,7 @@ impl Database {
     {
         use crate::internal::TransactionTrait;
 
-        let txn = match self.__get_connection() {
+        let txn = match self.__get_connection()? {
             ConnectionRef::Database(conn) => conn
                 .begin()
                 .await
@@ -435,7 +441,7 @@ impl Database {
     pub async fn ping(&self) -> Result<bool> {
         use crate::internal::ConnectionTrait;
 
-        let conn = self.__internal_connection();
+        let conn = self.__internal_connection()?;
         conn
             .execute_unprepared("SELECT 1")
             .await
@@ -496,10 +502,10 @@ impl Database {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
         let db = crate::database::__current_db()?;
-        let backend = db.__internal_backend();
+        let backend = db.__internal_backend()?;
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = match db.__get_connection() {
+        let results = match db.__get_connection()? {
             ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
                 .await,
             ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
@@ -549,7 +555,7 @@ impl Database {
     ) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let results = match self.__get_connection() {
+        let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
                 let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
                 crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
@@ -585,7 +591,7 @@ impl Database {
         use crate::internal::ConnectionTrait;
 
         let db = crate::database::__current_db()?;
-        let result = match db.__get_connection() {
+        let result = match db.__get_connection()? {
             ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(conn.execute_unprepared(sql)).await
             }
@@ -625,7 +631,7 @@ impl Database {
     ) -> Result<u64> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let result = match self.__get_connection() {
+        let result = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
                 let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
                 crate::profiling::__profile_future(conn.execute_raw(stmt)).await
@@ -666,10 +672,10 @@ impl Database {
         use crate::internal::{ConnectionTrait, Statement};
 
         let db = crate::database::__current_db()?;
-        let backend = db.__internal_backend();
+        let backend = db.__internal_backend()?;
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = match db.__get_connection() {
+        let results = match db.__get_connection()? {
             ConnectionRef::Database(conn) => crate::profiling::__profile_future(conn.query_all_raw(stmt))
                 .await,
             ConnectionRef::Transaction(tx) => crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt))
@@ -698,7 +704,7 @@ impl Database {
     ) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let results = match self.__get_connection() {
+        let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
                 let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
                 crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
@@ -756,11 +762,8 @@ impl Database {
 
     /// Get the raw internal connection (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_connection(&self) -> crate::internal::DatabaseConnection {
-        self.current_inner()
-            .expect("database connection should be initialized before use")
-            .connection()
-            .clone()
+    pub fn __internal_connection(&self) -> Result<crate::internal::DatabaseConnection> {
+        Ok(self.current_inner()?.connection().clone())
     }
 
     /// Get the database backend type
@@ -789,13 +792,20 @@ impl Database {
         // Fallback to SeaORM backend detection
         use crate::internal::DbBackend;
         match self.__internal_backend() {
-            DbBackend::Postgres => crate::config::DatabaseType::Postgres,
-            DbBackend::MySql => crate::config::DatabaseType::MySQL,
-            DbBackend::Sqlite => crate::config::DatabaseType::SQLite,
-            other => {
+            Ok(DbBackend::Postgres) => crate::config::DatabaseType::Postgres,
+            Ok(DbBackend::MySql) => crate::config::DatabaseType::MySQL,
+            Ok(DbBackend::Sqlite) => crate::config::DatabaseType::SQLite,
+            Ok(other) => {
                 tide_warn!(
                     "Unknown database backend {:?}, defaulting to Postgres",
                     other
+                );
+                crate::config::DatabaseType::Postgres
+            }
+            Err(err) => {
+                tide_warn!(
+                    "Unable to inspect database backend for disconnected handle: {}. Defaulting to Postgres",
+                    err
                 );
                 crate::config::DatabaseType::Postgres
             }
@@ -804,16 +814,13 @@ impl Database {
 
     /// Get the raw SeaORM database backend (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_backend(&self) -> crate::internal::DbBackend {
+    pub fn __internal_backend(&self) -> Result<crate::internal::DbBackend> {
         use crate::internal::ConnectionTrait;
 
-        match self
-            .current_handle()
-            .expect("database connection should be initialized before use")
-        {
+        Ok(match self.current_handle()? {
             DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
             DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
-        }
+        })
     }
 }
 
@@ -985,7 +992,7 @@ impl Default for DatabaseBuilder {
 pub trait Connection: Send + Sync {
     /// Get the internal connection for query execution
     #[doc(hidden)]
-    fn __get_connection(&self) -> ConnectionRef;
+    fn __get_connection(&self) -> Result<ConnectionRef>;
 }
 
 /// Internal connection reference (hidden from users)
@@ -996,19 +1003,37 @@ pub enum ConnectionRef {
 }
 
 impl Connection for Database {
-    fn __get_connection(&self) -> ConnectionRef {
-        match self
-            .current_handle()
-            .expect("database connection should be initialized before use")
-        {
+    fn __get_connection(&self) -> Result<ConnectionRef> {
+        Ok(match self.current_handle()? {
             DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner.connection().clone()),
             DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
-        }
+        })
     }
 }
 
 impl Connection for Transaction {
-    fn __get_connection(&self) -> ConnectionRef {
-        ConnectionRef::Transaction(self.inner.clone())
+    fn __get_connection(&self) -> Result<ConnectionRef> {
+        Ok(ConnectionRef::Transaction(self.inner.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Connection, Database};
+
+    #[test]
+    fn hidden_accessors_return_errors_for_disconnected_database() {
+        let db = Database::disconnected();
+
+        assert!(db.__internal_connection().is_err());
+        assert!(db.__internal_backend().is_err());
+        assert!(db.__get_connection().is_err());
+    }
+
+    #[test]
+    fn backend_defaults_safely_for_disconnected_database() {
+        let db = Database::disconnected();
+
+        assert_eq!(db.backend(), crate::config::DatabaseType::Postgres);
     }
 }

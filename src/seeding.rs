@@ -222,7 +222,7 @@ impl Seeder {
 
             log_seed_start(name);
 
-            seed.run(database).await?;
+            seed.run(&database).await?;
 
             // Record seed as executed
             self.record_seed(name).await?;
@@ -250,7 +250,7 @@ impl Seeder {
             if seed.name() == seed_name {
                 log_seed_start(seed_name);
 
-                seed.run(database).await?;
+                seed.run(&database).await?;
 
                 // Record seed (or update timestamp if already exists)
                 let executed = self.get_executed_seeds().await?;
@@ -294,7 +294,7 @@ impl Seeder {
             if seed.name() == last_name {
                 log_seed_rollback(last_name);
 
-                seed.rollback(database).await?;
+                seed.rollback(&database).await?;
 
                 // Remove seed record
                 self.remove_seed_record(last_name).await?;
@@ -321,7 +321,7 @@ impl Seeder {
             if seed.name() == seed_name {
                 log_seed_rollback(seed_name);
 
-                seed.rollback(database).await?;
+                seed.rollback(&database).await?;
 
                 // Remove seed record
                 self.remove_seed_record(seed_name).await?;
@@ -476,7 +476,7 @@ impl Seeder {
     /// Ensure the seeds table exists
     async fn ensure_seeds_table(&self) -> Result<()> {
         let database = require_db()?;
-        let db_type = detect_database_type(database);
+        let db_type = detect_database_type(&database);
 
         let sql = match db_type {
             DatabaseType::Postgres => {
@@ -509,7 +509,7 @@ impl Seeder {
         };
 
         database
-            .__internal_connection()
+            .__internal_connection()?
             .execute_unprepared(sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -523,7 +523,7 @@ impl Seeder {
 
         use crate::internal::Statement;
 
-        let backend = database.__internal_connection().get_database_backend();
+        let backend = database.__internal_connection()?.get_database_backend();
         let q = |id: &str| quote_identifier(id, backend);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
@@ -534,7 +534,7 @@ impl Seeder {
         let stmt = Statement::from_string(backend, sql);
 
         let results = database
-            .__internal_connection()
+            .__internal_connection()?
             .query_all_raw(stmt)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -553,7 +553,7 @@ impl Seeder {
     /// Record a seed as executed
     async fn record_seed(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = database.__internal_connection().get_database_backend();
+        let backend = database.__internal_connection()?.get_database_backend();
         let q = |id: &str| quote_identifier(id, backend);
 
         let sql = format!(
@@ -564,7 +564,7 @@ impl Seeder {
         );
 
         database
-            .__internal_connection()
+            .__internal_connection()?
             .execute_unprepared(&sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -575,7 +575,7 @@ impl Seeder {
     /// Remove a seed record
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = database.__internal_connection().get_database_backend();
+        let backend = database.__internal_connection()?.get_database_backend();
         let q = |id: &str| quote_identifier(id, backend);
 
         let sql = format!(
@@ -586,7 +586,7 @@ impl Seeder {
         );
 
         database
-            .__internal_connection()
+            .__internal_connection()?
             .execute_unprepared(&sql)
             .await
             .map_err(|e| Error::query(e.to_string()))?;

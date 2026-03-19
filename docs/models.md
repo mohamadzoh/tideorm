@@ -25,6 +25,15 @@ The `#[tideorm::model]` macro automatically implements:
 - `Serialize` - for JSON serialization
 - `Deserialize` - for JSON deserialization
 
+### Reserved Attribute Names
+
+`params` is reserved for presenter payloads.
+
+When TideORM builds `to_hash_map()` output and the serialized `params` value is
+an object or array, it is omitted from the resulting map. Avoid using `params`
+for presenter-facing structured model attributes if you need that data to appear
+in `to_hash_map()` output.
+
 ### Custom Implementations (When Needed)
 
 If you need custom implementations, use `skip_derives` and provide your own:
@@ -860,11 +869,14 @@ let has_manager = manager_rel.exists().await?;
 let reports = reports_rel.load().await?;
 let count = reports_rel.count().await?;
 
-// Load entire subtree recursively
+// Load entire subtree recursively in one recursive CTE query
 let tree = reports_rel.load_tree(3).await?;  // 3 levels deep
 ```
 
 Note: `SelfRef` and `SelfRefMany` are runtime wrappers today. The derive macro does not yet provide `#[tideorm(self_ref = ...)]` or `#[tideorm(self_ref_many = ...)]` field wiring.
+
+`SelfRefMany::load_tree()` respects the configured `local_key` and fetches the
+tree in one query, which avoids one SELECT per node on large hierarchies.
 
 ### Nested Save (Cascade Operations)
 

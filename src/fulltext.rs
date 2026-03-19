@@ -414,10 +414,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let db_type = db.backend();
         let (sql, params) = self.build_sql(db_type)?;
 
-        let backend = db.__internal_backend();
+        let backend = db.__internal_backend()?;
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let results = match db.__get_connection() {
+        let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(conn.query_all_raw(statement)).await
             }
@@ -448,10 +448,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let db_type = db.backend();
         let (sql, params) = self.build_ranked_sql(db_type)?;
 
-        let backend = db.__internal_backend();
+        let backend = db.__internal_backend()?;
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let results = match db.__get_connection() {
+        let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(conn.query_all_raw(statement)).await
             }
@@ -491,10 +491,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let db_type = db.backend();
         let (sql, params) = self.build_count_sql(db_type)?;
 
-        let backend = db.__internal_backend();
+        let backend = db.__internal_backend()?;
         let statement = Statement::from_sql_and_values(backend, &sql, params);
 
-        let result = match db.__get_connection() {
+        let result = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
                 crate::profiling::__profile_future(conn.query_one_raw(statement)).await
             }
