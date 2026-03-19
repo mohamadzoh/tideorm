@@ -701,9 +701,7 @@ impl<M: Model> QueryBuilder<M> {
             JsonStringOperator::KeyPresent => db_sql::json_key_exists(db_type, column, value),
             JsonStringOperator::KeyAbsent => db_sql::json_key_not_exists(db_type, column, value),
             JsonStringOperator::PathPresent => db_sql::json_path_exists(db_type, column, value),
-            JsonStringOperator::PathAbsent => {
-                db_sql::json_path_not_exists(db_type, column, value)
-            }
+            JsonStringOperator::PathAbsent => db_sql::json_path_not_exists(db_type, column, value),
         }
     }
 

@@ -455,7 +455,7 @@ mod cache_stats_accounting {
         assert!(stats.entries <= 2);
         // hit_ratio should be between 0 and 1
         let ratio = stats.hit_ratio();
-        assert!(ratio >= 0.0 && ratio <= 1.0);
+        assert!((0.0..=1.0).contains(&ratio));
     }
 }
 

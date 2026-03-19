@@ -242,8 +242,10 @@ fn test_tide_config_file_base_url_for_builder() {
 
 #[test]
 fn test_config_resolve_file_base_url_prefers_field_match() {
-    let mut config = Config::default();
-    config.file_base_url = Some("https://cdn.example.com/uploads".to_string());
+    let mut config = Config {
+        file_base_url: Some("https://cdn.example.com/uploads".to_string()),
+        ..Default::default()
+    };
     config.file_field_base_urls.insert(
         "thumbnail".to_string(),
         "https://thumbs.example.com/uploads".to_string(),

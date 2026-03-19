@@ -118,6 +118,20 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let field_names = &ctx.field_names;
     let column_names = &ctx.column_names;
     let with_relations_method = generate_with_relations_method(ctx);
+    let delete_active_model_init = if ctx.field_names.len() == 1 {
+        quote! {
+            #internal_entity_mod::ActiveModel {
+                #pk_ident: ActiveValue::Unchanged(self.#pk_ident),
+            }
+        }
+    } else {
+        quote! {
+            #internal_entity_mod::ActiveModel {
+                #pk_ident: ActiveValue::Unchanged(self.#pk_ident),
+                ..Default::default()
+            }
+        }
+    };
 
     quote! {
         impl #struct_name {
@@ -178,10 +192,7 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
             #[doc(hidden)]
             fn __into_delete_active_model(self) -> #internal_entity_mod::ActiveModel {
                 use ::tideorm::sea_orm::ActiveValue;
-                #internal_entity_mod::ActiveModel {
-                    #pk_ident: ActiveValue::Unchanged(self.#pk_ident),
-                    ..Default::default()
-                }
+                #delete_active_model_init
             }
 
             #with_relations_method

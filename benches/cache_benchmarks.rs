@@ -471,7 +471,9 @@ fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
         .expect("failed to connect to benchmark sqlite database");
 
     rt.block_on(async {
-        let conn = db.__internal_connection();
+        let conn = db
+            .__internal_connection()
+            .expect("benchmark sqlite connection should be available");
 
         conn.execute_unprepared(
             r#"
@@ -562,7 +564,9 @@ fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
         .expect("failed to connect to concurrency benchmark sqlite database");
 
     rt.block_on(async {
-        let conn = db.__internal_connection();
+        let conn = db
+            .__internal_connection()
+            .expect("benchmark sqlite connection should be available");
 
         conn.execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
             .await

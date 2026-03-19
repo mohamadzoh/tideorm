@@ -72,6 +72,7 @@ impl Callbacks for HookedModel {
 }
 
 #[test]
+#[allow(clippy::unnecessary_mut_passed)]
 fn callback_dispatch_is_noop_for_models_without_callbacks() {
     let mut model = PlainModel;
     assert!((&mut &mut model).run_before_create().is_ok());

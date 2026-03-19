@@ -175,7 +175,7 @@ fn bench_relation_tree_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_tree_operations");
 
     group.bench_function("create_empty", |b| {
-        b.iter(|| RelationTree::new());
+        b.iter(RelationTree::new);
     });
 
     group.bench_function("add_single_path", |b| {
@@ -247,7 +247,7 @@ fn bench_relation_constraints(c: &mut Criterion) {
     let mut group = c.benchmark_group("relation_constraints");
 
     group.bench_function("default", |b| {
-        b.iter(|| RelationConstraints::default());
+        b.iter(RelationConstraints::default);
     });
 
     group.bench_function("where_eq", |b| {

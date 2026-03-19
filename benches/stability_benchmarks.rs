@@ -266,7 +266,7 @@ fn bench_timestamp_operations(c: &mut Criterion) {
     use chrono::Utc;
 
     c.bench_function("utc_now", |b| {
-        b.iter(|| Utc::now());
+        b.iter(Utc::now);
     });
 
     c.bench_function("timestamp_comparison", |b| {
