@@ -2,12 +2,22 @@
 
 use async_trait::async_trait;
 use sea_orm::sea_query::OnConflict;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::callbacks::{AfterCreateDispatch, AfterDeleteDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeDeleteDispatch, BeforeUpdateDispatch};
 use crate::error::{Error, Result};
 use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_error};
 
 use super::Model;
+
+type OneRelationSaveOp = Box<
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>>>>,
+>;
+
+type ManyRelationSaveOp = Box<
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<Vec<serde_json::Value>>>>>,
+>;
 
 fn parent_primary_key_json<M: Model>(parent: &M) -> serde_json::Value {
     let pk = parent.primary_key();
@@ -163,6 +173,54 @@ where
     reorder_models_by_primary_key(fetched, &pk_order)
 }
 
+async fn save_related_model_as_json<R>(
+    related: R,
+    foreign_key: String,
+    parent_pk_value: serde_json::Value,
+) -> Result<serde_json::Value>
+where
+    R: Model,
+{
+    let related = apply_foreign_key(related, &foreign_key, &parent_pk_value)?;
+    let related = related.save().await?;
+    serde_json::to_value(&related)
+        .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))
+}
+
+async fn save_related_models_as_json<R>(
+    related: Vec<R>,
+    foreign_key: String,
+    parent_pk_value: serde_json::Value,
+) -> Result<Vec<serde_json::Value>>
+where
+    R: Model,
+    <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
+{
+    if related.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut prepared_related = Vec::with_capacity(related.len());
+    for item in related {
+        let mut item = apply_foreign_key(item, &foreign_key, &parent_pk_value)?;
+        (&mut item).run_before_create()?;
+        prepared_related.push(item);
+    }
+
+    let saved_related = R::insert_all(prepared_related).await?;
+    let mut saved_json = Vec::with_capacity(saved_related.len());
+    for item in saved_related {
+        (&item).run_after_create()?;
+        saved_json.push(
+            serde_json::to_value(&item).map_err(|e| {
+                Error::conversion(format!("Failed to serialize related model: {}", e))
+            })?,
+        );
+    }
+
+    Ok(saved_json)
+}
+
 /// Extension trait for cascade save operations.
 #[async_trait]
 pub trait NestedSave: Model {
@@ -305,8 +363,8 @@ impl<M: Model> NestedSave for M {}
 /// Builder for nested/cascade saves.
 pub struct NestedSaveBuilder<M: Model> {
     parent: M,
-    one_relations: Vec<(serde_json::Value, String)>,
-    many_relations: Vec<(Vec<serde_json::Value>, String)>,
+    one_relations: Vec<OneRelationSaveOp>,
+    many_relations: Vec<ManyRelationSaveOp>,
 }
 
 impl<M: Model> NestedSaveBuilder<M> {
@@ -318,20 +376,30 @@ impl<M: Model> NestedSaveBuilder<M> {
         }
     }
 
-    pub fn with_one<R: Model>(mut self, related: R, foreign_key: &str) -> Self {
-        if let Ok(json) = serde_json::to_value(&related) {
-            self.one_relations.push((json, foreign_key.to_string()));
-        }
+    pub fn with_one<R: Model + 'static>(mut self, related: R, foreign_key: &str) -> Self {
+        let foreign_key = foreign_key.to_string();
+        self.one_relations.push(Box::new(move |parent_pk_value| {
+            Box::pin(save_related_model_as_json(
+                related,
+                foreign_key,
+                parent_pk_value,
+            ))
+        }));
         self
     }
 
-    pub fn with_many<R: Model>(mut self, related: Vec<R>, foreign_key: &str) -> Self {
-        let json_values: Vec<serde_json::Value> = related
-            .into_iter()
-            .filter_map(|r| serde_json::to_value(&r).ok())
-            .collect();
-        self.many_relations
-            .push((json_values, foreign_key.to_string()));
+    pub fn with_many<R: Model + 'static>(mut self, related: Vec<R>, foreign_key: &str) -> Self
+    where
+        <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
+    {
+        let foreign_key = foreign_key.to_string();
+        self.many_relations.push(Box::new(move |parent_pk_value| {
+            Box::pin(save_related_models_as_json(
+                related,
+                foreign_key,
+                parent_pk_value,
+            ))
+        }));
         self
     }
 
@@ -345,30 +413,12 @@ impl<M: Model> NestedSaveBuilder<M> {
 
         let mut saved_json = Vec::new();
 
-        for (mut json, fk) in self.one_relations {
-            if let serde_json::Value::Object(ref mut map) = json {
-                let pk_str = pk_value.as_str().unwrap_or_default();
-                if let Ok(pk_i64) = pk_str.parse::<i64>() {
-                    map.insert(fk, serde_json::json!(pk_i64));
-                } else {
-                    map.insert(fk, pk_value.clone());
-                }
-            }
-            saved_json.push(json);
+        for save_relation in self.one_relations {
+            saved_json.push(save_relation(pk_value.clone()).await?);
         }
 
-        for (items, fk) in self.many_relations {
-            for mut json in items {
-                if let serde_json::Value::Object(ref mut map) = json {
-                    let pk_str = pk_value.as_str().unwrap_or_default();
-                    if let Ok(pk_i64) = pk_str.parse::<i64>() {
-                        map.insert(fk.clone(), serde_json::json!(pk_i64));
-                    } else {
-                        map.insert(fk.clone(), pk_value.clone());
-                    }
-                }
-                saved_json.push(json);
-            }
+        for save_relations in self.many_relations {
+            saved_json.extend(save_relations(pk_value.clone()).await?);
         }
 
         Ok((parent, saved_json))

@@ -1,4 +1,4 @@
-use super::NestedSave;
+use super::{NestedSave, NestedSaveBuilder};
 use crate::internal::ConnectionTrait;
 use crate::model::Model;
 use crate::{Database, GlobalProfiler, TideConfig};
@@ -89,6 +89,43 @@ async fn save_with_many_persists_children_with_parent_fk() {
         .await
         .expect("should fetch nested children");
     assert_eq!(fetched, saved_children);
+}
+
+#[tokio::test]
+async fn nested_save_builder_persists_related_models_with_parent_fk() {
+    let _db = setup_nested_test_db().await;
+
+    let parent = NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    };
+
+    let (saved_parent, saved_related) = NestedSaveBuilder::new(parent)
+        .with_many(nested_children(&["alpha", "beta"]), "parent_id")
+        .save()
+        .await
+        .expect("nested builder save should succeed");
+
+    assert!(saved_parent.id > 0);
+    assert_eq!(saved_related.len(), 2);
+
+    let fetched = NestedTestChild::query()
+        .where_eq("parent_id", saved_parent.id)
+        .order_by("id", crate::query::Order::Asc)
+        .get()
+        .await
+        .expect("should fetch nested children saved by builder");
+
+    assert_eq!(fetched.len(), 2);
+    assert_eq!(fetched[0].name, "alpha");
+    assert_eq!(fetched[1].name, "beta");
+    assert!(fetched.iter().all(|child| child.parent_id == saved_parent.id));
+
+    let returned_parent_ids: Vec<_> = saved_related
+        .iter()
+        .map(|value| value.get("parent_id").and_then(serde_json::Value::as_i64))
+        .collect();
+    assert_eq!(returned_parent_ids, vec![Some(saved_parent.id), Some(saved_parent.id)]);
 }
 
 #[tokio::test]
