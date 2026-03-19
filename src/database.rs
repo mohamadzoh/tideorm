@@ -421,9 +421,12 @@ impl Database {
                 Ok(result)
             }
             Err(e) => {
-                if let Ok(txn) = Arc::try_unwrap(txn) {
-                    let _ = txn.rollback().await;
-                }
+                let txn = Arc::try_unwrap(txn).map_err(|_| {
+                    Error::transaction(
+                        "transaction handle leaked outside the transaction scope".to_string(),
+                    )
+                })?;
+                let _ = txn.rollback().await;
                 Err(e)
             }
         }

@@ -1,5 +1,12 @@
+use std::sync::{Mutex, OnceLock};
+
 use tideorm::prelude::*;
 use tideorm::{Database, TideConfig};
+
+fn leaked_transaction_db_slot() -> &'static Mutex<Option<Database>> {
+    static LEAKED_TRANSACTION_DB: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
+    LEAKED_TRANSACTION_DB.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "ci_users")]
@@ -170,6 +177,49 @@ async fn sqlite_transaction_model_methods_use_transaction_connection() {
         .expect("failed to check rolled back delete")
         .expect("baseline user should remain after rollback");
     assert_eq!(still_present.email, "baseline@example.com");
+}
+
+#[tokio::test]
+async fn sqlite_transaction_leak_on_error_returns_transaction_error() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    leaked_transaction_db_slot()
+        .lock()
+        .expect("leaked transaction slot lock poisoned")
+        .take();
+
+    let err = CiUser::transaction(|_tx| {
+        Box::pin(async move {
+            let leaked_db = tideorm::database::__current_db()
+                .expect("transaction-scoped database should be available inside transaction");
+            *leaked_transaction_db_slot()
+                .lock()
+                .expect("leaked transaction slot lock poisoned") = Some(leaked_db);
+
+            Err::<(), _>(tideorm::Error::query(
+                "rollback with leaked transaction handle",
+            ))
+        })
+    })
+    .await
+    .expect_err("leaked transaction handle should surface as a transaction error");
+
+    assert!(
+        err.to_string()
+            .contains("transaction handle leaked outside the transaction scope"),
+        "unexpected error: {err}"
+    );
+
+    leaked_transaction_db_slot()
+        .lock()
+        .expect("leaked transaction slot lock poisoned")
+        .take();
 }
 
 #[tokio::test]
