@@ -78,6 +78,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 /// Collection of validation errors organized by field name
 #[derive(Debug, Clone, Default)]
@@ -531,9 +532,11 @@ impl Validator {
 
     /// Check if a string is a valid email address
     pub fn is_valid_email(s: &str) -> bool {
-        // Simple email validation regex
-        let email_regex =
-            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+        static EMAIL_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+        let email_regex = EMAIL_REGEX.get_or_init(|| {
+            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+                .expect("email validation regex should be valid")
+        });
         email_regex.is_match(s)
     }
 

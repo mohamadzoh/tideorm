@@ -906,6 +906,8 @@ let (user, related_json) = NestedSaveBuilder::new(user)
 
 `save_with_many` batches related inserts through TideORM's bulk insert path, and `delete_with_many` removes related rows with a single `WHERE IN` delete. `update_with_many` batches existing related rows through an upsert-style write and then reloads them once. If any related model still looks new, `update_with_many` falls back to per-row updates so create-vs-update semantics stay unchanged.
 
+`NestedSaveBuilder` is `Send`, so you can hold it across await points or move it into task executors such as `tokio::spawn` before calling `.save()`.
+
 ### Join Result Consolidation
 
 Transform flat JOIN results into nested structures:

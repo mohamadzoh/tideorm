@@ -668,6 +668,16 @@ impl<E: Model> HasOne<E> {
         self.cached = model.map(Box::new);
     }
 
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+        {
+            self.cached = previous.cached.clone();
+        }
+    }
+
     /// Load the related model
     pub async fn load(&self) -> Result<Option<E>> {
         if let Some(cached) = &self.cached {
@@ -816,6 +826,16 @@ impl<E: Model> HasMany<E> {
     #[doc(hidden)]
     pub fn set_cached(&mut self, models: Vec<E>) {
         self.cached = Some(models);
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     /// Load all related models
@@ -980,6 +1000,16 @@ impl<E: Model> BelongsTo<E> {
     #[doc(hidden)]
     pub fn set_cached(&mut self, model: Option<E>) {
         self.cached = model.map(Box::new);
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.owner_key == previous.owner_key
+            && self.fk_value == previous.fk_value
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     /// Load the related model
@@ -1150,6 +1180,19 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     #[doc(hidden)]
     pub fn set_cached(&mut self, models: Vec<Related>) {
         self.cached = Some(models);
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.related_key == previous.related_key
+            && self.local_key == previous.local_key
+            && self.related_local_key == previous.related_local_key
+            && self.pivot_table == previous.pivot_table
+            && self.parent_pk == previous.parent_pk
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     /// Load all related models

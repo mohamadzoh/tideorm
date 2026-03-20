@@ -802,40 +802,211 @@ impl Database {
     ) -> Result<Vec<serde_json::Value>> {
         let mut json_results = Vec::new();
         for row in results {
-            let mut obj = serde_json::Map::new();
-
-            for col_name in row.column_names() {
-                let json_val = if let Ok(val) = row.try_get::<Option<i64>>("", &col_name) {
-                    match val {
-                        Some(v) => serde_json::json!(v),
-                        None => serde_json::Value::Null,
-                    }
-                } else if let Ok(val) = row.try_get::<Option<bool>>("", &col_name) {
-                    match val {
-                        Some(v) => serde_json::json!(v),
-                        None => serde_json::Value::Null,
-                    }
-                } else if let Ok(val) = row.try_get::<Option<f64>>("", &col_name) {
-                    match val {
-                        Some(v) => serde_json::json!(v),
-                        None => serde_json::Value::Null,
-                    }
-                } else if let Ok(val) = row.try_get::<Option<String>>("", &col_name) {
-                    match val {
-                        Some(v) => serde_json::json!(v),
-                        None => serde_json::Value::Null,
-                    }
-                } else {
-                    serde_json::Value::Null
-                };
-
-                obj.insert(col_name.to_string(), json_val);
-            }
-
-            json_results.push(serde_json::Value::Object(obj));
+            json_results.push(Self::query_row_to_json(&row));
         }
 
         Ok(json_results)
+    }
+
+    fn query_row_to_json(row: &crate::internal::QueryResult) -> serde_json::Value {
+        #[cfg(feature = "postgres")]
+        if let Some(pg_row) = row.try_as_pg_row() {
+            return Self::sqlx_row_to_json(
+                row,
+                pg_row,
+                |result, index, type_name| match type_name {
+                    "BOOL" => Self::typed_or_fallback::<bool>(result, index),
+                    "INT2" => Self::typed_or_fallback::<i16>(result, index),
+                    "INT4" => Self::typed_or_fallback::<i32>(result, index),
+                    "INT8" => Self::typed_or_fallback::<i64>(result, index),
+                    "FLOAT4" => Self::typed_or_fallback::<f32>(result, index),
+                    "FLOAT8" => Self::typed_or_fallback::<f64>(result, index),
+                    "NUMERIC" => Self::decimal_or_fallback(result, index),
+                    "UUID" => Self::typed_or_fallback::<uuid::Uuid>(result, index),
+                    "JSON" | "JSONB" => Self::typed_or_fallback::<serde_json::Value>(result, index),
+                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
+                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
+                    "TIMESTAMP" => Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index),
+                    "TIMESTAMPTZ" => {
+                        Self::typed_or_fallback::<chrono::DateTime<chrono::FixedOffset>>(
+                            result, index,
+                        )
+                    }
+                    _ => Self::fallback_try_get_json(result, index),
+                },
+            );
+        }
+
+        #[cfg(feature = "mysql")]
+        if let Some(mysql_row) = row.try_as_mysql_row() {
+            return Self::sqlx_row_to_json(
+                row,
+                mysql_row,
+                |result, index, type_name| match type_name {
+                    "BOOLEAN" | "BOOL" => Self::typed_or_fallback::<bool>(result, index),
+                    "TINYINT" => Self::typed_or_fallback::<i8>(result, index),
+                    "SMALLINT" => Self::typed_or_fallback::<i16>(result, index),
+                    "INT" | "INTEGER" | "MEDIUMINT" => {
+                        Self::typed_or_fallback::<i32>(result, index)
+                    }
+                    "BIGINT" => Self::typed_or_fallback::<i64>(result, index),
+                    "FLOAT" => Self::typed_or_fallback::<f32>(result, index),
+                    "DOUBLE" => Self::typed_or_fallback::<f64>(result, index),
+                    "DECIMAL" | "NUMERIC" => Self::decimal_or_fallback(result, index),
+                    "JSON" => Self::typed_or_fallback::<serde_json::Value>(result, index),
+                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
+                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
+                    "DATETIME" | "TIMESTAMP" => {
+                        Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index)
+                    }
+                    _ => Self::fallback_try_get_json(result, index),
+                },
+            );
+        }
+
+        #[cfg(feature = "sqlite")]
+        if let Some(sqlite_row) = row.try_as_sqlite_row() {
+            return Self::sqlx_row_to_json(row, sqlite_row, |result, index, type_name| {
+                match type_name {
+                    "BOOLEAN" | "BOOL" => Self::typed_or_fallback::<bool>(result, index),
+                    "INTEGER" | "INT" => Self::typed_or_fallback::<i64>(result, index),
+                    "REAL" | "FLOAT" | "DOUBLE" => Self::typed_or_fallback::<f64>(result, index),
+                    "NUMERIC" | "DECIMAL" => Self::decimal_or_fallback(result, index),
+                    "JSON" => Self::typed_or_fallback::<serde_json::Value>(result, index),
+                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
+                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
+                    "DATETIME" | "TIMESTAMP" => {
+                        Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index)
+                    }
+                    "TEXT" => Self::typed_or_fallback::<String>(result, index),
+                    "BLOB" => Self::typed_or_fallback::<Vec<u8>>(result, index),
+                    _ => Self::fallback_try_get_json(result, index),
+                }
+            });
+        }
+
+        let mut obj = serde_json::Map::new();
+        for (index, col_name) in row.column_names().into_iter().enumerate() {
+            obj.insert(col_name, Self::fallback_try_get_json(row, index));
+        }
+
+        serde_json::Value::Object(obj)
+    }
+
+    fn fallback_try_get_json(
+        row: &crate::internal::QueryResult,
+        index: usize,
+    ) -> serde_json::Value {
+        Self::try_get_json::<serde_json::Value>(row, index)
+            .or_else(|| Self::try_get_json::<uuid::Uuid>(row, index))
+            .or_else(|| Self::try_get_decimal_json(row, index))
+            .or_else(|| Self::try_get_json::<chrono::DateTime<chrono::FixedOffset>>(row, index))
+            .or_else(|| Self::try_get_json::<chrono::DateTime<chrono::Utc>>(row, index))
+            .or_else(|| Self::try_get_json::<chrono::NaiveDateTime>(row, index))
+            .or_else(|| Self::try_get_json::<chrono::NaiveDate>(row, index))
+            .or_else(|| Self::try_get_json::<chrono::NaiveTime>(row, index))
+            .or_else(|| Self::try_get_json::<bool>(row, index))
+            .or_else(|| Self::try_get_json::<i64>(row, index))
+            .or_else(|| Self::try_get_json::<u64>(row, index))
+            .or_else(|| Self::try_get_json::<f64>(row, index))
+            .or_else(|| Self::try_get_json::<String>(row, index))
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn typed_or_fallback<T>(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value
+    where
+        T: crate::internal::TryGetable + serde::Serialize,
+    {
+        Self::try_get_json::<T>(row, index)
+            .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
+    }
+
+    fn decimal_or_fallback(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value {
+        Self::try_get_decimal_json(row, index)
+            .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
+    }
+
+    fn try_get_decimal_json(
+        row: &crate::internal::QueryResult,
+        index: usize,
+    ) -> Option<serde_json::Value> {
+        if let Some(value) = Self::try_get_json::<rust_decimal::Decimal>(row, index) {
+            return Some(value);
+        }
+
+        if let Ok(Some(value)) = row.try_get_by_index::<Option<String>>(index) {
+            return rust_decimal::Decimal::from_str_exact(&value)
+                .ok()
+                .and_then(|decimal| serde_json::to_value(decimal).ok())
+                .or(Some(serde_json::Value::String(value)));
+        }
+
+        if let Ok(Some(value)) = row.try_get_by_index::<Option<i64>>(index) {
+            return serde_json::to_value(rust_decimal::Decimal::from(value))
+                .ok()
+                .or(Some(serde_json::json!(value)));
+        }
+
+        if let Ok(Some(value)) = row.try_get_by_index::<Option<u64>>(index) {
+            return serde_json::to_value(rust_decimal::Decimal::from(value))
+                .ok()
+                .or(Some(serde_json::json!(value)));
+        }
+
+        if let Ok(Some(value)) = row.try_get_by_index::<Option<f64>>(index) {
+            let value_text = value.to_string();
+            return rust_decimal::Decimal::from_str_exact(&value_text)
+                .ok()
+                .and_then(|decimal| serde_json::to_value(decimal).ok())
+                .or(Some(serde_json::json!(value)));
+        }
+
+        None
+    }
+
+    fn try_get_json<T>(
+        row: &crate::internal::QueryResult,
+        index: usize,
+    ) -> Option<serde_json::Value>
+    where
+        T: crate::internal::TryGetable + serde::Serialize,
+    {
+        row.try_get_by_index::<Option<T>>(index)
+            .ok()
+            .map(Self::option_to_json)
+    }
+
+    fn option_to_json<T>(value: Option<T>) -> serde_json::Value
+    where
+        T: serde::Serialize,
+    {
+        match value {
+            Some(value) => serde_json::to_value(value).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn sqlx_row_to_json<R, F>(
+        result: &crate::internal::QueryResult,
+        row: &R,
+        decoder_for_type: F,
+    ) -> serde_json::Value
+    where
+        R: sea_orm::sqlx::Row,
+        F: Fn(&crate::internal::QueryResult, usize, &str) -> serde_json::Value,
+    {
+        use sea_orm::sqlx::{Column, TypeInfo};
+
+        let mut obj = serde_json::Map::new();
+        for (index, column) in row.columns().iter().enumerate() {
+            let type_name = column.type_info().name().to_ascii_uppercase();
+            obj.insert(
+                column.name().to_string(),
+                decoder_for_type(result, index, type_name.as_str()),
+            );
+        }
+
+        serde_json::Value::Object(obj)
     }
 
     /// Get the raw internal connection (for internal use only)

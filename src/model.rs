@@ -599,13 +599,6 @@ pub trait Model:
         serialization::load_language_translations(self, _language)
     }
 
-    /// Return an explicit error because loading all translations directly into
-    /// scalar model fields is not supported. Use translation accessors or
-    /// JSON-based helpers instead.
-    fn load_all_translations(&mut self) -> std::result::Result<(), String> {
-        serialization::load_all_translations(self)
-    }
-
     /// Extract translations from data HashMap for saving
     #[cfg(feature = "translations")]
     fn extract_translations(

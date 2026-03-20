@@ -210,7 +210,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.8.5", features = ["postgres", "attachments"] }
+tideorm = { version = "0.8.6", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -545,7 +545,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.8.5", features = ["postgres", "translations"] }
+tideorm = { version = "0.8.6", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup
@@ -616,6 +616,8 @@ for (lang, value) in all_names {
 let arabic = product.get_translations_for_language("ar")?;
 // Returns: {"name": "اسم المنتج", "description": "وصف المنتج"}
 ```
+
+`Model::load_all_translations()` is no longer available because applying every translation directly onto scalar model fields was misleading and lossy. Use `get_all_translations()` for field-level access, `get_translations_for_language()` for one language at a time, or `to_json_with_all_translations()` when you need a full JSON payload.
 
 ### Checking Translations
 

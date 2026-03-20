@@ -62,6 +62,7 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let insert_active_model_setters = &ctx.insert_active_model_setters;
     let all_field_names = &ctx.all_field_names;
     let relation_field_defaults = &ctx.relation_field_defaults;
+    let relation_state_refreshes = &ctx.relation_state_refreshes;
     let pk_column_variant = &ctx.pk_column_variant;
     let field_names = &ctx.field_names;
     let column_names = &ctx.column_names;
@@ -103,6 +104,10 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
 
             fn primary_key_column() -> Option<<Self::Entity as ::tideorm::sea_orm::EntityTrait>::Column> {
                 Some(#internal_entity_mod::Column::#pk_column_variant)
+            }
+
+            fn refresh_runtime_relations_from(&mut self, previous: &Self) {
+                #(#relation_state_refreshes)*
             }
         }
     }

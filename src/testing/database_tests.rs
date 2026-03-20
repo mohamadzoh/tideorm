@@ -97,3 +97,99 @@ async fn thread_override_is_reinstalled_when_future_is_polled_on_another_thread(
     assert_eq!(polled_threads.len(), 2);
     assert_ne!(polled_threads[0], polled_threads[1]);
 }
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn raw_json_preserves_boolean_and_json_column_types() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE raw_json_probe (enabled BOOLEAN NOT NULL, payload JSON NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating probe table should succeed");
+
+    db.__execute_with_params(
+        "INSERT INTO raw_json_probe (enabled, payload) VALUES (?, ?)",
+        vec![
+            crate::internal::Value::Bool(Some(true)),
+            crate::internal::Value::Json(Some(Box::new(serde_json::json!({
+                "kind": "probe",
+                "count": 2
+            })))),
+        ],
+    )
+    .await
+    .expect("inserting probe row should succeed");
+
+    let rows = db
+        .__raw_json_with_params("SELECT enabled, payload FROM raw_json_probe", vec![])
+        .await
+        .expect("querying raw JSON rows should succeed");
+
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "enabled": true,
+            "payload": {
+                "kind": "probe",
+                "count": 2
+            }
+        })]
+    );
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn raw_json_preserves_decimal_and_datetime_column_types() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE raw_json_typed_probe (amount DECIMAL NOT NULL, created_at DATETIME NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating typed probe table should succeed");
+
+    db.__execute_with_params(
+        "INSERT INTO raw_json_typed_probe (amount, created_at) VALUES (?, ?)",
+        vec![
+            crate::internal::Value::String(Some("12.34".to_string())),
+            crate::internal::Value::String(Some("2026-03-21 10:11:12".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting typed probe row should succeed");
+
+    let rows = db
+        .__raw_json_with_params(
+            "SELECT amount, created_at FROM raw_json_typed_probe",
+            vec![],
+        )
+        .await
+        .expect("querying typed raw JSON rows should succeed");
+
+    let expected_amount = serde_json::to_value(
+        rust_decimal::Decimal::from_str_exact("12.34")
+            .expect("decimal literal should parse for comparison"),
+    )
+    .expect("decimal should serialize to JSON");
+    let expected_created_at = serde_json::to_value(
+        chrono::NaiveDateTime::parse_from_str("2026-03-21 10:11:12", "%Y-%m-%d %H:%M:%S")
+            .expect("datetime literal should parse for comparison"),
+    )
+    .expect("datetime should serialize to JSON");
+
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "amount": expected_amount,
+            "created_at": expected_created_at,
+        })]
+    );
+}

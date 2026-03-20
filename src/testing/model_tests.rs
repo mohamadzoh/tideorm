@@ -38,12 +38,93 @@ struct TranslationSerializationModel {
     translations: Option<serde_json::Value>,
 }
 
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "model_test_translation_profiles")]
+struct TranslationRelationProfile {
+    #[tideorm(primary_key)]
+    id: i64,
+    user_id: i64,
+    bio: String,
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "model_test_translation_posts")]
+struct TranslationRelationPost {
+    #[tideorm(primary_key)]
+    id: i64,
+    user_id: i64,
+    title: String,
+
+    #[tideorm(belongs_to = "TranslationRelationUser", foreign_key = "user_id")]
+    author: crate::relations::BelongsTo<TranslationRelationUser>,
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "model_test_translation_roles")]
+struct TranslationRelationRole {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "model_test_translation_user_roles")]
+struct TranslationRelationUserRole {
+    #[tideorm(primary_key)]
+    id: i64,
+    user_id: i64,
+    role_id: i64,
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "model_test_translation_users", translatable = "title")]
+struct TranslationRelationUser {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    translations: Option<serde_json::Value>,
+
+    #[tideorm(has_one = "TranslationRelationProfile", foreign_key = "user_id")]
+    profile: crate::relations::HasOne<TranslationRelationProfile>,
+
+    #[tideorm(has_many = "TranslationRelationPost", foreign_key = "user_id")]
+    posts: crate::relations::HasMany<TranslationRelationPost>,
+
+    #[tideorm(
+        has_many_through = "TranslationRelationRole",
+        pivot = "model_test_translation_user_roles",
+        foreign_key = "user_id",
+        related_key = "role_id"
+    )]
+    roles: crate::relations::HasManyThrough<TranslationRelationRole, TranslationRelationUserRole>,
+}
+
 #[cfg(feature = "attachments")]
 #[tideorm::model(table = "model_test_attachments", has_one_files = "thumbnail")]
 struct FileSerializationModel {
     #[tideorm(primary_key)]
     id: i64,
     files: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "attachments")]
+#[tideorm::model(table = "model_test_attachment_users")]
+struct AttachmentRelationUser {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[cfg(feature = "attachments")]
+#[tideorm::model(table = "model_test_attachment_posts", has_one_files = "thumbnail")]
+struct AttachmentRelationPost {
+    #[tideorm(primary_key)]
+    id: i64,
+    user_id: i64,
+    files: Option<serde_json::Value>,
+
+    #[tideorm(belongs_to = "AttachmentRelationUser", foreign_key = "user_id")]
+    author: crate::relations::BelongsTo<AttachmentRelationUser>,
 }
 
 #[test]
@@ -133,20 +214,79 @@ fn test_load_language_translations_updates_model_fields() {
 
 #[cfg(feature = "translations")]
 #[test]
-fn test_load_all_translations_fails_loudly() {
-    let mut model = TranslationSerializationModel {
+fn test_load_language_translations_preserves_loaded_relations() {
+    let cached_profile = TranslationRelationProfile {
+        id: 10,
+        user_id: 1,
+        bio: "Cached profile".to_string(),
+    }
+    .with_relations();
+    let cached_post = TranslationRelationPost {
+        id: 20,
+        user_id: 1,
+        title: "Cached post".to_string(),
+        author: Default::default(),
+    }
+    .with_relations();
+
+    let mut model = TranslationRelationUser {
         id: 1,
         title: "Default Title".to_string(),
         translations: Some(serde_json::json!({
             "title": {
-                "en": "English Title"
+                "en": "English Title",
+                "fr": "French Title"
             }
         })),
-    };
+        profile: Default::default(),
+        posts: Default::default(),
+        roles: Default::default(),
+    }
+    .with_relations();
+    model.profile.set_cached(Some(cached_profile));
+    model.posts.set_cached(vec![cached_post]);
 
-    let error = model.load_all_translations().unwrap_err();
+    model.load_language_translations("fr").unwrap();
 
-    assert!(error.contains("not supported"));
+    assert_eq!(model.title, "French Title");
+    assert_eq!(
+        model.profile.get_cached().map(|profile| profile.id),
+        Some(10)
+    );
+    assert_eq!(model.posts.get_cached().map(|posts| posts.len()), Some(1));
+    assert_eq!(model.posts.get_cached().unwrap()[0].id, 20);
+}
+
+#[cfg(feature = "translations")]
+#[test]
+fn test_load_language_translations_preserves_loaded_has_many_through_relations() {
+    let cached_role = TranslationRelationRole {
+        id: 30,
+        name: "Cached role".to_string(),
+    }
+    .with_relations();
+
+    let mut model = TranslationRelationUser {
+        id: 1,
+        title: "Default Title".to_string(),
+        translations: Some(serde_json::json!({
+            "title": {
+                "en": "English Title",
+                "fr": "French Title"
+            }
+        })),
+        profile: Default::default(),
+        posts: Default::default(),
+        roles: Default::default(),
+    }
+    .with_relations();
+    model.roles.set_cached(vec![cached_role]);
+
+    model.load_language_translations("fr").unwrap();
+
+    assert_eq!(model.title, "French Title");
+    assert_eq!(model.roles.get_cached().map(|roles| roles.len()), Some(1));
+    assert_eq!(model.roles.get_cached().unwrap()[0].id, 30);
 }
 
 #[cfg(feature = "attachments")]
@@ -172,4 +312,41 @@ fn test_files_attribute_round_trip_updates_model() {
         }))
     );
     assert_eq!(model.get_files_attribute().unwrap(), files);
+}
+
+#[cfg(feature = "attachments")]
+#[test]
+fn test_set_files_attribute_preserves_loaded_belongs_to_relation() {
+    let cached_author = AttachmentRelationUser {
+        id: 7,
+        name: "Cached author".to_string(),
+    }
+    .with_relations();
+    let mut model = AttachmentRelationPost {
+        id: 3,
+        user_id: 7,
+        files: None,
+        author: Default::default(),
+    }
+    .with_relations();
+    let mut files = std::collections::HashMap::new();
+    files.insert(
+        "thumbnail".to_string(),
+        serde_json::json!({
+            "key": "uploads/example.png"
+        }),
+    );
+    model.author.set_cached(Some(cached_author));
+
+    model.set_files_attribute(files).unwrap();
+
+    assert_eq!(model.author.get_cached().map(|author| author.id), Some(7));
+    assert_eq!(
+        model.files,
+        Some(serde_json::json!({
+            "thumbnail": {
+                "key": "uploads/example.png"
+            }
+        }))
+    );
 }

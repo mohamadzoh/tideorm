@@ -5,7 +5,7 @@ use syn::{Ident, Type};
 
 use crate::meta_support::{pluralize, ExistingDerives};
 use crate::parse::{parse_validation_attributes, IndexDef, ModelField, ModelInput};
-use crate::relation_gen::build_relation_field_inits;
+use crate::relation_gen::{build_relation_field_inits, build_relation_state_refreshes};
 
 pub(crate) struct BuildContext {
     pub(crate) struct_name: Ident,
@@ -45,6 +45,7 @@ pub(crate) struct BuildContext {
     pub(crate) insert_active_model_setters: Vec<TokenStream2>,
     pub(crate) update_active_model_setters: Vec<TokenStream2>,
     pub(crate) relation_field_inits: Vec<TokenStream2>,
+    pub(crate) relation_state_refreshes: Vec<TokenStream2>,
     pub(crate) internal_entity_mod: Ident,
     pub(crate) sea_orm_field_defs: Vec<TokenStream2>,
     pub(crate) all_field_names: Vec<Ident>,
@@ -268,6 +269,7 @@ impl BuildContext {
             insert_active_model_setters,
             update_active_model_setters,
             relation_field_inits: Vec::new(),
+            relation_state_refreshes: Vec::new(),
             internal_entity_mod,
             sea_orm_field_defs,
             all_field_names,
@@ -287,6 +289,7 @@ impl BuildContext {
             db_fields,
         };
         ctx.relation_field_inits = build_relation_field_inits(&ctx, &relation_fields)?;
+        ctx.relation_state_refreshes = build_relation_state_refreshes(&ctx, &relation_fields)?;
         Ok(ctx)
     }
 

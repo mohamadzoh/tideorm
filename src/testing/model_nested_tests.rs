@@ -20,6 +20,15 @@ struct NestedTestChild {
     name: String,
 }
 
+#[derive(tideorm::Model, PartialEq)]
+#[tideorm(table = "nested_test_profiles")]
+struct NestedTestProfile {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    user_id: i64,
+    bio: String,
+}
+
 async fn setup_nested_test_db() -> Database {
     Database::reset_global();
     TideConfig::reset();
@@ -45,6 +54,12 @@ async fn setup_nested_test_db() -> Database {
                 parent_id INTEGER NOT NULL,
                 name TEXT NOT NULL
             );
+
+            CREATE TABLE nested_test_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                bio TEXT NOT NULL
+            );
             "#,
         )
         .await
@@ -62,6 +77,14 @@ fn nested_children(names: &[&str]) -> Vec<NestedTestChild> {
             name: (*name).to_string(),
         })
         .collect()
+}
+
+fn nested_profile() -> NestedTestProfile {
+    NestedTestProfile {
+        id: 0,
+        user_id: 0,
+        bio: "profile".to_string(),
+    }
 }
 
 #[tokio::test]
@@ -134,6 +157,48 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
         returned_parent_ids,
         vec![Some(saved_parent.id), Some(saved_parent.id)]
     );
+}
+
+#[tokio::test]
+async fn nested_save_builder_can_be_spawned() {
+    let _db = setup_nested_test_db().await;
+
+    let builder = NestedSaveBuilder::new(NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    })
+    .with_one(nested_profile(), "user_id")
+    .with_many(nested_children(&["alpha", "beta"]), "parent_id");
+
+    let join = tokio::spawn(async move { builder.save().await });
+
+    let (saved_parent, saved_related) = join
+        .await
+        .expect("spawned nested save task should join successfully")
+        .expect("spawned nested save should succeed");
+
+    assert!(saved_parent.id > 0);
+    assert_eq!(saved_related.len(), 3);
+
+    let profile = NestedTestProfile::query()
+        .where_eq("user_id", saved_parent.id)
+        .first()
+        .await
+        .expect("profile query should succeed")
+        .expect("spawned builder should persist the one relation");
+    assert_eq!(profile.bio, "profile");
+
+    let fetched = NestedTestChild::query()
+        .where_eq("parent_id", saved_parent.id)
+        .order_by("id", crate::query::Order::Asc)
+        .get()
+        .await
+        .expect("should fetch nested children saved by spawned builder");
+
+    assert_eq!(fetched.len(), 2);
+    assert!(fetched
+        .iter()
+        .all(|child| child.parent_id == saved_parent.id));
 }
 
 #[tokio::test]

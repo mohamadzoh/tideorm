@@ -14,11 +14,16 @@ use crate::internal::{translate_error, EntityTrait, InternalModel, IntoActiveMod
 
 use super::Model;
 
-type OneRelationSaveOp =
-    Box<dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>>>>>;
+type OneRelationSaveOp = Box<
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
+        + Send,
+>;
 
 type ManyRelationSaveOp = Box<
-    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<Vec<serde_json::Value>>>>>,
+    dyn FnOnce(
+            serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<serde_json::Value>>> + Send>>
+        + Send,
 >;
 
 fn parent_primary_key_json<M: Model>(parent: &M) -> serde_json::Value {

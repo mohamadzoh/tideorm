@@ -47,6 +47,9 @@ pub trait InternalModel: Sized + Send + Sync + Clone {
     fn primary_key_column() -> Option<<Self::Entity as EntityTrait>::Column> {
         None
     }
+
+    /// Rebuild runtime-only relation wrappers after an in-memory model overwrite.
+    fn refresh_runtime_relations_from(&mut self, _previous: &Self) {}
 }
 
 /// Internal connection wrapper

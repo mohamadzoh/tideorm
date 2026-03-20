@@ -5,6 +5,25 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] - 2026-03-21
+
+### Fixed
+
+- Preserved loaded `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relation runtime state when model helpers overwrite a model from JSON, so translation and file-attachment updates no longer silently discard cached relations.
+- Reworked raw SQL JSON row conversion to decode backend-aware column types instead of relying on a fragile probe order, preserving booleans and improving JSON, UUID, date/time, and decimal handling.
+- Added `Send` bounds to nested relation save operation erasure so `NestedSaveBuilder` remains `Send` and can safely cross await points or be moved into `tokio::spawn` tasks.
+
+### Changed
+
+- Removed the misleading `Model::load_all_translations()` helper. Use `get_all_translations()`, `get_translations_for_language()`, or `to_json_with_all_translations()` depending on whether you need per-field values, a single-language projection, or full JSON output.
+- Cached the email validation regex with `OnceLock` instead of compiling it on every validation call.
+- Refreshed dependency examples and macro-crate docs to use the 0.8.6 release version.
+
+### Internal
+
+- Updated relation compile-fail snapshots to match the attribute-macro test fixtures.
+- Verified the release prep with `cargo test --all-features`, `cargo clippy --lib --all-features -- -D warnings`, and `mdbook build`.
+
 ## [0.8.5] - 2026-03-20
 
 ### Fixed
@@ -587,7 +606,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...v0.8.4
 [0.8.1]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...v0.8.1

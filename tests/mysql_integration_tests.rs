@@ -103,6 +103,7 @@ async fn mysql_integration_tests() {
     let _ = Database::execute("DROP TABLE IF EXISTS `test_soft_deletes`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_posts`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_products`").await;
+    let _ = Database::execute("DROP TABLE IF EXISTS `test_raw_json_types`").await;
     let _ = Database::execute("DROP TABLE IF EXISTS `test_users`").await;
 
     Database::execute(
@@ -159,6 +160,20 @@ async fn mysql_integration_tests() {
     .await
     .expect("Failed to create test_soft_deletes table");
 
+    Database::execute(
+        r#"
+        CREATE TABLE `test_raw_json_types` (
+            `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+            `enabled` BOOLEAN NOT NULL,
+            `payload` JSON NOT NULL,
+            `amount` DECIMAL(10,2) NOT NULL,
+            `created_at` DATETIME NOT NULL
+        ) ENGINE=InnoDB
+    "#,
+    )
+    .await
+    .expect("Failed to create test_raw_json_types table");
+
     println!(" Database setup complete\n");
 
     // =========================================================================
@@ -177,6 +192,58 @@ async fn mysql_integration_tests() {
         // Verify it's MySQL
         assert_eq!(db.backend(), DatabaseType::MySQL);
         println!("   ✓ Database type is MySQL");
+    }
+    println!();
+
+    // =========================================================================
+    // RAW JSON TESTS
+    // =========================================================================
+    println!("🧪 Testing: Raw JSON Typed Decoding");
+    {
+        let db = tideorm::require_db().expect("database should be available");
+
+        db.__execute_with_params(
+            "INSERT INTO `test_raw_json_types` (`enabled`, `payload`, `amount`, `created_at`) VALUES (?, ?, ?, ?)",
+            vec![
+                tideorm::internal::Value::Bool(Some(true)),
+                tideorm::internal::Value::Json(Some(Box::new(serde_json::json!({
+                    "kind": "probe",
+                    "count": 2
+                })))),
+                tideorm::internal::Value::String(Some("12.34".to_string())),
+                tideorm::internal::Value::String(Some("2026-03-21 10:11:12".to_string())),
+            ],
+        )
+        .await
+        .expect("typed raw-json probe insert should succeed");
+
+        let rows = db
+            .__raw_json_with_params(
+                "SELECT `enabled`, `payload`, `amount`, `created_at` FROM `test_raw_json_types` ORDER BY `id` ASC",
+                vec![],
+            )
+            .await
+            .expect("typed raw-json probe query should succeed");
+
+        assert_eq!(
+            rows,
+            vec![serde_json::json!({
+                "enabled": true,
+                "payload": {
+                    "kind": "probe",
+                    "count": 2
+                },
+                "amount": serde_json::to_value(
+                    rust_decimal::Decimal::from_str_exact("12.34")
+                        .expect("decimal literal should parse")
+                ).expect("decimal should serialize to JSON"),
+                "created_at": serde_json::to_value(
+                    chrono::NaiveDateTime::parse_from_str("2026-03-21 10:11:12", "%Y-%m-%d %H:%M:%S")
+                        .expect("datetime literal should parse")
+                ).expect("datetime should serialize to JSON"),
+            })]
+        );
+        println!("   ✓ raw_json preserves MySQL boolean, JSON, decimal, and datetime types");
     }
     println!();
 

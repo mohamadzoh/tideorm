@@ -180,8 +180,11 @@ fn overwrite_model_from_object<M>(
 where
     M: Model,
 {
-    *model = serde_json::from_value(serde_json::Value::Object(object))
+    let previous = model.clone();
+    let mut updated: M = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|error| format!("Failed to deserialize model: {}", error))?;
+    updated.refresh_runtime_relations_from(&previous);
+    *model = updated;
     Ok(())
 }
 
@@ -221,20 +224,6 @@ where
     }
 
     overwrite_model_from_object(model, object)
-}
-
-pub(crate) fn load_all_translations<M>(model: &mut M) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    let _ = model;
-    if !M::has_translations() {
-        return Err("Model does not support translations".to_string());
-    }
-
-    Err(
-        "Loading all translations into model fields is not supported; use to_json_with_all_translations() or translation accessors instead".to_string(),
-    )
 }
 
 #[cfg(feature = "translations")]
