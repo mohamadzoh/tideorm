@@ -33,6 +33,25 @@ struct PresenterSerializationModel {
     title: String,
 }
 
+#[cfg(feature = "translations")]
+#[derive(tideorm::Model)]
+#[tideorm(table = "model_test_translations", translatable = "title")]
+struct TranslationSerializationModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    translations: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "attachments")]
+#[derive(tideorm::Model)]
+#[tideorm(table = "model_test_attachments", has_one_files = "thumbnail")]
+struct FileSerializationModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    files: Option<serde_json::Value>,
+}
+
 #[test]
 fn test_is_new_treats_zero_auto_increment_id_as_unsaved() {
     let model = AutoIncrementModel {
@@ -97,4 +116,66 @@ fn test_to_hash_map_preserves_structured_params_field() {
     );
     assert_eq!(map.get("params"), None);
     assert_eq!(map.get("_params"), None);
+}
+
+#[cfg(feature = "translations")]
+#[test]
+fn test_load_language_translations_updates_model_fields() {
+    let mut model = TranslationSerializationModel {
+        id: 1,
+        title: "Default Title".to_string(),
+        translations: Some(serde_json::json!({
+            "title": {
+                "en": "English Title",
+                "fr": "French Title"
+            }
+        })),
+    };
+
+    model.load_language_translations("fr").unwrap();
+
+    assert_eq!(model.title, "French Title");
+}
+
+#[cfg(feature = "translations")]
+#[test]
+fn test_load_all_translations_fails_loudly() {
+    let mut model = TranslationSerializationModel {
+        id: 1,
+        title: "Default Title".to_string(),
+        translations: Some(serde_json::json!({
+            "title": {
+                "en": "English Title"
+            }
+        })),
+    };
+
+    let error = model.load_all_translations().unwrap_err();
+
+    assert!(error.contains("not supported"));
+}
+
+#[cfg(feature = "attachments")]
+#[test]
+fn test_files_attribute_round_trip_updates_model() {
+    let mut model = FileSerializationModel { id: 3, files: None };
+    let mut files = std::collections::HashMap::new();
+    files.insert(
+        "thumbnail".to_string(),
+        serde_json::json!({
+            "key": "uploads/example.png"
+        }),
+    );
+
+    model.set_files_attribute(files.clone()).unwrap();
+
+    assert_eq!(
+        model.files,
+        Some(serde_json::json!({
+            "thumbnail": {
+                "key": "uploads/example.png"
+            }
+        }))
+    );
+    assert_eq!(model.get_files_attribute().unwrap(), files);
 }

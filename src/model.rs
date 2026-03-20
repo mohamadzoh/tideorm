@@ -596,12 +596,14 @@ pub trait Model:
 
     /// Load translations for a specific language into model fields
     fn load_language_translations(&mut self, _language: &str) -> std::result::Result<(), String> {
-        serialization::load_language_translations::<Self>(_language)
+        serialization::load_language_translations(self, _language)
     }
 
-    /// Load all translations for all languages into model fields
+    /// Return an explicit error because loading all translations directly into
+    /// scalar model fields is not supported. Use translation accessors or
+    /// JSON-based helpers instead.
     fn load_all_translations(&mut self) -> std::result::Result<(), String> {
-        serialization::load_all_translations::<Self>()
+        serialization::load_all_translations(self)
     }
 
     /// Extract translations from data HashMap for saving
@@ -628,7 +630,7 @@ pub trait Model:
     fn get_files_attribute(
         &self,
     ) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
-        serialization::get_files_attribute::<Self>()
+        serialization::get_files_attribute(self)
     }
 
     /// Set files to the JSONB 'files' column
@@ -636,7 +638,7 @@ pub trait Model:
         &mut self,
         files: HashMap<String, serde_json::Value>,
     ) -> std::result::Result<(), String> {
-        serialization::set_files_attribute::<Self>(files)
+        serialization::set_files_attribute(self, files)
     }
 
     /// Attach a file to a specific relation type

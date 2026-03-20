@@ -109,13 +109,10 @@ where
     R: Model,
     <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
 {
-    use crate::database::Connection;
-
     if related.is_empty() {
         return Ok(Vec::new());
     }
 
-    let db = crate::database::__current_db()?;
     let pk_column = R::primary_key_column().ok_or_else(|| {
         Error::invalid_query(format!(
             "bulk nested update requires a primary key column for {}",
@@ -146,12 +143,12 @@ where
             .to_owned()
     };
 
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::profiling::__profile_future(
                 R::Entity::insert_many(active_models)
                     .on_conflict(on_conflict)
-                    .exec(&conn),
+                    .exec(conn.connection()),
             )
             .await
         }

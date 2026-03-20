@@ -419,7 +419,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.query_all_raw(statement)).await
+                crate::profiling::__profile_future(conn.connection().query_all_raw(statement)).await
             }
             crate::database::ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(statement)).await
@@ -453,7 +453,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.query_all_raw(statement)).await
+                crate::profiling::__profile_future(conn.connection().query_all_raw(statement)).await
             }
             crate::database::ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(statement)).await
@@ -496,7 +496,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let result = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.query_one_raw(statement)).await
+                crate::profiling::__profile_future(conn.connection().query_one_raw(statement)).await
             }
             crate::database::ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().query_one_raw(statement)).await

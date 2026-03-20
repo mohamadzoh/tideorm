@@ -160,24 +160,81 @@ fn hash_map_output_key<'a>(key: &'a str, value: &serde_json::Value) -> Option<&'
     }
 }
 
-pub(crate) fn load_language_translations<M>(_language: &str) -> std::result::Result<(), String>
+fn model_to_object<M>(
+    model: &M,
+) -> std::result::Result<serde_json::Map<String, serde_json::Value>, String>
 where
     M: Model,
 {
-    if !M::has_translations() {
-        return Ok(());
+    match serde_json::to_value(model) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err("Failed to serialize model into an object".to_string()),
+        Err(error) => Err(format!("Failed to serialize model: {}", error)),
     }
+}
+
+fn overwrite_model_from_object<M>(
+    model: &mut M,
+    object: serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), String>
+where
+    M: Model,
+{
+    *model = serde_json::from_value(serde_json::Value::Object(object))
+        .map_err(|error| format!("Failed to deserialize model: {}", error))?;
     Ok(())
 }
 
-pub(crate) fn load_all_translations<M>() -> std::result::Result<(), String>
+pub(crate) fn load_language_translations<M>(
+    model: &mut M,
+    language: &str,
+) -> std::result::Result<(), String>
 where
     M: Model,
 {
     if !M::has_translations() {
-        return Ok(());
+        return Err("Model does not support translations".to_string());
     }
-    Ok(())
+
+    let mut object = model_to_object(model)?;
+    let fallback = M::fallback_language();
+
+    let translations = object
+        .get("translations")
+        .and_then(serde_json::Value::as_object)
+        .cloned();
+
+    if let Some(translations) = translations {
+        for field in M::translatable_fields() {
+            if let Some(value) = translations
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .and_then(|by_language| {
+                    by_language
+                        .get(language)
+                        .or_else(|| by_language.get(fallback.as_str()))
+                })
+            {
+                object.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+
+    overwrite_model_from_object(model, object)
+}
+
+pub(crate) fn load_all_translations<M>(model: &mut M) -> std::result::Result<(), String>
+where
+    M: Model,
+{
+    let _ = model;
+    if !M::has_translations() {
+        return Err("Model does not support translations".to_string());
+    }
+
+    Err(
+        "Loading all translations into model fields is not supported; use to_json_with_all_translations() or translation accessors instead".to_string(),
+    )
 }
 
 #[cfg(feature = "translations")]
@@ -218,27 +275,45 @@ where
     Ok(serde_json::json!({}))
 }
 
-pub(crate) fn get_files_attribute<M>()
--> std::result::Result<HashMap<String, serde_json::Value>, String>
+pub(crate) fn get_files_attribute<M>(
+    model: &M,
+) -> std::result::Result<HashMap<String, serde_json::Value>, String>
 where
     M: Model,
 {
     if !M::has_file_attachments() {
-        return Ok(HashMap::new());
+        return Err("Model does not support file attachments".to_string());
     }
-    Ok(HashMap::new())
+
+    let object = model_to_object(model)?;
+    match object.get("files") {
+        None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
+        Some(serde_json::Value::Object(map)) => Ok(map
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()),
+        Some(_) => Err("Model files attribute is not a JSON object".to_string()),
+    }
 }
 
 pub(crate) fn set_files_attribute<M>(
-    _files: HashMap<String, serde_json::Value>,
+    model: &mut M,
+    files: HashMap<String, serde_json::Value>,
 ) -> std::result::Result<(), String>
 where
     M: Model,
 {
     if !M::has_file_attachments() {
-        return Ok(());
+        return Err("Model does not support file attachments".to_string());
     }
-    Ok(())
+
+    let mut object = model_to_object(model)?;
+    object.insert(
+        "files".to_string(),
+        serde_json::Value::Object(files.into_iter().collect()),
+    );
+
+    overwrite_model_from_object(model, object)
 }
 
 pub(crate) fn attach_file<M>(

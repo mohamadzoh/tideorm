@@ -224,14 +224,12 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::sea_orm::EntityTrait;
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("find_by_id({})", id));
-                let db = ::tideorm::database::__current_db()?;
                 let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = db
-                        .__get_connection()
+                    let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(&conn).await
+                            #internal_entity_mod::Entity::find_by_id(id).one(conn.connection()).await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
                             #internal_entity_mod::Entity::find_by_id(id).one(tx.as_ref()).await
@@ -259,7 +257,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(&conn).await
+                            #internal_entity_mod::Entity::find_by_id(id).one(conn.connection()).await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
                             #internal_entity_mod::Entity::find_by_id(id).one(tx.as_ref()).await
@@ -277,14 +275,12 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::sea_orm::EntityTrait;
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("delete_by_id({})", id));
-                let db = ::tideorm::database::__current_db()?;
                 let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = db
-                        .__get_connection()
+                    let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::delete_by_id(id).exec(&conn).await
+                            #internal_entity_mod::Entity::delete_by_id(id).exec(conn.connection()).await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
                             #internal_entity_mod::Entity::delete_by_id(id).exec(tx.as_ref()).await
@@ -308,13 +304,11 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&model.#pk_ident)
                     .query(format!("delete where {} = {}", #pk_column_name, model.#pk_ident));
                 let active = model.clone().__into_delete_active_model();
-                let db = ::tideorm::database::__current_db()?;
                 let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = db
-                        .__get_connection()
+                    let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => active.delete(&conn).await,
+                        ::tideorm::database::ConnectionRef::Database(conn) => active.delete(conn.connection()).await,
                         ::tideorm::database::ConnectionRef::Transaction(tx) => active.delete(tx.as_ref()).await,
                     }
                 })
@@ -334,14 +328,12 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&mut model).run_before_create()?;
                 let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
                 let active = <Self as InternalModel>::into_active_model(model);
-                let db = ::tideorm::database::__current_db()?;
                 let result = ::tideorm::profiling::__profile_future(
                     async move {
-                        let connection = db
-                            .__get_connection()
+                        let connection = ::tideorm::database::__current_connection()
                             .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                         match connection {
-                            ::tideorm::database::ConnectionRef::Database(conn) => active.insert(&conn).await,
+                            ::tideorm::database::ConnectionRef::Database(conn) => active.insert(conn.connection()).await,
                             ::tideorm::database::ConnectionRef::Transaction(tx) => active.insert(tx.as_ref()).await,
                         }
                     }
@@ -364,14 +356,12 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let error_context = Self::__primary_key_error_context(&model.#pk_ident)
                     .query(format!("update where {} = {}", #pk_column_name, model.#pk_ident));
                 let active = model.__into_update_active_model();
-                let db = ::tideorm::database::__current_db()?;
                 let result = ::tideorm::profiling::__profile_future(
                     async move {
-                        let connection = db
-                            .__get_connection()
+                        let connection = ::tideorm::database::__current_connection()
                             .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                         match connection {
-                            ::tideorm::database::ConnectionRef::Database(conn) => active.update(&conn).await,
+                            ::tideorm::database::ConnectionRef::Database(conn) => active.update(conn.connection()).await,
                             ::tideorm::database::ConnectionRef::Transaction(tx) => active.update(tx.as_ref()).await,
                         }
                     }
@@ -398,9 +388,6 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::internal::InternalModel;
                 use ::tideorm::sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
                 use ::tideorm::sea_orm::sea_query::OnConflict;
-
-                let db = ::tideorm::database::__current_db()?;
-                let insert_db = db.clone();
 
                 let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
@@ -483,14 +470,13 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 };
 
                 ::tideorm::profiling::__profile_future(async move {
-                    let connection = insert_db
-                        .__get_connection()
+                    let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
                             #internal_entity_mod::Entity::insert(active_model)
                                 .on_conflict(on_conflict)
-                                .exec(&conn)
+                                .exec(conn.connection())
                                 .await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
@@ -519,8 +505,8 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     };
                 }
 
-                let result = match db.__get_connection()? {
-                    ::tideorm::database::ConnectionRef::Database(conn) => finder.one(&conn).await,
+                let result = match ::tideorm::database::__current_connection()? {
+                    ::tideorm::database::ConnectionRef::Database(conn) => finder.one(conn.connection()).await,
                     ::tideorm::database::ConnectionRef::Transaction(tx) => finder.one(tx.as_ref()).await,
                 }
                     .map_err(::tideorm::Error::from)
@@ -557,7 +543,7 @@ fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                     .iter()
                     .map(|entry| entry.model.to_sea_model())
                     .collect();
-                let db = ::tideorm::database::__current_db()?;
+                let connection = ::tideorm::database::__current_connection()?;
 
                 for relation_name in relation_tree.roots() {
                     match relation_name.as_str() {
@@ -591,9 +577,9 @@ fn build_eager_relation_arms(ctx: &BuildContext) -> Vec<TokenStream2> {
                 return Some(quote! {
                     #relation_name => {
                         let nested = relation_tree.get_nested(#relation_name);
-                        let loaded = match db.__get_connection()? {
+                        let loaded = match &connection {
                             ::tideorm::database::ConnectionRef::Database(conn) => sea_models
-                                .load_many(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), &conn)
+                                .load_many(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), conn.connection())
                                 .await,
                             ::tideorm::database::ConnectionRef::Transaction(tx) => sea_models
                                 .load_many(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), tx.as_ref())
@@ -633,9 +619,9 @@ fn build_eager_relation_arms(ctx: &BuildContext) -> Vec<TokenStream2> {
                 return Some(quote! {
                     #relation_name => {
                         let nested = relation_tree.get_nested(#relation_name);
-                        let loaded = match db.__get_connection()? {
+                        let loaded = match &connection {
                             ::tideorm::database::ConnectionRef::Database(conn) => sea_models
-                                .load_one(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), &conn)
+                                .load_one(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), conn.connection())
                                 .await,
                             ::tideorm::database::ConnectionRef::Transaction(tx) => sea_models
                                 .load_one(<<#related_ty as ::tideorm::internal::InternalModel>::Entity as EntityTrait>::find(), tx.as_ref())

@@ -35,7 +35,7 @@
 //!
 //! ```rust,ignore
 //! // Initialize global connection (call once at startup)
-//! Database::connect_global("postgres://localhost/myapp").await?;
+//! Database::init("postgres://localhost/myapp").await?;
 //!
 //! // Now models can use the global connection automatically
 //! let user = User {
@@ -66,7 +66,7 @@ use crate::tide_warn;
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 
 thread_local! {
-    static THREAD_DB_OVERRIDE: RefCell<Option<Database>> = const { RefCell::new(None) };
+    static THREAD_DB_OVERRIDE: RefCell<Option<DatabaseHandle>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone)]
@@ -86,7 +86,7 @@ fn panic_missing_global_db(message: &str) -> ! {
 /// Get a reference to the global database connection
 ///
 /// This function returns the global database connection that was initialized
-/// with `Database::connect_global()` or `Database::set_global()`.
+/// with `Database::init()` or `Database::set_global()`.
 ///
 /// # Panics
 ///
@@ -96,7 +96,7 @@ fn panic_missing_global_db(message: &str) -> ! {
 /// # Example
 ///
 /// ```rust,ignore
-/// // After initializing with connect_global()
+/// // After initializing with Database::init()
 /// let users = User::all().await?;
 /// ```
 pub fn db() -> &'static Database {
@@ -159,11 +159,37 @@ pub fn has_global_db() -> bool {
 
 #[doc(hidden)]
 pub fn __current_db() -> Result<Database> {
-    if let Some(db) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
-        return Ok(db);
+    if let Some(handle) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(Database::from_handle(handle));
     }
 
     require_db()
+}
+
+fn current_scope_handle() -> Result<DatabaseHandle> {
+    if let Some(handle) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(handle);
+    }
+
+    global_db_handle().current_handle()
+}
+
+#[doc(hidden)]
+pub fn __current_connection() -> Result<ConnectionRef> {
+    Ok(match current_scope_handle()? {
+        DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner),
+        DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
+    })
+}
+
+#[doc(hidden)]
+pub fn __current_backend() -> Result<crate::internal::DbBackend> {
+    use crate::internal::ConnectionTrait;
+
+    Ok(match current_scope_handle()? {
+        DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
+        DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+    })
 }
 
 /// Database connection handle
@@ -187,18 +213,14 @@ impl Database {
         }
     }
 
-    fn from_internal_connection(inner: InternalConnection) -> Self {
+    fn from_handle(handle: DatabaseHandle) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Connection(Arc::new(
-                inner,
-            ))))),
+            inner: Arc::new(RwLock::new(Some(handle))),
         }
     }
 
-    fn from_internal_transaction(inner: Arc<crate::internal::DatabaseTransaction>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Some(DatabaseHandle::Transaction(inner)))),
-        }
+    fn from_internal_connection(inner: InternalConnection) -> Self {
+        Self::from_handle(DatabaseHandle::Connection(Arc::new(inner)))
     }
 
     fn current_handle(&self) -> Result<DatabaseHandle> {
@@ -229,12 +251,12 @@ impl Database {
         self.inner.write().take();
     }
 
-    fn replace_thread_override(db: Option<Self>) -> Option<Self> {
-        THREAD_DB_OVERRIDE.with(|slot| slot.replace(db))
+    fn replace_thread_override(handle: Option<DatabaseHandle>) -> Option<DatabaseHandle> {
+        THREAD_DB_OVERRIDE.with(|slot| slot.replace(handle))
     }
 
-    fn set_thread_override(db: Option<Self>) {
-        THREAD_DB_OVERRIDE.with(|slot| *slot.borrow_mut() = db);
+    fn set_thread_override(handle: Option<DatabaseHandle>) {
+        THREAD_DB_OVERRIDE.with(|slot| *slot.borrow_mut() = handle);
     }
 
     fn is_connected(&self) -> bool {
@@ -308,8 +330,8 @@ impl Database {
     pub fn set_global(db: Self) -> Result<&'static Self> {
         let inner = db.current_inner()?;
         let global = global_db_handle();
-        global.replace_inner(inner);
-        Self::set_thread_override(Some(db));
+        global.replace_inner(inner.clone());
+        Self::set_thread_override(Some(DatabaseHandle::Connection(inner)));
         Ok(global)
     }
 
@@ -390,6 +412,7 @@ impl Database {
 
         let txn = match self.__get_connection()? {
             ConnectionRef::Database(conn) => conn
+                .connection()
                 .begin()
                 .await
                 .map_err(|e| Error::transaction(e.to_string()))?,
@@ -403,7 +426,7 @@ impl Database {
         let txn = Arc::new(txn);
         let tx = Transaction { inner: txn.clone() };
         let previous_override =
-            Self::replace_thread_override(Some(Self::from_internal_transaction(txn.clone())));
+            Self::replace_thread_override(Some(DatabaseHandle::Transaction(txn.clone())));
 
         let outcome = f(&tx).await;
 
@@ -505,13 +528,12 @@ impl Database {
     pub async fn raw<T: crate::model::Model>(sql: &str) -> Result<Vec<T>> {
         use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
 
-        let db = crate::database::__current_db()?;
-        let backend = db.__internal_backend()?;
+        let backend = crate::database::__current_backend()?;
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = match db.__get_connection()? {
+        let results = match crate::database::__current_connection()? {
             ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
@@ -563,8 +585,12 @@ impl Database {
 
         let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
-                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+                let stmt = Statement::from_sql_and_values(
+                    conn.connection().get_database_backend(),
+                    sql,
+                    params,
+                );
+                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
@@ -597,10 +623,9 @@ impl Database {
     pub async fn execute(sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
 
-        let db = crate::database::__current_db()?;
-        let result = match db.__get_connection()? {
+        let result = match crate::database::__current_connection()? {
             ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.execute_unprepared(sql)).await
+                crate::profiling::__profile_future(conn.connection().execute_unprepared(sql)).await
             }
             ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().execute_unprepared(sql)).await
@@ -640,8 +665,12 @@ impl Database {
 
         let result = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
-                crate::profiling::__profile_future(conn.execute_raw(stmt)).await
+                let stmt = Statement::from_sql_and_values(
+                    conn.connection().get_database_backend(),
+                    sql,
+                    params,
+                );
+                crate::profiling::__profile_future(conn.connection().execute_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
@@ -679,13 +708,12 @@ impl Database {
     pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
         use crate::internal::{ConnectionTrait, Statement};
 
-        let db = crate::database::__current_db()?;
-        let backend = db.__internal_backend()?;
+        let backend = crate::database::__current_backend()?;
         let stmt = Statement::from_string(backend, sql.to_string());
 
-        let results = match db.__get_connection()? {
+        let results = match crate::database::__current_connection()? {
             ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
@@ -716,8 +744,12 @@ impl Database {
 
         let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(conn.get_database_backend(), sql, params);
-                crate::profiling::__profile_future(conn.query_all_raw(stmt)).await
+                let stmt = Statement::from_sql_and_values(
+                    conn.connection().get_database_backend(),
+                    sql,
+                    params,
+                );
+                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
@@ -1011,16 +1043,14 @@ pub trait Connection: Send + Sync {
 /// Internal connection reference (hidden from users)
 #[doc(hidden)]
 pub enum ConnectionRef {
-    Database(crate::internal::DatabaseConnection),
+    Database(Arc<crate::internal::InternalConnection>),
     Transaction(Arc<crate::internal::DatabaseTransaction>),
 }
 
 impl Connection for Database {
     fn __get_connection(&self) -> Result<ConnectionRef> {
         Ok(match self.current_handle()? {
-            DatabaseHandle::Connection(inner) => {
-                ConnectionRef::Database(inner.connection().clone())
-            }
+            DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner),
             DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
         })
     }

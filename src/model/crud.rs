@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::database::Connection;
 use crate::error::Result;
 
 use super::Model;
@@ -20,10 +19,9 @@ pub(crate) async fn all<M>() -> Result<Vec<M>>
 where
     M: Model + Sized,
 {
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::find_all::<M, _>(&conn).await
+            crate::internal::QueryExecutor::find_all::<M, _>(conn.connection()).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::find_all::<M, _>(tx.as_ref()).await
@@ -35,10 +33,9 @@ pub(crate) async fn count<M>() -> Result<u64>
 where
     M: Model + Sized,
 {
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::count::<M, _>(&conn, None).await
+            crate::internal::QueryExecutor::count::<M, _>(conn.connection(), None).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::count::<M, _>(tx.as_ref(), None).await
@@ -50,10 +47,9 @@ pub(crate) async fn exists_any<M>() -> Result<bool>
 where
     M: Model + Sized,
 {
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::exists_any::<M, _>(&conn).await
+            crate::internal::QueryExecutor::exists_any::<M, _>(conn.connection()).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::exists_any::<M, _>(tx.as_ref()).await
@@ -71,10 +67,9 @@ where
         return Ok(Vec::new());
     }
 
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::insert_many::<M, _>(&conn, models).await
+            crate::internal::QueryExecutor::insert_many::<M, _>(conn.connection(), models).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::insert_many::<M, _>(tx.as_ref(), models).await
@@ -123,10 +118,9 @@ pub(crate) async fn first<M>() -> Result<Option<M>>
 where
     M: Model + Sized,
 {
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::first::<M, _>(&conn).await
+            crate::internal::QueryExecutor::first::<M, _>(conn.connection()).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::first::<M, _>(tx.as_ref()).await
@@ -138,10 +132,9 @@ pub(crate) async fn last<M>() -> Result<Option<M>>
 where
     M: Model + Sized,
 {
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::last::<M, _>(&conn).await
+            crate::internal::QueryExecutor::last::<M, _>(conn.connection()).await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::last::<M, _>(tx.as_ref()).await
@@ -154,10 +147,10 @@ where
     M: Model + Sized,
 {
     let offset = (page.saturating_sub(1)) * per_page;
-    let db = crate::database::__current_db()?;
-    match db.__get_connection()? {
+    match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
-            crate::internal::QueryExecutor::paginate::<M, _>(&conn, per_page, offset).await
+            crate::internal::QueryExecutor::paginate::<M, _>(conn.connection(), per_page, offset)
+                .await
         }
         crate::database::ConnectionRef::Transaction(tx) => {
             crate::internal::QueryExecutor::paginate::<M, _>(tx.as_ref(), per_page, offset).await

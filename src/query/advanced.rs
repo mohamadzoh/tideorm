@@ -575,7 +575,7 @@ impl<M: Model> QueryBuilder<M> {
                         .select_only()
                         .column_as(count_expr, "count_result")
                         .into_model::<CountResult>()
-                        .one(&conn),
+                        .one(conn.connection()),
                 )
                 .await
             }
@@ -631,7 +631,7 @@ impl<M: Model> QueryBuilder<M> {
                         .select_only()
                         .column_as(agg_expr, "agg_result")
                         .into_model::<AggResult>()
-                        .one(&conn),
+                        .one(conn.connection()),
                 )
                 .await
             }

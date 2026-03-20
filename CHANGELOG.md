@@ -5,6 +5,26 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-03-20
+
+### Fixed
+
+- Replaced silent translation and file-attachment serialization stubs so `Model::load_language_translations()`, `Model::get_files_attribute()`, and `Model::set_files_attribute()` now operate on the model state instead of succeeding without effect.
+- Made `Model::load_all_translations()` fail loudly with a clear unsupported error instead of silently pretending to load all translations into scalar model fields.
+- Hardened `Database::transaction()` so leaked transaction handles now fail consistently on both commit and rollback paths instead of silently relying on drop-based rollback in the error path.
+- Ensured `NestedSaveBuilder::save()` persists related models with the parent foreign key instead of returning only FK-patched JSON payloads.
+
+### Changed
+
+- Reduced database-access overhead on model hot paths by resolving the current connection/backend directly from the active scope instead of repeatedly cloning the outer `Database` wrapper.
+- Changed transaction-scoped thread-local overrides to store `DatabaseHandle` directly and updated `ConnectionRef::Database` to carry the shared internal connection handle instead of cloning `DatabaseConnection` per lookup.
+- Refreshed public docs and examples to use the current global-database initialization API and the 0.8.4 crate version.
+
+### Internal
+
+- Kept the workspace warning-free after the connection-handle refactor by updating generated macro code, full-text execution paths, eager loading, nested bulk upserts, and query helpers to use shared internal connections correctly.
+- Verified the release with `cargo test --lib` and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## [0.8.1] - 2026-03-18
 
 ### Fixed
@@ -551,7 +571,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...v0.8.4
 [0.8.1]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/mohamadzoh/tideorm/compare/v0.7.3...v0.8.0
 [0.7.3]: https://github.com/mohamadzoh/tideorm/compare/v0.7.2...v0.7.3
