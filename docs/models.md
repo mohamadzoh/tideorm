@@ -547,8 +547,7 @@ Enable tokenization with the `#[tideorm(tokenize)]` attribute:
 ```rust
 use tideorm::prelude::*;
 
-#[derive(Model)]
-#[tideorm(table = "users", tokenize)]  // Enable tokenization
+#[tideorm::model(table = "users", tokenize)]  // Enable tokenization
 pub struct User {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
@@ -602,12 +601,10 @@ When a model has `#[tideorm(tokenize)]`, these methods are available:
 Tokens are bound to their model type. A User token cannot decode a Product:
 
 ```rust
-#[derive(Model)]
-#[tideorm(table = "users", tokenize)]
+#[tideorm::model(table = "users", tokenize)]
 pub struct User { /* ... */ }
 
-#[derive(Model)]
-#[tideorm(table = "products", tokenize)]
+#[tideorm::model(table = "products", tokenize)]
 pub struct Product { /* ... */ }
 
 // Same ID, different tokens
@@ -642,8 +639,7 @@ For custom tokenization logic, implement the `Tokenizable` trait manually:
 ```rust
 use tideorm::tokenization::{Tokenizable, TokenEncoder, TokenDecoder};
 
-#[derive(Model)]
-#[tideorm(table = "documents")]
+#[tideorm::model(table = "documents")]
 pub struct Document {
     #[tideorm(primary_key)]
     pub id: i64,

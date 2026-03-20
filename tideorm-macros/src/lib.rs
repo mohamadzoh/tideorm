@@ -16,13 +16,13 @@ use darling::FromDeriveInput;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{DeriveInput, parse_macro_input};
+use syn::{parse_macro_input, DeriveInput};
 
 use context::BuildContext;
 use entity_gen::generate_entity_support;
-use meta_support::{ExistingDerives, detect_existing_derives};
+use meta_support::{detect_existing_derives, ExistingDerives};
 use model_trait::generate_model_support;
-use parse::{ModelInput, parse_index_attributes};
+use parse::{parse_index_attributes, ModelInput};
 use serde_gen::generate_trait_impls;
 use tokenization_gen::generate_tokenizable_impl;
 use validation_gen::generate_validation_impl;

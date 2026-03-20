@@ -1,4 +1,4 @@
-use tideorm::tokenization::{TokenConfig, Tokenizable, default_decode, default_encode};
+use tideorm::tokenization::{default_decode, default_encode, TokenConfig, Tokenizable};
 use tideorm::{Error, Result};
 
 struct MissingKeyModel {

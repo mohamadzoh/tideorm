@@ -29,8 +29,7 @@
 //! Define indexes using attribute macros:
 //!
 //! ```ignore
-//! #[derive(Model)]
-//! #[tideorm(
+//! #[tideorm::model(
 //!     table = "users",
 //!     index = "email;name:first_name,last_name",
 //!     unique_index = "tenant_id,email"

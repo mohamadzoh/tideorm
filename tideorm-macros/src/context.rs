@@ -3,8 +3,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{Ident, Type};
 
-use crate::meta_support::{ExistingDerives, pluralize};
-use crate::parse::{IndexDef, ModelField, ModelInput, parse_validation_attributes};
+use crate::meta_support::{pluralize, ExistingDerives};
+use crate::parse::{parse_validation_attributes, IndexDef, ModelField, ModelInput};
 use crate::relation_gen::build_relation_field_inits;
 
 pub(crate) struct BuildContext {

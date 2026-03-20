@@ -62,7 +62,7 @@
 use std::fmt;
 
 use crate::config::DatabaseType;
-use crate::database::{Database, require_db};
+use crate::database::{require_db, Database};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
 use crate::tide_info;

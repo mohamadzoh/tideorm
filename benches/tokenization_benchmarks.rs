@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo bench --bench tokenization_benchmarks
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
 // ============================================================================

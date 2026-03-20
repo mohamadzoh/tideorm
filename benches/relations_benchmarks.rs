@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo bench --bench relations_benchmarks
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use serde_json::json;
 use std::hint::black_box;
 use tideorm::query::Order;

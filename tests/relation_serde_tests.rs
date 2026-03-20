@@ -1,8 +1,7 @@
 use tideorm::relations::{HasManyThrough, MorphMany};
-use tideorm::{BelongsTo, HasMany, HasOne, Model};
+use tideorm::{BelongsTo, HasMany, HasOne};
 
-#[derive(Model)]
-#[tideorm(table = "profiles")]
+#[tideorm::model(table = "profiles")]
 struct Profile {
     #[tideorm(primary_key)]
     pub id: i64,
@@ -10,8 +9,7 @@ struct Profile {
     pub bio: String,
 }
 
-#[derive(Model)]
-#[tideorm(table = "posts")]
+#[tideorm::model(table = "posts")]
 struct Post {
     #[tideorm(primary_key)]
     pub id: i64,
@@ -19,8 +17,7 @@ struct Post {
     pub title: String,
 }
 
-#[derive(Model)]
-#[tideorm(table = "articles")]
+#[tideorm::model(table = "articles")]
 struct Article {
     #[tideorm(primary_key)]
     pub id: i64,
@@ -30,16 +27,14 @@ struct Article {
     pub author: BelongsTo<User>,
 }
 
-#[derive(Model)]
-#[tideorm(table = "roles")]
+#[tideorm::model(table = "roles")]
 struct Role {
     #[tideorm(primary_key)]
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Model)]
-#[tideorm(table = "user_roles")]
+#[tideorm::model(table = "user_roles")]
 struct UserRole {
     #[tideorm(primary_key)]
     pub id: i64,
@@ -47,8 +42,7 @@ struct UserRole {
     pub role_id: i64,
 }
 
-#[derive(Model)]
-#[tideorm(table = "teams")]
+#[tideorm::model(table = "teams")]
 struct Team {
     #[tideorm(primary_key)]
     #[tideorm(column = "team_uuid")]
@@ -64,8 +58,7 @@ struct Team {
     pub labels: MorphMany<Role>,
 }
 
-#[derive(Model)]
-#[tideorm(table = "team_members")]
+#[tideorm::model(table = "team_members")]
 struct TeamMember {
     #[tideorm(primary_key)]
     pub id: i64,
@@ -81,8 +74,7 @@ struct TeamMember {
     pub team: BelongsTo<Team>,
 }
 
-#[derive(Model)]
-#[tideorm(table = "users")]
+#[tideorm::model(table = "users")]
 struct User {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,

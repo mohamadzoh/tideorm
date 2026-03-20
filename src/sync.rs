@@ -8,11 +8,10 @@
 //! ### 1. TideORM Models (Primary)
 //!
 //! TideORM models use `ModelSchema` for schema definition. This is automatically
-//! handled by the `#[derive(Model)]` macro:
+//! handled by TideORM's model macros:
 //!
 //! ```rust,ignore
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -90,8 +89,7 @@
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -120,12 +118,12 @@ use crate::{tide_debug, tide_info, tide_warn};
 
 // Use SeaORM  schema management
 use sea_orm::{
-    ConnectionTrait, DbBackend, EntityTrait, Statement,
     schema::{Schema, SchemaBuilder},
     sea_query::{
         Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, MysqlQueryBuilder,
         PostgresQueryBuilder, SqliteQueryBuilder, Table,
     },
+    ConnectionTrait, DbBackend, EntityTrait, Statement,
 };
 
 /// Type alias for entity registration functions that register with SchemaBuilder
@@ -147,7 +145,7 @@ fn get_model_schemas() -> &'static RwLock<Vec<ModelSchema>> {
 
 /// Trait for models that can be synced with the database
 ///
-/// This trait is automatically implemented by the `#[derive(Model)]` macro.
+/// This trait is automatically implemented by TideORM's model macros.
 /// Models that implement this trait can be registered for schema synchronization.
 ///
 /// For TideORM models, this uses `ModelSchema` to define the table structure.

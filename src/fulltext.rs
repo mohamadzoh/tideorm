@@ -15,8 +15,8 @@
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model, Clone, Debug)]
-//! #[tideorm(table = "articles")]
+//! #[tideorm::model(table = "articles")]
+//! #[derive(Clone, Debug)]
 //! pub struct Article {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,

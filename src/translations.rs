@@ -20,8 +20,7 @@
 //! Add a `translations` JSONB column to your table and use the `#[tideorm(translatable)]` attribute:
 //!
 //! ```rust,ignore
-//! #[derive(Model)]
-//! #[tideorm(table = "products")]
+//! #[tideorm::model(table = "products")]
 //! #[tideorm(translatable = "name,description")]
 //! pub struct Product {
 //!     #[tideorm(primary_key, auto_increment)]

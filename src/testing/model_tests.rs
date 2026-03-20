@@ -1,22 +1,19 @@
-use crate::model::Model;
+use crate::model::Model as ModelTrait;
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_users")]
+#[tideorm::model(table = "model_test_users")]
 struct AutoIncrementModel {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
 }
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_tokens")]
+#[tideorm::model(table = "model_test_tokens")]
 struct NaturalKeyModel {
     #[tideorm(primary_key)]
     id: String,
 }
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_serialization")]
+#[tideorm::model(table = "model_test_serialization")]
 struct SerializationModel {
     #[tideorm(primary_key)]
     id: i64,
@@ -24,8 +21,7 @@ struct SerializationModel {
     enabled: bool,
 }
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_presenter_serialization")]
+#[tideorm::model(table = "model_test_presenter_serialization")]
 struct PresenterSerializationModel {
     #[tideorm(primary_key)]
     id: i64,
@@ -34,8 +30,7 @@ struct PresenterSerializationModel {
 }
 
 #[cfg(feature = "translations")]
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_translations", translatable = "title")]
+#[tideorm::model(table = "model_test_translations", translatable = "title")]
 struct TranslationSerializationModel {
     #[tideorm(primary_key)]
     id: i64,
@@ -44,8 +39,7 @@ struct TranslationSerializationModel {
 }
 
 #[cfg(feature = "attachments")]
-#[derive(tideorm::Model)]
-#[tideorm(table = "model_test_attachments", has_one_files = "thumbnail")]
+#[tideorm::model(table = "model_test_attachments", has_one_files = "thumbnail")]
 struct FileSerializationModel {
     #[tideorm(primary_key)]
     id: i64,

@@ -1,15 +1,13 @@
-use tideorm::{BelongsTo, Model};
+use tideorm::BelongsTo;
 
-#[derive(Model)]
-#[tideorm(table = "users")]
+#[tideorm::model(table = "users")]
 struct User {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     email: String,
 }
 
-#[derive(Model)]
-#[tideorm(table = "articles")]
+#[tideorm::model(table = "articles")]
 struct Article {
     #[tideorm(primary_key, auto_increment)]
     id: i64,

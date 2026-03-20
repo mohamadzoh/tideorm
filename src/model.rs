@@ -21,7 +21,7 @@ pub use nested::{NestedSave, NestedSaveBuilder};
 /// Core trait for TideORM models
 ///
 /// This trait provides all the CRUD operations and query capabilities.
-/// It is automatically implemented by the `#[derive(Model)]` macro.
+/// It is automatically implemented by TideORM's model macros.
 ///
 /// ## Global Database Connection
 ///

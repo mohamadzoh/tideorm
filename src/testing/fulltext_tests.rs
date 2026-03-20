@@ -3,8 +3,7 @@ use crate::config::DatabaseType;
 use crate::internal::Value;
 
 mod builder_test_model {
-    #[derive(tideorm::Model)]
-    #[tideorm(table = "fulltext_test_articles")]
+    #[tideorm::model(table = "fulltext_test_articles")]
     pub struct FullTextTestArticle {
         #[tideorm(primary_key, auto_increment)]
         pub id: i64,

@@ -10,7 +10,7 @@ use crate::callbacks::{
     BeforeDeleteDispatch, BeforeUpdateDispatch,
 };
 use crate::error::{Error, Result};
-use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_error};
+use crate::internal::{translate_error, EntityTrait, InternalModel, IntoActiveModel};
 
 use super::Model;
 

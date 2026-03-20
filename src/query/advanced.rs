@@ -1,7 +1,7 @@
 use super::*;
 use crate::error::Result;
 use crate::internal::{
-    EntityTrait, Expr, FromQueryResult, QueryFilter, QuerySelect, translate_error,
+    translate_error, EntityTrait, Expr, FromQueryResult, QueryFilter, QuerySelect,
 };
 use crate::model::Model;
 
@@ -1233,7 +1233,11 @@ impl<M: Model> QueryBuilder<M> {
     where
         F: FnOnce(Self) -> Self,
     {
-        if condition { f(self) } else { self }
+        if condition {
+            f(self)
+        } else {
+            self
+        }
     }
 
     /// Apply a scope based on an Option value

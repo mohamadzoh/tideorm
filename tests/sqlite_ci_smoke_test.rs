@@ -361,8 +361,8 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
 
 #[tokio::test]
 async fn sqlite_query_errors_include_query_builder_context() {
-    use tideorm::Database;
     use tideorm::internal::ConnectionTrait;
+    use tideorm::Database;
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -431,8 +431,8 @@ async fn sqlite_query_errors_include_query_builder_context() {
 
 #[tokio::test]
 async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
-    use tideorm::QueryCache;
     use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
+    use tideorm::QueryCache;
 
     let cache = QueryCache::global();
     cache.clear();

@@ -5,11 +5,11 @@
 //!
 //! Run with: cargo bench --bench fulltext_benchmarks
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tideorm::config::DatabaseType;
 use tideorm::fulltext::{
-    FullTextConfig, FullTextIndex, PgFullTextIndexType, SearchMode, SearchWeights,
-    generate_snippet, highlight_text, pg_headline_sql,
+    generate_snippet, highlight_text, pg_headline_sql, FullTextConfig, FullTextIndex,
+    PgFullTextIndexType, SearchMode, SearchWeights,
 };
 
 // =============================================================================

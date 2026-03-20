@@ -4,8 +4,7 @@ use super::{
 use crate::config::DatabaseType;
 use crate::internal::{ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "internal_count_users")]
+#[tideorm::model(table = "internal_count_users")]
 struct InternalCountUser {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
@@ -85,11 +84,9 @@ fn count_select_applies_optional_condition() {
     let statement =
         build_count_select::<InternalCountUser>(Some(condition)).build(DbBackend::Postgres);
 
-    assert!(
-        statement
-            .sql
-            .contains("WHERE \"internal_count_users\".\"name\" = $1")
-    );
+    assert!(statement
+        .sql
+        .contains("WHERE \"internal_count_users\".\"name\" = $1"));
     assert!(statement.values.is_some());
 }
 

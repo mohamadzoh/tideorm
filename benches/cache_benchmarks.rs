@@ -4,15 +4,15 @@
 //!
 //! Run with: `cargo bench --bench cache_benchmarks`
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use tideorm::Database;
 use tideorm::cache::{CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache};
 use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
 use tideorm::prelude::*;
+use tideorm::Database;
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "bench_cache_users")]

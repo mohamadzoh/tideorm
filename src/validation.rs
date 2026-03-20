@@ -25,8 +25,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::validation::{Validate, ValidationRule};
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -168,7 +167,11 @@ impl ValidationErrors {
 
     /// Convert to a Result, returning Ok if empty
     pub fn to_result(self) -> Result<(), Self> {
-        if self.is_empty() { Ok(()) } else { Err(self) }
+        if self.is_empty() {
+            Ok(())
+        } else {
+            Err(self)
+        }
     }
 
     /// Get all errors as (field, message) pairs for backwards compatibility
@@ -390,9 +393,7 @@ macro_rules! impl_validatable_for_int {
     };
 }
 
-impl_validatable_for_int!(
-    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
-);
+impl_validatable_for_int!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64);
 
 /// Validator for applying validation rules
 pub struct Validator;
@@ -544,7 +545,7 @@ impl Validator {
 
 /// Trait for models that can be validated
 ///
-/// This trait is automatically implemented by the `#[derive(Model)]` macro
+/// This trait is automatically implemented by TideORM's model macros
 /// when validation attributes are present. You can also implement it manually
 /// for custom validation logic.
 pub trait Validate {

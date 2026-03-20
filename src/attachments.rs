@@ -15,8 +15,7 @@
 //! `#[tideorm(has_many_files)]` attributes:
 //!
 //! ```rust,ignore
-//! #[derive(Model)]
-//! #[tideorm(table = "products")]
+//! #[tideorm::model(table = "products")]
 //! #[tideorm(has_one_file = "thumbnail")]
 //! #[tideorm(has_many_files = "images,documents")]
 //! pub struct Product {

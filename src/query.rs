@@ -17,8 +17,8 @@ pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order, WhereCondition,
 };
 pub use structure::{
-    AggregateFunction, CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType,
-    QueryFragment, UnionClause, UnionType, WindowFunction, WindowFunctionType,
+    AggregateFunction, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType,
+    QueryFragment, UnionClause, UnionType, WindowFunction, WindowFunctionType, CTE,
 };
 
 /// Fluent query builder for TideORM models.

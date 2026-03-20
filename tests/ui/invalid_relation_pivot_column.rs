@@ -1,16 +1,13 @@
 use tideorm::relations::HasManyThrough;
-use tideorm::Model;
 
-#[derive(Model)]
-#[tideorm(table = "roles")]
+#[tideorm::model(table = "roles")]
 struct Role {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
 }
 
-#[derive(Model)]
-#[tideorm(table = "user_roles")]
+#[tideorm::model(table = "user_roles")]
 struct UserRole {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
@@ -18,8 +15,7 @@ struct UserRole {
     role_id: i64,
 }
 
-#[derive(Model)]
-#[tideorm(table = "users")]
+#[tideorm::model(table = "users")]
 struct User {
     #[tideorm(primary_key, auto_increment)]
     id: i64,

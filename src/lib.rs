@@ -7,8 +7,7 @@
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -58,7 +57,7 @@
 //!
 //! ## Features
 //!
-//! - **Clean Model Definitions** - Use `#[derive(Model)]` to define your models
+//! - **Clean Model Definitions** - Use `#[tideorm::model(table = "...")]` to define your models
 //! - **Unified Configuration** - Database, pool settings, and app config in one place
 //! - **Global Database Connection** - Initialize once, use anywhere
 //! - **Production-Ready Pool Settings** - Configure min/max connections, timeouts
@@ -120,11 +119,10 @@
 //!
 //! ## Model Definition
 //!
-//! Models are defined using the `#[derive(Model)]` macro with field-level attributes:
+//! Models are typically defined using the `#[tideorm::model(...)]` attribute macro with field-level attributes:
 //!
 //! ```rust,ignore
-//! #[derive(Model)]
-//! #[tideorm(table = "posts", soft_delete)]
+//! #[tideorm::model(table = "posts", soft_delete)]
 //! #[index("user_id")]
 //! #[unique_index("slug")]
 //! pub struct Post {

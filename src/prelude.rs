@@ -25,8 +25,6 @@ pub use crate::model::{
     NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,
 };
 pub use crate::query::{
-    // CTE types
-    CTE,
     FrameBound,
     FrameType,
     // Join result consolidation
@@ -47,6 +45,8 @@ pub use crate::query::{
     // Window function types
     WindowFunction,
     WindowFunctionType,
+    // CTE types
+    CTE,
 };
 pub use crate::schema::{
     ColumnSchema, SchemaGenerator, SchemaWriter, TableSchema, TableSchemaBuilder,
@@ -56,6 +56,7 @@ pub use crate::sync::{RegisterModels, SyncModel};
 
 // Migrations
 pub use crate::migration::{
+    async_trait,
     ColumnType,
     CompositePrimaryKey,
     DefaultValue,
@@ -67,7 +68,6 @@ pub use crate::migration::{
     Schema,
     // Multi-column constraint types
     UniqueConstraint,
-    async_trait,
 };
 
 // Relations
@@ -148,9 +148,9 @@ pub use crate::tokenization::{TokenConfig, TokenDecoder, TokenEncoder, Tokenizab
 // Full-text search
 #[cfg(feature = "fulltext")]
 pub use crate::fulltext::{
-    FullTextConfig, FullTextIndex, FullTextIndexConfig, FullTextSearch, FullTextSearchBuilder,
-    HighlightConfig, HighlightedField, PgFullTextIndexType, SearchMode, SearchResult,
-    SearchWeights, generate_snippet, highlight_text, pg_headline_sql,
+    generate_snippet, highlight_text, pg_headline_sql, FullTextConfig, FullTextIndex,
+    FullTextIndexConfig, FullTextSearch, FullTextSearchBuilder, HighlightConfig, HighlightedField,
+    PgFullTextIndexType, SearchMode, SearchResult, SearchWeights,
 };
 
 // Strongly-typed columns
@@ -167,7 +167,7 @@ pub use tideorm_macros::model;
 
 // Common external types users will need
 pub use serde::{Deserialize, Serialize};
-pub use serde_json::{Value as JsonValue, json};
+pub use serde_json::{json, Value as JsonValue};
 
 // Date/time types
 pub use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};

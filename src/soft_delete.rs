@@ -10,8 +10,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::SoftDelete;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "posts", soft_delete)]
+//! #[tideorm::model(table = "posts", soft_delete)]
 //! pub struct Post {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,

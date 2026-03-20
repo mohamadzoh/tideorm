@@ -16,8 +16,8 @@
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model, Clone, Debug, Serialize, Deserialize)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -32,8 +32,7 @@
 //!     pub posts: HasMany<Post>,
 //! }
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "posts")]
+//! #[tideorm::model(table = "posts")]
 //! pub struct Post {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -44,8 +43,7 @@
 //!     pub author: BelongsTo<User>,
 //! }
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "profiles")]
+//! #[tideorm::model(table = "profiles")]
 //! pub struct Profile {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -68,8 +66,7 @@
 //! ## Many-to-Many Relations
 //!
 //! ```rust,ignore
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -616,7 +613,7 @@ mod tests;
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     pub id: i64,
 ///     pub name: String,
@@ -766,7 +763,7 @@ impl<'de, E: Model> Deserialize<'de> for HasOne<E> {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     pub id: i64,
 ///     pub name: String,
@@ -929,7 +926,7 @@ impl<'de, E: Model> Deserialize<'de> for HasMany<E> {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "posts")]
 /// pub struct Post {
 ///     pub id: i64,
 ///     pub user_id: i64,
@@ -1080,7 +1077,7 @@ impl<'de, E: Model> Deserialize<'de> for BelongsTo<E> {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     pub id: i64,
 ///     pub name: String,

@@ -20,15 +20,14 @@
 //! 2. **TideConfig-level** - Set via `TokenConfig::set_encoder()` / `TokenConfig::set_decoder()`
 //! 3. **Default** - Built-in authenticated encryption using the configured encryption key
 //!
-//! ## Quick Start with Derive Macro
+//! ## Quick Start
 //!
 //! The easiest way to enable tokenization is using the `#[tideorm(tokenize)]` attribute:
 //!
 //! ```rust,ignore
 //! use tideorm::prelude::*;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users", tokenize)]  // Enable tokenization with derive macro
+//! #[tideorm::model(table = "users", tokenize)]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -59,8 +58,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::tokenization::Tokenizable;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key)]
 //!     pub id: i64,
@@ -510,14 +508,13 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
 
 /// Trait for models that support tokenization
 ///
-/// This trait is automatically implemented by the `#[derive(Model)]` macro
-/// when tokenization is enabled via `#[tideorm(tokenize)]`.
+/// This trait is automatically implemented by TideORM's model macros
+/// when tokenization is enabled via `tokenize`.
 ///
 /// ## Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
-/// #[tideorm(table = "users", tokenize)]  // Enable tokenization
+/// #[tideorm::model(table = "users", tokenize)]
 /// pub struct User {
 ///     #[tideorm(primary_key)]
 ///     pub id: i64,

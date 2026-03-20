@@ -21,8 +21,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::callbacks::Callbacks;
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "audit_logs")]
+//! #[tideorm::model(table = "audit_logs")]
 //! pub struct AuditLog {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -32,8 +31,7 @@
 //!     pub created_at: DateTime<Utc>,
 //! }
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,

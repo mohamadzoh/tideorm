@@ -30,8 +30,7 @@
 //! use tideorm::prelude::*;
 //! use tideorm::types::{Encrypted, Hashed, CommaSeparated};
 //!
-//! #[derive(Model)]
-//! #[tideorm(table = "users")]
+//! #[tideorm::model(table = "users")]
 //! pub struct User {
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
@@ -95,8 +94,7 @@ pub type JsonArray = Vec<serde_json::Value>;
 /// ```rust,ignore
 /// use tideorm::types::UnixTimestamp;
 ///
-/// #[derive(Model)]
-/// #[tideorm(table = "events")]
+/// #[tideorm::model(table = "events")]
 /// pub struct Event {
 ///     #[tideorm(primary_key)]
 ///     pub id: i64,
@@ -196,8 +194,7 @@ impl fmt::Display for UnixTimestamp {
 /// ```rust,ignore
 /// use tideorm::types::UnixTimestampMillis;
 ///
-/// #[derive(Model)]
-/// #[tideorm(table = "events")]
+/// #[tideorm::model(table = "events")]
 /// pub struct Event {
 ///     #[tideorm(primary_key)]
 ///     pub id: i64,
@@ -517,7 +514,7 @@ pub trait AttributeCaster<T>: Sized {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     #[tideorm(cast = "encrypted")]
 ///     pub ssn: Encrypted<String>,
@@ -683,7 +680,7 @@ fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     #[tideorm(cast = "hashed")]
 ///     pub password: Hashed,
@@ -735,7 +732,7 @@ impl Hashed {
 
     /// Compute an Argon2 hash suitable for password storage.
     fn compute_hash(input: &str) -> String {
-        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
 
         let salt = SaltString::generate(&mut OsRng);
         argon2::Argon2::default()
@@ -800,7 +797,7 @@ impl<'de> Deserialize<'de> for Hashed {
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     #[tideorm(cast = "comma_separated")]
 ///     pub tags: CommaSeparated<String>,
@@ -958,7 +955,7 @@ mod tests;
 /// # Example
 ///
 /// ```rust,ignore
-/// #[derive(Model)]
+/// #[tideorm::model(table = "users")]
 /// pub struct User {
 ///     pub permissions: Collection<String>,
 /// }

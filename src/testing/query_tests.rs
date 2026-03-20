@@ -1,17 +1,16 @@
 use super::db_sql;
 use super::{
-    CTE, FrameBound, FrameType, Order, QueryBuilder, UnionClause, UnionType, WindowFunction,
-    WindowFunctionType,
+    FrameBound, FrameType, Order, QueryBuilder, UnionClause, UnionType, WindowFunction,
+    WindowFunctionType, CTE,
 };
 use crate::config::DatabaseType;
 #[cfg(feature = "fulltext")]
 use crate::fulltext::{FullTextSearchBuilder, SearchMode};
 #[cfg(feature = "fulltext")]
 use crate::internal::Value;
-use crate::model::Model;
+use crate::model::Model as ModelTrait;
 
-#[derive(tideorm::Model)]
-#[tideorm(table = "query_test_users")]
+#[tideorm::model(table = "query_test_users")]
 struct QueryTestUser {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
@@ -375,10 +374,9 @@ async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() 
         .await
         .unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("invalid subquery for where_in_subquery()")
-    );
+    assert!(err
+        .to_string()
+        .contains("invalid subquery for where_in_subquery()"));
 }
 
 #[test]
