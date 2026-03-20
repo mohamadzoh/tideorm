@@ -5,6 +5,22 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-03-20
+
+### Fixed
+
+- Reworked `Database::transaction()` to restore the transaction-scoped database override on every future poll, so model and query helpers keep using the active transaction even if the async runtime resumes the future on a different thread.
+
+### Changed
+
+- Moved the remaining inline unit tests out of implementation modules and into dedicated owner test files under `src/testing/`, keeping private-module coverage while making the source files easier to maintain.
+- Refreshed dependency examples and macro-crate docs to use the 0.8.5 release version.
+
+### Internal
+
+- Added a regression test that manually polls a transaction-scoped future on two different threads to verify the per-poll override behavior.
+- Verified the release prep with `cargo test --lib --features sqlite` and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## [0.8.4] - 2026-03-20
 
 ### Fixed
@@ -571,7 +587,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...v0.8.4
 [0.8.1]: https://github.com/mohamadzoh/tideorm/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/mohamadzoh/tideorm/compare/v0.7.3...v0.8.0

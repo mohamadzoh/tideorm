@@ -174,6 +174,36 @@ fn current_scope_handle() -> Result<DatabaseHandle> {
     global_db_handle().current_handle()
 }
 
+struct ThreadOverrideGuard {
+    previous: Option<DatabaseHandle>,
+}
+
+impl ThreadOverrideGuard {
+    fn install(handle: DatabaseHandle) -> Self {
+        Self {
+            previous: Database::replace_thread_override(Some(handle)),
+        }
+    }
+}
+
+impl Drop for ThreadOverrideGuard {
+    fn drop(&mut self) {
+        Database::set_thread_override(self.previous.take());
+    }
+}
+
+fn poll_with_thread_override<F>(
+    future: std::pin::Pin<&mut F>,
+    cx: &mut std::task::Context<'_>,
+    handle: &DatabaseHandle,
+) -> std::task::Poll<F::Output>
+where
+    F: Future + ?Sized,
+{
+    let _guard = ThreadOverrideGuard::install(handle.clone());
+    future.poll(cx)
+}
+
 #[doc(hidden)]
 pub fn __current_connection() -> Result<ConnectionRef> {
     Ok(match current_scope_handle()? {
@@ -423,15 +453,20 @@ impl Database {
                 .map_err(|e| Error::transaction(e.to_string()))?,
         };
 
-        let txn = Arc::new(txn);
-        let tx = Transaction { inner: txn.clone() };
-        let previous_override =
-            Self::replace_thread_override(Some(DatabaseHandle::Transaction(txn.clone())));
+        let outcome = {
+            let txn = Arc::new(txn);
+            let tx = Transaction { inner: txn.clone() };
+            let override_handle = DatabaseHandle::Transaction(txn.clone());
+            let mut future = std::pin::pin!(f(&tx));
+            let outcome = std::future::poll_fn(|cx| {
+                poll_with_thread_override(future.as_mut(), cx, &override_handle)
+            })
+            .await;
 
-        let outcome = f(&tx).await;
+            (txn, outcome)
+        };
 
-        Self::set_thread_override(previous_override);
-        drop(tx);
+        let (txn, outcome) = outcome;
 
         match outcome {
             Ok(result) => {
@@ -1063,22 +1098,5 @@ impl Connection for Transaction {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Connection, Database};
-
-    #[test]
-    fn hidden_accessors_return_errors_for_disconnected_database() {
-        let db = Database::disconnected();
-
-        assert!(db.__internal_connection().is_err());
-        assert!(db.__internal_backend().is_err());
-        assert!(db.__get_connection().is_err());
-    }
-
-    #[test]
-    fn backend_defaults_safely_for_disconnected_database() {
-        let db = Database::disconnected();
-
-        assert_eq!(db.backend(), crate::config::DatabaseType::Postgres);
-    }
-}
+#[path = "testing/database_tests.rs"]
+mod tests;

@@ -3292,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "argon2",
  "async-recursion",
@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "convert_case",
  "darling 0.23.0",
