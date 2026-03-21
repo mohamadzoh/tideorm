@@ -1,7 +1,7 @@
 [package]
 name = "tideorm"
 version = "0.8.7"
-edition = "2021"
+edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
 license = "MIT"
