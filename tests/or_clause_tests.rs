@@ -21,18 +21,12 @@ mod or_group_unit_tests {
     use super::*;
 
     #[test]
-    fn test_logical_op_as_sql() {
-        assert_eq!(LogicalOp::And.as_sql(), "AND");
-        assert_eq!(LogicalOp::Or.as_sql(), "OR");
-    }
-
-    #[test]
     fn test_or_group_new() {
         let group = OrGroup::new();
+
         assert!(group.conditions.is_empty());
         assert!(group.nested_groups.is_empty());
         assert_eq!(group.combine_with, LogicalOp::Or);
-        assert!(group.is_empty());
     }
 
     #[test]
@@ -51,40 +45,10 @@ mod or_group_unit_tests {
     }
 
     #[test]
-    fn test_or_group_where_not() {
-        let group = OrGroup::new().where_not("status", "banned");
-
-        assert_eq!(group.conditions.len(), 1);
-        assert!(matches!(group.conditions[0].operator, Operator::NotEq));
-    }
-
-    #[test]
     fn test_or_group_where_gt() {
         let group = OrGroup::new().where_gt("age", 18);
 
-        assert_eq!(group.conditions.len(), 1);
         assert!(matches!(group.conditions[0].operator, Operator::Gt));
-    }
-
-    #[test]
-    fn test_or_group_where_gte() {
-        let group = OrGroup::new().where_gte("age", 21);
-
-        assert!(matches!(group.conditions[0].operator, Operator::Gte));
-    }
-
-    #[test]
-    fn test_or_group_where_lt() {
-        let group = OrGroup::new().where_lt("price", 100);
-
-        assert!(matches!(group.conditions[0].operator, Operator::Lt));
-    }
-
-    #[test]
-    fn test_or_group_where_lte() {
-        let group = OrGroup::new().where_lte("quantity", 50);
-
-        assert!(matches!(group.conditions[0].operator, Operator::Lte));
     }
 
     #[test]

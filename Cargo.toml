@@ -111,3 +111,23 @@ harness = false
 name = "sqlite_ci_smoke_test"
 path = "tests/sqlite_ci_smoke_test.rs"
 required-features = ["sqlite", "runtime-tokio"]
+
+[[test]]
+name = "sqlite_integration_tests"
+path = "tests/sqlite_integration_tests.rs"
+required-features = ["sqlite", "runtime-tokio"]
+
+[[test]]
+name = "postgres_integration_tests"
+path = "tests/postgres_integration_tests.rs"
+required-features = ["postgres", "runtime-tokio"]
+
+[[test]]
+name = "postgres_advanced_tests"
+path = "tests/postgres_advanced_tests.rs"
+required-features = ["postgres", "runtime-tokio"]
+
+[[test]]
+name = "mysql_integration_tests"
+path = "tests/mysql_integration_tests.rs"
+required-features = ["mysql", "runtime-tokio"]

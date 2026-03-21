@@ -661,8 +661,9 @@ fn test_build_select_sql_with_params_quotes_reserved_identifiers() {
         .order_by("order", Order::Desc)
         .limit(5);
 
-    let (postgres_sql, postgres_params) =
-        query.clone().build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let (postgres_sql, postgres_params) = query
+        .clone()
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
     assert_eq!(
         postgres_sql,
         "SELECT \"query_test_users\".\"order\" AS \"group\" FROM \"query_test_users\" WHERE \"group\" = $1 GROUP BY \"group\" ORDER BY \"order\" DESC LIMIT 5"

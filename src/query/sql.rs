@@ -898,7 +898,12 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn format_select_column_for_db(&self, db_type: DatabaseType, table: &str, column: &str) -> String {
+    fn format_select_column_for_db(
+        &self,
+        db_type: DatabaseType,
+        table: &str,
+        column: &str,
+    ) -> String {
         let trimmed = column.trim();
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
