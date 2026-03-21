@@ -4911,18 +4911,9 @@ mod relation_field_type_tests {
         id: i64,
     }
 
-    // Note: We can't actually test load() methods without a database,
-    // but we can test the struct creation and configuration
-
     // =========================================================================
     // HasOne TESTS
     // =========================================================================
-
-    #[test]
-    fn test_has_one_new() {
-        // We can't easily create a HasOne without a Model, but we can test Default
-        // HasOne requires Model trait bound, so we test what we can
-    }
 
     #[test]
     fn test_has_one_default_has_none_cached() {
