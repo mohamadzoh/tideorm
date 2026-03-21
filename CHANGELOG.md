@@ -5,6 +5,24 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.7] - 2026-03-21
+
+### Fixed
+
+- Quoted simple identifier references consistently in the manual SQL builder paths so reserved column names such as `order` and `group` no longer break generated SELECT, WHERE, GROUP BY, JOIN, and ORDER BY clauses.
+- Preserved embedded identifier-quote escaping while tightening the reserved-word quoting path, so names containing quote characters still render correctly for each backend dialect.
+- Fixed SQLite raw JSON decoding for untyped aggregate expressions such as `COUNT(*)` and `SUM(...)`, so count/exists helpers and raw JSON reads no longer degrade numeric aggregate results into strings.
+
+### Changed
+
+- Refreshed dependency examples and macro-crate docs to use the 0.8.7 release version.
+
+### Internal
+
+- Added query SQL regressions covering reserved-word identifiers and embedded quote escaping.
+- Added SQLite raw JSON regressions covering aggregate count decoding.
+- Verified the release prep with `cargo test --all-features`, `cargo clippy --lib --all-features -- -D warnings`, and `mdbook build`.
+
 ## [0.8.6] - 2026-03-21
 
 ### Fixed
@@ -606,7 +624,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/mohamadzoh/tideorm/compare/v0.8.1...v0.8.4

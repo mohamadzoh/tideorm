@@ -880,7 +880,7 @@ impl Database {
                     }
                     "TEXT" => Self::typed_or_fallback::<String>(result, index),
                     "BLOB" => Self::typed_or_fallback::<Vec<u8>>(result, index),
-                    _ => Self::fallback_try_get_json(result, index),
+                    _ => Self::sqlite_unknown_type_or_fallback(result, index),
                 }
             });
         }
@@ -905,10 +905,10 @@ impl Database {
             .or_else(|| Self::try_get_json::<chrono::NaiveDateTime>(row, index))
             .or_else(|| Self::try_get_json::<chrono::NaiveDate>(row, index))
             .or_else(|| Self::try_get_json::<chrono::NaiveTime>(row, index))
-            .or_else(|| Self::try_get_json::<bool>(row, index))
             .or_else(|| Self::try_get_json::<i64>(row, index))
             .or_else(|| Self::try_get_json::<u64>(row, index))
             .or_else(|| Self::try_get_json::<f64>(row, index))
+            .or_else(|| Self::try_get_json::<bool>(row, index))
             .or_else(|| Self::try_get_json::<String>(row, index))
             .unwrap_or(serde_json::Value::Null)
     }
@@ -924,6 +924,26 @@ impl Database {
     fn decimal_or_fallback(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value {
         Self::try_get_decimal_json(row, index)
             .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn sqlite_unknown_type_or_fallback(
+        row: &crate::internal::QueryResult,
+        index: usize,
+    ) -> serde_json::Value {
+        let value = Self::fallback_try_get_json(row, index);
+
+        if let serde_json::Value::String(text) = &value {
+            if let Ok(integer) = text.parse::<i64>() {
+                return serde_json::json!(integer);
+            }
+
+            if let Ok(unsigned) = text.parse::<u64>() {
+                return serde_json::json!(unsigned);
+            }
+        }
+
+        value
     }
 
     fn try_get_decimal_json(

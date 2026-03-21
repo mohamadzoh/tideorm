@@ -872,10 +872,72 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn format_column_for_db(&self, db_type: DatabaseType, column: &str) -> String {
-        if column.contains(' ') {
-            column.to_string()
-        } else {
-            db_sql::format_column(db_type, column)
+        let trimmed = column.trim();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+
+        match parts.as_slice() {
+            [identifier] => db_sql::format_column(db_type, identifier),
+            [identifier, direction]
+                if direction.eq_ignore_ascii_case("asc")
+                    || direction.eq_ignore_ascii_case("desc") =>
+            {
+                db_sql::format_identifier_reference(db_type, identifier)
+                    .map(|identifier| format!("{} {}", identifier, direction.to_ascii_uppercase()))
+                    .unwrap_or_else(|| trimmed.to_string())
+            }
+            [identifier, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => {
+                match (
+                    db_sql::format_identifier_reference(db_type, identifier),
+                    db_sql::format_identifier_reference(db_type, alias),
+                ) {
+                    (Some(identifier), Some(alias)) => format!("{} AS {}", identifier, alias),
+                    _ => trimmed.to_string(),
+                }
+            }
+            _ => trimmed.to_string(),
+        }
+    }
+
+    fn format_select_column_for_db(&self, db_type: DatabaseType, table: &str, column: &str) -> String {
+        let trimmed = column.trim();
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+
+        match parts.as_slice() {
+            [identifier]
+                if !identifier.contains('(')
+                    && !identifier.contains('*')
+                    && db_sql::format_identifier_reference(db_type, identifier).is_some() =>
+            {
+                if identifier.contains('.') {
+                    self.format_column_for_db(db_type, identifier)
+                } else {
+                    format!(
+                        "{}.{}",
+                        db_sql::quote_ident(db_type, table),
+                        db_sql::quote_ident(db_type, identifier)
+                    )
+                }
+            }
+            [identifier, as_keyword, alias]
+                if as_keyword.eq_ignore_ascii_case("as")
+                    && !identifier.contains('(')
+                    && !identifier.contains('*')
+                    && db_sql::format_identifier_reference(db_type, identifier).is_some()
+                    && db_sql::format_identifier_reference(db_type, alias).is_some() =>
+            {
+                let identifier = if identifier.contains('.') {
+                    self.format_column_for_db(db_type, identifier)
+                } else {
+                    format!(
+                        "{}.{}",
+                        db_sql::quote_ident(db_type, table),
+                        db_sql::quote_ident(db_type, identifier)
+                    )
+                };
+
+                format!("{} AS {}", identifier, db_sql::quote_ident(db_type, alias))
+            }
+            _ => trimmed.to_string(),
         }
     }
 
@@ -893,24 +955,7 @@ impl<M: Model> QueryBuilder<M> {
         if let Some(columns) = &self.select_columns {
             let mut rendered_columns: Vec<String> = columns
                 .iter()
-                .map(|column| {
-                    if column.contains('(')
-                        || column.contains('*')
-                        || column.contains('"')
-                        || column.contains('`')
-                        || column.contains(' ')
-                    {
-                        column.clone()
-                    } else if column.contains('.') {
-                        self.format_column_for_db(db_type, column)
-                    } else {
-                        format!(
-                            "{}.{}",
-                            db_sql::quote_ident(db_type, table),
-                            db_sql::quote_ident(db_type, column)
-                        )
-                    }
-                })
+                .map(|column| self.format_select_column_for_db(db_type, table, column))
                 .collect();
 
             for window_function in &self.window_functions {

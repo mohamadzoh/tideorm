@@ -238,6 +238,36 @@ pub fn quote_ident(db_type: DatabaseType, name: &str) -> String {
     format!("{}{}{}", q, escaped, q)
 }
 
+/// Quote a simple identifier reference like `column` or `table.column`.
+pub fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with('"')
+        || trimmed.ends_with('"')
+        || trimmed.starts_with('`')
+        || trimmed.ends_with('`')
+        || trimmed.contains('(')
+        || trimmed.contains(')')
+        || trimmed.contains('*')
+        || trimmed.contains(' ')
+    {
+        return None;
+    }
+
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+
+    Some(
+        parts
+            .into_iter()
+            .map(|part| quote_ident(db_type, part))
+            .collect::<Vec<_>>()
+            .join("."),
+    )
+}
+
 /// Generate JSON contains expression
 ///
 /// - PostgreSQL: `column @> 'value'`
@@ -497,22 +527,7 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
 
 /// Format a column identifier for the database
 pub fn format_column(db_type: DatabaseType, column: &str) -> String {
-    if column.contains('(') || column.contains('*') {
-        column.to_string()
-    } else if column.contains('.') {
-        let parts: Vec<&str> = column.split('.').collect();
-        if parts.len() == 2 {
-            format!(
-                "{}.{}",
-                quote_ident(db_type, parts[0]),
-                quote_ident(db_type, parts[1])
-            )
-        } else {
-            column.to_string()
-        }
-    } else {
-        quote_ident(db_type, column)
-    }
+    format_identifier_reference(db_type, column).unwrap_or_else(|| column.to_string())
 }
 
 /// Generate aggregate function with proper casting for the database

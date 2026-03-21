@@ -215,6 +215,18 @@ fn test_format_column_expression() {
 }
 
 #[test]
+fn test_format_identifier_reference_quotes_reserved_words() {
+    assert_eq!(
+        db_sql::format_identifier_reference(DatabaseType::Postgres, "order"),
+        Some("\"order\"".to_string())
+    );
+    assert_eq!(
+        db_sql::format_identifier_reference(DatabaseType::MySQL, "users.group"),
+        Some("`users`.`group`".to_string())
+    );
+}
+
+#[test]
 fn test_cast_to_float() {
     assert_eq!(
         db_sql::cast_to_float(DatabaseType::Postgres, "value"),
@@ -638,6 +650,31 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
         "SELECT `query_test_users`.`id`, `query_test_users`.`name` FROM `query_test_users` WHERE `status` = ? ORDER BY `name` ASC LIMIT 5"
     );
     assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn test_build_select_sql_with_params_quotes_reserved_identifiers() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["order as group"])
+        .where_eq("group", "active")
+        .group_by("group")
+        .order_by("order", Order::Desc)
+        .limit(5);
+
+    let (postgres_sql, postgres_params) =
+        query.clone().build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    assert_eq!(
+        postgres_sql,
+        "SELECT \"query_test_users\".\"order\" AS \"group\" FROM \"query_test_users\" WHERE \"group\" = $1 GROUP BY \"group\" ORDER BY \"order\" DESC LIMIT 5"
+    );
+    assert_eq!(postgres_params.len(), 1);
+
+    let (mysql_sql, mysql_params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    assert_eq!(
+        mysql_sql,
+        "SELECT `query_test_users`.`order` AS `group` FROM `query_test_users` WHERE `group` = ? GROUP BY `group` ORDER BY `order` DESC LIMIT 5"
+    );
+    assert_eq!(mysql_params.len(), 1);
 }
 
 #[cfg(feature = "fulltext")]

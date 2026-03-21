@@ -193,3 +193,43 @@ async fn raw_json_preserves_decimal_and_datetime_column_types() {
         })]
     );
 }
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn raw_json_preserves_count_aggregates_as_numbers() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE raw_json_count_probe (enabled BOOLEAN NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating count probe table should succeed");
+
+    for enabled in [true, true, false] {
+        db.__execute_with_params(
+            "INSERT INTO raw_json_count_probe (enabled) VALUES (?)",
+            vec![crate::internal::Value::Bool(Some(enabled))],
+        )
+        .await
+        .expect("inserting count probe row should succeed");
+    }
+
+    let rows = db
+        .__raw_json_with_params(
+            "SELECT COUNT(*) AS count, SUM(enabled) AS enabled_total FROM raw_json_count_probe",
+            vec![],
+        )
+        .await
+        .expect("querying count aggregate JSON rows should succeed");
+
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "count": 3,
+            "enabled_total": 2,
+        })]
+    );
+}
