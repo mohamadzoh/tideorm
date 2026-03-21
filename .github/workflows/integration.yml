@@ -1,0 +1,96 @@
+name: Integration
+
+on:
+  pull_request:
+    branches:
+      - master
+
+env:
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  postgres:
+    name: PostgreSQL Integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: test_tide_orm
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test_tide_orm"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRESQL_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/test_tide_orm
+      TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/test_tide_orm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: postgres_integration_tests
+        run: cargo test --test postgres_integration_tests --all-features -- --test-threads=1
+      - name: postgres_advanced_tests
+        run: cargo test --test postgres_advanced_tests --all-features -- --test-threads=1
+      - name: or_clause_tests
+        run: cargo test --test or_clause_tests --all-features -- --test-threads=1
+      - name: query_builder_tests
+        run: cargo test --test query_builder_tests --all-features -- --test-threads=1
+      - name: tokenization_tests
+        run: cargo test --test tokenization_tests --all-features -- --test-threads=1
+      - name: edge_case_tests
+        run: cargo test --test edge_case_tests --all-features -- --test-threads=1
+      - name: seaorm2_features_tests
+        run: cargo test --test seaorm2_features_tests --all-features -- --test-threads=1
+
+  mysql:
+    name: MySQL Integration
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: test_tide_orm
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MYSQL_DATABASE_URL: mysql://root:root@127.0.0.1:3306/test_tide_orm
+      TEST_DATABASE_URL: mysql://root:root@127.0.0.1:3306/test_tide_orm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: mysql_integration_tests
+        run: cargo test --test mysql_integration_tests --all-features -- --test-threads=1
+
+  sqlite:
+    name: SQLite Full Suite
+    runs-on: ubuntu-latest
+    env:
+      SQLITE_DATABASE_URL: "sqlite::memory:"
+      TEST_DATABASE_URL: "sqlite::memory:"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: sqlite_integration_tests
+        run: cargo test --test sqlite_integration_tests --all-features -- --test-threads=1
+      - name: sqlite_ci_smoke_test
+        run: cargo test --test sqlite_ci_smoke_test --all-features -- --test-threads=1

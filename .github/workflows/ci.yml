@@ -5,98 +5,120 @@ on:
     branches:
       - master
   pull_request:
+    branches:
+      - master
 
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  RUSTFLAGS: -Dwarnings
 
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-  clippy:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  test:
+  compile-check:
+    name: Compile Check (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        feature-set:
-          - "--no-default-features --features postgres,runtime-tokio"
-          - "--no-default-features --features mysql,runtime-tokio"
-          - "--no-default-features --features sqlite,runtime-tokio"
-
+        include:
+          - name: sqlite
+            features: "sqlite runtime-tokio"
+          - name: postgres
+            features: "postgres runtime-tokio"
+          - name: mysql
+            features: "mysql runtime-tokio"
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --all-targets --no-default-features --features "${{ matrix.features }}"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check
-        run: cargo check ${{ matrix.feature-set }}
-
-      - name: Test
-        run: cargo test --lib ${{ matrix.feature-set }}
-
-  integration-sqlite:
+  formatting:
+    name: Formatting
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        run: cargo clippy --all-targets --no-default-features --features "sqlite runtime-tokio" -- -D warnings
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --lib
+        run: cargo test --lib --no-default-features --features "sqlite runtime-tokio"
 
-      - name: Run SQLite integration test
-        run: cargo test --package tideorm --test sqlite_ci_smoke_test --no-default-features --features sqlite,runtime-tokio
+  sqlite-smoke:
+    name: SQLite Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test sqlite_ci_smoke_test
+        run: cargo test --test sqlite_ci_smoke_test --no-default-features --features "sqlite runtime-tokio"
+
+  macro-tests:
+    name: Macro Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test tideorm-macros
+        run: cargo test -p tideorm-macros
+      - name: cargo test relation_compile_fail
+        run: cargo test --test relation_compile_fail --no-default-features --features "sqlite runtime-tokio"
 
   docs:
+    name: Doc Build
     runs-on: ubuntu-latest
-
+    env:
+      RUSTDOCFLAGS: -Dwarnings
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc
+        run: cargo doc --no-deps --no-default-features --features "sqlite runtime-tokio attachments translations fulltext"
 
-      - name: Install mdBook
-        uses: taiki-e/install-action@mdbook
-
-      - name: Build book
-        run: mdbook build
+  msrv:
+    name: MSRV 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check MSRV
+        run: cargo check --no-default-features --features "sqlite runtime-tokio"
