@@ -11,7 +11,7 @@
 - Fast smoke test: `cargo test --lib`
 - Broad compatibility pass: `cargo test --all-features`
 - Default backend test pass: `cargo test --features postgres`
-- SQLite integration suite: `cargo test --test sqlite_integration_tests --features sqlite --no-default-features`
+- SQLite integration suite: `cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features`
 - PostgreSQL integration suite: `cargo test --test postgres_integration_tests`
 - Advanced PostgreSQL suite: `cargo test --test postgres_advanced_tests`
 - MySQL integration suite: `cargo test --test mysql_integration_tests --features mysql`

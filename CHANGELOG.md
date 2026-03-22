@@ -5,6 +5,22 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.8] - 2026-03-22
+
+### Fixed
+
+- Restored `Database::ping()` after the database module split so query-builder and backend integration tests keep the expected public API.
+- Corrected the documented SQLite integration command to include the required `runtime-tokio` feature when running `sqlite_integration_tests` without default features.
+
+### Changed
+
+- Split the remaining large `config`, `database`, `migration`, `model`, `query`, `relations`, and `types` modules into focused submodules while preserving the public TideORM API surface.
+- Refreshed dependency examples and macro-crate docs to use the 0.8.8 release version.
+
+### Internal
+
+- Verified the refactor and release prep with `cargo test --all-features`, `cargo test --lib`, `cargo test --features postgres`, `cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features`, `cargo test --test postgres_integration_tests`, `cargo test --test postgres_advanced_tests`, and `cargo test --test mysql_integration_tests --features mysql`.
+
 ## [0.8.7] - 2026-03-21
 
 ### Fixed
@@ -624,7 +640,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/mohamadzoh/tideorm/compare/v0.8.4...v0.8.5
