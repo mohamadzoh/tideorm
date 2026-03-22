@@ -732,7 +732,7 @@ impl Hashed {
 
     /// Compute an Argon2 hash suitable for password storage.
     fn compute_hash(input: &str) -> String {
-        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 
         let salt = SaltString::generate(&mut OsRng);
         argon2::Argon2::default()

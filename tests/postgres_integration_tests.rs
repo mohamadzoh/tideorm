@@ -306,7 +306,9 @@ async fn postgres_integration_tests() {
                     .expect("uuid should serialize to JSON"),
             })]
         );
-        println!("   ✓ raw_json preserves PostgreSQL boolean, JSONB, numeric, timestamptz, and UUID types");
+        println!(
+            "   ✓ raw_json preserves PostgreSQL boolean, JSONB, numeric, timestamptz, and UUID types"
+        );
     }
     println!();
 

@@ -537,9 +537,11 @@ mod profiling_query_analyzer {
     #[test]
     fn test_analyzer_order_by_without_limit() {
         let suggestions = QueryAnalyzer::analyze("SELECT id FROM users ORDER BY created_at");
-        assert!(suggestions
-            .iter()
-            .any(|s| s.title.contains("ORDER BY") && s.title.contains("LIMIT")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.title.contains("ORDER BY") && s.title.contains("LIMIT"))
+        );
     }
 
     #[test]
@@ -577,9 +579,11 @@ mod profiling_query_analyzer {
     #[test]
     fn test_missing_where_on_update_is_critical() {
         let suggestions = QueryAnalyzer::analyze("UPDATE users SET active = false");
-        assert!(suggestions
-            .iter()
-            .any(|s| s.level == SuggestionLevel::Critical && s.title.contains("WHERE")));
+        assert!(
+            suggestions
+                .iter()
+                .any(|s| s.level == SuggestionLevel::Critical && s.title.contains("WHERE"))
+        );
     }
 }
 
@@ -599,9 +603,11 @@ mod profiling_report_stats {
         assert_eq!(report.query_count(), 0);
         assert_eq!(report.avg_query_time(), Duration::ZERO);
         assert_eq!(report.query_time_percentage(), 0.0);
-        assert!(report
-            .queries_slower_than(Duration::from_secs(1))
-            .is_empty());
+        assert!(
+            report
+                .queries_slower_than(Duration::from_secs(1))
+                .is_empty()
+        );
     }
 
     #[test]

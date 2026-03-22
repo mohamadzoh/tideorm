@@ -103,9 +103,11 @@ async fn save_with_many_persists_children_with_parent_fk() {
 
     assert!(saved_parent.id > 0);
     assert_eq!(saved_children.len(), 2);
-    assert!(saved_children
-        .iter()
-        .all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        saved_children
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
     assert!(saved_children.iter().all(|child| child.id > 0));
 
     let fetched = NestedTestChild::query()
@@ -145,9 +147,11 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
     assert_eq!(fetched.len(), 2);
     assert_eq!(fetched[0].name, "alpha");
     assert_eq!(fetched[1].name, "beta");
-    assert!(fetched
-        .iter()
-        .all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        fetched
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
 
     let returned_parent_ids: Vec<_> = saved_related
         .iter()
@@ -196,9 +200,11 @@ async fn nested_save_builder_can_be_spawned() {
         .expect("should fetch nested children saved by spawned builder");
 
     assert_eq!(fetched.len(), 2);
-    assert!(fetched
-        .iter()
-        .all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        fetched
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
 }
 
 #[tokio::test]

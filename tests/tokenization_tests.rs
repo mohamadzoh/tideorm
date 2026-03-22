@@ -37,7 +37,7 @@ fn init_test_env() {
 
 mod unit_tests {
     use super::*;
-    use tideorm::tokenization::{default_decode, default_encode, TokenConfig};
+    use tideorm::tokenization::{TokenConfig, default_decode, default_encode};
 
     #[test]
     fn test_encode_decode_roundtrip() {
@@ -310,9 +310,11 @@ mod tokenizable_trait_tests {
         assert!(!token.is_empty());
 
         // Token should be URL-safe
-        assert!(token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use super::{build_self_ref_tree_sql, Value};
+use super::{Value, build_self_ref_tree_sql};
 use crate::config::DatabaseType;
 
 #[tideorm::model(table = "relation_test_nodes")]
@@ -58,7 +58,8 @@ fn self_ref_tree_sql_rejects_unknown_columns() {
     )
     .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("Unknown self-reference column 'missing_column'"));
+    assert!(
+        err.to_string()
+            .contains("Unknown self-reference column 'missing_column'")
+    );
 }

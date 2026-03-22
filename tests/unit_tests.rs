@@ -26,9 +26,10 @@ mod validation_tests {
     fn test_validation_rule_email() {
         let rule = ValidationRule::Email;
         assert!(rule.validate(&"test@example.com".to_string()).is_ok());
-        assert!(rule
-            .validate(&"user.name+tag@domain.co.uk".to_string())
-            .is_ok());
+        assert!(
+            rule.validate(&"user.name+tag@domain.co.uk".to_string())
+                .is_ok()
+        );
         assert!(rule.validate(&"invalid".to_string()).is_err());
         assert!(rule.validate(&"@nodomain.com".to_string()).is_err());
         assert!(rule.validate(&"noat.com".to_string()).is_err());
@@ -38,9 +39,10 @@ mod validation_tests {
     fn test_validation_rule_url() {
         let rule = ValidationRule::Url;
         assert!(rule.validate(&"https://example.com".to_string()).is_ok());
-        assert!(rule
-            .validate(&"http://localhost:8080/path".to_string())
-            .is_ok());
+        assert!(
+            rule.validate(&"http://localhost:8080/path".to_string())
+                .is_ok()
+        );
         assert!(rule.validate(&"not-a-url".to_string()).is_err());
         assert!(rule.validate(&"example.com".to_string()).is_err());
     }
@@ -129,16 +131,19 @@ mod validation_tests {
     #[test]
     fn test_validation_rule_uuid() {
         let rule = ValidationRule::Uuid;
-        assert!(rule
-            .validate(&"550e8400-e29b-41d4-a716-446655440000".to_string())
-            .is_ok());
-        assert!(rule
-            .validate(&"550E8400-E29B-41D4-A716-446655440000".to_string())
-            .is_ok());
+        assert!(
+            rule.validate(&"550e8400-e29b-41d4-a716-446655440000".to_string())
+                .is_ok()
+        );
+        assert!(
+            rule.validate(&"550E8400-E29B-41D4-A716-446655440000".to_string())
+                .is_ok()
+        );
         assert!(rule.validate(&"not-a-uuid".to_string()).is_err());
-        assert!(rule
-            .validate(&"550e8400-e29b-41d4-a716".to_string())
-            .is_err());
+        assert!(
+            rule.validate(&"550e8400-e29b-41d4-a716".to_string())
+                .is_err()
+        );
     }
 
     #[test]
@@ -310,9 +315,8 @@ mod validation_tests {
 mod fulltext_tests {
     use tideorm::config::DatabaseType;
     use tideorm::fulltext::{
-        generate_snippet, highlight_text, pg_headline_sql, FullTextConfig, FullTextIndex,
-        HighlightConfig, HighlightedField, PgFullTextIndexType, SearchMode, SearchResult,
-        SearchWeights,
+        FullTextConfig, FullTextIndex, HighlightConfig, HighlightedField, PgFullTextIndexType,
+        SearchMode, SearchResult, SearchWeights, generate_snippet, highlight_text, pg_headline_sql,
     };
 
     #[test]
@@ -841,7 +845,7 @@ mod config_tests {
 mod schema_tests {
     use tideorm::config::DatabaseType;
     use tideorm::model::IndexDefinition;
-    use tideorm::schema::{rust_type_to_sql, ColumnSchema, SchemaGenerator, TableSchemaBuilder};
+    use tideorm::schema::{ColumnSchema, SchemaGenerator, TableSchemaBuilder, rust_type_to_sql};
 
     #[test]
     fn test_rust_type_to_sql_postgres() {
@@ -1916,7 +1920,7 @@ mod query_edge_cases {
 mod schema_edge_cases {
     use tideorm::config::DatabaseType;
     use tideorm::model::IndexDefinition;
-    use tideorm::schema::{rust_type_to_sql, ColumnSchema, SchemaGenerator, TableSchemaBuilder};
+    use tideorm::schema::{ColumnSchema, SchemaGenerator, TableSchemaBuilder, rust_type_to_sql};
 
     #[test]
     fn test_rust_type_unknown() {
@@ -4434,9 +4438,10 @@ mod attribute_casting_tests {
         let err =
             serde_json::from_value::<Encrypted<String>>(serde_json::json!("secret")).unwrap_err();
 
-        assert!(err
-            .to_string()
-            .contains("Encrypted fields must use the encrypted payload format"));
+        assert!(
+            err.to_string()
+                .contains("Encrypted fields must use the encrypted payload format")
+        );
     }
 
     #[test]
@@ -4929,9 +4934,10 @@ mod relation_field_type_tests {
         let relation = HasOne::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("HasOne relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasOne relation is not configured")
+        );
     }
 
     // =========================================================================
@@ -4952,9 +4958,10 @@ mod relation_field_type_tests {
         let relation = HasMany::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("HasMany relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasMany relation is not configured")
+        );
     }
 
     // =========================================================================
@@ -4975,9 +4982,10 @@ mod relation_field_type_tests {
         let relation = BelongsTo::<RelationFieldTestModel>::default().with_fk_value(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("BelongsTo relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("BelongsTo relation is not configured")
+        );
     }
 
     #[test]
@@ -5000,9 +5008,10 @@ mod relation_field_type_tests {
                 .with_parent_pk(json!(1));
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("HasManyThrough relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("HasManyThrough relation is not configured")
+        );
     }
 
     #[test]
@@ -5019,9 +5028,10 @@ mod relation_field_type_tests {
         let relation = MorphOne::<RelationFieldTestModel>::default();
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("MorphOne relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("MorphOne relation is not configured")
+        );
     }
 
     #[test]
@@ -5038,9 +5048,10 @@ mod relation_field_type_tests {
         let relation = MorphMany::<RelationFieldTestModel>::default();
 
         let err = relation.load().await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("MorphMany relation is not configured"));
+        assert!(
+            err.to_string()
+                .contains("MorphMany relation is not configured")
+        );
     }
 
     // =========================================================================

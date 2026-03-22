@@ -125,9 +125,11 @@ fn test_token_is_url_safe() {
     let record_id = 999999999i64;
     let token = default_encode(record_id, "User").unwrap();
 
-    assert!(token
-        .chars()
-        .all(|c| { c.is_ascii_alphanumeric() || c == '-' || c == '_' }));
+    assert!(
+        token
+            .chars()
+            .all(|c| { c.is_ascii_alphanumeric() || c == '-' || c == '_' })
+    );
 }
 
 #[test]

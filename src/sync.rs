@@ -118,12 +118,12 @@ use crate::{tide_debug, tide_info, tide_warn};
 
 // Use SeaORM  schema management
 use sea_orm::{
+    ConnectionTrait, DbBackend, EntityTrait, Statement,
     schema::{Schema, SchemaBuilder},
     sea_query::{
         Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, MysqlQueryBuilder,
         PostgresQueryBuilder, SqliteQueryBuilder, Table,
     },
-    ConnectionTrait, DbBackend, EntityTrait, Statement,
 };
 
 /// Type alias for entity registration functions that register with SchemaBuilder

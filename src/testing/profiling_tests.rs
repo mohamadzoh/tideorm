@@ -96,7 +96,9 @@ async fn test_profile_future_skips_timing_when_disabled_at_entry() {
 #[test]
 fn test_missing_where_detection() {
     let suggestions = QueryAnalyzer::analyze("DELETE FROM users");
-    assert!(suggestions
-        .iter()
-        .any(|s| s.level == SuggestionLevel::Critical));
+    assert!(
+        suggestions
+            .iter()
+            .any(|s| s.level == SuggestionLevel::Critical)
+    );
 }

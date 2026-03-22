@@ -1,7 +1,7 @@
 use super::db_sql;
 use super::{
-    FrameBound, FrameType, Order, QueryBuilder, UnionClause, UnionType, WindowFunction,
-    WindowFunctionType, CTE,
+    CTE, FrameBound, FrameType, Order, QueryBuilder, UnionClause, UnionType, WindowFunction,
+    WindowFunctionType,
 };
 use crate::config::DatabaseType;
 #[cfg(feature = "fulltext")]
@@ -386,9 +386,10 @@ async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() 
         .await
         .unwrap_err();
 
-    assert!(err
-        .to_string()
-        .contains("invalid subquery for where_in_subquery()"));
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for where_in_subquery()")
+    );
 }
 
 #[test]

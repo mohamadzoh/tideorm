@@ -1,5 +1,5 @@
 use super::{
-    db_sql, ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, WhereCondition,
+    ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, WhereCondition, db_sql,
 };
 use crate::error::{Error, Result};
 use crate::model::Model;

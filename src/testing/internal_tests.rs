@@ -84,9 +84,11 @@ fn count_select_applies_optional_condition() {
     let statement =
         build_count_select::<InternalCountUser>(Some(condition)).build(DbBackend::Postgres);
 
-    assert!(statement
-        .sql
-        .contains("WHERE \"internal_count_users\".\"name\" = $1"));
+    assert!(
+        statement
+            .sql
+            .contains("WHERE \"internal_count_users\".\"name\" = $1")
+    );
     assert!(statement.values.is_some());
 }
 

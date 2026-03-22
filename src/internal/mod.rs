@@ -14,14 +14,14 @@ use crate::error::{Error, Result};
 // Allow unused_imports here: we re-export broadly so other modules can import selectively
 #[allow(unused_imports)]
 pub use sea_orm::{
-    entity::prelude::*,
-    sea_query::{Alias, Asterisk, Expr, ExprTrait},
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
     ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
     DatabaseTransaction, DbBackend, DbErr, DeleteMany, DeriveEntityModel, DeriveRelation,
     EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden, IntoActiveModel, Iterable,
     LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     Related, RelationDef, RelationTrait, Statement, TransactionTrait, TryGetable, Value,
+    entity::prelude::*,
+    sea_query::{Alias, Asterisk, Expr, ExprTrait},
 };
 
 /// Internal trait that maps TideORM models to SeaORM entities

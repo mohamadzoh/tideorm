@@ -10,7 +10,7 @@
 //!
 //! Run with: cargo bench --bench query_benchmarks
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tideorm::prelude::*;

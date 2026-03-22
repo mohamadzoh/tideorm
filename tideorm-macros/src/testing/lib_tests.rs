@@ -1,6 +1,6 @@
 use super::*;
 use quote::quote;
-use syn::{parse_quote, Type};
+use syn::{Type, parse_quote};
 
 use crate::parse::ModelField;
 
