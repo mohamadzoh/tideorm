@@ -13,8 +13,7 @@ impl Database {
                     .await
             }
             ConnectionRef::Transaction(tx) => {
-                crate::profiling::__profile_future(tx.as_ref().execute_unprepared("SELECT 1"))
-                    .await
+                crate::profiling::__profile_future(tx.as_ref().execute_unprepared("SELECT 1")).await
             }
         }
         .map_err(|e| Error::connection(e.to_string()))?;
