@@ -5,6 +5,18 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9] - 2026-03-22
+
+### Changed
+
+- Removed the unused direct `async-recursion` dependency from the main TideORM crate.
+- Updated the macros crate to use `convert_case` 0.11.
+- Refreshed dependency examples and macro-crate docs to use the 0.8.9 release version.
+
+### Internal
+
+- Verified the release prep with `cargo test --lib`.
+
 ## [0.8.8] - 2026-03-22
 
 ### Fixed
@@ -640,7 +652,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/mohamadzoh/tideorm/compare/v0.8.5...v0.8.6

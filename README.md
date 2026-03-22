@@ -193,22 +193,22 @@ let recent_posts = user.posts.load_with(|q| {
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.8.8", features = ["postgres"] }
+tideorm = { version = "0.8.9", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.8.8", features = ["mysql"] }
+tideorm = { version = "0.8.9", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.8.8", features = ["sqlite"] }
+tideorm = { version = "0.8.9", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.8.8", features = ["postgres", "attachments"] }
+tideorm = { version = "0.8.9", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.8.8", features = ["postgres", "translations"] }
+tideorm = { version = "0.8.9", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.8.8", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.8.9", features = ["postgres", "fulltext"] }
 ```
 
 ### Feature Flags
