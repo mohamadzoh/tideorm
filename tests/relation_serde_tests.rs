@@ -55,6 +55,7 @@ struct Team {
     )]
     pub members: HasMany<TeamMember>,
 
+    #[tideorm(morph_name = "labelable")]
     pub labels: MorphMany<Role>,
 }
 

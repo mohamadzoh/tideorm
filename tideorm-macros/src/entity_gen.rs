@@ -313,6 +313,7 @@ fn build_related_entity_value(ty: &syn::Type) -> TokenStream2 {
 fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
     ctx.relation_fields
         .iter()
+        .filter(|field| field.is_relation())
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| -> syn::Result<TokenStream2> {
             let related_types = relation_generic_types(&field.ty);

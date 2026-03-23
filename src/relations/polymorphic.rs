@@ -32,6 +32,16 @@ impl<Morphable> MorphTo<Morphable> {
         self.id_value = Some(id_value);
         self
     }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.type_column == previous.type_column
+            && self.id_column == previous.id_column
+        {
+            self.type_value = previous.type_value.clone();
+            self.id_value = previous.id_value.clone();
+        }
+    }
 }
 
 impl<Morphable> Default for MorphTo<Morphable> {
@@ -100,6 +110,17 @@ impl<Related: Model> MorphOne<Related> {
         self.parent_pk = Some(pk);
         self.parent_table = Some(table);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.morph_name == previous.morph_name
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+            && self.parent_table == previous.parent_table
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     pub async fn load(&self) -> Result<Option<Related>> {
@@ -197,6 +218,17 @@ impl<Related: Model> MorphMany<Related> {
         self.parent_pk = Some(pk);
         self.parent_table = Some(table);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.morph_name == previous.morph_name
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+            && self.parent_table == previous.parent_table
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     pub async fn load(&self) -> Result<Vec<Related>> {

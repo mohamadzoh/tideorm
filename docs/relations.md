@@ -195,10 +195,12 @@ pub struct Post {
     pub title: String,
     
     // Polymorphic: Post has many Images
+    #[tideorm(morph_name = "imageable")]
     pub images: MorphMany<Image>,
 }
 
-// Note: MorphMany/MorphOne require manual setup with .with_parent()
+// MorphOne/MorphMany fields are wired automatically when morph_name is provided.
+// On the child side, use #[tideorm(morph_name = "imageable")] on MorphTo<T> too.
 ```
 
 ---

@@ -34,6 +34,16 @@ impl<E: Model> SelfRef<E> {
         self
     }
 
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.fk_value == previous.fk_value
+        {
+            self.cached = previous.cached.clone();
+        }
+    }
+
     pub async fn load(&self) -> Result<Option<E>> {
         let fk = match &self.fk_value {
             Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load")?,
@@ -130,6 +140,16 @@ impl<E: Model> SelfRefMany<E> {
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        if self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+        {
+            self.cached = previous.cached.clone();
+        }
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {

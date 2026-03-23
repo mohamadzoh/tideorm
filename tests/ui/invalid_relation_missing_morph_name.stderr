@@ -1,0 +1,5 @@
+error: polymorphic relation fields require #[tideorm(morph_name = "...")]
+ --> tests/ui/invalid_relation_missing_morph_name.rs:5:5
+  |
+5 |     images: tideorm::relations::MorphMany<Image>,
+  |     ^^^^^^

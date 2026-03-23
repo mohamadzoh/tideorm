@@ -4,7 +4,9 @@ use quote::{format_ident, quote};
 use syn::{Ident, Type};
 
 use crate::meta_support::{ExistingDerives, pluralize};
-use crate::parse::{IndexDef, ModelField, ModelInput, parse_validation_attributes};
+use crate::parse::{
+    IndexDef, ModelField, ModelInput, parse_validation_attributes, relation_wrapper_name,
+};
 use crate::relation_gen::{build_relation_field_inits, build_relation_state_refreshes};
 
 pub(crate) struct BuildContext {
@@ -480,6 +482,27 @@ fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()> {
     let mut errors: Option<syn::Error> = None;
 
     for field in fields {
+        if matches!(
+            relation_wrapper_name(&field.ty),
+            Some("MorphOne" | "MorphMany" | "MorphTo")
+        ) && field.morph_name.is_none()
+        {
+            let field_ident = field
+                .ident
+                .as_ref()
+                .expect("relation fields must have identifiers");
+            let error = syn::Error::new_spanned(
+                field_ident,
+                "polymorphic relation fields require #[tideorm(morph_name = \"...\")]",
+            );
+
+            if let Some(existing) = &mut errors {
+                existing.combine(error);
+            } else {
+                errors = Some(error);
+            }
+        }
+
         if field.has_many_through.is_some() {
             let mut missing = Vec::new();
             if field.pivot.is_none() {

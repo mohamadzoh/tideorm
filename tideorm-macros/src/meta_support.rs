@@ -20,6 +20,7 @@ pub(crate) fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
             existing.has_debug |= tokens.contains("Debug");
             existing.has_clone |= tokens.contains("Clone");
             existing.has_default |= tokens.contains("Default");
+            existing.has_serialize |= tokens.contains("Serialize");
             if tokens.contains("Deserialize") {
                 existing.has_deserialize = true;
             }

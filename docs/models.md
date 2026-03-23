@@ -876,16 +876,19 @@ pub struct Employee {
     pub id: i64,
     pub name: String,
     pub manager_id: Option<i64>,
+
+    #[tideorm(foreign_key = "manager_id")]
+    pub manager: SelfRef<Employee>,
+
+    #[tideorm(foreign_key = "manager_id")]
+    pub reports: SelfRefMany<Employee>,
 }
 
 // Usage:
 let emp = Employee::find(5).await?.unwrap();
 
-// Manual wrapper setup is required currently.
-let manager_rel = SelfRef::<Employee>::new("manager_id", "id")
-    .with_fk_value(serde_json::json!(emp.manager_id));
-let reports_rel = SelfRefMany::<Employee>::new("manager_id", "id")
-    .with_parent_pk(serde_json::json!(emp.id));
+let manager_rel = emp.manager.clone();
+let reports_rel = emp.reports.clone();
 
 // Load parent (manager)
 let manager = manager_rel.load().await?;
@@ -899,7 +902,7 @@ let count = reports_rel.count().await?;
 let tree = reports_rel.load_tree(3).await?;  // 3 levels deep
 ```
 
-Note: `SelfRef` and `SelfRefMany` are runtime wrappers today. The derive macro does not yet provide `#[tideorm(self_ref = ...)]` or `#[tideorm(self_ref_many = ...)]` field wiring.
+`SelfRef` and `SelfRefMany` fields are wired automatically when you provide the self-referencing `foreign_key`. `local_key` defaults to `id` and can be overridden explicitly when needed.
 
 `SelfRefMany::load_tree()` respects the configured `local_key` and fetches the
 tree in one query, which avoids one SELECT per node on large hierarchies.

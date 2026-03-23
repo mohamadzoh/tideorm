@@ -101,7 +101,10 @@ For `has_many_through`, declare `pivot`, `foreign_key`, and `related_key` explic
 | `#[tideorm(has_many_through = "Model")]` | Define a has-many-through relationship |
 | `#[tideorm(foreign_key = "col")]` | Specify the foreign key column |
 | `#[tideorm(owner_key = "col")]` | Specify the owner/local key |
+| `#[tideorm(morph_name = "name")]` | Configure the base name for polymorphic relation columns |
 | `#[tideorm(pivot = "table")]` | Specify pivot table for many-to-many |
+
+Wrapper fields such as `MorphOne<T>`, `MorphMany<T>`, `MorphTo<T>`, `SelfRef<T>`, and `SelfRefMany<T>` are macro-wired as relation helpers when their required metadata is present. Polymorphic wrappers require `morph_name`; self-referencing wrappers use `foreign_key` and default `local_key` to `id`.
 
 ## License
 
