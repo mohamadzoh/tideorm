@@ -27,7 +27,7 @@ pub use sea_orm::{
 /// Internal trait that maps TideORM models to SeaORM entities
 /// This is implemented by TideORM's model macros.
 #[doc(hidden)]
-pub trait InternalModel: Sized + Send + Sync + Clone {
+pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     type Entity: EntityTrait;
     type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + ActiveModelBehavior + Send;
 
@@ -43,9 +43,19 @@ pub trait InternalModel: Sized + Send + Sync + Clone {
     /// Resolve a SeaORM column enum from either a field name or column name.
     fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column>;
 
-    /// Get SeaORM primary key column (optional, for find_by_id)
+    /// Get SeaORM primary key columns.
+    fn primary_key_columns() -> Vec<<Self::Entity as EntityTrait>::Column> {
+        Vec::new()
+    }
+
+    /// Get the SeaORM condition for an exact primary key match.
+    fn primary_key_condition(
+        primary_key: &<Self as crate::model::ModelMeta>::PrimaryKey,
+    ) -> Condition;
+
+    /// Get SeaORM primary key column (optional, for single-column operations)
     fn primary_key_column() -> Option<<Self::Entity as EntityTrait>::Column> {
-        None
+        Self::primary_key_columns().into_iter().next()
     }
 
     /// Rebuild runtime-only relation wrappers after an in-memory model overwrite.
@@ -208,9 +218,12 @@ impl QueryExecutor {
         let mut query_label = String::from("last()");
 
         // Use the primary key column if available, otherwise fall back to unordered
-        if let Some(pk_col) = M::primary_key_column() {
-            select = select.order_by_desc(pk_col);
-            query_label = format!("last(order_by={} desc)", M::primary_key_name());
+        let pk_columns = M::primary_key_columns();
+        if !pk_columns.is_empty() {
+            for pk_col in pk_columns {
+                select = select.order_by_desc(pk_col);
+            }
+            query_label = format!("last(order_by={} desc)", M::primary_key_names().join(", "));
         }
 
         let result = select.one(conn);

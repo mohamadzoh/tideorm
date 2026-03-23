@@ -29,6 +29,22 @@ struct PresenterSerializationModel {
     title: String,
 }
 
+#[tideorm::model(table = "model_test_custom_pk_column")]
+struct CustomPrimaryKeyColumnModel {
+    #[tideorm(primary_key, column = "user_id")]
+    id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "model_test_user_roles")]
+struct CompositePrimaryKeyModel {
+    #[tideorm(primary_key)]
+    user_id: i64,
+    #[tideorm(primary_key)]
+    role_id: i64,
+    granted_by: String,
+}
+
 #[cfg(feature = "translations")]
 #[tideorm::model(table = "model_test_translations", translatable = "title")]
 struct TranslationSerializationModel {
@@ -191,6 +207,42 @@ fn test_to_hash_map_preserves_structured_params_field() {
     );
     assert_eq!(map.get("params"), None);
     assert_eq!(map.get("_params"), None);
+}
+
+#[test]
+fn test_primary_key_name_uses_database_column_name() {
+    assert_eq!(
+        <CustomPrimaryKeyColumnModel as crate::model::ModelMeta>::primary_key_name(),
+        "user_id"
+    );
+}
+
+#[test]
+fn test_composite_primary_key_metadata_and_accessors() {
+    let model = CompositePrimaryKeyModel {
+        user_id: 7,
+        role_id: 9,
+        granted_by: "system".to_string(),
+    };
+
+    assert_eq!(model.primary_key(), (7, 9));
+    assert_eq!(
+        <CompositePrimaryKeyModel as crate::model::ModelMeta>::primary_key_names(),
+        &["user_id", "role_id"]
+    );
+    assert_eq!(
+        <CompositePrimaryKeyModel as crate::model::ModelMeta>::primary_key_display(&(7, 9)),
+        "user_id = 7 AND role_id = 9"
+    );
+    assert!(!model.is_new());
+
+    let primary_key_columns =
+        <CompositePrimaryKeyModel as crate::internal::InternalModel>::primary_key_columns();
+    assert_eq!(primary_key_columns.len(), 2);
+
+    let _ = <CompositePrimaryKeyModel as crate::internal::InternalModel>::primary_key_condition(&(
+        7, 9,
+    ));
 }
 
 #[cfg(feature = "translations")]

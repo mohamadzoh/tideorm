@@ -5,6 +5,8 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::require_scalar_relation_key;
+
 #[derive(Debug, Clone)]
 pub struct MorphTo<Morphable> {
     pub type_column: &'static str,
@@ -107,6 +109,7 @@ impl<Related: Model> MorphOne<Related> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "MorphOne::load")?;
         let table = self
             .parent_table
             .as_ref()
@@ -203,6 +206,7 @@ impl<Related: Model> MorphMany<Related> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "MorphMany::load")?;
         let table = self
             .parent_table
             .as_ref()
@@ -228,6 +232,7 @@ impl<Related: Model> MorphMany<Related> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "MorphMany::load_with")?;
         let table = self
             .parent_table
             .as_ref()
@@ -250,6 +255,7 @@ impl<Related: Model> MorphMany<Related> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "MorphMany::count")?;
         let table = self
             .parent_table
             .as_ref()

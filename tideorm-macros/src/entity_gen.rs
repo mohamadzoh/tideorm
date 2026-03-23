@@ -21,10 +21,10 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let internal_entity_mod = &ctx.internal_entity_mod;
     let table_name = &ctx.table_name;
     let struct_name = &ctx.struct_name;
-    let pk_column_variant = &ctx.pk_column_variant;
+    let pk_column_variants = &ctx.pk_column_variants;
     let pk_type = &ctx.pk_type;
+    let pk_column_names = &ctx.pk_column_names;
     let pk_auto_increment = ctx.pk_auto_increment;
-    let pk_ident = &ctx.pk_ident;
     let column_type_defs = &ctx.column_type_defs;
     let column_variants = &ctx.column_variants;
     let sea_orm_field_defs = &ctx.sea_orm_field_defs;
@@ -53,6 +53,8 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let relation_variants = build_relation_variants(ctx);
     let relation_defs = build_relation_defs(ctx)?;
     let related_impls = build_related_impls(ctx)?;
+    let primary_key_display_impl = build_primary_key_display_impl(ctx);
+    let primary_key_is_new_impl = build_primary_key_is_new_impl(ctx);
     let relation_trait_impl = if relation_variants.is_empty() {
         quote! {
             impl RelationTrait for Relation {
@@ -103,7 +105,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
 
             #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
             pub enum PrimaryKey {
-                #pk_column_variant
+                #(#pk_column_variants),*
             }
 
             impl PrimaryKeyTrait for PrimaryKey {
@@ -135,8 +137,14 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         impl ::tideorm::model::ModelMeta for #struct_name {
             type PrimaryKey = #pk_type;
             fn table_name() -> &'static str { #table_name }
-            fn primary_key_name() -> &'static str { stringify!(#pk_ident) }
+            fn primary_key_names() -> &'static [&'static str] { &[#(#pk_column_names),*] }
             fn primary_key_auto_increment() -> bool { #pk_auto_increment }
+            fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
+                #primary_key_display_impl
+            }
+            fn primary_key_is_new(primary_key: &Self::PrimaryKey) -> bool {
+                #primary_key_is_new_impl
+            }
             fn column_names() -> &'static [&'static str] { &[#(#column_names),*] }
             fn field_names() -> &'static [&'static str] { &[#(stringify!(#field_names)),*] }
             fn hidden_attributes() -> Vec<&'static str> { vec![#(#hidden_attrs),*] }
@@ -153,6 +161,56 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#unique_index_impls),*] }
         }
     })
+}
+
+fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
+    if ctx.pk_column_names.len() == 1 {
+        let pk_column_name = &ctx.pk_column_name;
+        return quote! {
+            format!("{} = {}", #pk_column_name, primary_key)
+        };
+    }
+
+    let bindings: Vec<_> = (0..ctx.pk_column_names.len())
+        .map(|index| format_ident!("pk_{index}"))
+        .collect();
+    let pk_column_names = &ctx.pk_column_names;
+
+    quote! {
+        let (#(#bindings),*) = primary_key.clone();
+        vec![#(format!("{} = {}", #pk_column_names, #bindings)),*].join(" AND ")
+    }
+}
+
+fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
+    if ctx.pk_column_names.len() == 1 {
+        if ctx.pk_auto_increment {
+            return quote! {
+                let primary_key = primary_key.to_string();
+                if primary_key.is_empty() {
+                    return true;
+                }
+
+                primary_key
+                    .parse::<i128>()
+                    .map(|value| value == 0)
+                    .unwrap_or(false)
+            };
+        }
+
+        return quote! {
+            primary_key.to_string().is_empty()
+        };
+    }
+
+    let bindings: Vec<_> = (0..ctx.pk_column_names.len())
+        .map(|index| format_ident!("pk_{index}"))
+        .collect();
+
+    quote! {
+        let (#(#bindings),*) = primary_key.clone();
+        false #(|| #bindings.to_string().is_empty())*
+    }
 }
 
 fn build_relation_variants(ctx: &BuildContext) -> Vec<syn::Ident> {
@@ -378,6 +436,7 @@ fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
     let schema_name = &ctx.schema_name;
     let field_types = &ctx.field_types;
     let column_names = &ctx.column_names;
+    let pk_column_names = &ctx.pk_column_names;
     let sync_column_attrs = &ctx.sync_column_attrs;
 
     quote! {
@@ -385,7 +444,9 @@ fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
             #[doc(hidden)]
             pub fn __get_sync_schema() -> ::tideorm::sync::ModelSchema {
                 use ::tideorm::sync::{ColumnDef, ModelSchema, normalize_rust_type};
-                let mut schema = ModelSchema::new(#table_name).schema(#schema_name);
+                let mut schema = ModelSchema::new(#table_name)
+                    .schema(#schema_name)
+                    .primary_keys(vec![#(#pk_column_names.to_string()),*]);
                 #(
                     {
                         let rust_type = normalize_rust_type(stringify!(#field_types));

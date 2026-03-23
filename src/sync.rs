@@ -121,8 +121,8 @@ use sea_orm::{
     ConnectionTrait, DbBackend, EntityTrait, Statement,
     schema::{Schema, SchemaBuilder},
     sea_query::{
-        Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, MysqlQueryBuilder,
-        PostgresQueryBuilder, SqliteQueryBuilder, Table,
+        Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, Index,
+        MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder, Table,
     },
 };
 
@@ -358,6 +358,8 @@ pub struct ModelSchema {
     pub schema_name: String,
     /// Column definitions
     pub columns: Vec<ColumnDef>,
+    /// Primary key columns, in declaration order.
+    pub primary_keys: Vec<String>,
 }
 
 impl ModelSchema {
@@ -367,6 +369,7 @@ impl ModelSchema {
             table_name: table_name.into(),
             schema_name: "public".to_string(),
             columns: Vec::new(),
+            primary_keys: Vec::new(),
         }
     }
 
@@ -385,6 +388,12 @@ impl ModelSchema {
     /// Add multiple columns
     pub fn columns(mut self, cols: Vec<ColumnDef>) -> Self {
         self.columns.extend(cols);
+        self
+    }
+
+    /// Set the model primary keys.
+    pub fn primary_keys(mut self, columns: Vec<String>) -> Self {
+        self.primary_keys = columns;
         self
     }
 }
@@ -602,6 +611,7 @@ async fn create_table_from_model_schema(
 ) -> Result<()> {
     let mut table = Table::create();
     table.table(Alias::new(&model.table_name));
+    let composite_primary_key = model.primary_keys.len() > 1;
 
     // Add columns using SeaORM's column definitions
     for col in &model.columns {
@@ -610,7 +620,7 @@ async fn create_table_from_model_schema(
         // Set column type based on Rust type
         apply_column_type(&mut column, &col.col_type, col.auto_increment, backend);
 
-        if col.primary_key {
+        if col.primary_key && !composite_primary_key {
             column.primary_key();
         }
 
@@ -618,7 +628,7 @@ async fn create_table_from_model_schema(
             column.auto_increment();
         }
 
-        if !col.nullable && !col.primary_key && !col.auto_increment {
+        if (composite_primary_key || !col.primary_key) && !col.auto_increment && !col.nullable {
             column.not_null();
         }
 
@@ -628,6 +638,14 @@ async fn create_table_from_model_schema(
         }
 
         table.col(&mut column);
+    }
+
+    if composite_primary_key {
+        let mut primary_key = Index::create();
+        for column in &model.primary_keys {
+            primary_key.col(Alias::new(column));
+        }
+        table.primary_key(&mut primary_key);
     }
 
     table.if_not_exists();

@@ -1,0 +1,5 @@
+error: has_many_through relations require #[tideorm(pivot = "...")], #[tideorm(foreign_key = "...")], #[tideorm(related_key = "...")]
+  --> tests/ui/invalid_relation_missing_multiple_requirements.rs:24:5
+   |
+24 |     roles: HasManyThrough<Role, UserRole>,
+   |     ^^^^^

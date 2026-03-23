@@ -1,5 +1,5 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 
 use crate::context::BuildContext;
 use crate::parse::relation_generic_types;
@@ -17,6 +17,56 @@ pub(crate) fn generate_model_support(ctx: &BuildContext) -> TokenStream2 {
         #model_trait_impl
         #soft_delete_impl
         #eager_loader_impl
+    }
+}
+
+fn build_primary_key_value_impl(ctx: &BuildContext) -> TokenStream2 {
+    if ctx.pk_idents.len() == 1 {
+        let pk_ident = &ctx.pk_ident;
+        quote!(self.#pk_ident.clone())
+    } else {
+        let pk_idents = &ctx.pk_idents;
+        quote!((#(self.#pk_idents.clone()),*))
+    }
+}
+
+fn build_primary_key_condition_impl(
+    ctx: &BuildContext,
+    internal_entity_mod: &syn::Ident,
+) -> TokenStream2 {
+    if ctx.pk_column_variants.len() == 1 {
+        let pk_column_variant = &ctx.pk_column_variant;
+        return quote! {
+            use ::tideorm::sea_orm::ColumnTrait;
+            ::tideorm::sea_orm::Condition::all()
+                .add(#internal_entity_mod::Column::#pk_column_variant.eq(primary_key.clone()))
+        };
+    }
+
+    let bindings: Vec<_> = (0..ctx.pk_column_variants.len())
+        .map(|index| format_ident!("pk_{index}"))
+        .collect();
+    let pk_column_variants = &ctx.pk_column_variants;
+
+    quote! {
+        use ::tideorm::sea_orm::ColumnTrait;
+        let (#(#bindings),*) = primary_key.clone();
+        ::tideorm::sea_orm::Condition::all()
+            #(.add(#internal_entity_mod::Column::#pk_column_variants.eq(#bindings)))*
+    }
+}
+
+fn build_pk_conflict_check(ctx: &BuildContext) -> TokenStream2 {
+    let pk_column_names = &ctx.pk_column_names;
+    quote! {
+        conflict_cols.iter().any(|column| matches!(column.as_str(), #(#pk_column_names)|*))
+    }
+}
+
+fn build_pk_exclusion_check(ctx: &BuildContext, value_ident: TokenStream2) -> TokenStream2 {
+    let pk_column_names = &ctx.pk_column_names;
+    quote! {
+        matches!(#value_ident.as_str(), #(#pk_column_names)|*)
     }
 }
 
@@ -63,10 +113,11 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let all_field_names = &ctx.all_field_names;
     let relation_field_defaults = &ctx.relation_field_defaults;
     let relation_state_refreshes = &ctx.relation_state_refreshes;
-    let pk_column_variant = &ctx.pk_column_variant;
+    let pk_column_variants = &ctx.pk_column_variants;
     let field_names = &ctx.field_names;
     let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
+    let primary_key_condition_impl = build_primary_key_condition_impl(ctx, internal_entity_mod);
 
     quote! {
         #[doc(hidden)]
@@ -102,8 +153,14 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 }
             }
 
-            fn primary_key_column() -> Option<<Self::Entity as ::tideorm::sea_orm::EntityTrait>::Column> {
-                Some(#internal_entity_mod::Column::#pk_column_variant)
+            fn primary_key_columns() -> Vec<<Self::Entity as ::tideorm::sea_orm::EntityTrait>::Column> {
+                vec![#(#internal_entity_mod::Column::#pk_column_variants),*]
+            }
+
+            fn primary_key_condition(
+                primary_key: &<Self as ::tideorm::model::ModelMeta>::PrimaryKey,
+            ) -> ::tideorm::sea_orm::Condition {
+                #primary_key_condition_impl
             }
 
             fn refresh_runtime_relations_from(&mut self, previous: &Self) {
@@ -117,22 +174,21 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
     let update_active_model_setters = &ctx.update_active_model_setters;
-    let pk_ident = &ctx.pk_ident;
+    let pk_idents = &ctx.pk_idents;
     let table_name = &ctx.table_name;
-    let pk_column_name = &ctx.pk_column_name;
     let field_names = &ctx.field_names;
     let column_names = &ctx.column_names;
     let with_relations_method = generate_with_relations_method(ctx);
-    let delete_active_model_init = if ctx.field_names.len() == 1 {
+    let delete_active_model_init = if ctx.field_names.len() == ctx.pk_idents.len() {
         quote! {
             #internal_entity_mod::ActiveModel {
-                #pk_ident: ActiveValue::Unchanged(self.#pk_ident),
+                #(#pk_idents: ActiveValue::Unchanged(self.#pk_idents)),*
             }
         }
     } else {
         quote! {
             #internal_entity_mod::ActiveModel {
-                #pk_ident: ActiveValue::Unchanged(self.#pk_ident),
+                #(#pk_idents: ActiveValue::Unchanged(self.#pk_idents)),*,
                 ..Default::default()
             }
         }
@@ -180,7 +236,7 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
             fn __primary_key_error_context(
                 primary_key: &<Self as ::tideorm::model::ModelMeta>::PrimaryKey,
             ) -> ::tideorm::error::ErrorContext {
-                let condition = format!("{} = {}", #pk_column_name, primary_key);
+                let condition = <Self as ::tideorm::model::ModelMeta>::primary_key_display(primary_key);
                 Self::__base_error_context()
                     .condition(condition.clone())
                     .operator_chain(condition)
@@ -208,36 +264,43 @@ fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
 fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let pk_ident = &ctx.pk_ident;
+    let primary_key_impl = build_primary_key_value_impl(ctx);
     let table_name = &ctx.table_name;
-    let pk_column_name = &ctx.pk_column_name;
     let pk_auto_increment = ctx.pk_auto_increment;
     let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
     let field_names = &ctx.field_names;
+    let pk_contains_conflict_check = build_pk_conflict_check(ctx);
+    let pk_exclusion_check = build_pk_exclusion_check(ctx, quote!(column));
 
     quote! {
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::model::Model for #struct_name {
             fn primary_key(&self) -> Self::PrimaryKey {
-                self.#pk_ident.clone()
+                #primary_key_impl
             }
 
             async fn find(id: Self::PrimaryKey) -> ::tideorm::Result<Option<Self>> {
                 use ::tideorm::database::Connection;
                 use ::tideorm::internal::InternalModel;
-                use ::tideorm::sea_orm::EntityTrait;
+                use ::tideorm::sea_orm::{EntityTrait, QueryFilter};
                 let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("find_by_id({})", id));
+                    .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(conn.connection()).await
+                            #internal_entity_mod::Entity::find()
+                                .filter(<Self as InternalModel>::primary_key_condition(&id))
+                                .one(conn.connection())
+                                .await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(tx.as_ref()).await
+                            #internal_entity_mod::Entity::find()
+                                .filter(<Self as InternalModel>::primary_key_condition(&id))
+                                .one(tx.as_ref())
+                                .await
                         }
                     }
                 })
@@ -253,19 +316,25 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             ) -> ::tideorm::Result<Option<Self>> {
                 use ::tideorm::database::Connection;
                 use ::tideorm::internal::InternalModel;
-                use ::tideorm::sea_orm::EntityTrait;
+                use ::tideorm::sea_orm::{EntityTrait, QueryFilter};
                 let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("find_by_id({})", id));
+                    .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = db
                         .__get_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(conn.connection()).await
+                            #internal_entity_mod::Entity::find()
+                                .filter(<Self as InternalModel>::primary_key_condition(&id))
+                                .one(conn.connection())
+                                .await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::find_by_id(id).one(tx.as_ref()).await
+                            #internal_entity_mod::Entity::find()
+                                .filter(<Self as InternalModel>::primary_key_condition(&id))
+                                .one(tx.as_ref())
+                                .await
                         }
                     }
                 })
@@ -277,18 +346,24 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
                 use ::tideorm::database::Connection;
-                use ::tideorm::sea_orm::EntityTrait;
+                use ::tideorm::sea_orm::{EntityTrait, QueryFilter};
                 let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("delete_by_id({})", id));
+                    .query(format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
                     match connection {
                         ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::delete_by_id(id).exec(conn.connection()).await
+                            #internal_entity_mod::Entity::delete_many()
+                                .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
+                                .exec(conn.connection())
+                                .await
                         }
                         ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::delete_by_id(id).exec(tx.as_ref()).await
+                            #internal_entity_mod::Entity::delete_many()
+                                .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
+                                .exec(tx.as_ref())
+                                .await
                         }
                     }
                 })
@@ -306,8 +381,9 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
                 let model = self;
                 (&model).run_before_delete()?;
-                let error_context = Self::__primary_key_error_context(&model.#pk_ident)
-                    .query(format!("delete where {} = {}", #pk_column_name, model.#pk_ident));
+                let primary_key = model.primary_key();
+                let error_context = Self::__primary_key_error_context(&primary_key)
+                    .query(format!("delete where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));
                 let active = model.clone().__into_delete_active_model();
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = ::tideorm::database::__current_connection()
@@ -358,8 +434,9 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::sea_orm::ActiveModelTrait;
                 let mut model = self;
                 (&mut model).run_before_update()?;
-                let error_context = Self::__primary_key_error_context(&model.#pk_ident)
-                    .query(format!("update where {} = {}", #pk_column_name, model.#pk_ident));
+                let primary_key = model.primary_key();
+                let error_context = Self::__primary_key_error_context(&primary_key)
+                    .query(format!("update where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));
                 let active = model.__into_update_active_model();
                 let result = ::tideorm::profiling::__profile_future(
                     async move {
@@ -396,10 +473,10 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
                 let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
-                let include_pk = conflict_cols.contains(&#pk_column_name.to_string()) || !#pk_auto_increment;
+                let include_pk = #pk_contains_conflict_check || !#pk_auto_increment;
                 let insertable_columns: Vec<&str> = vec![#(#column_names),*]
                     .into_iter()
-                    .filter(|column| !(*column == #pk_column_name && #pk_auto_increment && !include_pk))
+                    .filter(|column| !(*column == <Self as ::tideorm::model::ModelMeta>::primary_key_name() && #pk_auto_increment && !include_pk))
                     .collect();
                 let conflict_columns: Vec<_> = conflict_cols
                     .iter()
@@ -424,7 +501,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 } else {
                     insertable_columns.iter().filter(|column| {
                         let column = column.to_string();
-                        !conflict_cols.contains(&column) && column != #pk_column_name
+                        !conflict_cols.contains(&column) && !#pk_exclusion_check
                     }).map(|column| column.to_string()).collect()
                 };
                 for column in &update_cols {

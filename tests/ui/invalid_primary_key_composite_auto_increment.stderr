@@ -1,0 +1,5 @@
+error: composite primary keys do not support #[tideorm(auto_increment)]
+ --> tests/ui/invalid_primary_key_composite_auto_increment.rs:4:5
+  |
+4 |     user_id: i64,
+  |     ^^^^^^^

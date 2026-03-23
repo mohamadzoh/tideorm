@@ -7,6 +7,32 @@ use crate::internal::InternalModel;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
 
+fn apply_primary_key_filter<M: Model>(
+    mut query: QueryBuilder<M>,
+    primary_key: &M::PrimaryKey,
+) -> Result<QueryBuilder<M>> {
+    let values = match serde_json::to_value(primary_key)
+        .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?
+    {
+        serde_json::Value::Array(values) => values,
+        value => vec![value],
+    };
+
+    let columns = M::primary_key_names();
+    if values.len() != columns.len() {
+        return Err(Error::invalid_query(format!(
+            "Primary key value for {} did not match declared key columns",
+            M::table_name()
+        )));
+    }
+
+    for (column, value) in columns.iter().zip(values.into_iter()) {
+        query = query.where_eq(*column, value);
+    }
+
+    Ok(query)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RelationConstraints {
     pub conditions: Vec<(String, serde_json::Value)>,
@@ -306,14 +332,11 @@ impl<M: Model> EagerQueryBuilder<M> {
         Ok(results.into_iter().next())
     }
 
-    pub async fn find(
-        mut self,
-        id: impl Into<serde_json::Value>,
-    ) -> Result<Option<WithRelations<M>>>
+    pub async fn find(mut self, id: M::PrimaryKey) -> Result<Option<WithRelations<M>>>
     where
         M: EagerLoadModel,
     {
-        self.query = self.query.where_eq(M::primary_key_name(), id);
+        self.query = apply_primary_key_filter(self.query, &id)?.limit(1);
         self.first().await
     }
 }

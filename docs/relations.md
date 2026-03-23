@@ -82,6 +82,10 @@ pub struct Post {
 
 Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are runtime helpers, not persisted columns. TideORM's generated serde implementation skips them during serialization and restores them with defaults during deserialization, so they do not leak into JSON payloads.
 
+Runtime relation helpers operate on a single local or foreign key value per query. For composite-key models, define `local_key` explicitly when needed and use custom queries when the relation requires matching multiple columns.
+
+For `has_many_through`, TideORM requires all three relation options to be declared explicitly: `pivot`, `foreign_key`, and `related_key`. Missing any of them is now a compile-time error.
+
 ```rust
 // Load a HasOne relation
 let user = User::find(1).await?.unwrap();

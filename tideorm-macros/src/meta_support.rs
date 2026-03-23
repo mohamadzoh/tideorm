@@ -23,9 +23,6 @@ pub(crate) fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
             if tokens.contains("Deserialize") {
                 existing.has_deserialize = true;
             }
-            if tokens.contains("Serialize") && !tokens.contains("Deserialize") {
-                existing.has_serialize = true;
-            }
             for part in tokens.split(',').map(str::trim) {
                 if part == "Serialize"
                     || part.ends_with("::Serialize")
@@ -51,5 +48,36 @@ pub(crate) fn pluralize(word: &str) -> String {
         format!("{}ies", &word[..word.len() - 1])
     } else {
         format!("{}s", word)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_existing_derives;
+
+    #[test]
+    fn detect_existing_derives_finds_serialize_and_deserialize_together() {
+        let item: syn::DeriveInput = syn::parse_quote! {
+            #[derive(Serialize, Deserialize)]
+            struct Example;
+        };
+
+        let existing = detect_existing_derives(&item.attrs);
+
+        assert!(existing.has_serialize);
+        assert!(existing.has_deserialize);
+    }
+
+    #[test]
+    fn detect_existing_derives_finds_path_qualified_serialize() {
+        let item: syn::DeriveInput = syn::parse_quote! {
+            #[derive(serde::Serialize)]
+            struct Example;
+        };
+
+        let existing = detect_existing_derives(&item.attrs);
+
+        assert!(existing.has_serialize);
+        assert!(!existing.has_deserialize);
     }
 }

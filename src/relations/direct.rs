@@ -5,6 +5,8 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::require_scalar_relation_key;
+
 #[derive(Debug, Clone)]
 pub struct HasOne<E: Model> {
     pub foreign_key: &'static str,
@@ -66,6 +68,7 @@ impl<E: Model> HasOne<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasOne::load")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -83,6 +86,7 @@ impl<E: Model> HasOne<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasOne::load_with")?;
 
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).first().await
@@ -95,6 +99,7 @@ impl<E: Model> HasOne<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasOne::exists")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -198,6 +203,7 @@ impl<E: Model> HasMany<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasMany::load")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -215,6 +221,7 @@ impl<E: Model> HasMany<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasMany::load_with")?;
 
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).get().await
@@ -227,6 +234,7 @@ impl<E: Model> HasMany<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasMany::count")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -241,6 +249,7 @@ impl<E: Model> HasMany<E> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasMany::exists")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -344,6 +353,7 @@ impl<E: Model> BelongsTo<E> {
             .fk_value
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
 
         E::query()
             .where_eq(self.owner_key, fk.clone())
@@ -361,6 +371,7 @@ impl<E: Model> BelongsTo<E> {
             .fk_value
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        let fk = require_scalar_relation_key(fk, "BelongsTo::load_with")?;
 
         let query = E::query().where_eq(self.owner_key, fk.clone());
         constraint_fn(query).first().await
@@ -373,6 +384,7 @@ impl<E: Model> BelongsTo<E> {
             .fk_value
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
+        let fk = require_scalar_relation_key(fk, "BelongsTo::exists")?;
 
         E::query()
             .where_eq(self.owner_key, fk.clone())

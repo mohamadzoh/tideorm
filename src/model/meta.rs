@@ -55,13 +55,23 @@ impl IndexDefinition {
 
 /// Metadata trait for model information.
 pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
-    type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + std::fmt::Display + 'static;
+    type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + serde::Serialize + 'static;
 
     fn table_name() -> &'static str;
 
-    fn primary_key_name() -> &'static str;
+    fn primary_key_names() -> &'static [&'static str];
+
+    fn primary_key_name() -> &'static str {
+        Self::primary_key_names().first().copied().unwrap_or("id")
+    }
 
     fn primary_key_auto_increment() -> bool {
+        false
+    }
+
+    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String;
+
+    fn primary_key_is_new(_primary_key: &Self::PrimaryKey) -> bool {
         false
     }
 
@@ -82,11 +92,11 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     }
 
     fn default_order() -> Vec<(&'static str, &'static str)> {
-        vec![("id", "DESC")]
+        vec![(Self::primary_key_name(), "DESC")]
     }
 
     fn option_set_label() -> &'static str {
-        "id"
+        Self::primary_key_name()
     }
 
     fn option_set_search_fields() -> Vec<&'static str> {

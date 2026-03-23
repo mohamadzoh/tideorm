@@ -126,3 +126,17 @@ pub use self_referencing::{SelfRef, SelfRefMany};
 #[cfg(test)]
 #[path = "../testing/relations_tests.rs"]
 mod tests;
+
+pub(crate) fn require_scalar_relation_key<'a>(
+    value: &'a serde_json::Value,
+    context: &str,
+) -> crate::error::Result<&'a serde_json::Value> {
+    if value.is_array() || value.is_object() {
+        return Err(crate::error::Error::invalid_query(format!(
+            "{} only supports scalar relation keys; composite primary keys require an explicit single-column relation key or a custom query",
+            context
+        )));
+    }
+
+    Ok(value)
+}

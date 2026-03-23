@@ -169,18 +169,5 @@ pub(crate) fn is_new<M>(model: &M) -> bool
 where
     M: Model,
 {
-    let primary_key = model.primary_key().to_string();
-
-    if primary_key.is_empty() {
-        return true;
-    }
-
-    if M::primary_key_auto_increment() {
-        return primary_key
-            .parse::<i128>()
-            .map(|value| value == 0)
-            .unwrap_or(false);
-    }
-
-    false
+    M::primary_key_is_new(&model.primary_key())
 }

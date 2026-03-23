@@ -106,10 +106,7 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
         ));
     }
 
-    let other_attrs: Vec<_> = attrs
-        .iter()
-        .filter(|attr| !attr.path().is_ident("derive"))
-        .collect();
+    let other_attrs: Vec<_> = attrs.iter().collect();
     let inline_tide_attr = if has_inline_model_options {
         Some(quote! { #[tideorm(#model_attr)] })
     } else {

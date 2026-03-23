@@ -6,6 +6,8 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::require_scalar_relation_key;
+
 #[derive(Debug, Clone)]
 pub struct HasManyThrough<Related: Model, Pivot: Model> {
     pub foreign_key: &'static str,
@@ -87,17 +89,20 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::load")?;
+        let pivot_related_column = format!("{}.{}", self.pivot_table, self.related_key);
+        let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
         Related::query()
             .inner_join(
                 self.pivot_table,
-                &format!("{}.{}", self.pivot_table, self.related_key),
-                &format!("{}.{}", Related::table_name(), self.related_local_key),
+                &pivot_related_column,
+                &related_local_column,
             )
-            .where_raw(&format!(
-                "{}.{} = {}",
-                self.pivot_table, self.foreign_key, pk
-            ))
+            .where_eq(
+                format!("{}.{}", self.pivot_table, self.foreign_key),
+                pk.clone(),
+            )
             .get()
             .await
     }
@@ -112,17 +117,20 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::load_with")?;
+        let pivot_related_column = format!("{}.{}", self.pivot_table, self.related_key);
+        let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
         let query = Related::query()
             .inner_join(
                 self.pivot_table,
-                &format!("{}.{}", self.pivot_table, self.related_key),
-                &format!("{}.{}", Related::table_name(), self.related_local_key),
+                &pivot_related_column,
+                &related_local_column,
             )
-            .where_raw(&format!(
-                "{}.{} = {}",
-                self.pivot_table, self.foreign_key, pk
-            ));
+            .where_eq(
+                format!("{}.{}", self.pivot_table, self.foreign_key),
+                pk.clone(),
+            );
 
         constraint_fn(query).get().await
     }
@@ -134,12 +142,13 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::count")?;
 
         Pivot::query()
-            .where_raw(&format!(
-                "{}.{} = {}",
-                self.pivot_table, self.foreign_key, pk
-            ))
+            .where_eq(
+                format!("{}.{}", self.pivot_table, self.foreign_key),
+                pk.clone(),
+            )
             .count()
             .await
     }
@@ -151,6 +160,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::attach")?;
 
         let mut data = HashMap::new();
         data.insert(self.foreign_key.to_string(), pk.clone());
@@ -182,6 +192,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::detach")?;
 
         Pivot::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -197,6 +208,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
+        let pk = require_scalar_relation_key(pk, "HasManyThrough::sync")?;
 
         Pivot::query()
             .where_eq(self.foreign_key, pk.clone())

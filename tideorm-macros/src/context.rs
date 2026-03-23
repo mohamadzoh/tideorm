@@ -31,6 +31,7 @@ pub(crate) struct BuildContext {
     pub(crate) searchable_fields: Vec<String>,
     pub(crate) validation_rules: Vec<(String, Vec<TokenStream2>)>,
     pub(crate) pk_ident: Ident,
+    pub(crate) pk_idents: Vec<Ident>,
     pub(crate) pk_type: Type,
     pub(crate) field_names: Vec<Ident>,
     pub(crate) field_types: Vec<Type>,
@@ -38,7 +39,9 @@ pub(crate) struct BuildContext {
     pub(crate) column_variants: Vec<Ident>,
     pub(crate) column_type_defs: Vec<TokenStream2>,
     pub(crate) pk_column_variant: Ident,
+    pub(crate) pk_column_variants: Vec<Ident>,
     pub(crate) pk_column_name: String,
+    pub(crate) pk_column_names: Vec<String>,
     pub(crate) pk_auto_increment: bool,
     pub(crate) timestamps_enabled: bool,
     pub(crate) sync_column_attrs: Vec<TokenStream2>,
@@ -84,7 +87,8 @@ impl BuildContext {
             !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
         let should_gen_clone =
             !input.skip_derives && !input.skip_clone && !existing_derives.has_clone;
-        let should_gen_default = !existing_derives.has_default;
+        let should_gen_default =
+            !input.skip_derives && !input.skip_default && !existing_derives.has_default;
         let should_gen_serialize =
             !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
         let should_gen_deserialize =
@@ -121,6 +125,9 @@ impl BuildContext {
             .cloned()
             .collect();
 
+        validate_primary_key_fields(&db_fields, input.tokenize)?;
+        validate_relation_fields(&relation_fields)?;
+
         let validation_rules = db_fields
             .iter()
             .filter_map(|field| {
@@ -130,14 +137,22 @@ impl BuildContext {
             })
             .collect();
 
-        let pk_field = db_fields.iter().find(|field| field.primary_key);
+        let pk_fields: Vec<_> = db_fields.iter().filter(|field| field.primary_key).collect();
+        let pk_field = pk_fields.first().copied();
         let pk_ident = pk_field
             .and_then(|field| field.ident.as_ref())
             .cloned()
             .unwrap_or_else(|| format_ident!("id"));
-        let pk_type = pk_field
-            .map(|field| field.ty.clone())
-            .unwrap_or_else(|| syn::parse_quote!(i64));
+        let pk_idents: Vec<_> = pk_fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref().cloned())
+            .collect();
+        let pk_types: Vec<_> = pk_fields.iter().map(|field| field.ty.clone()).collect();
+        let pk_type = if pk_types.len() == 1 {
+            pk_types[0].clone()
+        } else {
+            syn::parse2(quote!((#(#pk_types),*)))?
+        };
 
         let field_names: Vec<_> = db_fields
             .iter()
@@ -161,11 +176,24 @@ impl BuildContext {
                 Some(quote!(Self::#variant => #col_type_expr))
             })
             .collect();
-        let pk_column_variant = format_ident!("{}", pk_ident.to_string().to_case(Case::Pascal));
-        let pk_column_name = pk_field
-            .map(Self::column_name)
+        let pk_column_variants: Vec<_> = pk_idents
+            .iter()
+            .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Pascal)))
+            .collect();
+        let pk_column_variant = pk_column_variants
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format_ident!("Id"));
+        let pk_column_names: Vec<_> = pk_fields
+            .iter()
+            .map(|field| Self::column_name(field))
+            .collect();
+        let pk_column_name = pk_column_names
+            .first()
+            .cloned()
             .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
-        let pk_auto_increment = pk_field.map(|field| field.auto_increment).unwrap_or(false);
+        let pk_auto_increment =
+            pk_fields.len() == 1 && pk_field.map(|field| field.auto_increment).unwrap_or(false);
         let (soft_delete_field_ident, soft_delete_column_name) = if input.soft_delete {
             let field = db_fields
                 .iter()
@@ -255,6 +283,7 @@ impl BuildContext {
             searchable_fields,
             validation_rules,
             pk_ident,
+            pk_idents,
             pk_type,
             field_names,
             field_types,
@@ -262,7 +291,9 @@ impl BuildContext {
             column_variants,
             column_type_defs,
             pk_column_variant,
+            pk_column_variants,
             pk_column_name,
+            pk_column_names,
             pk_auto_increment,
             timestamps_enabled,
             sync_column_attrs,
@@ -351,7 +382,14 @@ impl BuildContext {
         }) {
             Ok(ident)
         } else if key == "id" {
-            Ok(self.pk_ident.clone())
+            if self.pk_idents.len() == 1 {
+                Ok(self.pk_ident.clone())
+            } else {
+                Err(syn::Error::new_spanned(
+                    relation_ident,
+                    "composite primary keys require an explicit relation local_key; implicit 'id' is ambiguous",
+                ))
+            }
         } else {
             Err(syn::Error::new_spanned(
                 relation_ident,
@@ -378,6 +416,111 @@ fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
             .map(|part| part.trim().to_string())
             .collect()
     })
+}
+
+fn validate_primary_key_fields(fields: &[ModelField], tokenize_enabled: bool) -> syn::Result<()> {
+    let primary_key_fields: Vec<&ModelField> =
+        fields.iter().filter(|field| field.primary_key).collect();
+
+    if primary_key_fields.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "TideORM models require exactly one #[tideorm(primary_key)] field",
+        ));
+    }
+
+    if primary_key_fields.len() > 1 {
+        if tokenize_enabled {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "#[tideorm(tokenize)] requires exactly one #[tideorm(primary_key)] field",
+            ));
+        }
+
+        if primary_key_fields.iter().any(|field| field.auto_increment) {
+            let mut errors: Option<syn::Error> = None;
+            for field in primary_key_fields
+                .iter()
+                .filter(|field| field.auto_increment)
+            {
+                let error = syn::Error::new_spanned(
+                    field
+                        .ident
+                        .as_ref()
+                        .expect("database fields must have identifiers"),
+                    "composite primary keys do not support #[tideorm(auto_increment)]",
+                );
+                if let Some(existing) = &mut errors {
+                    existing.combine(error);
+                } else {
+                    errors = Some(error);
+                }
+            }
+
+            return Err(errors.expect("composite auto increment errors should exist"));
+        }
+    }
+
+    for field in fields {
+        if field.auto_increment && !field.primary_key {
+            return Err(syn::Error::new_spanned(
+                field
+                    .ident
+                    .as_ref()
+                    .expect("database fields must have identifiers"),
+                "#[tideorm(auto_increment)] requires #[tideorm(primary_key)] on the same field",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()> {
+    let mut errors: Option<syn::Error> = None;
+
+    for field in fields {
+        if field.has_many_through.is_some() {
+            let mut missing = Vec::new();
+            if field.pivot.is_none() {
+                missing.push("pivot");
+            }
+            if field.foreign_key.is_none() {
+                missing.push("foreign_key");
+            }
+            if field.related_key.is_none() {
+                missing.push("related_key");
+            }
+
+            if !missing.is_empty() {
+                let field_ident = field
+                    .ident
+                    .as_ref()
+                    .expect("relation fields must have identifiers");
+                let requirement_list = missing
+                    .iter()
+                    .map(|name| format!("#[tideorm({name} = \"...\")]"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let error = syn::Error::new_spanned(
+                    field_ident,
+                    format!("has_many_through relations require {}", requirement_list),
+                );
+
+                if let Some(existing) = &mut errors {
+                    existing.combine(error);
+                } else {
+                    errors = Some(error);
+                }
+            }
+        }
+    }
+
+    if let Some(error) = errors {
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 fn has_timestamp_pair(fields: &[ModelField]) -> bool {

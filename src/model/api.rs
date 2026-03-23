@@ -190,12 +190,11 @@ pub trait Model:
     where
         Self: Sized,
     {
-        let id_display = format!("{}", id);
+        let id_display = Self::primary_key_display(&id);
         Self::find(id).await?.ok_or_else(|| {
             Error::not_found(format!(
-                "{} with {} = {} not found",
+                "{} with {} not found",
                 Self::table_name(),
-                Self::primary_key_name(),
                 id_display
             ))
         })

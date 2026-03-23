@@ -6,6 +6,7 @@ use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::build_self_ref_tree_sql;
+use super::require_scalar_relation_key;
 
 /// SelfRef relation type - represents a self-referencing relationship
 #[derive(Debug, Clone)]
@@ -35,7 +36,7 @@ impl<E: Model> SelfRef<E> {
 
     pub async fn load(&self) -> Result<Option<E>> {
         let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => v,
+            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load")?,
             _ => return Ok(None),
         };
 
@@ -50,7 +51,7 @@ impl<E: Model> SelfRef<E> {
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
         let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => v,
+            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load_with")?,
             _ => return Ok(None),
         };
 
@@ -60,7 +61,7 @@ impl<E: Model> SelfRef<E> {
 
     pub async fn exists(&self) -> Result<bool> {
         let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => v,
+            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::exists")?,
             _ => return Ok(false),
         };
 
@@ -137,6 +138,7 @@ impl<E: Model> SelfRefMany<E> {
                 "Parent primary key not set for self-reference",
             ))
         })?;
+        let pk = require_scalar_relation_key(pk, "SelfRefMany::load")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -153,6 +155,7 @@ impl<E: Model> SelfRefMany<E> {
                 "Parent primary key not set for self-reference",
             ))
         })?;
+        let pk = require_scalar_relation_key(pk, "SelfRefMany::load_with")?;
 
         let query = E::query().where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).get().await
@@ -164,6 +167,7 @@ impl<E: Model> SelfRefMany<E> {
                 "Parent primary key not set for self-reference",
             ))
         })?;
+        let pk = require_scalar_relation_key(pk, "SelfRefMany::count")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -177,6 +181,7 @@ impl<E: Model> SelfRefMany<E> {
                 "Parent primary key not set for self-reference",
             ))
         })?;
+        let pk = require_scalar_relation_key(pk, "SelfRefMany::exists")?;
 
         E::query()
             .where_eq(self.foreign_key, pk.clone())
@@ -198,6 +203,7 @@ impl<E: Model> SelfRefMany<E> {
                 "Parent primary key not set for self-reference",
             ))
         })?;
+        let pk = require_scalar_relation_key(pk, "SelfRefMany::load_tree")?;
 
         let db = crate::database::__current_db()?;
         let (sql, params) = build_self_ref_tree_sql::<E>(

@@ -213,6 +213,22 @@ fn test_table_schema_multiple_indexes() {
 }
 
 #[test]
+fn test_schema_generator_supports_composite_primary_keys() {
+    let table = TableSchemaBuilder::new("user_roles")
+        .column(ColumnSchema::new("user_id", "BIGINT").primary_key())
+        .column(ColumnSchema::new("role_id", "BIGINT").primary_key())
+        .build();
+
+    assert_eq!(table.primary_keys, vec!["user_id", "role_id"]);
+
+    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+    generator.add_table(table);
+    let sql = generator.generate();
+
+    assert!(sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"));
+}
+
+#[test]
 fn test_rust_type_to_sql_postgres() {
     assert_eq!(rust_type_to_sql("i64", DatabaseType::Postgres), "BIGINT");
     assert_eq!(rust_type_to_sql("i32", DatabaseType::Postgres), "INTEGER");

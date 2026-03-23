@@ -65,6 +65,8 @@ pub struct TableSchema {
     pub indexes: Vec<IndexDefinition>,
     /// Primary key column name
     pub primary_key: String,
+    /// Primary key column names, in declaration order.
+    pub primary_keys: Vec<String>,
 }
 
 /// Schema for a single column
@@ -144,11 +146,23 @@ impl SchemaGenerator {
         sql.push_str(&column_defs.join(",\n"));
 
         // Add primary key constraint if not inline
-        if !table.primary_key.is_empty() {
+        let primary_keys = if !table.primary_keys.is_empty() {
+            table.primary_keys.clone()
+        } else if !table.primary_key.is_empty() {
+            vec![table.primary_key.clone()]
+        } else {
+            Vec::new()
+        };
+
+        if !primary_keys.is_empty() {
             sql.push_str(",\n");
             sql.push_str(&format!(
                 "    PRIMARY KEY ({})",
-                self.quote_identifier(&table.primary_key)
+                primary_keys
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
 
@@ -235,6 +249,7 @@ pub struct TableSchemaBuilder {
     columns: Vec<ColumnSchema>,
     indexes: Vec<IndexDefinition>,
     primary_key: String,
+    primary_keys: Vec<String>,
 }
 
 impl TableSchemaBuilder {
@@ -245,13 +260,17 @@ impl TableSchemaBuilder {
             columns: Vec::new(),
             indexes: Vec::new(),
             primary_key: String::new(),
+            primary_keys: Vec::new(),
         }
     }
 
     /// Add a column
     pub fn column(mut self, schema: ColumnSchema) -> Self {
         if schema.primary_key {
-            self.primary_key = schema.name.clone();
+            if self.primary_key.is_empty() {
+                self.primary_key = schema.name.clone();
+            }
+            self.primary_keys.push(schema.name.clone());
         }
         self.columns.push(schema);
         self
@@ -378,6 +397,7 @@ impl TableSchemaBuilder {
             columns: self.columns,
             indexes: self.indexes,
             primary_key: self.primary_key,
+            primary_keys: self.primary_keys,
         }
     }
 }

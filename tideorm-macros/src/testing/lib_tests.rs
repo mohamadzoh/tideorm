@@ -99,6 +99,24 @@ fn model_attribute_preserves_stacked_tideorm_attribute() {
 }
 
 #[test]
+fn model_attribute_preserves_user_derives() {
+    let input: DeriveInput = parse_quote! {
+        #[derive(PartialEq, Eq, Hash)]
+        pub struct User {
+            pub id: i64,
+        }
+    };
+
+    let expanded = expand_model(quote!(table = "users"), input)
+        .expect("user derives should be preserved")
+        .to_string();
+    let normalized = normalize_tokens(&expanded);
+
+    assert!(normalized.contains("#[derive(tideorm::Model)]"));
+    assert!(normalized.contains("#[derive(PartialEq,Eq,Hash)]"));
+}
+
+#[test]
 fn model_attribute_rejects_mixed_inline_and_stacked_options() {
     let input: DeriveInput = parse_quote! {
         #[tideorm(table = "users")]

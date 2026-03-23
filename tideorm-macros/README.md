@@ -33,6 +33,8 @@ pub struct User {
 
 This expands to `#[derive(Model)]` plus the equivalent `#[tideorm(...)]` model options.
 
+Any existing `#[derive(...)]` attributes on the struct are preserved. The macro adds TideORM's generated derives only when they are still missing.
+
 ### Basic Model
 
 ```rust
@@ -48,12 +50,41 @@ pub struct User {
 }
 ```
 
+### Composite Primary Keys
+
+You can mark more than one field with `#[tideorm(primary_key)]` to generate a composite primary key:
+
+```rust
+use tideorm::prelude::*;
+
+#[tideorm::model(table = "user_roles")]
+pub struct UserRole {
+    #[tideorm(primary_key)]
+    pub user_id: i64,
+    #[tideorm(primary_key)]
+    pub role_id: i64,
+    pub granted_by: String,
+}
+
+let key = (1_i64, 2_i64);
+let record = UserRole::find(key).await?;
+```
+
+Composite primary key rules:
+
+- Use `#[tideorm(primary_key)]` on each key field in declaration order.
+- `#[tideorm(auto_increment)]` is only supported for single-column primary keys.
+- `#[tideorm(tokenize)]` requires exactly one primary key field.
+- Relation definitions that would otherwise rely on the implicit `id` local key must set `local_key = "..."` explicitly for composite-key models.
+
+For `has_many_through`, declare `pivot`, `foreign_key`, and `related_key` explicitly. The macro now rejects missing required relation metadata at compile time.
+
 ### Field Attributes
 
 | Attribute | Description |
 |-----------|-------------|
-| `#[tideorm(primary_key)]` | Mark field as primary key |
-| `#[tideorm(auto_increment)]` | Enable auto-increment for primary keys |
+| `#[tideorm(primary_key)]` | Mark field as part of the primary key |
+| `#[tideorm(auto_increment)]` | Enable auto-increment for a single-column primary key |
 | `#[tideorm(column = "name")]` | Override the database column name |
 | `#[tideorm(nullable)]` | Mark field as nullable |
 | `#[tideorm(default = "expr")]` | Set a default value expression |

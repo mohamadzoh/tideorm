@@ -6,8 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::callbacks::{
-    AfterCreateDispatch, AfterDeleteDispatch, AfterUpdateDispatch, BeforeCreateDispatch,
-    BeforeDeleteDispatch, BeforeUpdateDispatch,
+    AfterCreateDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeUpdateDispatch,
 };
 use crate::error::{Error, Result};
 use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_error};
@@ -26,17 +25,25 @@ type ManyRelationSaveOp = Box<
         + Send,
 >;
 
-fn parent_primary_key_json<M: Model>(parent: &M) -> serde_json::Value {
-    let pk = parent.primary_key();
-    serde_json::Value::String(format!("{}", pk))
+fn serialize_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<serde_json::Value> {
+    serde_json::to_value(primary_key)
+        .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))
 }
 
-fn primary_key_field_name<M: Model>() -> &'static str {
-    M::column_names()
-        .iter()
-        .position(|column| *column == M::primary_key_name())
-        .and_then(|index| M::field_names().get(index).copied())
-        .unwrap_or(M::primary_key_name())
+fn require_scalar_primary_key<M: Model>(
+    primary_key: &M::PrimaryKey,
+    context: &str,
+) -> Result<serde_json::Value> {
+    let value = serialize_primary_key::<M>(primary_key)?;
+    if value.is_array() || value.is_object() {
+        return Err(Error::invalid_query(format!(
+            "{} does not support composite primary keys for {}",
+            context,
+            M::table_name()
+        )));
+    }
+
+    Ok(value)
 }
 
 fn apply_foreign_key<R: Model>(
@@ -60,49 +67,28 @@ fn apply_foreign_key<R: Model>(
         .map_err(|e| Error::conversion(format!("Failed to deserialize related model: {}", e)))
 }
 
-fn related_primary_key_value<R: Model>(related: &R) -> Result<serde_json::Value> {
-    let related_json = serde_json::to_value(related)
-        .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
-    let field_name = primary_key_field_name::<R>();
-
-    match related_json {
-        serde_json::Value::Object(map) => map
-            .get(field_name)
-            .cloned()
-            .or_else(|| map.get(R::primary_key_name()).cloned())
-            .ok_or_else(|| {
-                Error::conversion(format!(
-                    "Failed to read primary key '{}' from related model JSON",
-                    field_name
-                ))
-            }),
-        _ => Err(Error::conversion(
-            "Failed to serialize related model into an object for primary key extraction",
-        )),
-    }
-}
-
-fn primary_key_identity(value: &serde_json::Value) -> String {
-    value.to_string()
+fn primary_key_identity<R: Model>(value: &R::PrimaryKey) -> String {
+    R::primary_key_display(value)
 }
 
 fn reorder_models_by_primary_key<R: Model>(
     models: Vec<R>,
-    ordered_primary_keys: &[String],
+    ordered_primary_keys: &[R::PrimaryKey],
 ) -> Result<Vec<R>> {
     let mut models_by_pk = std::collections::HashMap::with_capacity(models.len());
     for model in models {
-        let key = primary_key_identity(&related_primary_key_value(&model)?);
+        let key = primary_key_identity::<R>(&model.primary_key());
         models_by_pk.insert(key, model);
     }
 
     ordered_primary_keys
         .iter()
         .map(|key| {
-            models_by_pk.remove(key).ok_or_else(|| {
+            let identity = primary_key_identity::<R>(key);
+            models_by_pk.remove(&identity).ok_or_else(|| {
                 Error::query(format!(
                     "Bulk nested operation completed but could not reload related model with primary key {}",
-                    key
+                    identity
                 ))
             })
         })
@@ -118,21 +104,19 @@ where
         return Ok(Vec::new());
     }
 
-    let pk_column = R::primary_key_column().ok_or_else(|| {
-        Error::invalid_query(format!(
-            "bulk nested update requires a primary key column for {}",
+    let pk_columns = R::primary_key_columns();
+    if pk_columns.is_empty() {
+        return Err(Error::invalid_query(format!(
+            "bulk nested update requires primary key columns for {}",
             R::table_name()
-        ))
-    })?;
-    let pk_values: Vec<serde_json::Value> = related
-        .iter()
-        .map(related_primary_key_value)
-        .collect::<Result<_>>()?;
-    let pk_order: Vec<String> = pk_values.iter().map(primary_key_identity).collect();
+        )));
+    }
+
+    let primary_keys: Vec<R::PrimaryKey> = related.iter().map(Model::primary_key).collect();
     let update_columns: Vec<_> = R::column_names()
         .iter()
         .copied()
-        .filter(|column| *column != R::primary_key_name())
+        .filter(|column| !R::primary_key_names().contains(column))
         .filter_map(R::column_from_str)
         .collect();
     let active_models: Vec<_> = related
@@ -141,9 +125,11 @@ where
         .collect();
 
     let on_conflict = if update_columns.is_empty() {
-        OnConflict::column(pk_column).do_nothing().to_owned()
+        OnConflict::columns(pk_columns.iter().cloned())
+            .do_nothing()
+            .to_owned()
     } else {
-        OnConflict::column(pk_column)
+        OnConflict::columns(pk_columns.iter().cloned())
             .update_columns(update_columns)
             .to_owned()
     };
@@ -175,12 +161,12 @@ where
         )
     })?;
 
-    let fetched = R::query()
-        .where_in(R::primary_key_name(), pk_values)
-        .get()
-        .await?;
+    let mut reloaded = Vec::with_capacity(primary_keys.len());
+    for primary_key in &primary_keys {
+        reloaded.push(R::find_or_fail(primary_key.clone()).await?);
+    }
 
-    reorder_models_by_primary_key(fetched, &pk_order)
+    reorder_models_by_primary_key(reloaded, &primary_keys)
 }
 
 async fn save_related_model_as_json<R>(
@@ -241,10 +227,7 @@ pub trait NestedSave: Model {
     {
         let parent = self.save().await?;
 
-        let pk_value = {
-            let pk = parent.primary_key();
-            serde_json::Value::String(format!("{}", pk))
-        };
+        let pk_value = require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_one")?;
 
         let mut related_json = serde_json::to_value(&related)
             .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
@@ -283,7 +266,7 @@ pub trait NestedSave: Model {
             return Ok((parent, Vec::new()));
         }
 
-        let pk_value = parent_primary_key_json(&parent);
+        let pk_value = require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_many")?;
 
         let mut prepared_related = Vec::with_capacity(related.len());
         for item in related {
@@ -350,21 +333,10 @@ pub trait NestedSave: Model {
         let related_deleted = if related.is_empty() {
             0
         } else {
-            let mut pk_values = Vec::with_capacity(related.len());
-            for item in &related {
-                item.run_before_delete()?;
-                pk_values.push(related_primary_key_value(item)?);
+            let mut deleted = 0;
+            for item in related {
+                deleted += item.delete().await?;
             }
-
-            let deleted = R::query()
-                .where_in(R::primary_key_name(), pk_values)
-                .delete()
-                .await?;
-
-            for item in &related {
-                item.run_after_delete()?;
-            }
-
             deleted
         };
 
@@ -420,10 +392,8 @@ impl<M: Model> NestedSaveBuilder<M> {
     pub async fn save(self) -> Result<(M, Vec<serde_json::Value>)> {
         let parent = self.parent.save().await?;
 
-        let pk_value = {
-            let pk = parent.primary_key();
-            serde_json::Value::String(format!("{}", pk))
-        };
+        let pk_value =
+            require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
 
         let mut saved_json = Vec::new();
 

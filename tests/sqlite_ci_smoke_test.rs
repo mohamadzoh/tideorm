@@ -18,6 +18,17 @@ struct CiUser {
     active: bool,
 }
 
+#[derive(Model, PartialEq)]
+#[tideorm(table = "ci_user_roles")]
+struct CiUserRole {
+    #[tideorm(primary_key)]
+    user_id: i64,
+    #[tideorm(primary_key)]
+    role_id: i64,
+    label: String,
+    active: bool,
+}
+
 #[tokio::test]
 async fn sqlite_ci_smoke_test() {
     TideConfig::init()
@@ -79,6 +90,133 @@ async fn sqlite_ci_smoke_test() {
         .await
         .expect("failed to verify deletion");
     assert!(missing.is_none(), "deleted user should not exist");
+}
+
+#[tokio::test]
+async fn sqlite_composite_primary_key_crud_smoke_test() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_user_roles").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_user_roles (
+            user_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (user_id, role_id)
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_user_roles table");
+
+    let created = CiUserRole {
+        user_id: 1,
+        role_id: 7,
+        label: "owner".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert composite-key row");
+
+    assert_eq!(created.user_id, 1);
+    assert_eq!(created.role_id, 7);
+
+    let fetched = CiUserRole::find((1_i64, 7_i64))
+        .await
+        .expect("failed to fetch inserted composite-key row")
+        .expect("inserted composite-key row should exist");
+    assert_eq!(fetched.label, "owner");
+    assert!(fetched.active);
+
+    let updated = CiUserRole {
+        label: "admin".to_string(),
+        active: false,
+        ..fetched
+    }
+    .update()
+    .await
+    .expect("failed to update composite-key row");
+    assert_eq!(updated.label, "admin");
+    assert!(!updated.active);
+
+    let deleted_rows = CiUserRole::destroy((1_i64, 7_i64))
+        .await
+        .expect("failed to delete composite-key row");
+    assert_eq!(deleted_rows, 1);
+
+    let missing = CiUserRole::find((1_i64, 7_i64))
+        .await
+        .expect("failed to verify composite-key deletion");
+    assert!(
+        missing.is_none(),
+        "deleted composite-key row should not exist"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_eager_find_preserves_existing_filters() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_users table");
+
+    let created = CiUser {
+        id: 0,
+        email: "eager@example.com".to_string(),
+        name: "Eager User".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert eager test user");
+
+    let filtered_out = CiUser::eager()
+        .where_eq("active", false)
+        .find(created.id)
+        .await
+        .expect("eager find with filter should succeed");
+    assert!(
+        filtered_out.is_none(),
+        "eager find should respect prior query filters"
+    );
+
+    let matched = CiUser::eager()
+        .where_eq("active", true)
+        .find(created.id)
+        .await
+        .expect("eager find with matching filter should succeed");
+    assert!(
+        matched.is_some(),
+        "eager find should still find matching rows"
+    );
 }
 
 #[tokio::test]
@@ -525,7 +663,7 @@ async fn sqlite_model_crud_errors_include_model_context() {
         find_ctx
             .query
             .as_deref()
-            .is_some_and(|query| query.contains("find_by_id(1)")),
+            .is_some_and(|query| query.contains("find(id = 1)")),
         "expected model operation in context: {:?}",
         find_ctx.query
     );

@@ -25,6 +25,8 @@ The `#[tideorm::model]` macro automatically implements:
 - `Serialize` - for JSON serialization
 - `Deserialize` - for JSON deserialization
 
+User-defined `#[derive(...)]` attributes are preserved. TideORM only adds the generated derives that are still missing unless you opt out with the `skip_*` attributes.
+
 ### Reserved Attribute Names
 
 `params` is reserved for presenter payloads.
@@ -36,7 +38,7 @@ in `to_hash_map()` output.
 
 ### Custom Implementations (When Needed)
 
-If you need custom implementations, use `skip_derives` and provide your own:
+If you need full control over generated derives, use `skip_derives` and provide your own:
 
 ```rust
 #[tideorm::model(table = "products", skip_derives)]
@@ -73,9 +75,10 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | Attribute | Description |
 |-----------|-------------|
 | `#[tideorm(table = "name")]` | Custom table name |
-| `#[tideorm(skip_derives)]` | Skip auto-generated Debug, Clone, Serialize, Deserialize |
+| `#[tideorm(skip_derives)]` | Skip auto-generated Debug, Clone, Default, Serialize, Deserialize |
 | `#[tideorm(skip_debug)]` | Skip auto-generated Debug impl only |
 | `#[tideorm(skip_clone)]` | Skip auto-generated Clone impl only |
+| `#[tideorm(skip_default)]` | Skip auto-generated Default impl only |
 | `#[tideorm(skip_serialize)]` | Skip auto-generated Serialize impl only |
 | `#[tideorm(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
 | `#[index("col")]` | Create an index |
@@ -87,13 +90,37 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | Attribute | Description |
 |-----------|-------------|
 | `#[tideorm(primary_key)]` | Mark as primary key |
-| `#[tideorm(auto_increment)]` | Auto-increment field |
+| `#[tideorm(auto_increment)]` | Auto-increment field for a single-column primary key |
 | `#[tideorm(nullable)]` | Optional/nullable field |
 | `#[tideorm(column = "name")]` | Custom column name |
 | `#[tideorm(default = "value")]` | Default value |
 | `#[tideorm(skip)]` | Skip field in queries |
 
 ---
+
+### Composite Primary Keys
+
+TideORM supports composite primary keys by declaring `#[tideorm(primary_key)]` on multiple fields:
+
+```rust
+#[tideorm::model(table = "user_roles")]
+pub struct UserRole {
+    #[tideorm(primary_key)]
+    pub user_id: i64,
+    #[tideorm(primary_key)]
+    pub role_id: i64,
+    pub granted_by: String,
+}
+
+let role = UserRole::find((1_i64, 2_i64)).await?;
+```
+
+Composite primary key notes:
+
+- CRUD methods use tuples in the same order as the key fields are declared.
+- `#[tideorm(auto_increment)]` only works with a single primary key field.
+- `#[tideorm(tokenize)]` requires exactly one primary key field.
+- When defining relations on a composite-key model, set `local_key = "..."` explicitly if the relation would otherwise rely on the implicit `id` key.
 
 
 ---
@@ -113,7 +140,7 @@ let user = user.save().await?;
 println!("Created user with id: {}", user.id);
 ```
 
-For auto-increment primary keys, TideORM treats `0` as an unsaved record marker internally. You usually do not need to assign it yourself when constructing a new model. Natural keys and non-auto-increment primary keys are considered persisted unless the primary key is empty.
+For auto-increment primary keys, TideORM treats `0` as an unsaved record marker internally. You usually do not need to assign it yourself when constructing a new model. Natural keys, composite keys, and non-auto-increment primary keys are considered persisted unless the primary key value is empty.
 
 ### Read
 
@@ -121,8 +148,11 @@ For auto-increment primary keys, TideORM treats `0` as an unsaved record marker 
 // Get all
 let users = User::all().await?;
 
-// Find by ID
+// Find by primary key
 let user = User::find(1).await?;  // Option<User>
+
+// Composite primary key example
+let membership = UserRole::find((1_i64, 2_i64)).await?;
 
 // Query builder (see above)
 let users = User::query().where_eq("active", true).get().await?;
