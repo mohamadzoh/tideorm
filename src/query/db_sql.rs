@@ -9,11 +9,11 @@ fn json_string_contents(value: &str) -> String {
     json[1..json.len() - 1].to_string()
 }
 
-fn canonical_json_member_path(key: &str) -> String {
+pub(crate) fn canonical_json_member_path(key: &str) -> String {
     format!("$.\"{}\"", json_string_contents(key))
 }
 
-fn normalize_mysql_sqlite_json_path(path: &str) -> Option<String> {
+pub(crate) fn normalize_mysql_sqlite_json_path(path: &str) -> Option<String> {
     let chars: Vec<char> = path.chars().collect();
     if chars.first().copied() != Some('$') {
         return None;
@@ -109,7 +109,7 @@ fn parse_quoted_json_path_segment(chars: &[char], index: &mut usize) -> Option<S
     None
 }
 
-fn invalid_json_path_predicate(exists: bool) -> String {
+pub(crate) fn invalid_json_path_predicate(exists: bool) -> String {
     let _ = exists;
     "0 = 1".to_string()
 }

@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::internal::{Condition, Expr, ExprTrait, Value};
 use crate::model::Model;
 use sea_orm::sea_query::{
+    extension::postgres::PgBinOper,
     Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
 };
 
@@ -304,6 +305,84 @@ impl<M: Model> QueryBuilder<M> {
 
     fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
         values.iter().map(Self::json_to_sea_value).collect()
+    }
+
+    fn json_text_value(text: String) -> Value {
+        Value::String(Some(text))
+    }
+
+    fn json_array_parameter(values: &[serde_json::Value]) -> Value {
+        Self::json_text_value(
+            serde_json::to_string(values)
+                .expect("serializing array predicate values should not fail"),
+        )
+    }
+
+    fn json_scalar_parameter(value: &serde_json::Value) -> Value {
+        Self::json_text_value(
+            serde_json::to_string(value)
+                .expect("serializing scalar predicate value should not fail"),
+        )
+    }
+
+    fn json_parameter(value: &serde_json::Value) -> Value {
+        Value::Json(Some(Box::new(value.clone())))
+    }
+
+    fn sqlite_json_compare_value(value: &serde_json::Value) -> Value {
+        match value {
+            serde_json::Value::String(text) => Value::String(Some(text.clone())),
+            serde_json::Value::Null => Value::String(Some("null".to_string())),
+            serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
+            serde_json::Value::Number(number) => {
+                if let Some(integer) = number.as_i64() {
+                    Value::BigInt(Some(integer))
+                } else if let Some(float) = number.as_f64() {
+                    Value::Double(Some(float))
+                } else {
+                    Value::String(Some(number.to_string()))
+                }
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                Value::String(Some(value.to_string()))
+            }
+        }
+    }
+
+    fn postgres_array_value(values: &[serde_json::Value]) -> Value {
+        if values.iter().all(|value| value.is_string()) {
+            return values
+                .iter()
+                .map(|value| value.as_str().expect("checked string value").to_string())
+                .collect::<Vec<_>>()
+                .into();
+        }
+
+        if values.iter().all(|value| value.is_boolean()) {
+            return values
+                .iter()
+                .map(|value| value.as_bool().expect("checked boolean value"))
+                .collect::<Vec<_>>()
+                .into();
+        }
+
+        if values.iter().all(|value| value.as_i64().is_some()) {
+            return values
+                .iter()
+                .map(|value| value.as_i64().expect("checked integer value"))
+                .collect::<Vec<_>>()
+                .into();
+        }
+
+        if values.iter().all(|value| value.is_number()) {
+            return values
+                .iter()
+                .map(|value| value.as_f64().expect("checked numeric value"))
+                .collect::<Vec<_>>()
+                .into();
+        }
+
+        values.to_vec().into()
     }
 
     fn placeholder_list(count: usize) -> String {
@@ -690,6 +769,49 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn build_json_value_expression(
+        &self,
+        db_type: DatabaseType,
+        column_expr: SimpleExpr,
+        column_sql: &str,
+        operator: JsonValueOperator,
+        value: &serde_json::Value,
+    ) -> SimpleExpr {
+        match db_type {
+            DatabaseType::Postgres => match operator {
+                JsonValueOperator::Contains => {
+                    column_expr.binary(PgBinOper::Contains, Expr::val(Self::json_parameter(value)))
+                }
+                JsonValueOperator::ContainedBy => {
+                    column_expr.binary(PgBinOper::Contained, Expr::val(Self::json_parameter(value)))
+                }
+            },
+            DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
+                JsonValueOperator::Contains => self.build_custom_expression(
+                    format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
+                    vec![Self::json_scalar_parameter(value)],
+                ),
+                JsonValueOperator::ContainedBy => self.build_custom_expression(
+                    format!("JSON_CONTAINS(CAST(? AS JSON), {})", column_sql),
+                    vec![Self::json_scalar_parameter(value)],
+                ),
+            },
+            DatabaseType::SQLite => match operator {
+                JsonValueOperator::Contains => self.build_custom_expression(
+                    format!("EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)", column_sql),
+                    vec![Self::sqlite_json_compare_value(value)],
+                ),
+                JsonValueOperator::ContainedBy => self.build_custom_expression(
+                    format!(
+                        "json_type({}) IS NOT NULL AND ? LIKE '%' || {} || '%'",
+                        column_sql, column_sql
+                    ),
+                    vec![Self::json_scalar_parameter(value)],
+                ),
+            },
+        }
+    }
+
     fn build_json_string_sql(
         &self,
         db_type: DatabaseType,
@@ -705,6 +827,93 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn build_json_string_expression(
+        &self,
+        db_type: DatabaseType,
+        column_sql: &str,
+        operator: JsonStringOperator,
+        value: &str,
+    ) -> SimpleExpr {
+        match operator {
+            JsonStringOperator::KeyPresent => match db_type {
+                DatabaseType::Postgres => self.build_custom_expression(
+                    format!("{} ? $1", column_sql),
+                    vec![Value::String(Some(value.to_string()))],
+                ),
+                DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
+                    format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                ),
+                DatabaseType::SQLite => self.build_custom_expression(
+                    format!("json_extract({}, ?) IS NOT NULL", column_sql),
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                ),
+            },
+            JsonStringOperator::KeyAbsent => match db_type {
+                DatabaseType::Postgres => self.build_custom_expression(
+                    format!("NOT ({} ? $1)", column_sql),
+                    vec![Value::String(Some(value.to_string()))],
+                ),
+                DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
+                    format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                ),
+                DatabaseType::SQLite => self.build_custom_expression(
+                    format!("json_extract({}, ?) IS NULL", column_sql),
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                ),
+            },
+            JsonStringOperator::PathPresent => match db_type {
+                DatabaseType::Postgres => self.build_custom_expression(
+                    format!("{} @? ($1::jsonpath)", column_sql),
+                    vec![Value::String(Some(value.to_string()))],
+                ),
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
+                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
+                        return Expr::cust(db_sql::invalid_json_path_predicate(true));
+                    };
+                    self.build_custom_expression(
+                        format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
+                        vec![Value::String(Some(path))],
+                    )
+                }
+                DatabaseType::SQLite => {
+                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
+                        return Expr::cust(db_sql::invalid_json_path_predicate(true));
+                    };
+                    self.build_custom_expression(
+                        format!("json_extract({}, ?) IS NOT NULL", column_sql),
+                        vec![Value::String(Some(path))],
+                    )
+                }
+            },
+            JsonStringOperator::PathAbsent => match db_type {
+                DatabaseType::Postgres => self.build_custom_expression(
+                    format!("NOT ({} @? ($1::jsonpath))", column_sql),
+                    vec![Value::String(Some(value.to_string()))],
+                ),
+                DatabaseType::MySQL | DatabaseType::MariaDB => {
+                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
+                        return Expr::cust(db_sql::invalid_json_path_predicate(false));
+                    };
+                    self.build_custom_expression(
+                        format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
+                        vec![Value::String(Some(path))],
+                    )
+                }
+                DatabaseType::SQLite => {
+                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
+                        return Expr::cust(db_sql::invalid_json_path_predicate(false));
+                    };
+                    self.build_custom_expression(
+                        format!("json_extract({}, ?) IS NULL", column_sql),
+                        vec![Value::String(Some(path))],
+                    )
+                }
+            },
+        }
+    }
+
     fn build_array_sql(
         &self,
         db_type: DatabaseType,
@@ -717,6 +926,103 @@ impl<M: Model> QueryBuilder<M> {
             ArrayOperator::Contains => db_sql::array_contains(db_type, column, &rendered),
             ArrayOperator::ContainedBy => db_sql::array_contained_by(db_type, column, &rendered),
             ArrayOperator::Overlaps => db_sql::array_overlaps(db_type, column, &rendered),
+        }
+    }
+
+    fn build_array_expression(
+        &self,
+        db_type: DatabaseType,
+        column_expr: SimpleExpr,
+        column_sql: &str,
+        operator: ArrayOperator,
+        values: &[serde_json::Value],
+    ) -> SimpleExpr {
+        match db_type {
+            DatabaseType::Postgres => {
+                if values.is_empty() {
+                    return Expr::cust(self.build_array_sql(db_type, column_sql, operator, values));
+                }
+
+                let operator = match operator {
+                    ArrayOperator::Contains => PgBinOper::Contains,
+                    ArrayOperator::ContainedBy => PgBinOper::Contained,
+                    ArrayOperator::Overlaps => PgBinOper::Overlap,
+                };
+
+                column_expr.binary(operator, Expr::val(Self::postgres_array_value(values)))
+            }
+            DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
+                ArrayOperator::Contains => self.build_custom_expression(
+                    format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
+                    vec![Self::json_array_parameter(values)],
+                ),
+                ArrayOperator::ContainedBy => self.build_custom_expression(
+                    format!("JSON_CONTAINS(CAST(? AS JSON), {})", column_sql),
+                    vec![Self::json_array_parameter(values)],
+                ),
+                ArrayOperator::Overlaps => {
+                    if values.is_empty() {
+                        Expr::cust("0 = 1".to_string())
+                    } else {
+                        let sql = std::iter::repeat_n(
+                            format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
+                            values.len(),
+                        )
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                        let params = values.iter().map(Self::json_scalar_parameter).collect();
+                        self.build_custom_expression(format!("({})", sql), params)
+                    }
+                }
+            },
+            DatabaseType::SQLite => match operator {
+                ArrayOperator::Contains => {
+                    if values.is_empty() {
+                        Expr::cust("1 = 1".to_string())
+                    } else {
+                        let sql = std::iter::repeat_n(
+                            format!(
+                                "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
+                                column_sql
+                            ),
+                            values.len(),
+                        )
+                        .collect::<Vec<_>>()
+                        .join(" AND ");
+                        self.build_custom_expression(format!("({})", sql), Self::sea_value_list(values))
+                    }
+                }
+                ArrayOperator::ContainedBy => {
+                    if values.is_empty() {
+                        Expr::cust(format!("NOT EXISTS (SELECT 1 FROM json_each({}))", column_sql))
+                    } else {
+                        self.build_custom_expression(
+                            format!(
+                                "NOT EXISTS (SELECT 1 FROM json_each({}) WHERE value NOT IN ({}))",
+                                column_sql,
+                                Self::placeholder_list(values.len())
+                            ),
+                            Self::sea_value_list(values),
+                        )
+                    }
+                }
+                ArrayOperator::Overlaps => {
+                    if values.is_empty() {
+                        Expr::cust("0 = 1".to_string())
+                    } else {
+                        let sql = std::iter::repeat_n(
+                            format!(
+                                "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
+                                column_sql
+                            ),
+                            values.len(),
+                        )
+                        .collect::<Vec<_>>()
+                        .join(" OR ");
+                        self.build_custom_expression(format!("({})", sql), Self::sea_value_list(values))
+                    }
+                }
+            },
         }
     }
 
@@ -778,18 +1084,26 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Between { low, high } => {
                 Some(self.build_between_expression(column_expr, low, high))
             }
-            ConditionSpec::JsonValue { operator, value } => Some(Expr::cust(
-                self.build_json_value_sql(db_type, &condition.column, operator, value),
-            )),
-            ConditionSpec::JsonString { operator, value } => Some(Expr::cust(
-                self.build_json_string_sql(db_type, &condition.column, operator, value),
-            )),
-            ConditionSpec::Array { operator, values } => Some(Expr::cust(self.build_array_sql(
+            ConditionSpec::JsonValue { operator, value } => Some(self.build_json_value_expression(
                 db_type,
-                &condition.column,
+                column_expr,
+                &column_sql,
+                operator,
+                value,
+            )),
+            ConditionSpec::JsonString { operator, value } => Some(self.build_json_string_expression(
+                db_type,
+                &column_sql,
+                operator,
+                value,
+            )),
+            ConditionSpec::Array { operator, values } => Some(self.build_array_expression(
+                db_type,
+                column_expr,
+                &column_sql,
                 operator,
                 values,
-            ))),
+            )),
             ConditionSpec::Subquery { negated, query_sql } => {
                 Some(self.build_subquery_expression(&column_sql, negated, query_sql))
             }

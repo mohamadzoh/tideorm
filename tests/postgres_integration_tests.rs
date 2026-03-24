@@ -1257,16 +1257,18 @@ async fn postgres_integration_tests() {
             .expect("Count active failed");
         assert_eq!(active, 3, "Three users should remain active");
 
-        let err = TestUser::update_all()
-            .set_raw("name", "NOW(); DROP TABLE test_users; --")
+        let trusted_raw_affected = TestUser::update_all()
+            .set_trusted_raw("name", "'trusted-batch-update'")
             .where_eq("id", 1)
             .execute()
             .await
-            .expect_err("set_raw should be rejected by default");
-        assert!(
-            err.to_string().contains("set_raw() is disabled"),
-            "unexpected error: {err}"
-        );
+            .expect("set_trusted_raw should execute trusted SQL");
+        assert_eq!(trusted_raw_affected, 1, "One row should be updated");
+
+        let trusted_name = TestUser::find_or_fail(1)
+            .await
+            .expect("Reload trusted raw update failed");
+        assert_eq!(trusted_name.name, "trusted-batch-update");
 
         println!("   ✓ batch update builder");
     }

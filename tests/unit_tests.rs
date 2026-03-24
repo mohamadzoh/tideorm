@@ -4085,7 +4085,6 @@ mod batch_update_value_tests {
     fn test_update_value_variants() {
         // Test all UpdateValue variants can be created
         let _value = UpdateValue::Value(json!("hello"));
-        let _raw = UpdateValue::Raw("NOW()".to_string());
         let _trusted_raw = UpdateValue::UnsafeRaw("NOW()".to_string());
         let _inc = UpdateValue::Increment(5);
         let _dec = UpdateValue::Decrement(3);
@@ -4139,15 +4138,6 @@ mod batch_update_value_tests {
         match value {
             UpdateValue::Divide(n) => assert!((n - 4.0).abs() < f64::EPSILON),
             _ => panic!("Expected UpdateValue::Divide"),
-        }
-    }
-
-    #[test]
-    fn test_update_value_raw() {
-        let value = UpdateValue::Raw("NOW()".to_string());
-        match value {
-            UpdateValue::Raw(s) => assert_eq!(s, "NOW()"),
-            _ => panic!("Expected UpdateValue::Raw"),
         }
     }
 
@@ -4211,9 +4201,9 @@ mod batch_update_value_tests {
 
     #[test]
     fn test_update_value_debug() {
-        let value = UpdateValue::Raw("test_expr".to_string());
+        let value = UpdateValue::UnsafeRaw("test_expr".to_string());
         let debug_str = format!("{:?}", value);
-        assert!(debug_str.contains("Raw"));
+        assert!(debug_str.contains("UnsafeRaw"));
         assert!(debug_str.contains("test_expr"));
     }
 }

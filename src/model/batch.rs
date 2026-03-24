@@ -18,7 +18,6 @@ pub struct BatchUpdateBuilder<M: Model> {
 #[derive(Debug, Clone)]
 pub enum UpdateValue {
     Value(serde_json::Value),
-    Raw(String),
     UnsafeRaw(String),
     Increment(i64),
     Decrement(i64),
@@ -47,12 +46,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
-    pub fn set_raw(mut self, field: &str, expression: &str) -> Self {
-        self.updates
-            .insert(field.to_string(), UpdateValue::Raw(expression.to_string()));
-        self
-    }
-
     pub fn set_trusted_raw(mut self, field: &str, expression: &str) -> Self {
         self.updates.insert(
             field.to_string(),
@@ -61,18 +54,17 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
-    pub fn set_if<F>(
+    pub fn set_if(
         mut self,
         field: &str,
         value: impl Into<serde_json::Value>,
-        condition: F,
-    ) -> Self
-    where
-        F: FnOnce(Self) -> Self,
-    {
-        self.updates
-            .insert(field.to_string(), UpdateValue::Value(value.into()));
-        condition(self)
+        condition: bool,
+    ) -> Self {
+        if condition {
+            self.updates
+                .insert(field.to_string(), UpdateValue::Value(value.into()));
+        }
+        self
     }
 
     pub fn increment(mut self, field: &str, by: i64) -> Self {
@@ -504,9 +496,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
                 Ok(format!("{} = {}", col, placeholder))
             }
-            UpdateValue::Raw(_) => Err(Error::invalid_query(
-                "set_raw() is disabled because it allows SQL injection; use typed update helpers or set_trusted_raw() only with trusted SQL",
-            )),
             UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
             UpdateValue::Increment(by) => {
                 let placeholder =

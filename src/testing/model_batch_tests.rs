@@ -54,3 +54,20 @@ fn batch_update_guard_rejects_limit_without_where() {
             .contains("requires at least one explicit filter")
     );
 }
+
+#[test]
+fn batch_update_set_if_applies_update_when_condition_is_true() {
+    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", true);
+
+    assert!(matches!(
+        builder.updates.get("name"),
+        Some(super::UpdateValue::Value(value)) if *value == serde_json::json!("updated")
+    ));
+}
+
+#[test]
+fn batch_update_set_if_skips_update_when_condition_is_false() {
+    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", false);
+
+    assert!(!builder.updates.contains_key("name"));
+}

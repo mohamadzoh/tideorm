@@ -6,7 +6,6 @@ use super::{
 use crate::config::DatabaseType;
 #[cfg(feature = "fulltext")]
 use crate::fulltext::{FullTextSearchBuilder, SearchMode};
-#[cfg(feature = "fulltext")]
 use crate::internal::Value;
 use crate::model::Model as ModelTrait;
 
@@ -719,6 +718,105 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
         "SELECT `query_test_users`.`id`, `query_test_users`.`name` FROM `query_test_users` WHERE `status` = ? ORDER BY `name` ASC LIMIT 5"
     );
     assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_array_contains("tags", vec!["ops'", "core"])
+        .where_array_contained_by("tags", vec!["ops'", "core"])
+        .where_array_overlaps("tags", vec!["ops'", "core"]);
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains("\"tags\" @> $1"));
+    assert!(sql.contains("\"tags\" <@ $2"));
+    assert!(sql.contains("\"tags\" && $3"));
+    assert!(!sql.contains("ops'"));
+    assert_eq!(params.len(), 3);
+    assert!(matches!(params.first(), Some(Value::Array(_, Some(values))) if values.len() == 2));
+    assert!(matches!(params.get(1), Some(Value::Array(_, Some(values))) if values.len() == 2));
+    assert!(matches!(params.get(2), Some(Value::Array(_, Some(values))) if values.len() == 2));
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_postgres_json_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_json_contains("data", serde_json::json!({"role": "admin'"}))
+        .where_json_key_exists("data", "unsafe'key")
+        .where_json_path_exists("data", "$.user.name");
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains("\"data\" @> $1"));
+    assert!(sql.contains("\"data\" ? $2"));
+    assert!(sql.contains("\"data\" @? ($3::jsonpath)"));
+    assert!(!sql.contains("admin'"));
+    assert!(!sql.contains("unsafe'key"));
+    assert_eq!(params.len(), 3);
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_mysql_json_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_json_contains("data", serde_json::json!({"role": "admin'"}))
+        .where_json_key_exists("data", "unsafe'key")
+        .where_json_path_exists("data", "$.user.name");
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+
+    assert!(sql.contains("JSON_CONTAINS(`data`, CAST(? AS JSON))"));
+    assert!(sql.contains("JSON_CONTAINS_PATH(`data`, 'one', ?)"));
+    assert!(!sql.contains("admin'"));
+    assert!(!sql.contains("unsafe'key"));
+    assert_eq!(params.len(), 3);
+    assert!(matches!(params.first(), Some(Value::String(Some(json))) if json == "{\"role\":\"admin'\"}"));
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_sqlite_json_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_json_contains("data", serde_json::json!("admin'"))
+        .where_json_path_exists("data", "$.user.name");
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
+
+    assert!(sql.contains("EXISTS (SELECT 1 FROM json_each(\"data\") WHERE value = ?)"));
+    assert!(sql.contains("json_extract(\"data\", ?) IS NOT NULL"));
+    assert!(!sql.contains("admin'"));
+    assert_eq!(params.len(), 2);
+    assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "admin'"));
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_mysql_array_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_array_contains("tags", vec!["ops'", "core"])
+        .where_array_overlaps("tags", vec!["ops'", "core"]);
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+
+    assert!(sql.contains("JSON_CONTAINS(`tags`, CAST(? AS JSON))"));
+    assert!(sql.contains("(JSON_CONTAINS(`tags`, CAST(? AS JSON)) OR JSON_CONTAINS(`tags`, CAST(? AS JSON)))"));
+    assert!(!sql.contains("ops'"));
+    assert_eq!(params.len(), 3);
+    assert!(matches!(params.first(), Some(Value::String(Some(json))) if json == "[\"ops'\",\"core\"]"));
+    assert!(matches!(params.get(1), Some(Value::String(Some(json))) if json == "\"ops'\""));
+    assert!(matches!(params.get(2), Some(Value::String(Some(json))) if json == "\"core\""));
+}
+
+#[test]
+fn test_build_select_sql_with_params_parameterizes_sqlite_array_predicates() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_array_contained_by("tags", vec!["ops'", "core"])
+        .where_array_overlaps("tags", vec!["ops'", "core"]);
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
+
+    assert!(sql.contains("NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN (?, ?))"));
+    assert!(sql.contains("(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?) OR EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?))"));
+    assert!(!sql.contains("ops'"));
+    assert_eq!(params.len(), 4);
 }
 
 #[test]
