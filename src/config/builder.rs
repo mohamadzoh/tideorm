@@ -4,7 +4,7 @@ use std::time::Duration;
 use super::FileUrlGenerator;
 use super::database::rewrite_driver_url;
 use super::state::{
-    global_config_state, global_db_type_state, global_pool_config_state, 
+    global_config_state, global_db_type_state, global_pool_config_state,
     global_schema_file_path_state,
 };
 use super::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds};
@@ -365,7 +365,10 @@ impl TideConfig {
     }
 
     pub fn pool_config() -> PoolConfig {
-        global_pool_config_state().read().clone().unwrap_or_default()
+        global_pool_config_state()
+            .read()
+            .clone()
+            .unwrap_or_default()
     }
 
     pub fn schema_file_path() -> Option<String> {

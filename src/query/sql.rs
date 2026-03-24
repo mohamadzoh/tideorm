@@ -4,8 +4,8 @@ use crate::error::{Error, Result};
 use crate::internal::{Condition, Expr, ExprTrait, Value};
 use crate::model::Model;
 use sea_orm::sea_query::{
-    extension::postgres::PgBinOper,
     Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
+    extension::postgres::PgBinOper,
 };
 
 #[derive(Clone, Copy)]
@@ -778,14 +778,14 @@ impl<M: Model> QueryBuilder<M> {
         value: &serde_json::Value,
     ) -> SimpleExpr {
         match db_type {
-            DatabaseType::Postgres => match operator {
-                JsonValueOperator::Contains => {
-                    column_expr.binary(PgBinOper::Contains, Expr::val(Self::json_parameter(value)))
+            DatabaseType::Postgres => {
+                match operator {
+                    JsonValueOperator::Contains => column_expr
+                        .binary(PgBinOper::Contains, Expr::val(Self::json_parameter(value))),
+                    JsonValueOperator::ContainedBy => column_expr
+                        .binary(PgBinOper::Contained, Expr::val(Self::json_parameter(value))),
                 }
-                JsonValueOperator::ContainedBy => {
-                    column_expr.binary(PgBinOper::Contained, Expr::val(Self::json_parameter(value)))
-                }
-            },
+            }
             DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
                 JsonValueOperator::Contains => self.build_custom_expression(
                     format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
@@ -798,7 +798,10 @@ impl<M: Model> QueryBuilder<M> {
             },
             DatabaseType::SQLite => match operator {
                 JsonValueOperator::Contains => self.build_custom_expression(
-                    format!("EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)", column_sql),
+                    format!(
+                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
+                        column_sql
+                    ),
                     vec![Self::sqlite_json_compare_value(value)],
                 ),
                 JsonValueOperator::ContainedBy => self.build_custom_expression(
@@ -842,11 +845,15 @@ impl<M: Model> QueryBuilder<M> {
                 ),
                 DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
                     format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(
+                        value,
+                    )))],
                 ),
                 DatabaseType::SQLite => self.build_custom_expression(
                     format!("json_extract({}, ?) IS NOT NULL", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(
+                        value,
+                    )))],
                 ),
             },
             JsonStringOperator::KeyAbsent => match db_type {
@@ -856,11 +863,15 @@ impl<M: Model> QueryBuilder<M> {
                 ),
                 DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
                     format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(
+                        value,
+                    )))],
                 ),
                 DatabaseType::SQLite => self.build_custom_expression(
                     format!("json_extract({}, ?) IS NULL", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(value)))],
+                    vec![Value::String(Some(db_sql::canonical_json_member_path(
+                        value,
+                    )))],
                 ),
             },
             JsonStringOperator::PathPresent => match db_type {
@@ -989,12 +1000,18 @@ impl<M: Model> QueryBuilder<M> {
                         )
                         .collect::<Vec<_>>()
                         .join(" AND ");
-                        self.build_custom_expression(format!("({})", sql), Self::sea_value_list(values))
+                        self.build_custom_expression(
+                            format!("({})", sql),
+                            Self::sea_value_list(values),
+                        )
                     }
                 }
                 ArrayOperator::ContainedBy => {
                     if values.is_empty() {
-                        Expr::cust(format!("NOT EXISTS (SELECT 1 FROM json_each({}))", column_sql))
+                        Expr::cust(format!(
+                            "NOT EXISTS (SELECT 1 FROM json_each({}))",
+                            column_sql
+                        ))
                     } else {
                         self.build_custom_expression(
                             format!(
@@ -1019,7 +1036,10 @@ impl<M: Model> QueryBuilder<M> {
                         )
                         .collect::<Vec<_>>()
                         .join(" OR ");
-                        self.build_custom_expression(format!("({})", sql), Self::sea_value_list(values))
+                        self.build_custom_expression(
+                            format!("({})", sql),
+                            Self::sea_value_list(values),
+                        )
                     }
                 }
             },
@@ -1091,12 +1111,9 @@ impl<M: Model> QueryBuilder<M> {
                 operator,
                 value,
             )),
-            ConditionSpec::JsonString { operator, value } => Some(self.build_json_string_expression(
-                db_type,
-                &column_sql,
-                operator,
-                value,
-            )),
+            ConditionSpec::JsonString { operator, value } => {
+                Some(self.build_json_string_expression(db_type, &column_sql, operator, value))
+            }
             ConditionSpec::Array { operator, values } => Some(self.build_array_expression(
                 db_type,
                 column_expr,

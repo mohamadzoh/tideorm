@@ -67,7 +67,8 @@ fn batch_update_set_if_applies_update_when_condition_is_true() {
 
 #[test]
 fn batch_update_set_if_skips_update_when_condition_is_false() {
-    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", false);
+    let builder =
+        BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", false);
 
     assert!(!builder.updates.contains_key("name"));
 }

@@ -770,7 +770,9 @@ fn test_build_select_sql_with_params_parameterizes_mysql_json_predicates() {
     assert!(!sql.contains("admin'"));
     assert!(!sql.contains("unsafe'key"));
     assert_eq!(params.len(), 3);
-    assert!(matches!(params.first(), Some(Value::String(Some(json))) if json == "{\"role\":\"admin'\"}"));
+    assert!(
+        matches!(params.first(), Some(Value::String(Some(json))) if json == "{\"role\":\"admin'\"}")
+    );
 }
 
 #[test]
@@ -797,10 +799,14 @@ fn test_build_select_sql_with_params_parameterizes_mysql_array_predicates() {
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
 
     assert!(sql.contains("JSON_CONTAINS(`tags`, CAST(? AS JSON))"));
-    assert!(sql.contains("(JSON_CONTAINS(`tags`, CAST(? AS JSON)) OR JSON_CONTAINS(`tags`, CAST(? AS JSON)))"));
+    assert!(sql.contains(
+        "(JSON_CONTAINS(`tags`, CAST(? AS JSON)) OR JSON_CONTAINS(`tags`, CAST(? AS JSON)))"
+    ));
     assert!(!sql.contains("ops'"));
     assert_eq!(params.len(), 3);
-    assert!(matches!(params.first(), Some(Value::String(Some(json))) if json == "[\"ops'\",\"core\"]"));
+    assert!(
+        matches!(params.first(), Some(Value::String(Some(json))) if json == "[\"ops'\",\"core\"]")
+    );
     assert!(matches!(params.get(1), Some(Value::String(Some(json))) if json == "\"ops'\""));
     assert!(matches!(params.get(2), Some(Value::String(Some(json))) if json == "\"core\""));
 }
@@ -813,7 +819,9 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_array_predicates() {
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
 
-    assert!(sql.contains("NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN (?, ?))"));
+    assert!(
+        sql.contains("NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN (?, ?))")
+    );
     assert!(sql.contains("(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?) OR EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?))"));
     assert!(!sql.contains("ops'"));
     assert_eq!(params.len(), 4);
