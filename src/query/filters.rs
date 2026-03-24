@@ -108,81 +108,117 @@ impl OrGroup {
         }
     }
 
-    pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_eq(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Eq,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_not(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_not(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::NotEq,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_gt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_gt(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Gt,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_gte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_gte(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Gte,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_lt(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_lt(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Lt,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_lte(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
+    pub fn where_lte(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Lte,
             value: ConditionValue::Single(value.into()),
         });
         self
     }
 
-    pub fn where_like(mut self, column: &str, pattern: &str) -> Self {
+    pub fn where_like(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        pattern: &str,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Like,
             value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
         });
         self
     }
 
-    pub fn where_not_like(mut self, column: &str, pattern: &str) -> Self {
+    pub fn where_not_like(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        pattern: &str,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::NotLike,
             value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
         });
         self
     }
 
-    pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+    pub fn where_in<V: Into<serde_json::Value>>(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        values: Vec<V>,
+    ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::In,
             value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
         });
@@ -191,29 +227,29 @@ impl OrGroup {
 
     pub fn where_not_in<V: Into<serde_json::Value>>(
         mut self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         values: Vec<V>,
     ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::NotIn,
             value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
         });
         self
     }
 
-    pub fn where_null(mut self, column: &str) -> Self {
+    pub fn where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::IsNull,
             value: ConditionValue::None,
         });
         self
     }
 
-    pub fn where_not_null(mut self, column: &str) -> Self {
+    pub fn where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::IsNotNull,
             value: ConditionValue::None,
         });
@@ -222,12 +258,12 @@ impl OrGroup {
 
     pub fn where_between(
         mut self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         min: impl Into<serde_json::Value>,
         max: impl Into<serde_json::Value>,
     ) -> Self {
         self.conditions.push(WhereCondition {
-            column: column.to_string(),
+            column: column.column_name().to_string(),
             operator: Operator::Between,
             value: ConditionValue::Range(min.into(), max.into()),
         });
@@ -320,7 +356,7 @@ impl OrBranch {
 
     pub fn where_gt(
         mut self,
-        column: impl crate::columns::IntoColumnName,
+            column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
         self.conditions.push(WhereCondition {

@@ -609,6 +609,30 @@ fn test_build_where_sql_includes_or_groups() {
 }
 
 #[test]
+fn test_build_where_sql_includes_typed_columns_in_or_groups() {
+    let query = QueryBuilder::<QueryTestUser>::new().or_where(|q| {
+        q.where_eq(QueryTestUser::columns.name, "alice")
+            .where_eq(QueryTestUser::columns.id, 7)
+    });
+
+    let sql = query.build_where_sql_for_db(DatabaseType::Postgres);
+
+    assert_eq!(sql, "(\"name\" = 'alice' OR \"id\" = 7)");
+}
+
+#[test]
+fn test_begin_or_where_eq_accepts_typed_columns() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .begin_or_where_eq(QueryTestUser::columns.name, "alice")
+        .and_where_eq(QueryTestUser::columns.id, 7)
+        .end_or();
+
+    let sql = query.build_where_sql_for_db(DatabaseType::Postgres);
+
+    assert_eq!(sql, "((\"name\" = 'alice' AND \"id\" = 7))");
+}
+
+#[test]
 fn test_build_where_sql_escapes_inner_quotes_in_column_names() {
     let query = QueryBuilder::<QueryTestUser>::new().where_eq("profile.na\"me", "active");
 

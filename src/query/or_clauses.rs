@@ -206,7 +206,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub fn begin_or_where_eq(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_eq(column, value)
@@ -214,7 +214,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub fn begin_or_where_gt(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_gt(column, value)
@@ -222,7 +222,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub fn begin_or_where_gte(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_gte(column, value)
@@ -230,7 +230,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub fn begin_or_where_lt(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_lt(column, value)
@@ -238,35 +238,45 @@ impl<M: Model> QueryBuilder<M> {
 
     pub fn begin_or_where_lte(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_lte(column, value)
     }
 
-    pub fn begin_or_where_like(self, column: &str, pattern: &str) -> OrBranchBuilder<M> {
+    pub fn begin_or_where_like(
+        self,
+        column: impl crate::columns::IntoColumnName,
+        pattern: &str,
+    ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_like(column, pattern)
     }
 
     pub fn begin_or_where_in<V: Into<serde_json::Value>>(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         values: Vec<V>,
     ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_in(column, values)
     }
 
-    pub fn begin_or_where_null(self, column: &str) -> OrBranchBuilder<M> {
+    pub fn begin_or_where_null(
+        self,
+        column: impl crate::columns::IntoColumnName,
+    ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_null(column)
     }
 
-    pub fn begin_or_where_not_null(self, column: &str) -> OrBranchBuilder<M> {
+    pub fn begin_or_where_not_null(
+        self,
+        column: impl crate::columns::IntoColumnName,
+    ) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self).or_where_not_null(column)
     }
 
     pub fn begin_or_where_between(
         self,
-        column: &str,
+        column: impl crate::columns::IntoColumnName,
         min: impl Into<serde_json::Value>,
         max: impl Into<serde_json::Value>,
     ) -> OrBranchBuilder<M> {
