@@ -438,7 +438,16 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 if self.is_new() {
                     Self::create(self).await
                 } else {
-                    self.update().await
+                    let primary_key = self.primary_key();
+                    if <Self as ::tideorm::model::ModelMeta>::primary_key_auto_increment()
+                        && <Self as ::tideorm::model::ModelMeta>::primary_key_names().len() == 1
+                    {
+                        self.update().await
+                    } else if Self::exists(primary_key).await? {
+                        self.update().await
+                    } else {
+                        Self::create(self).await
+                    }
                 }
             }
 

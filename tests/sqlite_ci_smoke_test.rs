@@ -42,6 +42,15 @@ struct CiValidatedUser {
 }
 
 #[derive(Model, PartialEq)]
+#[tideorm(table = "ci_api_keys")]
+struct CiApiKey {
+    #[tideorm(primary_key)]
+    key: String,
+    label: String,
+    active: bool,
+}
+
+#[derive(Model, PartialEq)]
 #[tideorm(table = "ci_soft_delete_users", soft_delete)]
 struct CiSoftDeleteUser {
     #[tideorm(primary_key, auto_increment)]
@@ -222,6 +231,57 @@ async fn sqlite_composite_primary_key_crud_smoke_test() {
         missing.is_none(),
         "deleted composite-key row should not exist"
     );
+}
+
+#[tokio::test]
+async fn sqlite_natural_primary_key_save_smoke_test() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_api_keys").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_api_keys (
+            key TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_api_keys table");
+
+    let created = CiApiKey {
+        key: "ci-key-1".to_string(),
+        label: "First key".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert natural-key row");
+
+    assert_eq!(created.key, "ci-key-1");
+    assert_eq!(created.label, "First key");
+    assert!(created.active);
+
+    let saved_again = CiApiKey {
+        label: "Updated key".to_string(),
+        active: false,
+        ..created
+    }
+    .save()
+    .await
+    .expect("failed to update natural-key row");
+
+    assert_eq!(saved_again.key, "ci-key-1");
+    assert_eq!(saved_again.label, "Updated key");
+    assert!(!saved_again.active);
 }
 
 #[tokio::test]

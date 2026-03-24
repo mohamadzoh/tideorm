@@ -14,16 +14,87 @@ use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_err
 use super::Model;
 
 type OneRelationSaveOp = Box<
-    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<serde_json::Value>> + Send>>
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
         + Send,
 >;
 
 type ManyRelationSaveOp = Box<
     dyn FnOnce(
             serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<serde_json::Value>>> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
         + Send,
 >;
+
+#[derive(Debug, Clone, PartialEq)]
+enum SavedRelationInner {
+    One(serde_json::Value),
+    Many(Vec<serde_json::Value>),
+}
+
+/// Saved nested relation payload returned by [`NestedSaveBuilder::save`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedRelation(SavedRelationInner);
+
+impl SavedRelation {
+    fn one(value: serde_json::Value) -> Self {
+        Self(SavedRelationInner::One(value))
+    }
+
+    fn many(values: Vec<serde_json::Value>) -> Self {
+        Self(SavedRelationInner::Many(values))
+    }
+
+    /// Returns true when this result came from `with_one`.
+    pub fn is_one(&self) -> bool {
+        matches!(self.0, SavedRelationInner::One(_))
+    }
+
+    /// Returns true when this result came from `with_many`.
+    pub fn is_many(&self) -> bool {
+        matches!(self.0, SavedRelationInner::Many(_))
+    }
+
+    /// Convert a single related-model result into its concrete model type.
+    pub fn into_one<R: Model>(self) -> Result<R> {
+        match self.0 {
+            SavedRelationInner::One(value) => serde_json::from_value(value).map_err(|e| {
+                Error::conversion(format!("Failed to deserialize related model: {}", e))
+            }),
+            SavedRelationInner::Many(_) => Err(Error::conversion(
+                "Expected a single related model but received a relation collection".to_string(),
+            )),
+        }
+    }
+
+    /// Convert a collection result into concrete model values.
+    pub fn into_many<R: Model>(self) -> Result<Vec<R>> {
+        match self.0 {
+            SavedRelationInner::Many(values) => values
+                .into_iter()
+                .map(|value| {
+                    serde_json::from_value(value).map_err(|e| {
+                        Error::conversion(format!("Failed to deserialize related model: {}", e))
+                    })
+                })
+                .collect(),
+            SavedRelationInner::One(_) => Err(Error::conversion(
+                "Expected a related model collection but received a single relation".to_string(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn test_one(value: serde_json::Value) -> Self {
+        Self::one(value)
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn test_many(values: Vec<serde_json::Value>) -> Self {
+        Self::many(values)
+    }
+}
 
 fn serialize_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<serde_json::Value> {
     serde_json::to_value(primary_key)
@@ -173,13 +244,14 @@ async fn save_related_model_as_json<R>(
     related: R,
     foreign_key: String,
     parent_pk_value: serde_json::Value,
-) -> Result<serde_json::Value>
+) -> Result<SavedRelation>
 where
     R: Model,
 {
     let related = apply_foreign_key(related, &foreign_key, &parent_pk_value)?;
     let related = related.save().await?;
     serde_json::to_value(&related)
+        .map(SavedRelation::one)
         .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))
 }
 
@@ -188,13 +260,13 @@ async fn save_related_models_as_json<R>(
     related: Vec<R>,
     foreign_key: String,
     parent_pk_value: serde_json::Value,
-) -> Result<Vec<serde_json::Value>>
+) -> Result<SavedRelation>
 where
     R: Model,
     <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
 {
     if related.is_empty() {
-        return Ok(Vec::new());
+        return Ok(SavedRelation::many(Vec::new()));
     }
 
     let mut prepared_related = Vec::with_capacity(related.len());
@@ -215,7 +287,7 @@ where
         );
     }
 
-    Ok(saved_json)
+    Ok(SavedRelation::many(saved_json))
 }
 
 /// Extension trait for cascade save operations.
@@ -389,23 +461,23 @@ impl<M: Model> NestedSaveBuilder<M> {
         self
     }
 
-    pub async fn save(self) -> Result<(M, Vec<serde_json::Value>)> {
+    pub async fn save(self) -> Result<(M, Vec<SavedRelation>)> {
         let parent = self.parent.save().await?;
 
         let pk_value =
             require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
 
-        let mut saved_json = Vec::new();
+        let mut saved_relations = Vec::new();
 
         for save_relation in self.one_relations {
-            saved_json.push(save_relation(pk_value.clone()).await?);
+            saved_relations.push(save_relation(pk_value.clone()).await?);
         }
 
         for save_relations in self.many_relations {
-            saved_json.extend(save_relations(pk_value.clone()).await?);
+            saved_relations.push(save_relations(pk_value.clone()).await?);
         }
 
-        Ok((parent, saved_json))
+        Ok((parent, saved_relations))
     }
 }
 

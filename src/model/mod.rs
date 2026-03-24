@@ -13,7 +13,7 @@ pub use api::Model;
 pub use batch::{BatchUpdateBuilder, UpdateValue};
 pub use builders::{CreateBuilder, OnConflictBuilder, UpdateBuilder};
 pub use meta::{IndexDefinition, ModelMeta};
-pub use nested::{NestedSave, NestedSaveBuilder};
+pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
 
 #[cfg(test)]
 #[path = "../testing/model_tests.rs"]

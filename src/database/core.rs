@@ -11,6 +11,7 @@ use super::state::{global_connection_slot, global_db_handle, panic_missing_globa
 enum DatabaseInner {
     Global,
     Handle(DatabaseHandle),
+    #[allow(dead_code)]
     Disconnected,
 }
 
@@ -29,6 +30,7 @@ pub struct Database {
 }
 
 impl Database {
+    #[allow(dead_code)]
     pub(crate) fn disconnected() -> Self {
         Self {
             inner: DatabaseInner::Disconnected,

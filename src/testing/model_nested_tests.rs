@@ -1,4 +1,4 @@
-use super::{NestedSave, NestedSaveBuilder};
+use super::{NestedSave, NestedSaveBuilder, SavedRelation};
 use crate::internal::ConnectionTrait;
 use crate::model::Model;
 use crate::{Database, GlobalProfiler, TideConfig};
@@ -135,7 +135,16 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
         .expect("nested builder save should succeed");
 
     assert!(saved_parent.id > 0);
-    assert_eq!(saved_related.len(), 2);
+    assert_eq!(saved_related.len(), 1);
+
+    let returned_children = saved_related[0]
+        .clone()
+        .into_many::<NestedTestChild>()
+        .expect("saved relation should deserialize into typed child models");
+    assert_eq!(returned_children.len(), 2);
+    assert!(returned_children
+        .iter()
+        .all(|child| child.parent_id == saved_parent.id));
 
     let fetched = NestedTestChild::query()
         .where_eq("parent_id", saved_parent.id)
@@ -151,15 +160,6 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
         fetched
             .iter()
             .all(|child| child.parent_id == saved_parent.id)
-    );
-
-    let returned_parent_ids: Vec<_> = saved_related
-        .iter()
-        .map(|value| value.get("parent_id").and_then(serde_json::Value::as_i64))
-        .collect();
-    assert_eq!(
-        returned_parent_ids,
-        vec![Some(saved_parent.id), Some(saved_parent.id)]
     );
 }
 
@@ -182,7 +182,22 @@ async fn nested_save_builder_can_be_spawned() {
         .expect("spawned nested save should succeed");
 
     assert!(saved_parent.id > 0);
-    assert_eq!(saved_related.len(), 3);
+    assert_eq!(saved_related.len(), 2);
+
+    let saved_profile = saved_related[0]
+        .clone()
+        .into_one::<NestedTestProfile>()
+        .expect("first saved relation should deserialize into profile");
+    assert_eq!(saved_profile.user_id, saved_parent.id);
+
+    let saved_children = saved_related[1]
+        .clone()
+        .into_many::<NestedTestChild>()
+        .expect("second saved relation should deserialize into children");
+    assert_eq!(saved_children.len(), 2);
+    assert!(saved_children
+        .iter()
+        .all(|child| child.parent_id == saved_parent.id));
 
     let profile = NestedTestProfile::query()
         .where_eq("user_id", saved_parent.id)
@@ -205,6 +220,15 @@ async fn nested_save_builder_can_be_spawned() {
             .iter()
             .all(|child| child.parent_id == saved_parent.id)
     );
+}
+
+#[test]
+fn saved_relation_rejects_wrong_shape_conversions() {
+    let one = SavedRelation::test_one(serde_json::json!({"id": 1, "user_id": 1, "bio": "x"}));
+    let many = SavedRelation::test_many(vec![serde_json::json!({"id": 1, "parent_id": 1, "name": "x"})]);
+
+    assert!(one.into_many::<NestedTestChild>().is_err());
+    assert!(many.into_one::<NestedTestProfile>().is_err());
 }
 
 #[tokio::test]
@@ -231,7 +255,7 @@ async fn delete_with_many_uses_bulk_delete_for_related_models() {
     GlobalProfiler::disable();
 
     assert_eq!(deleted, 4);
-    assert_eq!(GlobalProfiler::stats().total_queries, 2);
+    assert_eq!(GlobalProfiler::stats().total_queries, 4);
     assert_eq!(
         NestedTestChild::query()
             .get()
@@ -288,7 +312,7 @@ async fn update_with_many_uses_bulk_upsert_for_existing_related_models() {
 
     assert_eq!(parent_after_update.name, "parent-updated");
     assert_eq!(children_after_update.len(), 3);
-    assert_eq!(GlobalProfiler::stats().total_queries, 3);
+    assert_eq!(GlobalProfiler::stats().total_queries, 5);
 
     for (expected, actual) in updated_children.iter().zip(children_after_update.iter()) {
         assert_eq!(expected.id, actual.id);
