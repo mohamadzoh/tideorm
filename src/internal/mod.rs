@@ -131,42 +131,31 @@ pub(crate) fn count_to_u64(count: i64, context: &str) -> Result<u64> {
     })
 }
 
-fn build_exists_statement<M>(backend: DbBackend) -> Statement
-where
-    M: InternalModel + crate::model::Model,
-{
-    use sea_orm::sea_query::{MysqlQueryBuilder, PostgresQueryBuilder, Query, SqliteQueryBuilder};
-
-    let subquery = Query::select()
-        .expr(Expr::val(1))
-        .from(Alias::new(M::table_name()))
-        .limit(1)
-        .to_owned();
-
-    let exists = Query::select()
-        .expr_as(Expr::exists(subquery), Alias::new("exists"))
-        .to_owned();
-
-    let (sql, values) = match backend {
-        DbBackend::Postgres => exists.build(PostgresQueryBuilder),
-        DbBackend::MySql => exists.build(MysqlQueryBuilder),
-        DbBackend::Sqlite => exists.build(SqliteQueryBuilder),
-        _ => exists.build(PostgresQueryBuilder),
-    };
-
-    Statement::from_sql_and_values(backend, sql, values)
-}
-
 fn build_count_select<M>(condition: Option<Condition>) -> Select<M::Entity>
 where
     M: InternalModel + crate::model::Model,
 {
-    let mut select = M::Entity::find()
+    let mut select = scoped_find::<M>()
         .select_only()
         .column_as(Expr::col(Asterisk).count(), "count");
 
     if let Some(condition) = condition {
         select = select.filter(condition);
+    }
+
+    select
+}
+
+fn scoped_find<M>() -> Select<M::Entity>
+where
+    M: InternalModel + crate::model::Model,
+{
+    let mut select = M::Entity::find();
+
+    if M::soft_delete_enabled()
+        && let Some(deleted_at_column) = M::column_from_str(M::deleted_at_column())
+    {
+        select = select.filter(deleted_at_column.is_null());
     }
 
     select
@@ -183,7 +172,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let results = M::Entity::find().all(conn);
+        let results = scoped_find::<M>().all(conn);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)
@@ -198,7 +187,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let result = M::Entity::find().one(conn);
+        let result = scoped_find::<M>().one(conn);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
@@ -214,7 +203,7 @@ impl QueryExecutor {
         C: ConnectionTrait,
     {
         // Order by primary key descending to get the actual last record
-        let mut select = M::Entity::find();
+        let mut select = scoped_find::<M>();
         let mut query_label = String::from("last()");
 
         // Use the primary key column if available, otherwise fall back to unordered
@@ -266,20 +255,13 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        #[derive(Debug, FromQueryResult)]
-        struct ExistsResult {
-            exists: bool,
-        }
-
-        let backend = conn.get_database_backend();
-        let statement = build_exists_statement::<M>(backend);
-        let result = ExistsResult::find_by_statement(statement).one(conn);
+        let result = scoped_find::<M>().one(conn);
         let result = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
 
-        Ok(result.map(|row| row.exists).unwrap_or(false))
+        Ok(result.is_some())
     }
 
     /// Paginate records
@@ -288,7 +270,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let results = M::Entity::find().offset(offset).limit(limit).all(conn);
+        let results = scoped_find::<M>().offset(offset).limit(limit).all(conn);
         let results = crate::profiling::__profile_future(results)
             .await
             .map_err(translate_error)

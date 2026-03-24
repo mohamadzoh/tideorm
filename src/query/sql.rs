@@ -952,7 +952,7 @@ impl<M: Model> QueryBuilder<M> {
         if !self.raw_select_expressions.is_empty() {
             let mut expressions = self.raw_select_expressions.clone();
             for window_function in &self.window_functions {
-                expressions.push(window_function.to_sql());
+                expressions.push(window_function.to_sql_for_db(db_type));
             }
             return format!("SELECT {} ", expressions.join(", "));
         }
@@ -964,7 +964,7 @@ impl<M: Model> QueryBuilder<M> {
                 .collect();
 
             for window_function in &self.window_functions {
-                rendered_columns.push(window_function.to_sql());
+                rendered_columns.push(window_function.to_sql_for_db(db_type));
             }
 
             return format!("SELECT {} ", rendered_columns.join(", "));
@@ -972,7 +972,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let mut select_parts = vec![format!("{}.*", db_sql::quote_ident(db_type, table))];
         for window_function in &self.window_functions {
-            select_parts.push(window_function.to_sql());
+            select_parts.push(window_function.to_sql_for_db(db_type));
         }
         format!("SELECT {} ", select_parts.join(", "))
     }
@@ -1290,6 +1290,33 @@ impl<M: Model> QueryBuilder<M> {
         self.build_count_sql_with_params_for_db(self.db_type_for_sql())
     }
 
+    fn build_exists_sql_with_params_for_db(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+        let mut exists_query = self.clone();
+        exists_query.order_by.clear();
+        exists_query.limit_value = None;
+        exists_query.offset_value = None;
+
+        if exists_query.unions.is_empty() {
+            exists_query.select_columns = None;
+            exists_query.raw_select_expressions = vec!["1".to_string()];
+            exists_query.window_functions.clear();
+        }
+
+        let (inner_sql, params) = exists_query.build_select_sql_with_params_for_db(db_type);
+        (
+            format!(
+                "SELECT 1 FROM ({}) AS {} LIMIT 1",
+                inner_sql,
+                db_sql::quote_ident(db_type, "tideorm_exists_subquery")
+            ),
+            params,
+        )
+    }
+
+    fn build_exists_sql_with_params(&self) -> (String, Vec<Value>) {
+        self.build_exists_sql_with_params_for_db(self.db_type_for_sql())
+    }
+
     fn log_query(&self, sql: &str) {
         if std::env::var("TIDE_LOG_QUERIES")
             .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
@@ -1520,7 +1547,19 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub async fn exists(self) -> Result<bool> {
-        Ok(self.count().await? > 0)
+        self.ensure_query_is_valid()?;
+
+        let (sql, params) = self.build_exists_sql_with_params();
+
+        self.log_query(&sql);
+        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let rows = self
+            .current_db()?
+            .__raw_json_with_params(&sql, params)
+            .await
+            .map_err(|err| err.with_context(error_context.clone()))?;
+
+        Ok(!rows.is_empty())
     }
 
     fn ensure_mutation_query_is_safe(&self, operation: &str) -> Result<()> {

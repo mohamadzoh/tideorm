@@ -53,6 +53,7 @@ tideorm-macros = { version = "0.8.9", path = "tideorm-macros" }
 # Utils
 parking_lot = "0.12.5"
 regex = "1.12.3"
+url = "2.5.7"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 rand = "0.10.0"
 argon2 = { version = "0.5.3", features = ["std"] }

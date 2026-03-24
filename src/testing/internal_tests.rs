@@ -1,6 +1,4 @@
-use super::{
-    build_count_select, build_exists_statement, count_to_u64, supports_batch_insert_returning,
-};
+use super::{build_count_select, count_to_u64, scoped_find, supports_batch_insert_returning};
 use crate::config::DatabaseType;
 use crate::internal::{ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
 
@@ -9,6 +7,14 @@ struct InternalCountUser {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
+}
+
+#[tideorm::model(table = "internal_soft_delete_users", soft_delete)]
+struct InternalSoftDeleteUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[test]
@@ -64,14 +70,22 @@ fn count_select_omits_where_without_condition() {
 }
 
 #[test]
-fn exists_select_uses_exists_subquery_with_limit() {
-    let statement = build_exists_statement::<InternalCountUser>(DbBackend::Postgres);
+fn scoped_find_has_no_soft_delete_filter_for_regular_models() {
+    let statement = scoped_find::<InternalCountUser>().build(DbBackend::Postgres);
 
-    assert_eq!(
-        statement.sql,
-        "SELECT EXISTS(SELECT $1 FROM \"internal_count_users\" LIMIT $2) AS \"exists\""
+    assert_eq!(statement.sql, "SELECT \"internal_count_users\".\"id\", \"internal_count_users\".\"name\" FROM \"internal_count_users\"");
+}
+
+#[test]
+fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
+    let statement = scoped_find::<InternalSoftDeleteUser>().build(DbBackend::Postgres);
+
+    assert!(statement.sql.contains("FROM \"internal_soft_delete_users\""));
+    assert!(
+        statement
+            .sql
+            .contains("WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL")
     );
-    assert!(statement.values.is_some());
 }
 
 #[test]

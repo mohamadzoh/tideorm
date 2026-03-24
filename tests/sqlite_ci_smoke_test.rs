@@ -29,6 +29,27 @@ struct CiUserRole {
     active: bool,
 }
 
+#[derive(Model, PartialEq)]
+#[tideorm(table = "ci_validated_users")]
+struct CiValidatedUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    #[validate(email)]
+    email: String,
+    #[validate(min_length = 3)]
+    name: String,
+    active: bool,
+}
+
+#[derive(Model, PartialEq)]
+#[tideorm(table = "ci_soft_delete_users", soft_delete)]
+struct CiSoftDeleteUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[tokio::test]
 async fn sqlite_ci_smoke_test() {
     TideConfig::init()
@@ -257,6 +278,264 @@ async fn sqlite_eager_find_preserves_existing_filters() {
         matched.is_some(),
         "eager find should still find matching rows"
     );
+}
+
+#[tokio::test]
+async fn sqlite_save_and_update_run_model_validation() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_validated_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_validated_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_validated_users table");
+
+    let create_err = CiValidatedUser {
+        id: 0,
+        email: "not-an-email".to_string(),
+        name: "ok".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect_err("invalid model save should fail validation");
+    assert!(create_err.is_validation_error());
+
+    let count_after_failed_create = CiValidatedUser::count()
+        .await
+        .expect("failed to count validated users after rejected create");
+    assert_eq!(count_after_failed_create, 0);
+
+    let created = CiValidatedUser {
+        id: 0,
+        email: "valid@example.com".to_string(),
+        name: "Valid User".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("valid model save should succeed");
+
+    let update_err = CiValidatedUser {
+        email: "still-valid@example.com".to_string(),
+        name: "no".to_string(),
+        ..created
+    }
+    .update()
+    .await
+    .expect_err("invalid model update should fail validation");
+    assert!(update_err.is_validation_error());
+
+    let reloaded = CiValidatedUser::find(1_i64)
+        .await
+        .expect("failed to reload validated user")
+        .expect("validated user should still exist");
+    assert_eq!(reloaded.email, "valid@example.com");
+    assert_eq!(reloaded.name, "Valid User");
+    assert!(reloaded.active);
+}
+
+#[tokio::test]
+async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_soft_delete_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_soft_delete_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            deleted_at TEXT NULL
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_soft_delete_users table");
+
+    let first = CiSoftDeleteUser {
+        id: 0,
+        name: "First".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("failed to insert first soft-delete user");
+
+    let middle = CiSoftDeleteUser {
+        id: 0,
+        name: "Middle".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("failed to insert middle soft-delete user");
+
+    let last = CiSoftDeleteUser {
+        id: 0,
+        name: "Last".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("failed to insert last soft-delete user");
+
+    first
+        .soft_delete()
+        .await
+        .expect("failed to soft delete first user");
+    last.soft_delete()
+        .await
+        .expect("failed to soft delete last user");
+
+    let all_users = CiSoftDeleteUser::all()
+        .await
+        .expect("failed to fetch all soft-delete users");
+    assert_eq!(all_users.len(), 1);
+    assert_eq!(all_users[0].name, "Middle");
+
+    let first_user = CiSoftDeleteUser::first()
+        .await
+        .expect("failed to fetch first soft-delete user")
+        .expect("middle user should remain visible");
+    assert_eq!(first_user.name, "Middle");
+
+    let last_user = CiSoftDeleteUser::last()
+        .await
+        .expect("failed to fetch last soft-delete user")
+        .expect("middle user should remain visible");
+    assert_eq!(last_user.name, "Middle");
+
+    let count = CiSoftDeleteUser::count()
+        .await
+        .expect("failed to count visible soft-delete users");
+    assert_eq!(count, 1);
+
+    let exists_any = CiSoftDeleteUser::exists_any()
+        .await
+        .expect("failed to check visible soft-delete users");
+    assert!(exists_any);
+
+    let page = CiSoftDeleteUser::paginate(1, 10)
+        .await
+        .expect("failed to paginate soft-delete users");
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].name, "Middle");
+
+    let with_trashed = CiSoftDeleteUser::query()
+        .with_trashed()
+        .get()
+        .await
+        .expect("failed to query soft-delete users with trashed rows");
+    assert_eq!(with_trashed.len(), 3);
+
+    let only_trashed = CiSoftDeleteUser::query()
+        .only_trashed()
+        .get()
+        .await
+        .expect("failed to query only trashed rows");
+    assert_eq!(only_trashed.len(), 2);
+    assert!(only_trashed.iter().any(|user| user.name == "First"));
+    assert!(only_trashed.iter().any(|user| user.name == "Last"));
+
+    let middle_found = CiSoftDeleteUser::find(middle.id)
+        .await
+        .expect("failed to find middle user")
+        .expect("middle user should still be findable");
+    assert_eq!(middle_found.name, "Middle");
+}
+
+#[tokio::test]
+async fn sqlite_direct_crud_helpers_remain_unchanged_for_regular_models() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_users table");
+
+    for (email, name) in [
+        ("first@example.com", "First"),
+        ("middle@example.com", "Middle"),
+        ("last@example.com", "Last"),
+    ] {
+        CiUser {
+            id: 0,
+            email: email.to_string(),
+            name: name.to_string(),
+            active: true,
+        }
+        .save()
+        .await
+        .expect("failed to insert regular user");
+    }
+
+    let all_users = CiUser::all().await.expect("failed to fetch all regular users");
+    assert_eq!(all_users.len(), 3);
+
+    let first_user = CiUser::first()
+        .await
+        .expect("failed to fetch first regular user")
+        .expect("first regular user should exist");
+    assert_eq!(first_user.email, "first@example.com");
+
+    let last_user = CiUser::last()
+        .await
+        .expect("failed to fetch last regular user")
+        .expect("last regular user should exist");
+    assert_eq!(last_user.email, "last@example.com");
+
+    let count = CiUser::count()
+        .await
+        .expect("failed to count regular users");
+    assert_eq!(count, 3);
+
+    let exists_any = CiUser::exists_any()
+        .await
+        .expect("failed to check regular users existence");
+    assert!(exists_any);
+
+    let page = CiUser::paginate(1, 10)
+        .await
+        .expect("failed to paginate regular users");
+    assert_eq!(page.len(), 3);
 }
 
 #[tokio::test]

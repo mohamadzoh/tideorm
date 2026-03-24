@@ -73,6 +73,7 @@
 //! ```
 
 use parking_lot::RwLock;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -359,7 +360,7 @@ static SLOW_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_QUERY_TIME_MS: AtomicU64 = AtomicU64::new(0);
 
 static LOG_LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Off);
-static QUERY_HISTORY: RwLock<Vec<QueryLogEntry>> = RwLock::new(Vec::new());
+static QUERY_HISTORY: RwLock<VecDeque<QueryLogEntry>> = RwLock::new(VecDeque::new());
 static HISTORY_LIMIT: RwLock<usize> = RwLock::new(100);
 
 /// Query logger for debugging and performance monitoring
@@ -423,10 +424,14 @@ impl QueryLogger {
         {
             let mut history = QUERY_HISTORY.write();
             let limit = *HISTORY_LIMIT.read();
-            if history.len() >= limit {
-                history.remove(0);
+            if limit == 0 {
+                history.clear();
+            } else {
+                while history.len() >= limit {
+                    history.pop_front();
+                }
+                history.push_back(entry.clone());
             }
-            history.push(entry.clone());
         }
 
         // Determine if we should output
@@ -491,7 +496,7 @@ impl QueryLogger {
 
     /// Get query history
     pub fn history() -> Vec<QueryLogEntry> {
-        QUERY_HISTORY.read().clone()
+        QUERY_HISTORY.read().iter().cloned().collect()
     }
 
     /// Clear query history

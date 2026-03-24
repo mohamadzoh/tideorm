@@ -151,3 +151,44 @@ fn count_sql_ignores_order_limit_and_offset() {
     assert!(!sql.contains("OFFSET 20"));
     assert!(sql.contains("WHERE \"name\" = $1"));
 }
+
+#[test]
+fn exists_sql_uses_select_one_with_limit() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .where_eq("name", "alice")
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert_eq!(params.len(), 1);
+    assert!(sql.starts_with("SELECT 1 FROM (SELECT 1 FROM "));
+    assert!(sql.contains("FROM \"query_count_guard_users\""));
+    assert!(sql.contains("WHERE \"name\" = $1"));
+    assert!(sql.ends_with("AS \"tideorm_exists_subquery\" LIMIT 1"));
+}
+
+#[test]
+fn exists_sql_discards_original_projection_for_non_union_queries() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .select(vec!["name"])
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(params.is_empty());
+    assert!(sql.starts_with("SELECT 1 FROM (SELECT 1 FROM "));
+    assert!(!sql.contains("SELECT \"query_count_guard_users\".\"name\""));
+}
+
+#[test]
+fn exists_sql_ignores_order_limit_and_offset() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .where_eq("name", "alice")
+        .order_by("name", crate::query::Order::Asc)
+        .limit(10)
+        .offset(20)
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert_eq!(params.len(), 1);
+    assert!(!sql.contains("ORDER BY"));
+    assert!(!sql.contains("LIMIT 10"));
+    assert!(!sql.contains("OFFSET 20"));
+    assert!(sql.ends_with("LIMIT 1"));
+    assert!(sql.contains("WHERE \"name\" = $1"));
+}

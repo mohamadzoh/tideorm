@@ -3304,6 +3304,7 @@ dependencies = [
  "tideorm-macros",
  "tokio",
  "trybuild",
+ "url",
  "uuid",
 ]
 

@@ -32,21 +32,23 @@ use crate::error::Result;
 ///
 /// For `save()` on a new model:
 /// 1. `before_validation`
-/// 2. `after_validation`
-/// 3. `before_save`
-/// 4. `before_create`
-/// 5. (actual INSERT)
-/// 6. `after_create`
-/// 7. `after_save`
+/// 2. `Validate::validate()`
+/// 3. `after_validation`
+/// 4. `before_save`
+/// 5. `before_create`
+/// 6. (actual INSERT)
+/// 7. `after_create`
+/// 8. `after_save`
 ///
 /// For `save()` on an existing model, or `update()`:
 /// 1. `before_validation`
-/// 2. `after_validation`
-/// 3. `before_save`
-/// 4. `before_update`
-/// 5. (actual UPDATE)
-/// 6. `after_update`
-/// 7. `after_save`
+/// 2. `Validate::validate()`
+/// 3. `after_validation`
+/// 4. `before_save`
+/// 5. `before_update`
+/// 6. (actual UPDATE)
+/// 7. `after_update`
+/// 8. `after_save`
 ///
 /// For `delete()`:
 /// 1. `before_delete`
@@ -224,6 +226,74 @@ impl<T> AfterCreateDispatch<T> for &&T {
 }
 
 #[doc(hidden)]
+pub trait BeforeValidationDispatch<T> {
+    fn run_before_validation(self) -> Result<()>;
+}
+
+impl<T: Callbacks> BeforeValidationDispatch<T> for &mut T {
+    fn run_before_validation(self) -> Result<()> {
+        self.before_validation()
+    }
+}
+
+impl<T> BeforeValidationDispatch<T> for &&mut T {
+    fn run_before_validation(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait AfterValidationDispatch<T> {
+    fn run_after_validation(self) -> Result<()>;
+}
+
+impl<T: Callbacks> AfterValidationDispatch<T> for &T {
+    fn run_after_validation(self) -> Result<()> {
+        self.after_validation()
+    }
+}
+
+impl<T> AfterValidationDispatch<T> for &&T {
+    fn run_after_validation(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait BeforeSaveDispatch<T> {
+    fn run_before_save(self) -> Result<()>;
+}
+
+impl<T: Callbacks> BeforeSaveDispatch<T> for &mut T {
+    fn run_before_save(self) -> Result<()> {
+        self.before_save()
+    }
+}
+
+impl<T> BeforeSaveDispatch<T> for &&mut T {
+    fn run_before_save(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait BeforeCreateOnlyDispatch<T> {
+    fn run_before_create_only(self) -> Result<()>;
+}
+
+impl<T: Callbacks> BeforeCreateOnlyDispatch<T> for &mut T {
+    fn run_before_create_only(self) -> Result<()> {
+        self.before_create()
+    }
+}
+
+impl<T> BeforeCreateOnlyDispatch<T> for &&mut T {
+    fn run_before_create_only(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
 pub trait BeforeUpdateDispatch<T> {
     fn run_before_update(self) -> Result<()>;
 }
@@ -236,6 +306,23 @@ impl<T: CallbackRunner> BeforeUpdateDispatch<T> for &mut T {
 
 impl<T> BeforeUpdateDispatch<T> for &&mut T {
     fn run_before_update(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+pub trait BeforeUpdateOnlyDispatch<T> {
+    fn run_before_update_only(self) -> Result<()>;
+}
+
+impl<T: Callbacks> BeforeUpdateOnlyDispatch<T> for &mut T {
+    fn run_before_update_only(self) -> Result<()> {
+        self.before_update()
+    }
+}
+
+impl<T> BeforeUpdateOnlyDispatch<T> for &&mut T {
+    fn run_before_update_only(self) -> Result<()> {
         Ok(())
     }
 }

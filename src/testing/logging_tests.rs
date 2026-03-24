@@ -79,3 +79,46 @@ fn test_query_timer() {
     assert!(entry.duration.unwrap() >= Duration::from_millis(10));
     assert_eq!(entry.rows, Some(5));
 }
+
+#[test]
+fn test_query_history_limit_drops_oldest_entries() {
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    QueryLogger::disable();
+
+    QueryLogger::global()
+        .set_level(LogLevel::Debug)
+        .set_history_limit(2)
+        .enable();
+
+    QueryLogger::log(QueryLogEntry::new("SELECT 1"));
+    QueryLogger::log(QueryLogEntry::new("SELECT 2"));
+    QueryLogger::log(QueryLogEntry::new("SELECT 3"));
+
+    let history = QueryLogger::history();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].sql, "SELECT 2");
+    assert_eq!(history[1].sql, "SELECT 3");
+
+    QueryLogger::clear_history();
+    QueryLogger::global().set_history_limit(100).disable();
+}
+
+#[test]
+fn test_query_history_limit_zero_keeps_no_entries() {
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    QueryLogger::disable();
+
+    QueryLogger::global()
+        .set_level(LogLevel::Debug)
+        .set_history_limit(0)
+        .enable();
+
+    QueryLogger::log(QueryLogEntry::new("SELECT 1"));
+
+    assert!(QueryLogger::history().is_empty());
+
+    QueryLogger::clear_history();
+    QueryLogger::global().set_history_limit(100).disable();
+}

@@ -6,6 +6,69 @@ use crate::model::Model;
 use std::marker::PhantomData;
 
 impl<M: Model> QueryBuilder<M> {
+    fn split_select_alias(value: &str) -> &str {
+        let trimmed = value.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        if let Some(index) = lowered.find(" as ") {
+            trimmed[..index].trim()
+        } else {
+            trimmed
+        }
+    }
+
+    fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
+        let value = Self::split_select_alias(value);
+        if value.is_empty()
+            || value.starts_with('"')
+            || value.ends_with('"')
+            || value.starts_with('`')
+            || value.ends_with('`')
+            || value.contains('(')
+            || value.contains(')')
+            || value.contains('*')
+            || value.contains(' ')
+        {
+            return None;
+        }
+
+        match value.split_once('.') {
+            Some((table, column)) if !table.is_empty() && !column.is_empty() && !column.contains('.') => {
+                Some((table, column))
+            }
+            Some(_) => None,
+            None => Some(("", value)),
+        }
+    }
+
+    fn validate_model_column_reference(kind: &str, value: &str) -> std::result::Result<(), String> {
+        let Some((table, column)) = Self::simple_column_reference(value) else {
+            return Ok(());
+        };
+
+        let reference = if table.is_empty() {
+            column.to_string()
+        } else {
+            format!("{}.{}", table, column)
+        };
+        db_sql::validate_identifier_reference(kind, &reference)?;
+
+        if table.is_empty() || table == M::table_name() {
+            if M::column_names().contains(&column) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "unknown {} '{}' for model '{}'; known columns: {}",
+                    kind,
+                    reference,
+                    M::table_name(),
+                    M::column_names().join(", ")
+                ))
+            }
+        } else {
+            Ok(())
+        }
+    }
+
     fn validate_condition(condition: &WhereCondition) -> std::result::Result<(), String> {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => {
@@ -21,7 +84,13 @@ impl<M: Model> QueryBuilder<M> {
                 db_sql::validate_subquery_sql(query_sql)
             }
             _ => Ok(()),
+        }?;
+
+        if !condition.column.is_empty() {
+            Self::validate_model_column_reference("WHERE column", &condition.column)?;
         }
+
+        Ok(())
     }
 
     fn validate_or_group(group: &OrGroup) -> std::result::Result<(), String> {
@@ -43,6 +112,23 @@ impl<M: Model> QueryBuilder<M> {
 
         for group in &self.or_groups {
             Self::validate_or_group(group).map_err(Error::invalid_query)?;
+        }
+
+        for (column, _) in &self.order_by {
+            Self::validate_model_column_reference("ORDER BY column", column)
+                .map_err(Error::invalid_query)?;
+        }
+
+        for column in &self.group_by {
+            Self::validate_model_column_reference("GROUP BY column", column)
+                .map_err(Error::invalid_query)?;
+        }
+
+        if let Some(columns) = &self.select_columns {
+            for column in columns {
+                Self::validate_model_column_reference("SELECT column", column)
+                    .map_err(Error::invalid_query)?;
+            }
         }
 
         Ok(())

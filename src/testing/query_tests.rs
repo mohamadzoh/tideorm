@@ -618,6 +618,50 @@ fn test_build_where_sql_escapes_inner_quotes_in_column_names() {
 }
 
 #[test]
+fn test_query_validation_rejects_unknown_model_column_in_where() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .where_eq("naem", "alice")
+        .ensure_query_is_valid()
+        .expect_err("unknown where column should invalidate query");
+
+    assert!(err.to_string().contains("unknown WHERE column 'naem'"));
+    assert!(err.to_string().contains("known columns: id, name"));
+}
+
+#[test]
+fn test_query_validation_rejects_unknown_self_qualified_column() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .where_eq("query_test_users.naem", "alice")
+        .ensure_query_is_valid()
+        .expect_err("unknown self-qualified column should invalidate query");
+
+    assert!(
+        err.to_string()
+            .contains("unknown WHERE column 'query_test_users.naem'")
+    );
+}
+
+#[test]
+fn test_query_validation_allows_joined_table_column_references() {
+    QueryBuilder::<QueryTestUser>::new()
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .where_eq("profiles.active", true)
+        .order_by("profiles.created_at", Order::Desc)
+        .ensure_query_is_valid()
+        .expect("joined-table column references should remain allowed");
+}
+
+#[test]
+fn test_query_validation_rejects_unknown_model_column_in_order_by() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .order_by("naem", Order::Asc)
+        .ensure_query_is_valid()
+        .expect_err("unknown order-by column should invalidate query");
+
+    assert!(err.to_string().contains("unknown ORDER BY column 'naem'"));
+}
+
+#[test]
 fn test_build_select_sql_with_params_parameterizes_read_filters() {
     let query = QueryBuilder::<QueryTestUser>::new()
         .select_raw("COUNT(*) as total")
@@ -677,6 +721,26 @@ fn test_build_select_sql_with_params_quotes_reserved_identifiers() {
         "SELECT `query_test_users`.`order` AS `group` FROM `query_test_users` WHERE `group` = ? GROUP BY `group` ORDER BY `order` DESC LIMIT 5"
     );
     assert_eq!(mysql_params.len(), 1);
+}
+
+#[test]
+fn test_window_function_sql_uses_postgres_identifier_quoting() {
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .first_value("first_name", "na\"me", "id", "na\"me", Order::Asc)
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(params.is_empty());
+    assert!(sql.contains("FIRST_VALUE(\"na\"\"me\") OVER (PARTITION BY \"id\" ORDER BY \"na\"\"me\" ASC) AS \"first_name\""));
+}
+
+#[test]
+fn test_window_function_sql_uses_mysql_identifier_quoting() {
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .first_value("first_name", "na`me", "id", "na`me", Order::Asc)
+        .build_select_sql_with_params_for_db(DatabaseType::MySQL);
+
+    assert!(params.is_empty());
+    assert!(sql.contains("FIRST_VALUE(`na``me`) OVER (PARTITION BY `id` ORDER BY `na``me` ASC) AS `first_name`"));
 }
 
 #[cfg(feature = "fulltext")]

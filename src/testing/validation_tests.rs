@@ -15,6 +15,8 @@ fn test_url_validation() {
     assert!(Validator::is_valid_url("https://example.com/path?query=1"));
     assert!(!Validator::is_valid_url("example.com"));
     assert!(!Validator::is_valid_url("ftp://example.com"));
+    assert!(!Validator::is_valid_url("https://"));
+    assert!(!Validator::is_valid_url("https:// ; DROP TABLE users"));
 }
 
 #[test]

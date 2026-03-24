@@ -1,6 +1,8 @@
 #![allow(missing_docs)]
 
+use crate::config::DatabaseType;
 use super::{Order, WhereCondition};
+use super::db_sql;
 use crate::model::Model;
 use std::marker::PhantomData;
 
@@ -120,14 +122,16 @@ pub enum WindowFunctionType {
 }
 
 impl WindowFunctionType {
-    pub fn as_sql(&self) -> String {
+    pub fn as_sql_for_db(&self, db_type: DatabaseType) -> String {
+        let quote_column = |column: &str| db_sql::format_column(db_type, column);
+
         match self {
             WindowFunctionType::RowNumber => "ROW_NUMBER()".to_string(),
             WindowFunctionType::Rank => "RANK()".to_string(),
             WindowFunctionType::DenseRank => "DENSE_RANK()".to_string(),
             WindowFunctionType::Ntile(n) => format!("NTILE({})", n),
             WindowFunctionType::Lag(col, offset, default) => {
-                let mut s = format!("LAG(\"{}\"", col);
+                let mut s = format!("LAG({}", quote_column(col));
                 if let Some(o) = offset {
                     s.push_str(&format!(", {}", o));
                     if let Some(d) = default {
@@ -138,7 +142,7 @@ impl WindowFunctionType {
                 s
             }
             WindowFunctionType::Lead(col, offset, default) => {
-                let mut s = format!("LEAD(\"{}\"", col);
+                let mut s = format!("LEAD({}", quote_column(col));
                 if let Some(o) = offset {
                     s.push_str(&format!(", {}", o));
                     if let Some(d) = default {
@@ -148,19 +152,29 @@ impl WindowFunctionType {
                 s.push(')');
                 s
             }
-            WindowFunctionType::FirstValue(col) => format!("FIRST_VALUE(\"{}\")", col),
-            WindowFunctionType::LastValue(col) => format!("LAST_VALUE(\"{}\")", col),
-            WindowFunctionType::NthValue(col, n) => format!("NTH_VALUE(\"{}\", {})", col, n),
-            WindowFunctionType::Sum(col) => format!("SUM(\"{}\")", col),
-            WindowFunctionType::Avg(col) => format!("AVG(\"{}\")", col),
+            WindowFunctionType::FirstValue(col) => {
+                format!("FIRST_VALUE({})", quote_column(col))
+            }
+            WindowFunctionType::LastValue(col) => {
+                format!("LAST_VALUE({})", quote_column(col))
+            }
+            WindowFunctionType::NthValue(col, n) => {
+                format!("NTH_VALUE({}, {})", quote_column(col), n)
+            }
+            WindowFunctionType::Sum(col) => format!("SUM({})", quote_column(col)),
+            WindowFunctionType::Avg(col) => format!("AVG({})", quote_column(col)),
             WindowFunctionType::Count(col) => match col {
-                Some(c) => format!("COUNT(\"{}\")", c),
+                Some(c) => format!("COUNT({})", quote_column(c)),
                 None => "COUNT(*)".to_string(),
             },
-            WindowFunctionType::Min(col) => format!("MIN(\"{}\")", col),
-            WindowFunctionType::Max(col) => format!("MAX(\"{}\")", col),
+            WindowFunctionType::Min(col) => format!("MIN({})", quote_column(col)),
+            WindowFunctionType::Max(col) => format!("MAX({})", quote_column(col)),
             WindowFunctionType::Custom(expr) => expr.clone(),
         }
+    }
+
+    pub fn as_sql(&self) -> String {
+        self.as_sql_for_db(DatabaseType::Postgres)
     }
 }
 
@@ -210,8 +224,8 @@ impl WindowFunction {
         self
     }
 
-    pub fn to_sql(&self) -> String {
-        let mut sql = self.function.as_sql();
+    pub fn to_sql_for_db(&self, db_type: DatabaseType) -> String {
+        let mut sql = self.function.as_sql_for_db(db_type);
         sql.push_str(" OVER (");
 
         let mut clauses = Vec::new();
@@ -220,7 +234,7 @@ impl WindowFunction {
             let cols: Vec<String> = self
                 .partition_by
                 .iter()
-                .map(|c| format!("\"{}\"", c))
+                .map(|c| db_sql::format_column(db_type, c))
                 .collect();
             clauses.push(format!("PARTITION BY {}", cols.join(", ")));
         }
@@ -229,7 +243,7 @@ impl WindowFunction {
             let orders: Vec<String> = self
                 .order_by
                 .iter()
-                .map(|(col, dir)| format!("\"{}\" {}", col, dir.as_str()))
+                .map(|(col, dir)| format!("{} {}", db_sql::format_column(db_type, col), dir.as_str()))
                 .collect();
             clauses.push(format!("ORDER BY {}", orders.join(", ")));
         }
@@ -249,8 +263,12 @@ impl WindowFunction {
         }
 
         sql.push_str(&clauses.join(" "));
-        sql.push_str(&format!(") AS \"{}\"", self.alias));
+        sql.push_str(&format!(") AS {}", db_sql::quote_ident(db_type, &self.alias)));
         sql
+    }
+
+    pub fn to_sql(&self) -> String {
+        self.to_sql_for_db(DatabaseType::Postgres)
     }
 }
 

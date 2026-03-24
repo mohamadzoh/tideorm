@@ -375,11 +375,20 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
             async fn create(model: Self) -> ::tideorm::Result<Self> {
                 use ::tideorm::database::Connection;
-                use ::tideorm::callbacks::{AfterCreateDispatch, BeforeCreateDispatch};
+                use ::tideorm::callbacks::{
+                    AfterCreateDispatch, AfterValidationDispatch, BeforeCreateOnlyDispatch,
+                    BeforeSaveDispatch, BeforeValidationDispatch,
+                };
                 use ::tideorm::internal::InternalModel;
                 use ::tideorm::sea_orm::ActiveModelTrait;
+                use ::tideorm::validation::Validate;
                 let mut model = model;
-                (&mut model).run_before_create()?;
+                (&mut model).run_before_validation()?;
+                ::tideorm::validation::Validate::validate(&model)
+                    .map_err(::tideorm::Error::from)?;
+                (&model).run_after_validation()?;
+                (&mut model).run_before_save()?;
+                (&mut model).run_before_create_only()?;
                 let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
                 let active = <Self as InternalModel>::into_active_model(model);
                 let result = ::tideorm::profiling::__profile_future(
@@ -435,11 +444,20 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
             async fn update(self) -> ::tideorm::Result<Self> {
                 use ::tideorm::database::Connection;
-                use ::tideorm::callbacks::{AfterUpdateDispatch, BeforeUpdateDispatch};
+                use ::tideorm::callbacks::{
+                    AfterUpdateDispatch, AfterValidationDispatch, BeforeSaveDispatch,
+                    BeforeUpdateOnlyDispatch, BeforeValidationDispatch,
+                };
                 use ::tideorm::internal::InternalModel;
                 use ::tideorm::sea_orm::ActiveModelTrait;
+                use ::tideorm::validation::Validate;
                 let mut model = self;
-                (&mut model).run_before_update()?;
+                (&mut model).run_before_validation()?;
+                ::tideorm::validation::Validate::validate(&model)
+                    .map_err(::tideorm::Error::from)?;
+                (&model).run_after_validation()?;
+                (&mut model).run_before_save()?;
+                (&mut model).run_before_update_only()?;
                 let primary_key = model.primary_key();
                 let error_context = Self::__primary_key_error_context(&primary_key)
                     .query(format!("update where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));

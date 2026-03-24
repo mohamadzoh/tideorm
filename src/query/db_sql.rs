@@ -211,6 +211,24 @@ pub(crate) fn validate_identifier(kind: &str, value: &str) -> std::result::Resul
     ))
 }
 
+pub(crate) fn validate_identifier_reference(
+    kind: &str,
+    value: &str,
+) -> std::result::Result<(), String> {
+    let parts: Vec<&str> = value.split('.').collect();
+    if !parts.is_empty()
+        && parts.len() <= 2
+        && parts.iter().all(|part| !part.is_empty() && is_safe_identifier_segment(part))
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "invalid {} '{}': expected column or table.column using only ASCII letters, numbers, and underscores",
+        kind, value
+    ))
+}
+
 pub(crate) fn validate_join_column(value: &str) -> std::result::Result<(), String> {
     let parts: Vec<&str> = value.split('.').collect();
     if parts.len() == 2 && parts.iter().all(|part| is_safe_identifier_segment(part)) {

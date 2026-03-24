@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Removed the redundant `Model::insert_many()` and `Model::insert_many_returning()` aliases. `Model::insert_all()` remains the single batch-insert API and continues to return inserted models with database-generated values populated when the backend supports or emulates it.
 
+### Fixed
+
+- `Model::save()` and `Model::update()` now invoke `Validate::validate()` automatically during the lifecycle between `before_validation` and `after_validation`, so validation attributes and custom `Validate` implementations are enforced before writes hit the database.
+- Direct read helpers such as `Model::all()`, `Model::count()`, `Model::first()`, `Model::last()`, `Model::exists_any()`, and `Model::paginate()` now honor the default soft-delete scope instead of bypassing it through the lower-level query executor.
+
 ## [0.8.9] - 2026-03-22
 
 ### Changed

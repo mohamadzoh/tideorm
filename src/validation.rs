@@ -557,7 +557,10 @@ impl Validator {
 
     /// Check if a string is a valid URL
     pub fn is_valid_url(s: &str) -> bool {
-        s.starts_with("http://") || s.starts_with("https://")
+        match url::Url::parse(s) {
+            Ok(url) => matches!(url.scheme(), "http" | "https") && url.has_host(),
+            Err(_) => false,
+        }
     }
 }
 
