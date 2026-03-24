@@ -108,6 +108,8 @@ Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideO
 
 Composite primary keys are supported by marking multiple fields with `#[tideorm(primary_key)]`. Composite keys are used as tuples in CRUD APIs, for example `UserRole::find((user_id, role_id))`. `auto_increment` and tokenization remain single-primary-key features.
 
+For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-insert API and returns the inserted models with database-generated values populated when the active backend supports or emulates that behavior.
+
 For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
 
 ## Profiling

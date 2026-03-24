@@ -74,9 +74,29 @@ async fn sqlite_ci_smoke_test() {
     assert_eq!(fetched.name, "CI User");
     assert!(fetched.active);
 
+    let saved_again = CiUser {
+        name: "Saved Again".to_string(),
+        active: false,
+        ..fetched
+    }
+    .save()
+    .await
+    .expect("failed to save existing user");
+
+    assert_eq!(saved_again.id, created.id);
+    assert_eq!(saved_again.name, "Saved Again");
+    assert!(!saved_again.active);
+
+    let reloaded_after_save = CiUser::find(created.id)
+        .await
+        .expect("failed to reload saved user")
+        .expect("saved user should still exist");
+    assert_eq!(reloaded_after_save.name, "Saved Again");
+    assert!(!reloaded_after_save.active);
+
     let updated = CiUser {
         name: "Updated CI User".to_string(),
-        ..fetched
+        ..saved_again
     }
     .update()
     .await
@@ -138,10 +158,30 @@ async fn sqlite_composite_primary_key_crud_smoke_test() {
     assert_eq!(fetched.label, "owner");
     assert!(fetched.active);
 
+    let saved_again = CiUserRole {
+        label: "editor".to_string(),
+        active: false,
+        ..fetched
+    }
+    .save()
+    .await
+    .expect("failed to save existing composite-key row");
+    assert_eq!(saved_again.user_id, 1);
+    assert_eq!(saved_again.role_id, 7);
+    assert_eq!(saved_again.label, "editor");
+    assert!(!saved_again.active);
+
+    let reloaded_after_save = CiUserRole::find((1_i64, 7_i64))
+        .await
+        .expect("failed to reload saved composite-key row")
+        .expect("saved composite-key row should still exist");
+    assert_eq!(reloaded_after_save.label, "editor");
+    assert!(!reloaded_after_save.active);
+
     let updated = CiUserRole {
         label: "admin".to_string(),
         active: false,
-        ..fetched
+        ..saved_again
     }
     .update()
     .await

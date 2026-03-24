@@ -373,7 +373,32 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 Ok(result.rows_affected)
             }
 
-            async fn create(model: Self) -> ::tideorm::Result<Self> { model.save().await }
+            async fn create(model: Self) -> ::tideorm::Result<Self> {
+                use ::tideorm::database::Connection;
+                use ::tideorm::callbacks::{AfterCreateDispatch, BeforeCreateDispatch};
+                use ::tideorm::internal::InternalModel;
+                use ::tideorm::sea_orm::ActiveModelTrait;
+                let mut model = model;
+                (&mut model).run_before_create()?;
+                let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
+                let active = <Self as InternalModel>::into_active_model(model);
+                let result = ::tideorm::profiling::__profile_future(
+                    async move {
+                        let connection = ::tideorm::database::__current_connection()
+                            .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
+                        match connection {
+                            ::tideorm::database::ConnectionRef::Database(conn) => active.insert(conn.connection()).await,
+                            ::tideorm::database::ConnectionRef::Transaction(tx) => active.insert(tx.as_ref()).await,
+                        }
+                    }
+                )
+                    .await
+                    .map_err(::tideorm::Error::from)
+                    .map_err(|err| err.with_context(error_context))?;
+                let model = <Self as InternalModel>::from_sea_model(result);
+                (&model).run_after_create()?;
+                Ok(model)
+            }
 
             async fn delete(self) -> ::tideorm::Result<u64> {
                 use ::tideorm::database::Connection;
@@ -401,30 +426,11 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn save(self) -> ::tideorm::Result<Self> {
-                use ::tideorm::database::Connection;
-                use ::tideorm::callbacks::{AfterCreateDispatch, BeforeCreateDispatch};
-                use ::tideorm::internal::InternalModel;
-                use ::tideorm::sea_orm::ActiveModelTrait;
-                let mut model = self;
-                (&mut model).run_before_create()?;
-                let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
-                let active = <Self as InternalModel>::into_active_model(model);
-                let result = ::tideorm::profiling::__profile_future(
-                    async move {
-                        let connection = ::tideorm::database::__current_connection()
-                            .map_err(|error| ::tideorm::sea_orm::DbErr::Custom(error.to_string()))?;
-                        match connection {
-                            ::tideorm::database::ConnectionRef::Database(conn) => active.insert(conn.connection()).await,
-                            ::tideorm::database::ConnectionRef::Transaction(tx) => active.insert(tx.as_ref()).await,
-                        }
-                    }
-                )
-                    .await
-                    .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
-                let model = <Self as InternalModel>::from_sea_model(result);
-                (&model).run_after_create()?;
-                Ok(model)
+                if self.is_new() {
+                    Self::create(self).await
+                } else {
+                    self.update().await
+                }
             }
 
             async fn update(self) -> ::tideorm::Result<Self> {

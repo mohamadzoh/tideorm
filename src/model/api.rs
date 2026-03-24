@@ -106,6 +106,12 @@ pub trait Model:
         crud::exists_any::<Self>().await
     }
 
+    /// Insert multiple records and return the inserted models.
+    ///
+    /// TideORM uses the most efficient strategy the active backend supports.
+    /// PostgreSQL and MariaDB can use a batch `INSERT ... RETURNING`, while
+    /// MySQL and SQLite fall back to individual inserts so database-generated
+    /// fields such as auto-incremented IDs are still reflected in the result.
     async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>>
     where
         Self: Sized,
@@ -113,24 +119,6 @@ pub trait Model:
             crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
     {
         crud::insert_all::<Self>(models).await
-    }
-
-    async fn insert_many_returning(models: Vec<Self>) -> Result<Vec<Self>>
-    where
-        Self: Sized,
-        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
-    {
-        crud::insert_many_returning::<Self>(models).await
-    }
-
-    async fn insert_many(models: Vec<Self>) -> Result<Vec<Self>>
-    where
-        Self: Sized,
-        <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
-    {
-        crud::insert_many::<Self>(models).await
     }
 
     async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>
@@ -222,6 +210,10 @@ pub trait Model:
         Ok(Self::find(id).await?.is_some())
     }
 
+    /// Insert a new record.
+    ///
+    /// This always performs an `INSERT`. To get create-or-update behavior,
+    /// use `save()` instead.
     async fn create(model: Self) -> Result<Self>
     where
         Self: Sized;
@@ -230,10 +222,17 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Persist this model.
+    ///
+    /// Performs an `INSERT` when `is_new()` returns true, otherwise performs
+    /// an `UPDATE` for the current primary key.
     async fn save(self) -> Result<Self>
     where
         Self: Sized;
 
+    /// Update an existing record.
+    ///
+    /// This always performs an `UPDATE` using the model's current primary key.
     async fn update(self) -> Result<Self>
     where
         Self: Sized;
@@ -254,6 +253,9 @@ pub trait Model:
         crud::reload(self).await
     }
 
+    /// Return whether this model should be treated as not yet persisted.
+    ///
+    /// `save()` uses this to decide between `INSERT` and `UPDATE`.
     fn is_new(&self) -> bool {
         crud::is_new(self)
     }

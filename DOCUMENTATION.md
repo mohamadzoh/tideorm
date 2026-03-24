@@ -2,6 +2,8 @@
 
 The documentation has moved to an mdBook so it is easier to navigate, search, and publish.
 
+For batch inserts, the supported model API is `Model::insert_all(...)`. The Models chapter documents its backend-specific behavior.
+
 Primary entry points:
 
 - Book source index: [docs/introduction.md](docs/introduction.md)

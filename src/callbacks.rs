@@ -30,7 +30,7 @@ use crate::error::Result;
 ///
 /// # Callback Order
 ///
-/// For `save()` (insert):
+/// For `save()` on a new model:
 /// 1. `before_validation`
 /// 2. `after_validation`
 /// 3. `before_save`
@@ -39,7 +39,7 @@ use crate::error::Result;
 /// 6. `after_create`
 /// 7. `after_save`
 ///
-/// For `update()`:
+/// For `save()` on an existing model, or `update()`:
 /// 1. `before_validation`
 /// 2. `after_validation`
 /// 3. `before_save`

@@ -77,32 +77,6 @@ where
     }
 }
 
-pub(crate) async fn insert_many_returning<M>(models: Vec<M>) -> Result<Vec<M>>
-where
-    M: Model + Sized,
-    <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-        crate::internal::IntoActiveModel<<M as crate::internal::InternalModel>::ActiveModel>,
-{
-    if models.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    insert_all::<M>(models).await
-}
-
-pub(crate) async fn insert_many<M>(models: Vec<M>) -> Result<Vec<M>>
-where
-    M: Model + Sized,
-    <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-        crate::internal::IntoActiveModel<<M as crate::internal::InternalModel>::ActiveModel>,
-{
-    if models.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    insert_all::<M>(models).await
-}
-
 pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
 where
     F: for<'c> FnOnce(

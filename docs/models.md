@@ -1012,8 +1012,8 @@ use tideorm::types::{UnixTimestamp, UnixTimestampMillis};
 let ts = UnixTimestamp::now();
 let dt = ts.to_datetime();
 
-// Batch insert alias
-let users: Vec<User> = User::insert_many_returning(vec![u1, u2]).await?;
+// Batch insert
+let users: Vec<User> = User::insert_all(vec![u1, u2]).await?;
 
 // consolidate() - Reusable query fragments
 let active_scope = User::query()
