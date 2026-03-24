@@ -537,9 +537,8 @@ impl Validator {
             ValidationRule::Confirmed(_) => {
                 // This is handled at the model level, not here
             }
-            ValidationRule::Custom(msg) => {
-                // Custom rules are handled at the model level
-                return Some(msg.clone());
+            ValidationRule::Custom(_) => {
+                // Custom rules are handled through Validate::custom_validations.
             }
         }
         None

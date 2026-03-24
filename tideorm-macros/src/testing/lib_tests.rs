@@ -131,4 +131,3 @@ fn model_attribute_rejects_mixed_inline_and_stacked_options() {
 
     assert!(error.contains("use either #[tideorm::model(...)] or a separate #[tideorm(...)]"));
 }
-

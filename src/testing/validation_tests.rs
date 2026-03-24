@@ -1,5 +1,23 @@
 use super::*;
 
+struct CustomValidatedUser {
+    email: String,
+}
+
+impl Validate for CustomValidatedUser {
+    fn validate(&self) -> Result<(), ValidationErrors> {
+        self.custom_validations()
+    }
+
+    fn custom_validations(&self) -> Result<(), ValidationErrors> {
+        let mut errors = ValidationErrors::new();
+        if self.email.ends_with("@blocked.com") {
+            errors.add("email", "This email domain is not allowed");
+        }
+        errors.to_result()
+    }
+}
+
 #[test]
 fn test_email_validation() {
     assert!(Validator::is_valid_email("test@example.com"));
@@ -73,4 +91,32 @@ fn test_validation_builder() {
 
     assert_eq!(field, "email");
     assert_eq!(rules.len(), 3);
+}
+
+#[test]
+fn test_custom_rule_is_deferred_to_model_level() {
+    let rule = ValidationRule::Custom("blocked domain".to_string());
+
+    assert!(Validator::validate_rule(&"allowed@example.com".to_string(), &rule, "email").is_none());
+    assert!(Validator::validate_rule(&"blocked@blocked.com".to_string(), &rule, "email").is_none());
+}
+
+#[test]
+fn test_custom_validations_still_report_errors() {
+    let allowed = CustomValidatedUser {
+        email: "allowed@example.com".to_string(),
+    };
+    assert!(allowed.validate().is_ok());
+
+    let blocked = CustomValidatedUser {
+        email: "blocked@blocked.com".to_string(),
+    };
+    let errors = blocked
+        .validate()
+        .expect_err("blocked domain should fail custom validation");
+
+    assert_eq!(
+        errors.field_errors("email"),
+        vec!["This email domain is not allowed".to_string()]
+    );
 }

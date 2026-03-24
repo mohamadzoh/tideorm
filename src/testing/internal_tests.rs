@@ -73,14 +73,21 @@ fn count_select_omits_where_without_condition() {
 fn scoped_find_has_no_soft_delete_filter_for_regular_models() {
     let statement = scoped_find::<InternalCountUser>().build(DbBackend::Postgres);
 
-    assert_eq!(statement.sql, "SELECT \"internal_count_users\".\"id\", \"internal_count_users\".\"name\" FROM \"internal_count_users\"");
+    assert_eq!(
+        statement.sql,
+        "SELECT \"internal_count_users\".\"id\", \"internal_count_users\".\"name\" FROM \"internal_count_users\""
+    );
 }
 
 #[test]
 fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
     let statement = scoped_find::<InternalSoftDeleteUser>().build(DbBackend::Postgres);
 
-    assert!(statement.sql.contains("FROM \"internal_soft_delete_users\""));
+    assert!(
+        statement
+            .sql
+            .contains("FROM \"internal_soft_delete_users\"")
+    );
     assert!(
         statement
             .sql

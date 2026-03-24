@@ -19,9 +19,7 @@ type OneRelationSaveOp = Box<
 >;
 
 type ManyRelationSaveOp = Box<
-    dyn FnOnce(
-            serde_json::Value,
-        ) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
         + Send,
 >;
 

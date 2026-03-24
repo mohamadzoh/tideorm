@@ -218,7 +218,9 @@ pub(crate) fn validate_identifier_reference(
     let parts: Vec<&str> = value.split('.').collect();
     if !parts.is_empty()
         && parts.len() <= 2
-        && parts.iter().all(|part| !part.is_empty() && is_safe_identifier_segment(part))
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && is_safe_identifier_segment(part))
     {
         return Ok(());
     }

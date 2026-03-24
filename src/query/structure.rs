@@ -1,8 +1,8 @@
 #![allow(missing_docs)]
 
-use crate::config::DatabaseType;
-use super::{Order, WhereCondition};
 use super::db_sql;
+use super::{Order, WhereCondition};
+use crate::config::DatabaseType;
 use crate::model::Model;
 use std::marker::PhantomData;
 
@@ -243,7 +243,9 @@ impl WindowFunction {
             let orders: Vec<String> = self
                 .order_by
                 .iter()
-                .map(|(col, dir)| format!("{} {}", db_sql::format_column(db_type, col), dir.as_str()))
+                .map(|(col, dir)| {
+                    format!("{} {}", db_sql::format_column(db_type, col), dir.as_str())
+                })
                 .collect();
             clauses.push(format!("ORDER BY {}", orders.join(", ")));
         }
@@ -263,7 +265,10 @@ impl WindowFunction {
         }
 
         sql.push_str(&clauses.join(" "));
-        sql.push_str(&format!(") AS {}", db_sql::quote_ident(db_type, &self.alias)));
+        sql.push_str(&format!(
+            ") AS {}",
+            db_sql::quote_ident(db_type, &self.alias)
+        ));
         sql
     }
 

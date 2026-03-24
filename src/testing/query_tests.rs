@@ -764,7 +764,9 @@ fn test_window_function_sql_uses_mysql_identifier_quoting() {
         .build_select_sql_with_params_for_db(DatabaseType::MySQL);
 
     assert!(params.is_empty());
-    assert!(sql.contains("FIRST_VALUE(`na``me`) OVER (PARTITION BY `id` ORDER BY `na``me` ASC) AS `first_name`"));
+    assert!(sql.contains(
+        "FIRST_VALUE(`na``me`) OVER (PARTITION BY `id` ORDER BY `na``me` ASC) AS `first_name`"
+    ));
 }
 
 #[cfg(feature = "fulltext")]

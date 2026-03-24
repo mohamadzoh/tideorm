@@ -44,7 +44,7 @@ pub use async_trait::async_trait;
 /// use tideorm::prelude::*;
 /// use tideorm::Result;
 /// use tideorm::seeding::{Seed, async_trait};
-/// 
+///
 /// struct AdminUserSeeder;
 ///
 /// #[async_trait]
@@ -111,14 +111,14 @@ pub trait Seed: Send + Sync {
 /// use tideorm::prelude::*;
 /// use tideorm::Result;
 /// use tideorm::seeding::{Seed, Seeder, async_trait};
-/// 
+///
 /// #[derive(Default)]
 /// struct UserSeeder;
 /// #[derive(Default)]
 /// struct CategorySeeder;
 /// #[derive(Default)]
 /// struct ProductSeeder;
-/// 
+///
 /// #[async_trait]
 /// impl Seed for UserSeeder {
 ///     fn name(&self) -> &str { "user_seeder" }
@@ -134,7 +134,7 @@ pub trait Seed: Send + Sync {
 ///     fn name(&self) -> &str { "product_seeder" }
 ///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
 /// }
-/// 
+///
 /// # tideorm::__doctest_async! {
 /// Seeder::new()
 ///     .add(UserSeeder)

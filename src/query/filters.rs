@@ -356,7 +356,7 @@ impl OrBranch {
 
     pub fn where_gt(
         mut self,
-            column: impl crate::columns::IntoColumnName,
+        column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
         self.conditions.push(WhereCondition {

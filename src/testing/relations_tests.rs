@@ -187,14 +187,30 @@ async fn macro_generated_morph_and_self_ref_relations_are_configured() {
     assert_eq!(employee.avatar.local_key, "id");
 
     let manager_err = employee.manager.load().await.unwrap_err();
-    assert!(!manager_err.to_string().contains("Foreign key value not set"));
+    assert!(
+        !manager_err
+            .to_string()
+            .contains("Foreign key value not set")
+    );
 
     let reports_err = employee.reports.load().await.unwrap_err();
-    assert!(!reports_err.to_string().contains("Parent primary key not set"));
+    assert!(
+        !reports_err
+            .to_string()
+            .contains("Parent primary key not set")
+    );
 
     let avatar_err = employee.avatar.load().await.unwrap_err();
-    assert!(!avatar_err.to_string().contains("MorphOne relation is not configured"));
-    assert!(!avatar_err.to_string().contains("Parent primary key not set"));
+    assert!(
+        !avatar_err
+            .to_string()
+            .contains("MorphOne relation is not configured")
+    );
+    assert!(
+        !avatar_err
+            .to_string()
+            .contains("Parent primary key not set")
+    );
 }
 
 #[test]

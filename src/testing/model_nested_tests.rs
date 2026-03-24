@@ -142,9 +142,11 @@ async fn nested_save_builder_persists_related_models_with_parent_fk() {
         .into_many::<NestedTestChild>()
         .expect("saved relation should deserialize into typed child models");
     assert_eq!(returned_children.len(), 2);
-    assert!(returned_children
-        .iter()
-        .all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        returned_children
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
 
     let fetched = NestedTestChild::query()
         .where_eq("parent_id", saved_parent.id)
@@ -195,9 +197,11 @@ async fn nested_save_builder_can_be_spawned() {
         .into_many::<NestedTestChild>()
         .expect("second saved relation should deserialize into children");
     assert_eq!(saved_children.len(), 2);
-    assert!(saved_children
-        .iter()
-        .all(|child| child.parent_id == saved_parent.id));
+    assert!(
+        saved_children
+            .iter()
+            .all(|child| child.parent_id == saved_parent.id)
+    );
 
     let profile = NestedTestProfile::query()
         .where_eq("user_id", saved_parent.id)
@@ -225,7 +229,9 @@ async fn nested_save_builder_can_be_spawned() {
 #[test]
 fn saved_relation_rejects_wrong_shape_conversions() {
     let one = SavedRelation::test_one(serde_json::json!({"id": 1, "user_id": 1, "bio": "x"}));
-    let many = SavedRelation::test_many(vec![serde_json::json!({"id": 1, "parent_id": 1, "name": "x"})]);
+    let many = SavedRelation::test_many(vec![
+        serde_json::json!({"id": 1, "parent_id": 1, "name": "x"}),
+    ]);
 
     assert!(one.into_many::<NestedTestChild>().is_err());
     assert!(many.into_one::<NestedTestProfile>().is_err());

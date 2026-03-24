@@ -56,15 +56,16 @@ impl Database {
     pub(super) fn current_handle(&self) -> Result<DatabaseHandle> {
         match &self.inner {
             DatabaseInner::Handle(handle) => Ok(handle.clone()),
-            DatabaseInner::Global => {
-                global_connection_slot().load_full().map(DatabaseHandle::Connection).ok_or_else(|| {
+            DatabaseInner::Global => global_connection_slot()
+                .load_full()
+                .map(DatabaseHandle::Connection)
+                .ok_or_else(|| {
                     Error::connection(
                         "Global database connection not initialized. \
                          Call Database::init() or Database::set_global() before using models."
                             .to_string(),
                     )
-                })
-            }
+                }),
             DatabaseInner::Disconnected => Err(Error::connection(
                 "Global database connection not initialized. \
                  Call Database::init() or Database::set_global() before using models."

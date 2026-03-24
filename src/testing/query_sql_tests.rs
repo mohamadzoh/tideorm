@@ -206,11 +206,15 @@ fn sql_preview_is_labeled_as_non_executable() {
 
 #[test]
 fn debug_output_includes_preview_banner_and_parameterized_sql() {
-    let debug_info = QueryCountGuardUser::query().where_eq("name", "alice").debug();
+    let debug_info = QueryCountGuardUser::query()
+        .where_eq("name", "alice")
+        .debug();
 
-    assert!(debug_info
-        .sql
-        .starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n"));
+    assert!(
+        debug_info
+            .sql
+            .starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n")
+    );
     assert!(debug_info.sql.contains("-- PARAMETERIZED SQL\nSELECT"));
     assert!(debug_info.sql.contains("query_count_guard_users"));
     assert_eq!(debug_info.params.len(), 1);

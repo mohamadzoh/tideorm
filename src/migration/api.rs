@@ -17,7 +17,7 @@ use super::Schema;
 /// ```rust,no_run
 /// use tideorm::{ColumnType, Migration, Result, Schema};
 /// use tideorm::migration::async_trait;
-/// 
+///
 /// struct AddEmailVerifiedToUsers;
 ///
 /// #[async_trait]

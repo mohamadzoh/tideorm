@@ -35,9 +35,7 @@ impl<Morphable> MorphTo<Morphable> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.type_column == previous.type_column
-            && self.id_column == previous.id_column
-        {
+        if self.type_column == previous.type_column && self.id_column == previous.id_column {
             self.type_value = previous.type_value.clone();
             self.id_value = previous.id_value.clone();
         }

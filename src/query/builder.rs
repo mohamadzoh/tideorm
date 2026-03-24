@@ -32,7 +32,9 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         match value.split_once('.') {
-            Some((table, column)) if !table.is_empty() && !column.is_empty() && !column.contains('.') => {
+            Some((table, column))
+                if !table.is_empty() && !column.is_empty() && !column.contains('.') =>
+            {
                 Some((table, column))
             }
             Some(_) => None,

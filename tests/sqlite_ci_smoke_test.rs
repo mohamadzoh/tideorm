@@ -560,12 +560,12 @@ async fn sqlite_reload_returns_not_found_after_delete() {
     .await
     .expect("failed to insert user");
 
-    user.clone()
-        .delete()
-        .await
-        .expect("failed to delete user");
+    user.clone().delete().await.expect("failed to delete user");
 
-    let err = user.reload().await.expect_err("reload should fail after delete");
+    let err = user
+        .reload()
+        .await
+        .expect_err("reload should fail after delete");
     assert!(err.is_not_found());
     assert!(err.to_string().contains("ci_users"));
     assert!(err.to_string().contains("no longer exists"));
@@ -658,7 +658,9 @@ async fn sqlite_direct_crud_helpers_remain_unchanged_for_regular_models() {
         .expect("failed to insert regular user");
     }
 
-    let all_users = CiUser::all().await.expect("failed to fetch all regular users");
+    let all_users = CiUser::all()
+        .await
+        .expect("failed to fetch all regular users");
     assert_eq!(all_users.len(), 3);
 
     let first_user = CiUser::first()
