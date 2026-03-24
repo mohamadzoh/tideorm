@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 
-use super::{Database, DatabaseHandle, poll_with_thread_override};
+use super::state::with_connection_override;
+use super::{Database, DatabaseHandle};
 
 impl Database {
     /// Execute a closure within a database transaction
@@ -35,11 +36,7 @@ impl Database {
             let txn = Arc::new(txn);
             let tx = Transaction { inner: txn.clone() };
             let override_handle = DatabaseHandle::Transaction(txn.clone());
-            let mut future = std::pin::pin!(f(&tx));
-            let outcome = std::future::poll_fn(|cx| {
-                poll_with_thread_override(future.as_mut(), cx, &override_handle)
-            })
-            .await;
+            let outcome = with_connection_override(override_handle, f(&tx)).await;
 
             (txn, outcome)
         };

@@ -84,16 +84,6 @@ impl Database {
         }
     }
 
-    pub(super) fn replace_thread_override(
-        handle: Option<DatabaseHandle>,
-    ) -> Option<DatabaseHandle> {
-        super::state::THREAD_DB_OVERRIDE.with(|slot| slot.replace(handle))
-    }
-
-    pub(super) fn set_thread_override(handle: Option<DatabaseHandle>) {
-        super::state::THREAD_DB_OVERRIDE.with(|slot| *slot.borrow_mut() = handle);
-    }
-
     pub(super) fn is_connected(&self) -> bool {
         match &self.inner {
             DatabaseInner::Handle(_) => true,
@@ -117,15 +107,13 @@ impl Database {
     /// Set an existing database connection as the global connection
     pub fn set_global(db: Self) -> Result<&'static Self> {
         let inner = db.current_inner()?;
-        global_connection_slot().store(Some(inner.clone()));
-        Self::set_thread_override(Some(DatabaseHandle::Connection(inner)));
+        global_connection_slot().store(Some(inner));
         Ok(global_db_handle())
     }
 
-    /// Clear the global database connection and current thread override.
+    /// Clear the global database connection.
     pub fn reset_global() {
         global_connection_slot().store(None);
-        Self::set_thread_override(None);
     }
 
     /// Get a reference to the global database connection

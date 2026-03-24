@@ -1,6 +1,12 @@
 use super::*;
+use darling::FromDeriveInput;
 use quote::quote;
-use syn::{Type, parse_quote};
+use syn::{DeriveInput, Type, parse_quote};
+
+use crate::context::BuildContext;
+use crate::meta_support::detect_existing_derives;
+use crate::parse::ModelInput;
+use crate::serde_gen::generate_trait_impls;
 
 use crate::parse::ModelField;
 
@@ -130,4 +136,34 @@ fn model_attribute_rejects_mixed_inline_and_stacked_options() {
         .to_string();
 
     assert!(error.contains("use either #[tideorm::model(...)] or a separate #[tideorm(...)]"));
+}
+
+#[test]
+fn deserialize_impl_requires_missing_non_optional_fields() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            name: String,
+            nickname: Option<String>,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let ctx = BuildContext::new(&model_input, vec![], vec![], &existing_derives)
+        .expect("build context should be constructed");
+    let generated = generate_trait_impls(&ctx).to_string();
+    let normalized = normalize_tokens(&generated);
+
+    assert!(normalized.contains("id:__field_id.unwrap_or_default()"));
+    assert!(normalized.contains("nickname:__field_nickname.unwrap_or_default()"));
+    assert!(
+        normalized.contains(
+            "name:__field_name.ok_or_else(||::serde::de::Error::missing_field(\"name\"))?"
+        )
+    );
+    assert!(normalized.contains("let__field_id=seq.next_element()?.unwrap_or_default();"));
+    assert!(normalized.contains("let__field_nickname=seq.next_element()?.unwrap_or_default();"));
+    assert!(normalized.contains("let__field_name=seq.next_element()?.ok_or_else(||::serde::de::Error::invalid_length(1usize,&self))?;"));
 }

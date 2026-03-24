@@ -19,7 +19,10 @@ impl std::future::Future for OverrideVisibleAcrossPolls {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        assert!(super::__current_connection().is_ok());
+        assert!(matches!(
+            super::__current_connection(),
+            Ok(super::ConnectionRef::Transaction(_))
+        ));
         self.polled_threads
             .lock()
             .expect("thread list lock should not be poisoned")
@@ -83,36 +86,42 @@ async fn global_database_round_trips_through_set_and_reset() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn thread_override_is_reinstalled_when_future_is_polled_on_another_thread() {
+async fn transaction_override_remains_visible_when_scoped_future_moves_threads() {
+    use crate::internal::TransactionTrait;
     use std::task::{Context, Waker};
 
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("sqlite in-memory connection should succeed");
-    let handle = super::DatabaseHandle::Connection(
-        db.current_inner()
-            .expect("database should expose internal connection"),
-    );
+    let transaction = db
+        .current_inner()
+        .expect("database should expose internal connection")
+        .connection()
+        .begin()
+        .await
+        .expect("transaction should begin successfully");
+    let handle = super::DatabaseHandle::Transaction(Arc::new(transaction));
     let polled_threads = Arc::new(Mutex::new(Vec::new()));
-    let future = OverrideVisibleAcrossPolls {
-        polled_threads: polled_threads.clone(),
-        stage: 0,
-    };
-    let mut future = Box::pin(future);
+    let mut future = Box::pin(super::state::with_connection_override(
+        handle,
+        OverrideVisibleAcrossPolls {
+            polled_threads: polled_threads.clone(),
+            stage: 0,
+        },
+    ));
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
+    let runtime_handle = tokio::runtime::Handle::current();
 
-    assert!(matches!(
-        super::poll_with_thread_override(future.as_mut(), &mut context, &handle),
-        Poll::Pending
-    ));
+    assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
     assert!(super::__current_connection().is_err());
 
     let join = std::thread::spawn(move || {
+        let _guard = runtime_handle.enter();
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
         assert!(matches!(
-            super::poll_with_thread_override(future.as_mut(), &mut context, &handle),
+            future.as_mut().poll(&mut context),
             Poll::Ready(())
         ));
         assert!(super::__current_connection().is_err());

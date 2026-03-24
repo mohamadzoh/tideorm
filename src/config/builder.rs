@@ -14,6 +14,7 @@ use crate::database::Database;
 use crate::error::Result;
 use crate::migration::Migration;
 use crate::tide_info;
+use crate::tide_warn;
 
 pub struct TideConfig {
     pub(crate) config: Config,
@@ -270,7 +271,15 @@ impl TideConfig {
             for seed in self.seeds {
                 seeder = seeder.add_boxed(seed);
             }
-            let result = seeder.run().await?;
+            let result = match seeder.run().await {
+                Ok(result) => result,
+                Err(error) => {
+                    tide_warn!(
+                        "Database seeding failed after initialization steps were already applied. The database may be partially initialized: migrations may have run, but seed data is missing."
+                    );
+                    return Err(error);
+                }
+            };
             if result.has_executed() {
                 tide_info!("{}", result);
             }

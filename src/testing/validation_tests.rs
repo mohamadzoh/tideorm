@@ -64,6 +64,23 @@ fn test_range() {
 }
 
 #[test]
+fn test_regex_validation() {
+    let rule = ValidationRule::Regex(r"^[a-z]+$".to_string());
+
+    assert!(Validator::validate_rule(&"alice".to_string(), &rule, "name").is_none());
+    assert!(Validator::validate_rule(&"Alice1".to_string(), &rule, "name").is_some());
+    assert!(Validator::validate_rule(&"bob".to_string(), &rule, "name").is_none());
+}
+
+#[test]
+fn test_invalid_regex_rule_is_ignored_consistently() {
+    let rule = ValidationRule::Regex("[".to_string());
+
+    assert!(Validator::validate_rule(&"alice".to_string(), &rule, "name").is_none());
+    assert!(Validator::validate_rule(&"bob".to_string(), &rule, "name").is_none());
+}
+
+#[test]
 fn test_validation_errors() {
     let mut errors = ValidationErrors::new();
     assert!(errors.is_empty());

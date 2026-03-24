@@ -735,7 +735,8 @@ impl QueryDebugInfo {
 
 impl fmt::Display for QueryDebugInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const DEBUG_PREVIEW_BANNER: &str = "-- DEBUG PREVIEW (not executable, values are approximate)";
+        const DEBUG_PREVIEW_BANNER: &str =
+            "-- DEBUG PREVIEW (not executable, values are approximate)";
 
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "TIDEORM QUERY DEBUG")?;

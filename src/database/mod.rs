@@ -74,7 +74,7 @@ pub use transaction::{Connection, Transaction};
 #[doc(hidden)]
 pub use transaction::ConnectionRef;
 
-pub(crate) use state::{DatabaseHandle, poll_with_thread_override};
+pub(crate) use state::DatabaseHandle;
 
 #[cfg(test)]
 #[path = "../testing/database_tests.rs"]

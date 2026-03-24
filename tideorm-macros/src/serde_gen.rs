@@ -1,5 +1,6 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use syn::Type;
 
 use crate::context::BuildContext;
 
@@ -103,6 +104,48 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
         .iter()
         .map(|ident| format_ident!("__field_{}", ident))
         .collect();
+    let field_defaults: Vec<_> = serde_field_names
+        .iter()
+        .zip(ctx.field_types.iter())
+        .map(|(field_ident, field_ty)| {
+            let is_option = is_option_type(field_ty);
+            let is_auto_increment_primary_key = ctx.pk_auto_increment
+                && ctx.pk_idents.iter().any(|pk_ident| pk_ident == field_ident);
+
+            is_option || is_auto_increment_primary_key
+        })
+        .collect();
+    let field_resolutions: Vec<_> = serde_field_names
+        .iter()
+        .zip(serde_field_names_str.iter())
+        .zip(field_names_upper.iter())
+        .zip(field_defaults.iter())
+        .map(|(((field_ident, field_name_str), temp_ident), use_default)| {
+            if *use_default {
+                quote!(#field_ident: #temp_ident.unwrap_or_default())
+            } else {
+                quote!(
+                    #field_ident: #temp_ident.ok_or_else(|| ::serde::de::Error::missing_field(#field_name_str))?
+                )
+            }
+        })
+        .collect();
+    let seq_field_resolutions: Vec<_> = field_names_upper
+        .iter()
+        .zip(field_indices.iter())
+        .zip(field_defaults.iter())
+        .map(|((temp_ident, field_index), use_default)| {
+            if *use_default {
+                quote!(let #temp_ident = seq.next_element()?.unwrap_or_default();)
+            } else {
+                quote!(
+                    let #temp_ident = seq
+                        .next_element()?
+                        .ok_or_else(|| ::serde::de::Error::invalid_length(#field_index, &self))?;
+                )
+            }
+        })
+        .collect();
 
     quote! {
         impl<'de> ::serde::Deserialize<'de> for #struct_name {
@@ -164,7 +207,7 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                             }
                         }
                         Ok(#struct_name {
-                            #(#serde_field_names: #field_names_upper.unwrap_or_default(),)*
+                            #(#field_resolutions,)*
                             #(#relation_field_defaults,)*
                         })
                     }
@@ -172,7 +215,7 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                     where
                         A: ::serde::de::SeqAccess<'de>,
                     {
-                        #(let #field_names_upper = seq.next_element()?.ok_or_else(|| ::serde::de::Error::invalid_length(#field_indices, &self))?;)*
+                        #(#seq_field_resolutions)*
                         Ok(#struct_name {
                             #(#serde_field_names: #field_names_upper,)*
                             #(#relation_field_defaults,)*
@@ -184,5 +227,16 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 deserializer.deserialize_struct(stringify!(#struct_name), FIELDS, __Visitor)
             }
         }
+    }
+}
+
+fn is_option_type(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Option"),
+        _ => false,
     }
 }

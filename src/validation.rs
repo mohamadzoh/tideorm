@@ -95,7 +95,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Collection of validation errors organized by field name
 #[derive(Debug, Clone, Default)]
@@ -335,6 +335,19 @@ impl ValidationRule {
     }
 }
 
+fn compiled_validation_regex(pattern: &str) -> Option<regex::Regex> {
+    static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| regex::Regex::new(pattern).ok())
+        .clone()
+}
+
 /// Trait for validatable values
 pub trait ValidatableValue {
     /// Check if the value is empty (for Required validation)
@@ -490,7 +503,7 @@ impl Validator {
             }
             ValidationRule::Regex(pattern) => {
                 if let Some(s) = value.as_str_value() {
-                    if let Ok(re) = regex::Regex::new(pattern) {
+                    if let Some(re) = compiled_validation_regex(pattern) {
                         if !re.is_match(s) {
                             return Some(rule.message(field));
                         }

@@ -1,7 +1,9 @@
 use arc_swap::ArcSwapOption;
-use std::cell::RefCell;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
+
+#[cfg(not(feature = "runtime-tokio"))]
+use std::cell::RefCell;
 
 use crate::error::{Error, Result};
 use crate::internal::{DbBackend, InternalConnection};
@@ -11,6 +13,12 @@ use super::{ConnectionRef, Database};
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 static GLOBAL_CONNECTION: OnceLock<ArcSwapOption<InternalConnection>> = OnceLock::new();
 
+#[cfg(feature = "runtime-tokio")]
+tokio::task_local! {
+    pub(super) static TASK_DB_OVERRIDE: DatabaseHandle;
+}
+
+#[cfg(not(feature = "runtime-tokio"))]
 thread_local! {
     pub(super) static THREAD_DB_OVERRIDE: RefCell<Option<DatabaseHandle>> = const { RefCell::new(None) };
 }
@@ -75,9 +83,19 @@ pub fn has_global_db() -> bool {
     global_connection_slot().load_full().is_some()
 }
 
+#[cfg(feature = "runtime-tokio")]
+fn current_override_handle() -> Option<DatabaseHandle> {
+    TASK_DB_OVERRIDE.try_with(Clone::clone).ok()
+}
+
+#[cfg(not(feature = "runtime-tokio"))]
+fn current_override_handle() -> Option<DatabaseHandle> {
+    THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone())
+}
+
 #[doc(hidden)]
 pub fn __current_db() -> Result<Database> {
-    if let Some(handle) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+    if let Some(handle) = current_override_handle() {
         return Ok(Database::from_handle(handle));
     }
 
@@ -85,7 +103,7 @@ pub fn __current_db() -> Result<Database> {
 }
 
 pub(super) fn current_scope_handle() -> Result<DatabaseHandle> {
-    if let Some(handle) = THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+    if let Some(handle) = current_override_handle() {
         return Ok(handle);
     }
 
@@ -101,34 +119,33 @@ pub(super) fn current_scope_handle() -> Result<DatabaseHandle> {
         })
 }
 
-struct ThreadOverrideGuard {
-    previous: Option<DatabaseHandle>,
+#[cfg(feature = "runtime-tokio")]
+pub(super) async fn with_connection_override<F>(handle: DatabaseHandle, future: F) -> F::Output
+where
+    F: Future,
+{
+    TASK_DB_OVERRIDE.scope(handle, future).await
 }
 
-impl ThreadOverrideGuard {
-    fn install(handle: DatabaseHandle) -> Self {
-        Self {
-            previous: Database::replace_thread_override(Some(handle)),
+#[cfg(not(feature = "runtime-tokio"))]
+pub(super) async fn with_connection_override<F>(handle: DatabaseHandle, future: F) -> F::Output
+where
+    F: Future,
+{
+    let previous = THREAD_DB_OVERRIDE.with(|slot| slot.replace(Some(handle)));
+
+    struct ResetThreadOverride(Option<DatabaseHandle>);
+
+    impl Drop for ResetThreadOverride {
+        fn drop(&mut self) {
+            THREAD_DB_OVERRIDE.with(|slot| {
+                slot.replace(self.0.take());
+            });
         }
     }
-}
 
-impl Drop for ThreadOverrideGuard {
-    fn drop(&mut self) {
-        Database::set_thread_override(self.previous.take());
-    }
-}
-
-pub(crate) fn poll_with_thread_override<F>(
-    future: std::pin::Pin<&mut F>,
-    cx: &mut std::task::Context<'_>,
-    handle: &DatabaseHandle,
-) -> std::task::Poll<F::Output>
-where
-    F: Future + ?Sized,
-{
-    let _guard = ThreadOverrideGuard::install(handle.clone());
-    future.poll(cx)
+    let _reset = ResetThreadOverride(previous);
+    future.await
 }
 
 #[doc(hidden)]
