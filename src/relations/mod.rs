@@ -13,86 +13,18 @@
 //!
 //! Relations are declared as fields in your model struct using `#[tideorm(...)]` relation attributes:
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! #[tideorm::model(table = "users")]
-//! #[derive(Clone, Debug, Serialize, Deserialize)]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub name: String,
-//!     pub email: String,
-//!
-//!     // Relations defined as fields
-//!     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
-//!     pub profile: HasOne<Profile>,
-//!
-//!     #[tideorm(has_many = "Post", foreign_key = "user_id")]
-//!     pub posts: HasMany<Post>,
-//! }
-//!
-//! #[tideorm::model(table = "posts")]
-//! pub struct Post {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub user_id: i64,
-//!     pub title: String,
-//!
-//!     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
-//!     pub author: BelongsTo<User>,
-//! }
-//!
-//! #[tideorm::model(table = "profiles")]
-//! pub struct Profile {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub user_id: i64,
-//!     pub bio: String,
-//!
-//!     #[tideorm(belongs_to = "User", foreign_key = "user_id")]
-//!     pub user: BelongsTo<User>,
-//! }
-//!
-//! // Loading relations:
-//! let user = User::find(1).await?;
-//! let posts = user.posts.load().await?;
-//! let profile = user.profile.load().await?;
-//!
-//! let post = Post::find(1).await?;
-//! let author = post.author.load().await?;
-//! ```
+//! Use `HasOne`, `HasMany`, and `BelongsTo` fields plus the relation attributes
+//! on your model structs to declare relationships.
 //!
 //! ## Many-to-Many Relations
 //!
-//! ```rust,ignore
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub name: String,
-//!
-//!     #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
-//!     pub roles: HasManyThrough<Role, UserRole>,
-//! }
-//!
-//! // Load roles for a user
-//! let roles = user.roles.load().await?;
-//! ```
+//! Use `HasManyThrough` to model many-to-many relationships via a join model.
 //!
 //! ## Relation Constraints
 //!
 //! You can add constraints to relation queries:
 //!
-//! ```rust,ignore
-//! // Load only published posts
-//! let published_posts = user.posts.load_with(|query| {
-//!     query
-//!         .where_eq("published", true)
-//!         .order_by("created_at", Order::Desc)
-//!         .limit(10)
-//! }).await?;
-//! ```
+//! Use `load_with` to constrain relation queries with filters, ordering, and limits.
 
 #[allow(missing_docs)]
 mod direct;

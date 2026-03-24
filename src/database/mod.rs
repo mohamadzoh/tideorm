@@ -6,8 +6,9 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! // Simple connection
 //! let db = Database::connect("postgres://localhost/myapp").await?;
@@ -26,6 +27,9 @@
 //!     // tx.connection() gives you the transaction connection
 //!     Ok(())
 //! })).await?;
+//! # let _ = db;
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! ## Global Database Connection
@@ -33,7 +37,9 @@
 //! TideORM supports a global database connection, allowing models to access
 //! the database without explicitly passing a connection reference:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //! // Initialize global connection (call once at startup)
 //! Database::init("postgres://localhost/myapp").await?;
 //!
@@ -42,10 +48,14 @@
 //!     id: 0,
 //!     email: "john@example.com".to_string(),
 //!     name: "John".to_string(),
+//!     ..Default::default()
 //! };
 //!
 //! // No need to pass &db - uses global connection automatically
 //! let user = user.save().await?;
+//! # let _ = user;
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 
 mod builder;

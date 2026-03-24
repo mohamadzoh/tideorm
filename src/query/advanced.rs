@@ -45,8 +45,11 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// User::query().limit(10)
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
+    /// User::query().limit(10);
+    /// # }
     /// ```
     pub fn limit(mut self, n: u64) -> Self {
         self.limit_value = Some(n);
@@ -57,8 +60,11 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// User::query().offset(20)
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
+    /// User::query().offset(20);
+    /// # }
     /// ```
     pub fn offset(mut self, n: u64) -> Self {
         self.offset_value = Some(n);
@@ -69,9 +75,12 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Page 3, 25 items per page
-    /// User::query().page(3, 25)
+    /// User::query().page(3, 25);
+    /// # }
     /// ```
     pub fn page(self, page: u64, per_page: u64) -> Self {
         let offset = (page.saturating_sub(1)) * per_page;
@@ -96,8 +105,11 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// User::query().select(vec!["id", "name", "email"])
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
+    /// User::query().select(vec!["id", "name", "email"]);
+    /// # }
     /// ```
     pub fn select(mut self, columns: Vec<&str>) -> Self {
         self.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
@@ -111,18 +123,20 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Select cake fields and also bakery name through a link
-    /// let results: Vec<(i64, String, Option<String>)> = Cake::query()
+    /// let query = Cake::query()
     ///     .select_with_linked(
     ///         vec!["id", "name"],           // Local columns
     ///         "bakeries",                    // Linked table
     ///         "bakery_id",                   // Local FK
     ///         "id",                          // Remote PK
     ///         vec!["name as bakery_name"]    // Remote columns
-    ///     )
-    ///     .get_raw()
-    ///     .await?;
+    ///     );
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn select_with_linked(
         mut self,
@@ -162,17 +176,19 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Get all user fields plus their profile picture
-    /// let results = User::query()
+    /// let query = User::query()
     ///     .select_also_linked(
     ///         "profiles",
     ///         "id",
     ///         "user_id",
     ///         vec!["picture", "bio"]
-    ///     )
-    ///     .get_with_extra::<(String, String)>()
-    ///     .await?;
+    ///     );
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn select_also_linked(
         mut self,
@@ -219,12 +235,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Join posts with users
-    /// Post::query()
-    ///     .inner_join("users", "posts.user_id", "users.id")
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
+    /// // Join orders with users
+    /// Order::query()
+    ///     .inner_join("users", "orders.customer_id", "users.id")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn inner_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Inner, table, None, left_column, right_column)
@@ -234,11 +253,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// Post::query()
-    ///     .inner_join_as("users", "author", "posts.user_id", "author.id")
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
+    /// Order::query()
+    ///     .inner_join_as("users", "customer", "orders.customer_id", "customer.id")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn inner_join_as(
         self,
@@ -262,12 +284,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Get all users and their posts (if any)
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
+    /// // Get all users and their orders (if any)
     /// User::query()
-    ///     .left_join("posts", "users.id", "posts.user_id")
+    ///     .left_join("orders", "users.id", "orders.customer_id")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn left_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Left, table, None, left_column, right_column)
@@ -277,11 +302,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// User::query()
-    ///     .left_join_as("posts", "p", "users.id", "p.user_id")
+    ///     .left_join_as("orders", "o", "users.id", "o.customer_id")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn left_join_as(
         self,
@@ -305,12 +333,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Get all posts and their users
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
+    /// // Get all orders and their users
     /// User::query()
-    ///     .right_join("posts", "users.id", "posts.user_id")
+    ///     .right_join("orders", "users.id", "orders.customer_id")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Right, table, None, left_column, right_column)
@@ -365,13 +396,16 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Count posts by user
-    /// Post::query()
+    /// let query = Post::query()
     ///     .group_by("user_id")
     ///     .select_raw("user_id, COUNT(*) as post_count")
-    ///     .get_raw()
-    ///     .await?;
+    ///     ;
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.group_by.push(column.column_name().to_string());
@@ -382,11 +416,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// Order::query()
     ///     .group_by_columns(vec!["status", "category"])
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn group_by_columns(mut self, columns: Vec<&str>) -> Self {
         for col in columns {
@@ -399,12 +436,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// Post::query()
     ///     .group_by("user_id")
     ///     .having("COUNT(*) > 5")
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn having(mut self, condition: &str) -> Self {
         self.having_conditions.push(condition.to_string());
@@ -415,12 +455,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// Post::query()
     ///     .group_by("user_id")
     ///     .having_count_gt(5)
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn having_count_gt(self, value: i64) -> Self {
         self.having(&format!("COUNT(*) > {}", value))
@@ -445,12 +488,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// Order::query()
     ///     .group_by("customer_id")
     ///     .having_sum_gt("total", 1000.0)
     ///     .get()
     ///     .await?;
+    /// # }
     /// ```
     pub fn having_sum_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
         let db_type = self.db_type_for_sql();
@@ -469,11 +515,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let total = Order::query()
     ///     .where_eq("status", "completed")
     ///     .sum("amount")
     ///     .await?;
+    /// # let _ = total;
+    /// # }
     /// ```
     pub async fn sum(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
         let db_type = self.db_type_for_sql();
@@ -486,11 +536,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let avg_price = Product::query()
     ///     .where_eq("category", "electronics")
     ///     .avg("price")
     ///     .await?;
+    /// # let _ = avg_price;
+    /// # }
     /// ```
     pub async fn avg(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
         let db_type = self.db_type_for_sql();
@@ -503,11 +557,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let min_price = Product::query()
     ///     .where_eq("in_stock", true)
     ///     .min("price")
     ///     .await?;
+    /// # let _ = min_price;
+    /// # }
     /// ```
     pub async fn min(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
         let db_type = self.db_type_for_sql();
@@ -520,10 +578,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let max_price = Product::query()
     ///     .max("price")
     ///     .await?;
+    /// # let _ = max_price;
+    /// # }
     /// ```
     pub async fn max(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
         let db_type = self.db_type_for_sql();
@@ -536,10 +598,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let unique_categories = Product::query()
     ///     .count_distinct("category")
     ///     .await?;
+    /// # let _ = unique_categories;
+    /// # }
     /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
         use crate::database::Connection;
@@ -662,7 +728,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Get active users combined with admin users (no duplicates)
     /// let users = User::query()
     ///     .where_eq("active", true)
@@ -671,6 +739,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     )
     ///     .get()
     ///     .await?;
+    /// # let _ = users;
+    /// # }
     /// ```
     pub fn union<N: Model>(mut self, other: QueryBuilder<N>) -> Self {
         self.unions.push(UnionClause {
@@ -686,7 +756,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Combine all orders from different status (including duplicates)
     /// let orders = Order::query()
     ///     .where_eq("status", "pending")
@@ -698,6 +770,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     )
     ///     .get()
     ///     .await?;
+    /// # let _ = orders;
+    /// # }
     /// ```
     pub fn union_all<N: Model>(mut self, other: QueryBuilder<N>) -> Self {
         self.unions.push(UnionClause {
@@ -713,12 +787,16 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let results = User::query()
     ///     .where_eq("active", true)
     ///     .union_raw("SELECT * FROM archived_users WHERE year = 2023")
     ///     .get()
     ///     .await?;
+    /// # let _ = results;
+    /// # }
     /// ```
     pub fn union_raw(mut self, sql: &str) -> Self {
         self.unions.push(UnionClause {
@@ -745,16 +823,18 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Add row numbers partitioned by category
-    /// let products = Product::query()
+    /// let query = Product::query()
     ///     .window(
     ///         WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
     ///             .partition_by("category")
-    ///             .order_by("price", Order::Desc)
-    ///     )
-    ///     .get_raw()
-    ///     .await?;
+    ///             .order_by("price", tideorm::Order::Desc)
+    ///     );
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
         self.window_functions.push(window_fn);
@@ -765,12 +845,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Number rows within each category by price
-    /// let products = Product::query()
-    ///     .row_number("row_num", Some("category"), "price", Order::Desc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Product::query()
+    ///     .row_number("row_num", Some("category"), "price", tideorm::Order::Desc);
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn row_number(
         mut self,
@@ -792,12 +874,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Rank employees by salary within department
-    /// let employees = Employee::query()
-    ///     .rank("salary_rank", Some("department_id"), "salary", Order::Desc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Employee::query()
+    ///     .rank("salary_rank", Some("department_id"), "salary", tideorm::Order::Desc);
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn rank(
         mut self,
@@ -839,12 +923,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Get previous order total for comparison
-    /// let orders = Order::query()
-    ///     .lag("previous_total", "total", 1, None, "user_id", "created_at", Order::Asc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Order::query()
+    ///     .lag("previous_total", "total", 1, None, "customer_id", "created_at", tideorm::Order::Asc);
+    /// # let _ = query;
+    /// # }
     /// ```
     #[allow(clippy::too_many_arguments)]
     pub fn lag(
@@ -877,12 +963,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Get next appointment date
-    /// let appointments = Appointment::query()
-    ///     .lead("next_date", "date", 1, None, "patient_id", "date", Order::Asc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Appointment::query()
+    ///     .lead("next_date", "date", 1, None, "patient_id", "date", tideorm::Order::Asc);
+    /// # let _ = query;
+    /// # }
     /// ```
     #[allow(clippy::too_many_arguments)]
     pub fn lead(
@@ -913,12 +1001,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Calculate running total of sales
-    /// let sales = Sale::query()
-    ///     .running_sum("running_total", "amount", "date", Order::Asc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Sale::query()
+    ///     .running_sum("running_total", "amount", "date", tideorm::Order::Asc);
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn running_sum(mut self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
         let wf = WindowFunction::new(WindowFunctionType::Sum(column.to_string()), alias)
@@ -951,12 +1041,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Divide products into 4 price quartiles
-    /// let products = Product::query()
-    ///     .ntile("price_quartile", 4, "price", Order::Asc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Product::query()
+    ///     .ntile("price_quartile", 4, "price", tideorm::Order::Asc);
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn ntile(mut self, alias: &str, buckets: u32, order_by: &str, order: Order) -> Self {
         let wf = WindowFunction::new(WindowFunctionType::Ntile(buckets), alias)
@@ -969,12 +1061,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // Get the first order date for each customer
-    /// let orders = Order::query()
-    ///     .first_value("first_order_date", "created_at", "customer_id", "created_at", Order::Asc)
-    ///     .get_raw()
-    ///     .await?;
+    /// let query = Order::query()
+    ///     .first_value("first_order_date", "created_at", "customer_id", "created_at", tideorm::Order::Asc);
+    /// # let _ = query;
+    /// # }
     /// ```
     pub fn first_value(
         mut self,
@@ -1023,7 +1117,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Define a CTE for high-value orders
     /// let orders = Order::query()
     ///     .with_cte(CTE::new(
@@ -1033,6 +1129,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .where_raw("id IN (SELECT id FROM high_value_orders)")
     ///     .get()
     ///     .await?;
+    /// # let _ = orders;
+    /// # }
     /// ```
     pub fn with_cte(mut self, cte: CTE) -> Self {
         self.ctes.push(cte);
@@ -1043,7 +1141,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Create CTE from a query builder
     /// let active_users_query = User::query()
     ///     .where_eq("active", true)
@@ -1054,6 +1154,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .inner_join("active_users", "posts.user_id", "active_users.id")
     ///     .get()
     ///     .await?;
+    /// # let _ = posts;
+    /// # }
     /// ```
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
         self.ctes
@@ -1065,7 +1167,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let stats = Sale::query()
     ///     .with_cte_columns(
     ///         "daily_stats",
@@ -1075,6 +1179,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .where_raw("date IN (SELECT sale_date FROM daily_stats WHERE total_sales > 10000)")
     ///     .get()
     ///     .await?;
+    /// # let _ = stats;
+    /// # }
     /// ```
     pub fn with_cte_columns(mut self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
         self.ctes
@@ -1088,7 +1194,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Get all employees in a management hierarchy
     /// let employees = Employee::query()
     ///     .with_recursive_cte(
@@ -1104,6 +1212,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .where_raw("id IN (SELECT id FROM employee_tree)")
     ///     .get()
     ///     .await?;
+    /// # let _ = employees;
+    /// # }
     /// ```
     pub fn with_recursive_cte(
         mut self,
@@ -1129,12 +1239,16 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Get all users including soft-deleted ones
     /// let all_users = User::query()
     ///     .with_trashed()
     ///     .get()
     ///     .await?;
+    /// # let _ = all_users;
+    /// # }
     /// ```
     pub fn with_trashed(mut self) -> Self {
         self.include_trashed = true;
@@ -1148,12 +1262,16 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Get only soft-deleted users (trash bin)
     /// let trashed_users = User::query()
     ///     .only_trashed()
     ///     .get()
     ///     .await?;
+    /// # let _ = trashed_users;
+    /// # }
     /// ```
     pub fn only_trashed(mut self) -> Self {
         self.only_trashed = true;
@@ -1168,11 +1286,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let active_users = User::query()
     ///     .without_trashed()
     ///     .get()
     ///     .await?;
+    /// # let _ = active_users;
+    /// # }
     /// ```
     pub fn without_trashed(mut self) -> Self {
         self.include_trashed = false;
@@ -1191,7 +1313,9 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// // Define reusable scopes as functions
     /// fn active<M: Model>(q: QueryBuilder<M>) -> QueryBuilder<M> {
     ///     q.where_eq("active", true)
@@ -1207,6 +1331,8 @@ impl<M: Model> QueryBuilder<M> {
     ///     .scope(recent)
     ///     .get()
     ///     .await?;
+    /// # let _ = users;
+    /// # }
     /// ```
     pub fn scope<F>(self, f: F) -> Self
     where
@@ -1221,13 +1347,17 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let include_inactive = false;
     ///
     /// let users = User::query()
     ///     .when(include_inactive, |q| q.with_trashed())
     ///     .get()
     ///     .await?;
+    /// # let _ = users;
+    /// # }
     /// ```
     pub fn when<F>(self, condition: bool, f: F) -> Self
     where
@@ -1243,13 +1373,17 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # tideorm::__doctest_async! {
     /// let status_filter: Option<&str> = Some("active");
     ///
     /// let users = User::query()
     ///     .when_some(status_filter, |q, status| q.where_eq("status", status))
     ///     .get()
     ///     .await?;
+    /// # let _ = users;
+    /// # }
     /// ```
     pub fn when_some<T, F>(self, option: Option<T>, f: F) -> Self
     where

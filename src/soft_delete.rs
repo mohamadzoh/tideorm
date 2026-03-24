@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use tideorm::prelude::*;
 //! use tideorm::SoftDelete;
 //!
@@ -15,23 +15,27 @@
 //!     #[tideorm(primary_key, auto_increment)]
 //!     pub id: i64,
 //!     pub title: String,
-//!     pub deleted_at: Option<DateTime<Utc>>,
+//!     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 //! }
 //!
 //! // `#[tideorm(soft_delete)]` generates the `SoftDelete` impl automatically.
 //! // Use `deleted_at_column = "archived_on"` when the field/column name is not `deleted_at`.
 //!
+//! # async fn demo(post: Post) -> tideorm::Result<()> {
 //! // Soft delete a post
-//! post.soft_delete(&db).await?;
+//! post.clone().soft_delete().await?;
 //!
 //! // Restore a soft-deleted post
-//! post.restore(&db).await?;
+//! post.clone().restore().await?;
 //!
 //! // Query including soft-deleted records
-//! let all_posts = Post::with_trashed(&db).await?;
+//! let all_posts = Post::query().with_trashed().get().await?;
 //!
 //! // Query only soft-deleted records
-//! let trashed = Post::only_trashed(&db).await?;
+//! let trashed = Post::query().only_trashed().get().await?;
+//! # let _ = (all_posts, trashed);
+//! # Ok(())
+//! # }
 //! ```
 
 use async_trait::async_trait;
@@ -66,9 +70,20 @@ pub trait SoftDelete: Model {
     /// Soft delete this record (sets deleted_at to now)
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "posts", soft_delete)]
+    /// # struct Post {
+    /// #     #[tideorm(primary_key, auto_increment)]
+    /// #     id: i64,
+    /// #     title: String,
+    /// #     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// # }
+    /// # async fn demo() -> tideorm::Result<()> {
     /// let post = Post::find_or_fail(1).await?;
     /// post.soft_delete().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     async fn soft_delete(mut self) -> Result<Self>
     where
@@ -81,9 +96,20 @@ pub trait SoftDelete: Model {
     /// Restore a soft-deleted record (sets deleted_at to None)
     ///
     /// # Example
-    /// ```ignore
-    /// let post = Post::only_trashed().await?.into_iter().next().unwrap();
+    /// ```no_run
+    /// # use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "posts", soft_delete)]
+    /// # struct Post {
+    /// #     #[tideorm(primary_key, auto_increment)]
+    /// #     id: i64,
+    /// #     title: String,
+    /// #     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// # }
+    /// # async fn demo() -> tideorm::Result<()> {
+    /// let post = Post::query().only_trashed().first().await?.unwrap();
     /// post.restore().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     async fn restore(mut self) -> Result<Self>
     where
@@ -96,8 +122,19 @@ pub trait SoftDelete: Model {
     /// Permanently delete this record from the database
     ///
     /// # Example
-    /// ```ignore
+    /// ```no_run
+    /// # use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "posts", soft_delete)]
+    /// # struct Post {
+    /// #     #[tideorm(primary_key, auto_increment)]
+    /// #     id: i64,
+    /// #     title: String,
+    /// #     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// # }
+    /// # async fn demo(post: Post) -> tideorm::Result<()> {
     /// post.force_delete().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     async fn force_delete(self) -> Result<u64>
     where

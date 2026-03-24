@@ -8,9 +8,9 @@
 //! Use `GlobalProfiler` when you want aggregate statistics for real executed
 //! TideORM queries:
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//! use tideorm::profiling::GlobalProfiler;
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! GlobalProfiler::enable();
 //! GlobalProfiler::reset();
@@ -20,13 +20,17 @@
 //! println!("{}", stats);
 //!
 //! GlobalProfiler::disable();
+//! # let _ = users;
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! Use `Profiler` when you want to construct a detailed report manually:
 //!
-//! ```rust,ignore
-//! use std::time::Duration;
-//! use tideorm::profiling::{ProfiledQuery, Profiler};
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # use tideorm::profiling::{ProfiledQuery, Profiler};
+//! # fn demo() -> tideorm::Result<()> {
 //!
 //! let mut profiler = Profiler::start();
 //! profiler.record("SELECT * FROM users", Duration::from_millis(8));
@@ -37,6 +41,8 @@
 //! );
 //! let report = profiler.stop();
 //! println!("{}", report);
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! # Features
@@ -51,8 +57,10 @@
 //!
 //! The profiler can suggest optimizations:
 //!
-//! ```rust,ignore
-//! let tips = Profiler::analyze_query("SELECT * FROM users WHERE email = 'test'");
+//! ```rust,no_run
+//! use tideorm::QueryAnalyzer;
+//!
+//! let tips = QueryAnalyzer::analyze("SELECT * FROM users WHERE email = 'test'");
 //! for tip in tips {
 //!     println!("💡 {}", tip);
 //! }

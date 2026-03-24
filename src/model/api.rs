@@ -15,19 +15,34 @@ use super::{BatchUpdateBuilder, OnConflictBuilder, crud, serialization};
 ///
 /// TideORM uses a global database connection pattern. Initialize once at startup:
 ///
-/// ```ignore
+/// ```no_run
+/// # use tideorm::prelude::*;
+/// # async fn demo() -> tideorm::Result<()> {
 /// TideConfig::init()
 ///     .database("postgres://localhost/myapp")
 ///     .connect()
 ///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// After initialization, all model methods work without passing a database reference:
 ///
-/// ```ignore
+/// ```no_run
+/// # use tideorm::prelude::*;
+/// # #[tideorm::model(table = "users")]
+/// # struct User {
+/// #     #[tideorm(primary_key, auto_increment)]
+/// #     id: i64,
+/// #     email: String,
+/// # }
+/// # async fn demo() -> tideorm::Result<()> {
 /// let users = User::all().await?;
-/// let user = user.save().await?;
+/// let user = User { id: 0, email: "demo@example.com".into() }.save().await?;
 /// user.delete().await?;
+/// # let _ = users;
+/// # Ok(())
+/// # }
 /// ```
 #[async_trait]
 pub trait Model:

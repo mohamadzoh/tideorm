@@ -7,35 +7,18 @@
 //!
 //! Schema generation is configured via TideConfig:
 //!
-//! ```ignore
-//! TideConfig::init()
-//!     .database("postgres://localhost/myapp")
-//!     .schema_file("schema.sql")  // Auto-generate schema file on connect
-//!     .connect()
-//!     .await?;
-//! ```
+//! Configure schema generation with `TideConfig::schema_file(...)`.
 //!
 //! Or generate manually:
 //!
-//! ```ignore
-//! use tideorm::schema::SchemaWriter;
-//!
-//! // Write schema for registered models
-//! SchemaWriter::write_schema("schema.sql").await?;
-//! ```
+//! Use `SchemaWriter::write_schema(...)` to write a schema file directly.
 //!
 //! ## Index Definitions
 //!
 //! Define indexes using attribute macros:
 //!
-//! ```ignore
-//! #[tideorm::model(
-//!     table = "users",
-//!     index = "email;name:first_name,last_name",
-//!     unique_index = "tenant_id,email"
-//! )]
-//! struct User { ... }
-//! ```
+//! Use `#[index(...)]` and `#[unique_index(...)]` on TideORM models to define
+//! regular and unique indexes.
 
 use parking_lot::RwLock;
 use std::fs;
@@ -565,8 +548,11 @@ impl SchemaWriter {
     /// Generate and write schema to file
     ///
     /// # Example
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # use tideorm::SchemaWriter;
+    /// # tideorm::__doctest_async! {
     /// SchemaWriter::write_schema("schema.sql").await?;
+    /// # }
     /// ```
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
         let db_type =

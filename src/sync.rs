@@ -10,44 +10,15 @@
 //! TideORM models use `ModelSchema` for schema definition. This is automatically
 //! handled by TideORM's model macros:
 //!
-//! ```rust,ignore
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub email: String,
-//! }
-//!
-//! // Register via TideConfig
-//! TideConfig::init()
-//!     .database("postgres://...")
-//!     .sync(true)
-//!     .models::<(User, Post, Comment)>()
-//!     .connect()
-//!     .await?;
-//! ```
+//! Register TideORM models through `TideConfig::models::<(... )>()` and enable
+//! synchronization with `sync(true)`.
 //!
 //! ### 2. SeaORM Entities (Advanced)
 //!
 //! For SeaORM entities, you can use `SyncRegistry::register_entity::<E>()` to
 //! leverage SeaORM  native SchemaBuilder with incremental sync:
 //!
-//! ```rust,ignore
-//! use tideorm::sync::SyncRegistry;
-//! use sea_orm::entity::prelude::*;
-//!
-//! // Your SeaORM entity
-//! #[derive(Clone, Debug, DeriveEntityModel)]
-//! #[sea_orm(table_name = "products")]
-//! pub struct Model {
-//!     #[sea_orm(primary_key)]
-//!     pub id: i32,
-//!     pub name: String,
-//! }
-//!
-//! // Register the SeaORM entity
-//! SyncRegistry::register_entity::<Entity>();
-//! ```
+//! Register SeaORM entities with `SyncRegistry::register_entity::<Entity>()`.
 //!
 //! ## SeaORM Schema Sync Features
 //!
@@ -86,28 +57,8 @@
 //!
 //! Enable sync during TideORM initialization:
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub email: String,
-//!     pub name: Option<String>,
-//! }
-//!
-//! // Enable sync via TideConfig (recommended)
-//! TideConfig::init()
-//!     .database("postgres://...")
-//!     .sync(true)  // Enable auto-sync
-//!     .connect()
-//!     .await?;
-//!
-//! // Or manually call sync on Database
-//! let db = Database::connect("postgres://...").await?;
-//! db.sync().await?; // Syncs all registered models
-//! ```
+//! Enable synchronization with `TideConfig::init().sync(true)` or call
+//! `Database::sync()` directly after connecting.
 
 use parking_lot::RwLock;
 use std::sync::OnceLock;

@@ -187,7 +187,8 @@ fn with_relations_initializes_supported_relation_wrappers() {
 
     assert_eq!(team.members.foreign_key, "team_uuid");
     assert_eq!(team.members.local_key, "team_uuid");
-    assert_eq!(team.labels.morph_name, "");
+    assert_eq!(team.labels.morph_name, "labelable");
+    assert_eq!(team.labels.local_key, "id");
 
     let member = TeamMember {
         id: 9,

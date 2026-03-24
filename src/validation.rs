@@ -21,7 +21,7 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
+//! ```no_run
 //! use tideorm::prelude::*;
 //! use tideorm::validation::{Validate, ValidationRule};
 //!
@@ -41,7 +41,12 @@
 //! }
 //!
 //! // Validation is automatic on save/update, or call manually:
-//! let user = User { ... };
+//! let user = User {
+//!     id: 0,
+//!     email: "demo@example.com".into(),
+//!     name: "Demo User".into(),
+//!     age: 42,
+//! };
 //! user.validate()?;  // Returns Result<(), ValidationErrors>
 //!
 //! // Or get all errors:
@@ -53,13 +58,24 @@
 //!         }
 //!     }
 //! }
+//! # Ok::<(), tideorm::validation::ValidationErrors>(())
 //! ```
 //!
 //! ## Custom Validation
 //!
-//! ```ignore
+//! ```no_run
+//! use tideorm::validation::{Validate, ValidationErrors};
+//!
+//! struct User {
+//!     email: String,
+//! }
+//!
 //! impl Validate for User {
-//!     fn custom_validations(&self) -> Result<(), ValidationErrors> {
+//!     fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+//!         self.custom_validations()
+//!     }
+//!
+//!     fn custom_validations(&self) -> std::result::Result<(), ValidationErrors> {
 //!         let mut errors = ValidationErrors::new();
 //!         
 //!         // Custom business logic
@@ -74,6 +90,7 @@
 //!         }
 //!     }
 //! }
+//! # Ok::<(), tideorm::validation::ValidationErrors>(())
 //! ```
 
 use std::collections::HashMap;

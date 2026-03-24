@@ -6,12 +6,21 @@
 //!
 //! provides detailed, actionable error messages to help you debug issues quickly:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use tideorm::prelude::*;
 //!
+//! #[tideorm::model(table = "users")]
+//! struct User {
+//!     #[tideorm(primary_key, auto_increment)]
+//!     id: i64,
+//!     name: String,
+//! }
+//!
 //! // Errors include helpful context
+//! # async fn demo() -> tideorm::Result<()> {
 //! match User::find(999).await {
-//!     Ok(user) => println!("Found: {}", user.name),
+//!     Ok(Some(user)) => println!("Found: {}", user.name),
+//!     Ok(None) => println!("User not found"),
 //!     Err(e) => {
 //!         eprintln!("Error: {}", e);
 //!         eprintln!("Suggestion: {}", e.suggestion());
@@ -20,6 +29,8 @@
 //!         }
 //!     }
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Error Types
@@ -495,14 +506,10 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// match User::find(999).await {
-    ///     Err(e) => {
-    ///         eprintln!("Error: {}", e);
-    ///         eprintln!("Suggestion: {}", e.suggestion());
-    ///     }
-    ///     Ok(user) => println!("Found user"),
-    /// }
+    /// ```rust,no_run
+    /// let error = tideorm::Error::not_found("User 999 was not found");
+    /// eprintln!("Error: {}", error);
+    /// eprintln!("Suggestion: {}", error.suggestion());
     /// ```
     pub fn suggestion(&self) -> String {
         match self {
@@ -650,7 +657,10 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use serde_json::json;
+    ///
+    /// let e = tideorm::Error::query("invalid SQL");
     /// let error_response = json!({
     ///     "error": {
     ///         "code": e.code(),
@@ -683,14 +693,10 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // In an Actix-web handler
-    /// match result {
-    ///     Ok(data) => HttpResponse::Ok().json(data),
-    ///     Err(e) => HttpResponse::build(
-    ///         actix_web::http::StatusCode::from_u16(e.http_status()).unwrap()
-    ///     ).json(json!({"error": e.to_string()})),
-    /// }
+    /// ```rust,no_run
+    /// let e = tideorm::Error::validation("email", "must be present");
+    /// let status = e.http_status();
+    /// assert_eq!(status, 422);
     /// ```
     pub fn http_status(&self) -> u16 {
         match self {
@@ -716,19 +722,9 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let mut retries = 3;
-    /// loop {
-    ///     match operation().await {
-    ///         Ok(result) => return Ok(result),
-    ///         Err(e) if e.is_retryable() && retries > 0 => {
-    ///             retries -= 1;
-    ///             tokio::time::sleep(Duration::from_millis(100)).await;
-    ///             continue;
-    ///         }
-    ///         Err(e) => return Err(e),
-    ///     }
-    /// }
+    /// ```rust,no_run
+    /// let error = tideorm::Error::connection("pool timeout");
+    /// assert!(error.is_retryable());
     /// ```
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -757,8 +753,10 @@ impl Error {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// tracing::error!("{}", e.log_format());
+    /// ```rust,no_run
+    /// let e = tideorm::Error::query("syntax error near FROM");
+    /// let formatted = e.log_format();
+    /// assert!(formatted.contains("TIDE_QUERY"));
     /// ```
     pub fn log_format(&self) -> String {
         let mut output = format!("[{}] {}", self.code(), self);

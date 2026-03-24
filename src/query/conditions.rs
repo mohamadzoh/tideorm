@@ -8,12 +8,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // String-based (runtime checked)
-    /// User::query().where_eq("active", true)
+    /// User::query().where_eq("active", true);
     ///
     /// // Typed column (compile-time checked)
-    /// User::query().where_eq(User::columns.active, true)
+    /// User::query().where_eq(User::columns.active, true);
+    /// # }
     /// ```
     pub fn where_eq(
         mut self,
@@ -34,12 +37,15 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # tideorm::__doctest_prelude!();
+    /// # fn main() {
     /// // String-based
-    /// User::query().where_not("role", "admin")
+    /// User::query().where_not("role", "admin");
     ///
     /// // Typed column
-    /// User::query().where_not(User::columns.role, "admin")
+    /// User::query().where_not(User::columns.role, "admin");
+    /// # }
     /// ```
     pub fn where_not(
         mut self,

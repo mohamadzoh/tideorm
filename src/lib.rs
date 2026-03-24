@@ -1,484 +1,142 @@
-//! # TideORM
+//! TideORM is a developer-friendly ORM for Rust.
 //!
-//! A developer-friendly ORM for Rust with clean, expressive syntax.
-//!
-//! ## Quick Start
-//!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub email: String,
-//!     pub name: String,
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> tideorm::Result<()> {
-//!     // Initialize TideORM with database and configuration
-//!     TideConfig::init()
-//!         .database("postgres://localhost/myapp")
-//!         .max_connections(20)
-//!         .min_connections(5)
-//!         .connect()
-//!         .await?;
-//!     
-//!     // Create a record
-//!     let mut user = User {
-//!         id: 0,
-//!         email: "john@example.com".to_string(),
-//!         name: "John Doe".to_string(),
-//!     };
-//!     user = user.save().await?;
-//!     
-//!     // Find by ID
-//!     let user = User::find(1).await?;
-//!     
-//!     // Query with conditions
-//!     let users = User::query()
-//!         .where_eq("name", "John")
-//!         .order_by("created_at", Order::Desc)
-//!         .limit(10)
-//!         .get()
-//!         .await?;
-//!     
-//!     // Update
-//!     user.name = "Jane Doe".to_string();
-//!     let user = user.update().await?;
-//!     
-//!     // Delete
-//!     user.delete().await?;
-//!     
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Features
-//!
-//! - **Clean Model Definitions** - Use `#[tideorm::model(table = "...")]` to define your models
-//! - **Unified Configuration** - Database, pool settings, and app config in one place
-//! - **Global Database Connection** - Initialize once, use anywhere
-//! - **Production-Ready Pool Settings** - Configure min/max connections, timeouts
-//! - **Fluent Query Builder** - Chain methods for readable queries
-//! - **Type Safe** - Full Rust type safety without verbose syntax
-//! - **Async First** - Built for async/await from the ground up
-//! - **Database Agnostic** - PostgreSQL, MySQL, SQLite support
-//! - **Zero SeaORM Exposure** - SeaORM is an internal implementation detail
-//! - **Query Logging & Debugging** - Built-in query logging with timing and slow query detection
-//! - **Performance Profiling** - Query analysis and optimization suggestions
-//! - **Helpful Error Messages** - Clear errors with suggestions for fixes
-//!
-//! ## Query Logging
-//!
-//! Enable query logging for debugging:
-//!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! // Enable via environment variable
-//! // TIDE_LOG_QUERIES=true cargo run
-//!
-//! // Or enable programmatically
-//! QueryLogger::global()
-//!     .set_level(LogLevel::Debug)
-//!     .set_slow_query_threshold_ms(100)
-//!     .enable();
-//!
-//! // Debug a specific query
-//! let debug_info = User::query()
-//!     .where_eq("active", true)
-//!     .where_gt("age", 18)
-//!     .debug();
-//! println!("{}", debug_info);
-//! ```
-//!
-//! ## Performance Profiling
-//!
-//! For lightweight application-wide query timing, enable `GlobalProfiler` before
-//! executing TideORM queries:
-//!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//! use tideorm::profiling::GlobalProfiler;
-//!
-//! GlobalProfiler::enable();
-//! GlobalProfiler::reset();
-//!
-//! let users = User::query().where_eq("active", true).get().await?;
-//!
-//! let stats = GlobalProfiler::stats();
-//! println!("{}", stats);
-//!
-//! GlobalProfiler::disable();
-//! ```
-//!
-//! For a detailed report with custom SQL strings or metadata, build it manually
-//! with `Profiler` and `ProfiledQuery`.
-//!
-//! ## Model Definition
-//!
-//! Models are typically defined using the `#[tideorm::model(...)]` attribute macro with field-level attributes:
-//!
-//! ```rust,ignore
-//! #[tideorm::model(table = "posts", soft_delete)]
-//! #[index("user_id")]
-//! #[unique_index("slug")]
-//! pub struct Post {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     
-//!     pub user_id: i64,
-//!     pub slug: String,
-//!     pub title: String,
-//!     pub content: String,
-//!     pub published: bool,
-//!     
-//!     // Auto-managed timestamps
-//!     pub created_at: DateTime<Utc>,
-//!     pub updated_at: DateTime<Utc>,
-//!     
-//!     // Soft delete support
-//!     pub deleted_at: Option<DateTime<Utc>>,
-//!
-//!     // JSON and array fields (PostgreSQL)
-//!     pub metadata: Json,                    // JSONB column
-//!     pub tags: TextArray,                   // TEXT[] column
-//!     pub scores: IntArray,                  // INTEGER[] column
-//! }
-//! ```
-//!
-//! ### JSON and Array Field Types
-//!
-//! TideORM supports PostgreSQL's native JSON and array types:
-//!
-//! | Rust Type | PostgreSQL Type | Description |
-//! |-----------|-----------------|-------------|
-//! | `Json` | `JSONB` | JSON data storage |
-//! | `Jsonb` | `JSONB` | Alias for Json |
-//! | `IntArray` | `INTEGER[]` | Array of integers |
-//! | `BigIntArray` | `BIGINT[]` | Array of big integers |
-//! | `TextArray` | `TEXT[]` | Array of strings |
-//! | `BoolArray` | `BOOLEAN[]` | Array of booleans |
-//! | `FloatArray` | `DOUBLE PRECISION[]` | Array of floats |
-//! | `JsonArray` | `JSONB[]` | Array of JSON objects |
-//!
-//! ### Field Attributes
-//!
-//! | Attribute | Description |
-//! |-----------|-------------|
-//! | `#[tideorm(primary_key)]` | Marks the primary key field |
-//! | `#[tideorm(auto_increment)]` | Auto-incrementing field (usually with primary_key) |
-//! | `#[tideorm(column = "name")]` | Override the column name |
-//! | `#[tideorm(skip)]` | Skip this field in database operations |
-//!
-//! ### Table Attributes
-//!
-//! | Attribute | Description |
-//! |-----------|-------------|
-//! | `#[tideorm(table = "name")]` | Override the table name |
-//! | `#[tideorm(soft_delete)]` | Enable soft delete support |
-//! | `#[index("col1,col2")]` | Create a composite index |
-//! | `#[unique_index("col")]` | Create a unique index |
-//!
-//! ## Query Builder
-//!
-//! The fluent query builder supports all common operations:
-//!
-//! ```rust,ignore
-//! // WHERE conditions
-//! User::query()
-//!     .where_eq("status", "active")      // WHERE status = 'active'
-//!     .where_not("role", "banned")       // AND role != 'banned'
-//!     .where_in("tier", vec!["gold", "platinum"])  // AND tier IN (...)
-//!     .where_like("email", "%@company.com")       // AND email LIKE ...
-//!     .where_null("deleted_at")          // AND deleted_at IS NULL
-//!     .where_between("age", 18, 65)      // AND age BETWEEN 18 AND 65
-//!     .get()
-//!     .await?;
-//!
-//! // Ordering, pagination
-//! User::query()
-//!     .order_by("created_at", Order::Desc)
-//!     .limit(10)
-//!     .offset(20)
-//!     .get()
-//!     .await?;
-//!
-//! // Pagination helper
-//! let page = User::query()
-//!     .where_eq("active", true)
-//!     .page(2, 25)  // Page 2, 25 per page
-//!     .get()
-//!     .await?;
-//!
-//! // Counting
-//! let count = User::query()
-//!     .where_eq("active", true)
-//!     .count()
-//!     .await?;
-//!
-//! // Bulk delete
-//! let deleted = User::query()
-//!     .where_eq("status", "inactive")
-//!     .delete()
-//!     .await?;  // Returns number of deleted rows
-//! ```
-//!
-//! ### JSON Operations (PostgreSQL)
-//!
-//! Query JSON and JSONB columns with native PostgreSQL operators:
-//!
-//! ```rust,ignore
-//! // JSON containment: column @> value
-//! User::query()
-//!     .where_json_contains("metadata", serde_json::json!({"role": "admin"}))
-//!     .get()
-//!     .await?;
-//!
-//! // JSON key existence: column ? key
-//! User::query()
-//!     .where_json_key_exists("settings", "theme")
-//!     .get()
-//!     .await?;
-//!
-//! // JSON path queries: column @? path
-//! User::query()
-//!     .where_json_path_exists("preferences", "$.notifications.email")
-//!     .get()
-//!     .await?;
-//! ```
-//!
-//! ### Array Operations (PostgreSQL)
-//!
-//! Query array columns with native PostgreSQL operators:
-//!
-//! ```rust,ignore
-//! // Array containment: column @> ARRAY[values]
-//! User::query()
-//!     .where_array_contains("tags", vec!["rust", "postgres"])
-//!     .get()
-//!     .await?;
-//!
-//! // Array overlap (contains any): column && ARRAY[values]
-//! User::query()
-//!     .where_array_overlaps("skills", vec!["javascript", "react"])
-//!     .get()
-//!     .await?;
-//!
-//! // Array contains all: ARRAY[values] <@ column
-//! User::query()
-//!     .where_array_contains_all("permissions", vec!["read", "write"])
-//!     .get()
-//!     .await?;
-//! ```
-//!
-//! ### Conditional Queries (Scopes)
-//!
-//! ```rust,ignore
-//! // Build queries conditionally
-//! User::query()
-//!     .when(filter.is_some(), |q| q.where_eq("status", filter.unwrap()))
-//!     .when_some(search_term, |q, term| q.where_like("name", format!("%{}%", term)))
-//!     .get()
-//!     .await?;
-//! ```
-//!
-//! ## Soft Delete
-//!
-//! Models with `#[tideorm(soft_delete)]` support soft deletion:
-//!
-//! ```rust,ignore
-//! // Regular queries exclude soft-deleted records
-//! let users = User::all().await?;
-//!
-//! // Include soft-deleted records
-//! let all_users = User::query().with_trashed().get().await?;
-//!
-//! // Only soft-deleted records
-//! let deleted = User::query().only_trashed().get().await?;
-//!
-//! // Soft delete
-//! user.soft_delete().await?;
-//!
-//! // Restore
-//! user.restore().await?;
-//!
-//! // Force delete (permanent)
-//! user.force_delete().await?;
-//! ```
-//!
-//! ## Callbacks
-//!
-//! Implement lifecycle hooks for your models:
-//!
-//! ```rust,ignore
-//! impl Callbacks for User {
-//!     fn before_save(&mut self) -> tideorm::Result<()> {
-//!         // Normalize email before saving
-//!         self.email = self.email.to_lowercase();
-//!         Ok(())
-//!     }
-//!     
-//!     fn after_create(&self) -> tideorm::Result<()> {
-//!         // Send welcome email
-//!         println!("User {} created!", self.email);
-//!         Ok(())
-//!     }
-//! }
-//! ```
-//!
-//! Available callbacks:
-//! - `before_validation`, `after_validation`
-//! - `before_save`, `after_save`
-//! - `before_create`, `after_create`
-//! - `before_update`, `after_update`
-//! - `before_delete`, `after_delete`
-//!
-//! ## Model Relations
-//!
-//! Define relationships between models:
-//!
-//! ```rust,ignore
-//! // BelongsTo: Post belongs to User
-//! impl BelongsTo<User> for Post {
-//!     fn foreign_key() -> &'static str { "user_id" }
-//! }
-//!
-//! // HasMany: User has many Posts
-//! impl HasMany<Post> for User {
-//!     fn foreign_key() -> &'static str { "user_id" }
-//! }
-//!
-//! // Load relations
-//! let post = Post::find(1).await?;
-//! let author: User = post.load_belongs_to().await?;
-//!
-//! let user = User::find(1).await?;
-//! let posts: Vec<Post> = user.load_has_many().await?;
-//! ```
-//!
-//! ## Batch Operations
-//!
-//! ```rust,ignore
-//! // Insert many records at once
-//! let users = vec![user1, user2, user3];
-//! let inserted = User::insert_all(users).await?;
-//!
-//! // Update many records with conditions
-//! User::update_all()
-//!     .set("status", "inactive")
-//!     .where_eq("last_login_at", None::<DateTime<Utc>>)
-//!     .execute()
-//!     .await?;
-//! ```
-//!
-//! ## Raw SQL
-//!
-//! When you need raw SQL access:
-//!
-//! ```rust,ignore
-//! // Execute raw SQL
-//! Database::execute("TRUNCATE TABLE temp_data").await?;
-//!
-//! // Query with parameters
-//! let users: Vec<User> = Database::raw(
-//!     "SELECT * FROM users WHERE status = $1 AND age > $2"
-//! ).await?;
-//! ```
-//!
-//! ## Schema Generation
-//!
-//! Auto-generate schema files from database introspection:
-//!
-//! ```rust,ignore
-//! // Configure to auto-generate schema on connect
-//! TideConfig::init()
-//!     .database("postgres://localhost/myapp")
-//!     .schema_file("schema.sql")  // Auto-generates on connect
-//!     .connect()
-//!     .await?;
-//!
-//! // Or generate manually
-//! SchemaWriter::write_schema("schema.sql").await?;
-//! ```
-//!
-//! ## Multi-Database Support
-//!
-//! TideORM supports PostgreSQL, MySQL, and SQLite:
-//!
-//! ```rust,ignore
-//! // PostgreSQL
-//! TideConfig::init()
-//!     .database_type(DatabaseType::Postgres)
-//!     .database("postgres://user:pass@localhost/db")
-//!     .connect()
-//!     .await?;
-//!
-//! // MySQL
-//! TideConfig::init()
-//!     .database_type(DatabaseType::MySQL)
-//!     .database("mysql://user:pass@localhost/db")
-//!     .connect()
-//!     .await?;
-//!
-//! // SQLite
-//! TideConfig::init()
-//!     .database_type(DatabaseType::SQLite)
-//!     .database("sqlite:./data.db")
-//!     .connect()
-//!     .await?;
-//! ```
-//!
-//! ## Connection Pool Configuration
-//!
-//! ```rust,ignore
-//! TideConfig::init()
-//!     .database("postgres://localhost/myapp")
-//!     .max_connections(50)           // Maximum connections
-//!     .min_connections(5)            // Minimum idle connections
-//!     .connect_timeout(Duration::from_secs(30))
-//!     .idle_timeout(Duration::from_secs(600))
-//!     .max_lifetime(Duration::from_secs(1800))
-//!     .connect()
-//!     .await?;
-//! ```
-//!
-//! ## Query Logging
-//!
-//! Enable query logging for debugging:
-//!
-//! ```bash
-//! TIDE_LOG_QUERIES=true cargo run
-//! ```
-//!
-//! ## Error Handling
-//!
-//! TideORM provides descriptive error types:
-//!
-//! ```rust,ignore
-//! match User::find(999).await {
-//!     Ok(user) => println!("Found: {}", user.name),
-//!     Err(Error::NotFound { message, .. }) => println!("User not found: {}", message),
-//!     Err(Error::Connection { message }) => println!("Database error: {}", message),
-//!     Err(e) => println!("Other error: {}", e),
-//! }
-//! ```
-//!
-//! ## Design Philosophy
-//!
-//! TideORM is designed with these principles:
-//!
-//! 1. **Convention over Configuration** - Smart defaults, minimal boilerplate
-//! 2. **Developer Happiness** - APIs that feel natural and are hard to misuse
-//! 4. **Type Safety** - Catch errors at compile time when possible
-//! 5. **Performance** - Zero-cost abstractions where possible
+//! See the module-level documentation for examples covering models, queries,
+//! relations, schema generation, profiling, logging, and error handling.
 
 #![recursion_limit = "256"]
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![deny(unsafe_code)]
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doctest_prelude {
+    () => {
+        use std::time::Duration;
+        use tideorm::prelude::*;
+
+        #[tideorm::model(table = "users", soft_delete)]
+        struct User {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            email: String,
+            name: String,
+            active: bool,
+            age: i32,
+            status: String,
+            role: String,
+            tier: String,
+            created_at: chrono::DateTime<chrono::Utc>,
+            deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+            metadata: tideorm::prelude::Json,
+            settings: tideorm::prelude::Json,
+            preferences: tideorm::prelude::Json,
+            tags: tideorm::prelude::TextArray,
+            skills: tideorm::prelude::TextArray,
+            permissions: tideorm::prelude::TextArray,
+            last_login_at: Option<chrono::DateTime<chrono::Utc>>,
+        }
+
+        #[tideorm::model(table = "products")]
+        struct Product {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            category: String,
+            price: f64,
+            in_stock: bool,
+        }
+
+        #[tideorm::model(table = "orders")]
+        struct Order {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            status: String,
+            category: String,
+            customer_id: i64,
+            total: f64,
+            amount: f64,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+
+        #[tideorm::model(table = "cakes")]
+        struct Cake {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            name: String,
+            bakery_id: i64,
+        }
+
+        #[tideorm::model(table = "posts")]
+        struct Post {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            user_id: i64,
+            title: String,
+        }
+
+        #[tideorm::model(table = "profiles")]
+        struct Profile {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            user_id: i64,
+            bio: String,
+        }
+
+        #[tideorm::model(table = "employees")]
+        struct Employee {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            name: String,
+            manager_id: Option<i64>,
+            department_id: i64,
+            salary: f64,
+        }
+
+        #[tideorm::model(table = "appointments")]
+        struct Appointment {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            patient_id: i64,
+            date: chrono::DateTime<chrono::Utc>,
+        }
+
+        #[tideorm::model(table = "sales")]
+        struct Sale {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            amount: f64,
+            date: chrono::DateTime<chrono::Utc>,
+            created_at: chrono::DateTime<chrono::Utc>,
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doctest_async {
+    ($($body:tt)*) => {
+        async fn demo() -> tideorm::Result<()> {
+            $($body)*
+            Ok(())
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __doctest_tokenizable_user {
+    () => {
+        use tideorm::prelude::*;
+
+        #[tideorm::model(table = "users", tokenize)]
+        struct User {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            email: String,
+            name: String,
+        }
+    };
+}
 
 #[doc(hidden)]
 pub mod internal;

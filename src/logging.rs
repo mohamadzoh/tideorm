@@ -5,9 +5,9 @@
 //!
 //! # Quick Start
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//! use tideorm::logging::{QueryLogger, LogLevel};
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! // Enable query logging globally
 //! QueryLogger::global()
@@ -22,6 +22,9 @@
 //!     .get()
 //!     .await?;
 //! // Output: [TIDE] SELECT * FROM users WHERE active = true (took 12ms)
+//! # let _ = users;
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! # Log Levels
@@ -43,7 +46,9 @@
 //!
 //! # Query Debugging
 //!
-//! ```rust,ignore
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # fn demo() -> tideorm::Result<()> {
 //! // Debug a specific query without executing
 //! let debug_info = User::query()
 //!     .where_eq("email", "test@example.com")
@@ -63,6 +68,8 @@
 //! // SQL: SELECT * FROM users WHERE email = $1 AND age > $2
 //! // Params: ["test@example.com", 18]
 //! // ═══════════════════════════════════════════════════
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 
 use parking_lot::RwLock;

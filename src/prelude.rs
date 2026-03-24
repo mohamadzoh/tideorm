@@ -3,7 +3,7 @@
 //! This module re-exports the most commonly used types and traits.
 //! Import everything with:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use tideorm::prelude::*;
 //! ```
 

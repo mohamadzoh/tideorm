@@ -6,42 +6,8 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! // Define typed columns for a model
-//! mod user_columns {
-//!     use tideorm::columns::*;
-//!     
-//!     pub struct UserColumns {
-//!         pub id: Column<i64>,
-//!         pub name: Column<String>,
-//!         pub email: Column<String>,
-//!         pub age: Column<Option<i32>>,
-//!         pub active: Column<bool>,
-//!     }
-//!     
-//!     pub const COLUMNS: UserColumns = UserColumns {
-//!         id: Column::new("id"),
-//!         name: Column::new("name"),
-//!         email: Column::new("email"),
-//!         age: Column::new("age"),
-//!         active: Column::new("active"),
-//!     };
-//! }
-//!
-//! use user_columns::COLUMNS as USER;
-//!
-//! // Type-safe queries
-//! User::query()
-//!     .where_col(USER.name.eq("Alice"))           // OK: String == &str
-//!     .where_col(USER.age.gt(18))                 // OK: Option<i32> > i32
-//!     .where_col(USER.active.eq(true))            // OK: bool == bool
-//!     // .where_col(USER.name.eq(123))            // COMPILE ERROR: String != i32
-//!     // .where_col(USER.age.like("%test%"))      // COMPILE ERROR: i32 doesn't support LIKE
-//!     .get()
-//!     .await?;
-//! ```
+//! Define `Column<T>` constants for your model fields and use them with
+//! `where_col` to get compile-time checked query expressions.
 
 use std::marker::PhantomData;
 

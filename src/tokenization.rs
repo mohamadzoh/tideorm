@@ -24,37 +24,33 @@
 //!
 //! The easiest way to enable tokenization is using the `#[tideorm(tokenize)]` attribute:
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
+//! ```rust,no_run
+//! tideorm::__doctest_tokenizable_user!();
+//! use tideorm::tokenization::TokenConfig;
 //!
-//! #[tideorm::model(table = "users", tokenize)]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub email: String,
-//!     pub name: String,
-//! }
-//!
+//! # tideorm::__doctest_async! {
 //! // Configure encryption key (do this once at startup)
 //! TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
 //!
 //! // Now you can tokenize records
 //! let user = User::find(1).await?.unwrap();
-//! let token = user.tokenize()?;           // "iIBmdKYhJh4_vSKFlBTP..."
+//! let token = user.tokenize()?;
 //!
 //! // Decode without fetching
-//! let id = User::detokenize(&token)?;     // 1
+//! let id = User::detokenize(&token)?;
 //!
 //! // Or fetch directly from token
 //! let same_user = User::from_token(&token).await?;
 //! assert_eq!(user.id, same_user.id);
+//! # let _ = id;
+//! # }
 //! ```
 //!
 //! ## Manual Implementation
 //!
 //! You can also implement the `Tokenizable` trait manually:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use tideorm::prelude::*;
 //! use tideorm::tokenization::Tokenizable;
 //!
@@ -65,7 +61,7 @@
 //!     pub name: String,
 //! }
 //!
-//! #[async_trait::async_trait]
+//! #[tideorm::migration::async_trait]
 //! impl Tokenizable for User {
 //!     fn token_model_name() -> &'static str {
 //!         "User"
@@ -102,8 +98,17 @@
 //!
 //! For models that need custom tokenization logic:
 //!
-//! ```rust,ignore
-//! #[async_trait::async_trait]
+//! ```rust,no_run
+//! use tideorm::prelude::*;
+//! use tideorm::tokenization::{TokenDecoder, TokenEncoder, Tokenizable};
+//!
+//! #[tideorm::model(table = "secret_documents")]
+//! struct SecretDocument {
+//!     #[tideorm(primary_key)]
+//!     id: i64,
+//! }
+//!
+//! #[tideorm::migration::async_trait]
 //! impl Tokenizable for SecretDocument {
 //!     fn token_model_name() -> &'static str { "SecretDocument" }
 //!     fn token_primary_key(&self) -> i64 { self.id }
@@ -238,7 +243,9 @@ impl TokenConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use tideorm::tokenization::TokenConfig;
+    ///
     /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
     /// ```
     pub fn set_encryption_key(key: &str) {
@@ -280,7 +287,9 @@ impl TokenConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use tideorm::tokenization::TokenConfig;
+    ///
     /// TokenConfig::set_encoder(|record_id, model_name| {
     ///     Ok(format!("{}-{}", model_name.to_lowercase(), record_id))
     /// });
@@ -296,7 +305,9 @@ impl TokenConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use tideorm::tokenization::TokenConfig;
+    ///
     /// TokenConfig::set_decoder(|token, model_name| {
     ///     let prefix = format!("{}-", model_name.to_lowercase());
     ///     Ok(token.strip_prefix(&prefix)
@@ -338,8 +349,15 @@ impl TokenConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use tideorm::tokenization::TokenConfig;
+    ///
+    /// # fn main() -> tideorm::Result<()> {
+    /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
     /// let token = TokenConfig::encode(42, "User")?;
+    /// # let _ = token;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn encode(record_id: i64, model_name: &str) -> Result<String> {
         Self::get_encoder()(record_id, model_name)
@@ -349,9 +367,18 @@ impl TokenConfig {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// use tideorm::{Error, Result};
+    /// use tideorm::tokenization::TokenConfig;
+    ///
+    /// # fn main() -> Result<()> {
+    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
+    /// # let token = TokenConfig::encode(42, "User")?;
     /// let id = TokenConfig::decode(&token, "User")?
     ///     .ok_or_else(|| Error::invalid_token("Invalid token"))?;
+    /// # let _ = id;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn decode(token: &str, model_name: &str) -> Result<Option<i64>> {
         Self::get_decoder()(token, model_name)
@@ -513,18 +540,14 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
 ///
 /// ## Example
 ///
-/// ```rust,ignore
-/// #[tideorm::model(table = "users", tokenize)]
-/// pub struct User {
-///     #[tideorm(primary_key)]
-///     pub id: i64,
-///     pub email: String,
-/// }
-///
-/// // Now User implements Tokenizable
-/// let user = User::find(1).await?;
+/// ```rust,no_run
+/// tideorm::__doctest_tokenizable_user!();
+/// # tideorm::__doctest_async! {
+/// let user = User::find(1).await?.unwrap();
 /// let token = user.to_token()?;
 /// let restored = User::from_token(&token).await?;
+/// # let _ = restored;
+/// # }
 /// ```
 #[async_trait::async_trait]
 pub trait Tokenizable: Sized + Send + Sync {
@@ -561,10 +584,13 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let user = User::find(42).await?;
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// # tideorm::__doctest_async! {
+    /// let user = User::find(42).await?.unwrap();
     /// let token = user.to_token()?;
-    /// // token: "eyJhbGciOiJ..."
+    /// # let _ = token;
+    /// # }
     /// ```
     fn to_token(&self) -> Result<String> {
         if !Self::tokenization_enabled() {
@@ -582,9 +608,13 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let user = User::find(42).await?;
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// # tideorm::__doctest_async! {
+    /// let user = User::find(42).await?.unwrap();
     /// let token = user.tokenize()?;
+    /// # let _ = token;
+    /// # }
     /// ```
     fn tokenize(&self) -> Result<String> {
         self.to_token()
@@ -594,8 +624,16 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// use tideorm::tokenization::TokenConfig;
+    ///
+    /// # fn main() -> tideorm::Result<()> {
+    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
     /// let token = User::tokenize_id(42)?;
+    /// # let _ = token;
+    /// # Ok(())
+    /// # }
     /// ```
     fn tokenize_id(id: i64) -> Result<String> {
         if !Self::tokenization_enabled() {
@@ -615,8 +653,12 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// # tideorm::__doctest_async! {
     /// let user = User::from_token("eyJhbGciOiJ...").await?;
+    /// # let _ = user;
+    /// # }
     /// ```
     async fn from_token(token: &str) -> Result<Self>;
 
@@ -624,9 +666,17 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// use tideorm::tokenization::TokenConfig;
+    ///
+    /// # fn main() -> tideorm::Result<()> {
+    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
+    /// # let token = User::tokenize_id(42)?;
     /// let id = User::detokenize("eyJhbGciOiJ...")?;
-    /// // id: 42
+    /// # let _ = id;
+    /// # Ok(())
+    /// # }
     /// ```
     fn detokenize(token: &str) -> Result<i64> {
         Self::decode_token(token)
@@ -638,9 +688,17 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// use tideorm::tokenization::TokenConfig;
+    ///
+    /// # fn main() -> tideorm::Result<()> {
+    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
+    /// # let token = User::tokenize_id(42)?;
     /// let id = User::decode_token("eyJhbGciOiJ...")?;
-    /// // id: 42
+    /// # let _ = id;
+    /// # Ok(())
+    /// # }
     /// ```
     fn decode_token(token: &str) -> Result<i64> {
         if !Self::tokenization_enabled() {
@@ -665,11 +723,14 @@ pub trait Tokenizable: Sized + Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// let user = User::find(42).await?;
+    /// ```rust,no_run
+    /// tideorm::__doctest_tokenizable_user!();
+    /// # tideorm::__doctest_async! {
+    /// let user = User::find(42).await?.unwrap();
     /// let token1 = user.to_token()?;
     /// let token2 = user.regenerate_token()?;
-    /// // With the default encoder: token1 != token2
+    /// # let _ = (token1, token2);
+    /// # }
     /// ```
     fn regenerate_token(&self) -> Result<String> {
         self.to_token()

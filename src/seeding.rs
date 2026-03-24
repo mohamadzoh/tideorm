@@ -13,51 +13,8 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//! use tideorm::seeding::{Seed, async_trait};
-//!
-//! // Define a seed
-//! #[derive(Default)]
-//! struct UserSeeder;
-//!
-//! #[async_trait]
-//! impl Seed for UserSeeder {
-//!     fn name(&self) -> &str { "user_seeder" }
-//!
-//!     async fn run(&self, db: &Database) -> Result<()> {
-//!         // Insert seed data
-//!         db.execute_raw(r#"
-//!             INSERT INTO users (email, name, active)
-//!             VALUES
-//!                 ('admin@example.com', 'Admin User', true),
-//!                 ('user@example.com', 'Regular User', true)
-//!         "#).await?;
-//!         Ok(())
-//!     }
-//!
-//!     async fn rollback(&self, db: &Database) -> Result<()> {
-//!         // Remove seed data
-//!         db.execute_raw(r#"
-//!             DELETE FROM users WHERE email IN ('admin@example.com', 'user@example.com')
-//!         "#).await?;
-//!         Ok(())
-//!     }
-//! }
-//!
-//! // Run seeds via TideConfig
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     TideConfig::init()
-//!         .database("postgres://localhost/myapp")
-//!         .seeds::<(UserSeeder, CategorySeeder, ProductSeeder)>()
-//!         .run_seeds(true)
-//!         .connect()
-//!         .await?;
-//!
-//!     Ok(())
-//! }
-//! ```
+//! Implement `Seed` for your seeders and register them through
+//! `TideConfig::seeds::<(...)>()`.
 
 use std::fmt;
 
@@ -83,7 +40,11 @@ pub use async_trait::async_trait;
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use tideorm::prelude::*;
+/// use tideorm::Result;
+/// use tideorm::seeding::{Seed, async_trait};
+/// 
 /// struct AdminUserSeeder;
 ///
 /// #[async_trait]
@@ -91,18 +52,12 @@ pub use async_trait::async_trait;
 ///     fn name(&self) -> &str { "admin_user_seeder" }
 ///
 ///     async fn run(&self, db: &Database) -> Result<()> {
-///         db.execute_raw(r#"
-///             INSERT INTO users (email, name, role)
-///             VALUES ('admin@example.com', 'Admin', 'admin')
-///             ON CONFLICT (email) DO NOTHING
-///         "#).await?;
+///         let _ = db;
 ///         Ok(())
 ///     }
 ///
 ///     async fn rollback(&self, db: &Database) -> Result<()> {
-///         db.execute_raw(r#"
-///             DELETE FROM users WHERE email = 'admin@example.com'
-///         "#).await?;
+///         let _ = db;
 ///         Ok(())
 ///     }
 /// }
@@ -152,13 +107,42 @@ pub trait Seed: Send + Sync {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use tideorm::prelude::*;
+/// use tideorm::Result;
+/// use tideorm::seeding::{Seed, Seeder, async_trait};
+/// 
+/// #[derive(Default)]
+/// struct UserSeeder;
+/// #[derive(Default)]
+/// struct CategorySeeder;
+/// #[derive(Default)]
+/// struct ProductSeeder;
+/// 
+/// #[async_trait]
+/// impl Seed for UserSeeder {
+///     fn name(&self) -> &str { "user_seeder" }
+///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
+/// }
+/// #[async_trait]
+/// impl Seed for CategorySeeder {
+///     fn name(&self) -> &str { "category_seeder" }
+///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
+/// }
+/// #[async_trait]
+/// impl Seed for ProductSeeder {
+///     fn name(&self) -> &str { "product_seeder" }
+///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
+/// }
+/// 
+/// # tideorm::__doctest_async! {
 /// Seeder::new()
 ///     .add(UserSeeder)
 ///     .add(CategorySeeder)
 ///     .add(ProductSeeder)
 ///     .run()
 ///     .await?;
+/// # }
 /// ```
 pub struct Seeder {
     seeds: Vec<Box<dyn Seed>>,

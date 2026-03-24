@@ -12,9 +12,10 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use tideorm::migration::*;
 //! use tideorm::prelude::*;
+//! use tideorm::Result;
 //!
 //! // Define a migration
 //! struct CreateUsersTable;

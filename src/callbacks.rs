@@ -17,43 +17,8 @@
 //!
 //! ## Usage
 //!
-//! ```ignore
-//! use tideorm::prelude::*;
-//! use tideorm::callbacks::Callbacks;
-//!
-//! #[tideorm::model(table = "audit_logs")]
-//! pub struct AuditLog {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub action: String,
-//!     pub entity_type: String,
-//!     pub entity_id: i64,
-//!     pub created_at: DateTime<Utc>,
-//! }
-//!
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub name: String,
-//!     pub email: String,
-//!     pub password_hash: String,
-//! }
-//!
-//! impl Callbacks for User {
-//!     fn before_save(&mut self) -> tideorm::Result<()> {
-//!         // Normalize email before saving
-//!         self.email = self.email.to_lowercase();
-//!         Ok(())
-//!     }
-//!     
-//!     fn after_create(&self) -> tideorm::Result<()> {
-//!         // Log the creation
-//!         println!("User {} created with id {}", self.name, self.id);
-//!         Ok(())
-//!     }
-//! }
-//! ```
+//! Implement `Callbacks` on your model type and override only the lifecycle
+//! hooks you need.
 
 use crate::error::Result;
 

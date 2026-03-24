@@ -10,8 +10,9 @@
 //!
 //! ## Query Result Caching
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! // Enable query caching globally
 //! QueryCache::global()
@@ -35,14 +36,17 @@
 //!
 //! // Invalidate cache
 //! QueryCache::global().invalidate("admin_users");
-//! QueryCache::global().invalidate_model::<User>();  // Invalidate all User queries
+//! QueryCache::global().invalidate_model(User::table_name());  // Invalidate all User queries
 //! QueryCache::global().clear();  // Clear entire cache
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! ## Prepared Statement Caching
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! // Enable prepared statement caching globally
 //! PreparedStatementCache::global()
@@ -57,6 +61,8 @@
 //! println!("Cache hits: {}", stats.hits);
 //! println!("Cache misses: {}", stats.misses);
 //! println!("Cached statements: {}", stats.cached_count);
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 //!
 //! ## Cache Strategies

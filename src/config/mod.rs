@@ -5,8 +5,9 @@
 //!
 //! ## Example
 //!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
+//! ```rust,no_run
+//! # tideorm::__doctest_prelude!();
+//! # async fn demo() -> tideorm::Result<()> {
 //!
 //! // Configure and connect in one unified call
 //! TideConfig::init()
@@ -21,6 +22,9 @@
 //!
 //! // Now use models - database is automatically available
 //! let users = User::all().await?;
+//! # let _ = users;
+//! # Ok::<(), tideorm::Error>(())
+//! # }
 //! ```
 
 #[allow(missing_docs)]
