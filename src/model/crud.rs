@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use super::Model;
 
@@ -136,7 +136,16 @@ pub(crate) async fn reload<M>(model: &M) -> Result<M>
 where
     M: Model + Sized,
 {
-    M::find_or_fail(model.primary_key()).await
+    let primary_key = model.primary_key();
+    let id_display = M::primary_key_display(&primary_key);
+
+    M::find(primary_key).await?.ok_or_else(|| {
+        Error::not_found(format!(
+            "{} with {} no longer exists",
+            M::table_name(),
+            id_display
+        ))
+    })
 }
 
 pub(crate) fn is_new<M>(model: &M) -> bool

@@ -1335,7 +1335,8 @@ impl<M: Model> QueryBuilder<M> {
         use crate::logging::QueryDebugInfo;
 
         let (parameterized_sql, params) = self.build_select_sql_with_params();
-        let mut info = QueryDebugInfo::new(M::table_name()).with_sql(self.build_sql_preview());
+        let preview_sql = self.build_sql_preview();
+        let mut info = QueryDebugInfo::new(M::table_name()).with_sql(preview_sql.clone());
         info.params = params
             .into_iter()
             .map(|value| format!("{:?}", value))
@@ -1367,14 +1368,20 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         if !parameterized_sql.is_empty() {
-            info.sql = parameterized_sql;
+            info.sql = format!(
+                "{}\n-- PARAMETERIZED SQL\n{}",
+                preview_sql, parameterized_sql
+            );
         }
 
         info
     }
 
     pub fn build_sql_preview(&self) -> String {
-        self.build_select_sql()
+        format!(
+            "-- DEBUG PREVIEW (not executable, values are approximate)\n{}",
+            self.build_select_sql()
+        )
     }
 
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {

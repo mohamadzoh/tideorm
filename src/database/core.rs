@@ -1,4 +1,3 @@
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -6,7 +5,14 @@ use crate::internal::InternalConnection;
 use crate::tide_warn;
 
 use super::DatabaseHandle;
-use super::state::{global_db_handle, panic_missing_global_db};
+use super::state::{global_connection_slot, global_db_handle, panic_missing_global_db};
+
+#[derive(Clone)]
+enum DatabaseInner {
+    Global,
+    Handle(DatabaseHandle),
+    Disconnected,
+}
 
 /// Database connection handle
 ///
@@ -19,19 +25,25 @@ use super::state::{global_db_handle, panic_missing_global_db};
 /// threads and cloned without duplicating the underlying connection pool.
 #[derive(Clone)]
 pub struct Database {
-    pub(super) inner: Arc<RwLock<Option<DatabaseHandle>>>,
+    inner: DatabaseInner,
 }
 
 impl Database {
     pub(crate) fn disconnected() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(None)),
+            inner: DatabaseInner::Disconnected,
         }
     }
 
     pub(super) fn from_handle(handle: DatabaseHandle) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Some(handle))),
+            inner: DatabaseInner::Handle(handle),
+        }
+    }
+
+    pub(super) fn global_handle() -> Self {
+        Self {
+            inner: DatabaseInner::Global,
         }
     }
 
@@ -40,13 +52,23 @@ impl Database {
     }
 
     pub(super) fn current_handle(&self) -> Result<DatabaseHandle> {
-        self.inner.read().as_ref().cloned().ok_or_else(|| {
-            Error::connection(
+        match &self.inner {
+            DatabaseInner::Handle(handle) => Ok(handle.clone()),
+            DatabaseInner::Global => {
+                global_connection_slot().load_full().map(DatabaseHandle::Connection).ok_or_else(|| {
+                    Error::connection(
+                        "Global database connection not initialized. \
+                         Call Database::init() or Database::set_global() before using models."
+                            .to_string(),
+                    )
+                })
+            }
+            DatabaseInner::Disconnected => Err(Error::connection(
                 "Global database connection not initialized. \
                  Call Database::init() or Database::set_global() before using models."
                     .to_string(),
-            )
-        })
+            )),
+        }
     }
 
     pub(crate) fn current_inner(&self) -> Result<Arc<InternalConnection>> {
@@ -57,14 +79,6 @@ impl Database {
                     .to_string(),
             )),
         }
-    }
-
-    fn replace_inner(&self, inner: Arc<InternalConnection>) {
-        *self.inner.write() = Some(DatabaseHandle::Connection(inner));
-    }
-
-    fn clear_inner(&self) {
-        self.inner.write().take();
     }
 
     pub(super) fn replace_thread_override(
@@ -78,7 +92,11 @@ impl Database {
     }
 
     pub(super) fn is_connected(&self) -> bool {
-        self.inner.read().is_some()
+        match &self.inner {
+            DatabaseInner::Handle(_) => true,
+            DatabaseInner::Global => global_connection_slot().load_full().is_some(),
+            DatabaseInner::Disconnected => false,
+        }
     }
 
     /// Connect to a database using a connection URL
@@ -96,15 +114,14 @@ impl Database {
     /// Set an existing database connection as the global connection
     pub fn set_global(db: Self) -> Result<&'static Self> {
         let inner = db.current_inner()?;
-        let global = global_db_handle();
-        global.replace_inner(inner.clone());
+        global_connection_slot().store(Some(inner.clone()));
         Self::set_thread_override(Some(DatabaseHandle::Connection(inner)));
-        Ok(global)
+        Ok(global_db_handle())
     }
 
     /// Clear the global database connection and current thread override.
     pub fn reset_global() {
-        global_db_handle().clear_inner();
+        global_connection_slot().store(None);
         Self::set_thread_override(None);
     }
 
@@ -180,7 +197,7 @@ impl Database {
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Database")
-            .field("connected", &true)
+            .field("connected", &self.is_connected())
             .finish()
     }
 }

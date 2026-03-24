@@ -51,6 +51,36 @@ fn backend_defaults_safely_for_disconnected_database() {
     assert_eq!(db.backend(), crate::config::DatabaseType::Postgres);
 }
 
+#[test]
+fn debug_reports_disconnected_database_state() {
+    let db = Database::disconnected();
+
+    assert_eq!(format!("{:?}", db), "Database { connected: false }");
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn global_database_round_trips_through_set_and_reset() {
+    Database::reset_global();
+    assert!(!crate::database::has_global_db());
+    assert!(Database::try_global().is_none());
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    assert!(crate::database::has_global_db());
+    assert!(Database::try_global().is_some());
+    assert!(format!("{:?}", Database::global()).contains("connected: true"));
+
+    Database::reset_global();
+
+    assert!(!crate::database::has_global_db());
+    assert!(Database::try_global().is_none());
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn thread_override_is_reinstalled_when_future_is_polled_on_another_thread() {

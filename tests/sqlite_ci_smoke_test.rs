@@ -431,7 +431,6 @@ async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
         .await
         .expect("failed to count visible soft-delete users");
     assert_eq!(count, 1);
-
     let exists_any = CiSoftDeleteUser::exists_any()
         .await
         .expect("failed to check visible soft-delete users");
@@ -464,6 +463,98 @@ async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
         .expect("failed to find middle user")
         .expect("middle user should still be findable");
     assert_eq!(middle_found.name, "Middle");
+}
+
+#[tokio::test]
+async fn sqlite_reload_returns_not_found_after_delete() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_users table");
+
+    let user = CiUser {
+        id: 0,
+        email: "reload-delete@example.com".to_string(),
+        name: "Reload Delete".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert user");
+
+    user.clone()
+        .delete()
+        .await
+        .expect("failed to delete user");
+
+    let err = user.reload().await.expect_err("reload should fail after delete");
+    assert!(err.is_not_found());
+    assert!(err.to_string().contains("ci_users"));
+    assert!(err.to_string().contains("no longer exists"));
+}
+
+#[tokio::test]
+async fn sqlite_reload_still_finds_soft_deleted_records() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_soft_delete_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_soft_delete_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            deleted_at TEXT NULL
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_soft_delete_users table");
+
+    let user = CiSoftDeleteUser {
+        id: 0,
+        name: "Soft Deleted".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("failed to insert soft-delete user");
+
+    let deleted = user
+        .soft_delete()
+        .await
+        .expect("failed to soft delete user");
+
+    let reloaded = deleted
+        .reload()
+        .await
+        .expect("reload should include soft-deleted records");
+    assert_eq!(reloaded.id, deleted.id);
+    assert!(reloaded.deleted_at.is_some());
 }
 
 #[tokio::test]

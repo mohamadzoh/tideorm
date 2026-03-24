@@ -1139,24 +1139,7 @@ mod error_context_application {
 }
 
 // ============================================================================
-// 23. Soft delete: query extension constants
-// ============================================================================
-mod soft_delete_query_extensions {
-    use tideorm::soft_delete::query_extensions;
-
-    #[test]
-    fn test_without_trashed_sql_constant() {
-        assert_eq!(query_extensions::WITHOUT_TRASHED, "deleted_at IS NULL");
-    }
-
-    #[test]
-    fn test_only_trashed_sql_constant() {
-        assert_eq!(query_extensions::ONLY_TRASHED, "deleted_at IS NOT NULL");
-    }
-}
-
-// ============================================================================
-// 24. DatabaseType: Default trait gives Postgres
+// 23. DatabaseType: Default trait gives Postgres
 // ============================================================================
 mod database_type_default {
     use tideorm::config::DatabaseType;

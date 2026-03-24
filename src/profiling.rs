@@ -73,7 +73,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Performance profiler for tracking query execution
@@ -417,10 +417,20 @@ impl fmt::Display for ProfileReport {
 }
 
 /// Global profiling statistics
-static GLOBAL_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_TOTAL_TIME_NS: AtomicU64 = AtomicU64::new(0);
-static GLOBAL_SLOW_COUNT: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GlobalStatsState {
+    total_queries: u64,
+    total_time_ns: u64,
+    slow_queries: u64,
+}
+
+static GLOBAL_STATS: RwLock<GlobalStatsState> = RwLock::new(GlobalStatsState {
+    total_queries: 0,
+    total_time_ns: 0,
+    slow_queries: 0,
+});
 
 static GLOBAL_SLOW_THRESHOLD_MS: RwLock<u64> = RwLock::new(100);
 
@@ -446,31 +456,33 @@ impl GlobalProfiler {
     /// Record a query execution globally
     pub fn record(duration: Duration) {
         if Self::is_enabled() {
-            GLOBAL_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
-            GLOBAL_TOTAL_TIME_NS.fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
-
             let threshold_ms = *GLOBAL_SLOW_THRESHOLD_MS.read();
+            let mut stats = GLOBAL_STATS.write();
+
+            stats.total_queries += 1;
+            stats.total_time_ns += duration.as_nanos() as u64;
+
             if duration.as_millis() as u64 >= threshold_ms {
-                GLOBAL_SLOW_COUNT.fetch_add(1, Ordering::SeqCst);
+                stats.slow_queries += 1;
             }
         }
     }
 
     /// Get global statistics
     pub fn stats() -> GlobalStats {
+        let stats = *GLOBAL_STATS.read();
+
         GlobalStats {
-            total_queries: GLOBAL_QUERY_COUNT.load(Ordering::SeqCst),
-            total_time_ns: GLOBAL_TOTAL_TIME_NS.load(Ordering::SeqCst),
-            slow_queries: GLOBAL_SLOW_COUNT.load(Ordering::SeqCst),
+            total_queries: stats.total_queries,
+            total_time_ns: stats.total_time_ns,
+            slow_queries: stats.slow_queries,
             slow_threshold_ms: *GLOBAL_SLOW_THRESHOLD_MS.read(),
         }
     }
 
     /// Reset global statistics
     pub fn reset() {
-        GLOBAL_QUERY_COUNT.store(0, Ordering::SeqCst);
-        GLOBAL_TOTAL_TIME_NS.store(0, Ordering::SeqCst);
-        GLOBAL_SLOW_COUNT.store(0, Ordering::SeqCst);
+        *GLOBAL_STATS.write() = GlobalStatsState::default();
     }
 
     /// Set slow query threshold

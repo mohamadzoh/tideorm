@@ -1,3 +1,4 @@
+use arc_swap::ArcSwapOption;
 use std::cell::RefCell;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
@@ -8,6 +9,7 @@ use crate::internal::{DbBackend, InternalConnection};
 use super::{ConnectionRef, Database};
 
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
+static GLOBAL_CONNECTION: OnceLock<ArcSwapOption<InternalConnection>> = OnceLock::new();
 
 thread_local! {
     pub(super) static THREAD_DB_OVERRIDE: RefCell<Option<DatabaseHandle>> = const { RefCell::new(None) };
@@ -19,8 +21,12 @@ pub(crate) enum DatabaseHandle {
     Transaction(Arc<crate::internal::DatabaseTransaction>),
 }
 
+pub(super) fn global_connection_slot() -> &'static ArcSwapOption<InternalConnection> {
+    GLOBAL_CONNECTION.get_or_init(|| ArcSwapOption::new(None))
+}
+
 pub(super) fn global_db_handle() -> &'static Database {
-    GLOBAL_DB.get_or_init(Database::disconnected)
+    GLOBAL_DB.get_or_init(Database::global_handle)
 }
 
 pub(super) fn panic_missing_global_db(message: &str) -> ! {
@@ -45,27 +51,28 @@ pub fn db() -> &'static Database {
 
 /// Get the global database handle, returning an error if not initialized.
 pub fn require_db() -> Result<Database> {
-    let db = global_db_handle();
-    if db.is_connected() {
-        Ok(db.clone())
-    } else {
-        Err(Error::connection(
-            "Global database connection not initialized. \
-             Call Database::init() or Database::set_global() before using models."
-                .to_string(),
-        ))
-    }
+    global_connection_slot()
+        .load_full()
+        .map(|inner| Database::from_handle(DatabaseHandle::Connection(inner)))
+        .ok_or_else(|| {
+            Error::connection(
+                "Global database connection not initialized. \
+                 Call Database::init() or Database::set_global() before using models."
+                    .to_string(),
+            )
+        })
 }
 
 /// Try to get the global database handle.
 pub fn try_db() -> Option<Database> {
-    let db = global_db_handle();
-    db.is_connected().then(|| db.clone())
+    global_connection_slot()
+        .load_full()
+        .map(|inner| Database::from_handle(DatabaseHandle::Connection(inner)))
 }
 
 /// Check whether a global database connection has been initialized.
 pub fn has_global_db() -> bool {
-    global_db_handle().is_connected()
+    global_connection_slot().load_full().is_some()
 }
 
 #[doc(hidden)]
@@ -82,7 +89,16 @@ pub(super) fn current_scope_handle() -> Result<DatabaseHandle> {
         return Ok(handle);
     }
 
-    global_db_handle().current_handle()
+    global_connection_slot()
+        .load_full()
+        .map(DatabaseHandle::Connection)
+        .ok_or_else(|| {
+            Error::connection(
+                "Global database connection not initialized. \
+                 Call Database::init() or Database::set_global() before using models."
+                    .to_string(),
+            )
+        })
 }
 
 struct ThreadOverrideGuard {

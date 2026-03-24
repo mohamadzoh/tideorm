@@ -142,20 +142,4 @@ pub trait SoftDelete: Model {
     {
         <Self as Model>::delete(self).await
     }
-
-    // Note: Static methods like with_trashed(), only_trashed() would need
-    // to be implemented via query builder extensions or custom methods
-    // on each model since Rust doesn't support static methods in traits
-    // that return Self collections easily.
-}
-
-/// Extension methods for querying soft-deleted records
-///
-/// These methods can be added to the QueryBuilder to support soft delete queries
-pub mod query_extensions {
-    /// Query scope that excludes soft-deleted records
-    pub const WITHOUT_TRASHED: &str = "deleted_at IS NULL";
-
-    /// Query scope that includes only soft-deleted records  
-    pub const ONLY_TRASHED: &str = "deleted_at IS NOT NULL";
 }
