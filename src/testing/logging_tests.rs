@@ -122,3 +122,15 @@ fn test_query_history_limit_zero_keeps_no_entries() {
     QueryLogger::clear_history();
     QueryLogger::global().set_history_limit(100).disable();
 }
+
+#[test]
+fn test_query_debug_display_labels_preview_as_non_executable() {
+    let debug_info = QueryDebugInfo::new("users")
+        .with_sql("-- DEBUG PREVIEW (not executable, values are approximate)\nSELECT * FROM \"users\" WHERE \"id\" = 1");
+
+    let rendered = format!("{}", debug_info);
+
+    assert!(rendered.contains("SQL Preview (non-executable):"));
+    assert!(rendered.contains("-- DEBUG PREVIEW (not executable, values are approximate)"));
+    assert!(!rendered.contains("\nSQL: -- DEBUG PREVIEW"));
+}

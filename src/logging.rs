@@ -735,6 +735,8 @@ impl QueryDebugInfo {
 
 impl fmt::Display for QueryDebugInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const DEBUG_PREVIEW_BANNER: &str = "-- DEBUG PREVIEW (not executable, values are approximate)";
+
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "TIDEORM QUERY DEBUG")?;
         writeln!(f, "═══════════════════════════════════════════════════")?;
@@ -777,7 +779,15 @@ impl fmt::Display for QueryDebugInfo {
 
         if !self.sql.is_empty() {
             writeln!(f, "───────────────────────────────────────────────────")?;
-            writeln!(f, "SQL: {}", self.sql)?;
+            if self.sql.starts_with(DEBUG_PREVIEW_BANNER) {
+                writeln!(f, "SQL Preview (non-executable):")?;
+            } else {
+                writeln!(f, "SQL:")?;
+            }
+
+            for line in self.sql.lines() {
+                writeln!(f, "  {}", line)?;
+            }
         }
 
         if !self.params.is_empty() {

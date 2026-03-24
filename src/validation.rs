@@ -272,7 +272,10 @@ pub enum ValidationRule {
     NotIn(Vec<String>),
     /// Must match another field (for confirmations)
     Confirmed(String),
-    /// Custom validation with message
+    /// Custom validation marker with message.
+    ///
+    /// This is not evaluated directly by `Validator::validate_rule`; macro-generated
+    /// model validation defers custom checks to `Validate::custom_validations()`.
     Custom(String),
 }
 
@@ -319,9 +322,11 @@ impl ValidationRule {
         }
     }
 
-    /// Validate a value against this rule
+    /// Validate a value against this rule.
     ///
-    /// Returns Ok(()) if the value passes validation, or Err with an error message
+    /// Returns `Ok(())` if the value passes validation, or `Err` with an error
+    /// message. `ValidationRule::Custom` is treated as a no-op here because
+    /// custom checks run through `Validate::custom_validations()`.
     pub fn validate<T: ValidatableValue>(&self, value: &T) -> Result<(), String> {
         match Validator::validate_rule(value, self, "field") {
             Some(error) => Err(error),
@@ -712,7 +717,10 @@ impl ValidationBuilder {
         self
     }
 
-    /// Add custom message rule
+    /// Add a custom validation marker.
+    ///
+    /// The message is surfaced when your model's `custom_validations()` adds an
+    /// error for the field; it is not evaluated directly by `ValidationBuilder`.
     pub fn custom(mut self, message: impl Into<String>) -> Self {
         self.rules.push(ValidationRule::Custom(message.into()));
         self
