@@ -71,6 +71,17 @@ fn does_not_match_non_relation_names_by_substring() {
 }
 
 #[test]
+fn column_type_expr_emits_compile_error_for_unknown_types() {
+    let tokens = field_with_type(parse_quote!(CustomEnum))
+        .column_type_expr()
+        .to_string();
+    let normalized = normalize_tokens(&tokens);
+
+    assert!(normalized.contains("::core::compile_error!"));
+    assert!(normalized.contains("unsupportedTideORMcolumntype'CustomEnum'inschemageneration"));
+}
+
+#[test]
 fn model_attribute_accepts_inline_table_options() {
     let input: DeriveInput = parse_quote! {
         pub struct User {

@@ -544,16 +544,6 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                         !conflict_cols.contains(&column) && !#pk_exclusion_check
                     }).map(|column| column.to_string()).collect()
                 };
-                for column in &update_cols {
-                    let _ = Self::column_from_str(column).ok_or_else(|| {
-                        ::tideorm::Error::invalid_query(format!(
-                            "unknown update column '{}' for {}",
-                            column,
-                            #table_name
-                        ))
-                    })?;
-                }
-
                 let update_columns: Vec<_> = update_cols
                     .iter()
                     .map(|column| {

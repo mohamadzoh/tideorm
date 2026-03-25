@@ -184,22 +184,15 @@ fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
 
 fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
     if ctx.pk_column_names.len() == 1 {
-        if ctx.pk_auto_increment {
-            return quote! {
-                let primary_key = primary_key.to_string();
-                if primary_key.is_empty() {
-                    return true;
-                }
-
-                primary_key
-                    .parse::<i128>()
-                    .map(|value| value == 0)
-                    .unwrap_or(false)
-            };
-        }
-
         return quote! {
-            primary_key.to_string().is_empty()
+            fn __tideorm_is_default<T>(value: &T) -> bool
+            where
+                T: ::std::default::Default + ::std::cmp::PartialEq,
+            {
+                value == &T::default()
+            }
+
+            __tideorm_is_default(primary_key)
         };
     }
 
@@ -208,8 +201,15 @@ fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
         .collect();
 
     quote! {
+        fn __tideorm_is_default<T>(value: &T) -> bool
+        where
+            T: ::std::default::Default + ::std::cmp::PartialEq,
+        {
+            value == &T::default()
+        }
+
         let (#(#bindings),*) = primary_key.clone();
-        false #(|| #bindings.to_string().is_empty())*
+        false #(|| __tideorm_is_default(&#bindings))*
     }
 }
 

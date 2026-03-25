@@ -38,7 +38,37 @@ pub(crate) fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
 }
 
 pub(crate) fn pluralize(word: &str) -> String {
-    if word.ends_with('s') || word.ends_with('x') || word.ends_with("ch") || word.ends_with("sh") {
+    match word {
+        "person" => return "people".to_string(),
+        "man" => return "men".to_string(),
+        "woman" => return "women".to_string(),
+        "child" => return "children".to_string(),
+        "tooth" => return "teeth".to_string(),
+        "foot" => return "feet".to_string(),
+        "mouse" => return "mice".to_string(),
+        "goose" => return "geese".to_string(),
+        "leaf" => return "leaves".to_string(),
+        "knife" => return "knives".to_string(),
+        "life" => return "lives".to_string(),
+        "wife" => return "wives".to_string(),
+        "wolf" => return "wolves".to_string(),
+        "calf" => return "calves".to_string(),
+        "half" => return "halves".to_string(),
+        "loaf" => return "loaves".to_string(),
+        "self" => return "selves".to_string(),
+        "shelf" => return "shelves".to_string(),
+        "thief" => return "thieves".to_string(),
+        "quiz" => return "quizzes".to_string(),
+        "fez" => return "fezzes".to_string(),
+        _ => {}
+    }
+
+    if word.ends_with('s')
+        || word.ends_with('x')
+        || word.ends_with('z')
+        || word.ends_with("ch")
+        || word.ends_with("sh")
+    {
         format!("{}es", word)
     } else if word.ends_with('y')
         && !word.ends_with("ay")
@@ -54,7 +84,7 @@ pub(crate) fn pluralize(word: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_existing_derives;
+    use super::{detect_existing_derives, pluralize};
 
     #[test]
     fn detect_existing_derives_finds_serialize_and_deserialize_together() {
@@ -80,5 +110,29 @@ mod tests {
 
         assert!(existing.has_serialize);
         assert!(!existing.has_deserialize);
+    }
+
+    #[test]
+    fn pluralize_handles_common_irregular_nouns() {
+        assert_eq!(pluralize("person"), "people");
+        assert_eq!(pluralize("child"), "children");
+        assert_eq!(pluralize("mouse"), "mice");
+    }
+
+    #[test]
+    fn pluralize_handles_f_and_fe_endings() {
+        assert_eq!(pluralize("leaf"), "leaves");
+        assert_eq!(pluralize("knife"), "knives");
+        assert_eq!(pluralize("profile"), "profiles");
+        assert_eq!(pluralize("roof"), "roofs");
+    }
+
+    #[test]
+    fn pluralize_handles_z_suffixes() {
+        assert_eq!(pluralize("quiz"), "quizzes");
+        assert_eq!(pluralize("fez"), "fezzes");
+        assert_eq!(pluralize("bus"), "buses");
+        assert_eq!(pluralize("status"), "statuses");
+        assert_eq!(pluralize("topaz"), "topazes");
     }
 }

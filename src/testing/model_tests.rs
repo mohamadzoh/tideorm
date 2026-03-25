@@ -20,6 +20,18 @@ struct NaturalKeyModel {
     id: String,
 }
 
+#[tideorm::model(table = "model_test_numeric_natural_keys")]
+struct NumericNaturalKeyModel {
+    #[tideorm(primary_key)]
+    id: i64,
+}
+
+#[tideorm::model(table = "model_test_uuid_natural_keys")]
+struct UuidNaturalKeyModel {
+    #[tideorm(primary_key)]
+    id: uuid::Uuid,
+}
+
 #[tideorm::model(table = "model_test_serialization")]
 struct SerializationModel {
     #[tideorm(primary_key)]
@@ -208,6 +220,38 @@ fn test_is_new_does_not_treat_non_numeric_natural_key_as_unsaved() {
 }
 
 #[test]
+fn test_is_new_treats_zero_numeric_natural_key_as_unsaved() {
+    let model = NumericNaturalKeyModel { id: 0 };
+
+    assert!(model.is_new());
+}
+
+#[test]
+fn test_is_new_does_not_treat_non_zero_numeric_natural_key_as_unsaved() {
+    let model = NumericNaturalKeyModel { id: 42 };
+
+    assert!(!model.is_new());
+}
+
+#[test]
+fn test_is_new_treats_nil_uuid_natural_key_as_unsaved() {
+    let model = UuidNaturalKeyModel {
+        id: uuid::Uuid::nil(),
+    };
+
+    assert!(model.is_new());
+}
+
+#[test]
+fn test_is_new_does_not_treat_non_nil_uuid_natural_key_as_unsaved() {
+    let model = UuidNaturalKeyModel {
+        id: uuid::Uuid::new_v4(),
+    };
+
+    assert!(!model.is_new());
+}
+
+#[test]
 fn test_to_hash_map_preserves_params_field() {
     let model = SerializationModel {
         id: 7,
@@ -278,6 +322,25 @@ fn test_composite_primary_key_metadata_and_accessors() {
     let _ = <CompositePrimaryKeyModel as crate::internal::InternalModel>::primary_key_condition(&(
         7, 9,
     ));
+}
+
+#[test]
+fn test_is_new_treats_defaulted_composite_primary_key_component_as_unsaved() {
+    let model = CompositePrimaryKeyModel {
+        user_id: 0,
+        role_id: 9,
+        granted_by: "system".to_string(),
+    };
+
+    assert!(model.is_new());
+
+    let model = CompositePrimaryKeyModel {
+        user_id: 7,
+        role_id: 0,
+        granted_by: "system".to_string(),
+    };
+
+    assert!(model.is_new());
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

@@ -108,6 +108,27 @@ fn batch_update_set_if_skips_update_when_condition_is_false() {
     assert!(!builder.updates.contains_key("name"));
 }
 
+#[test]
+fn batch_update_builder_accepts_typed_update_columns() {
+    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
+        .set(BatchUpdateGuardUser::columns.name, "updated")
+        .increment(BatchUpdateGuardUser::columns.id, 1);
+
+    assert!(builder.updates.contains_key("name"));
+    assert!(builder.updates.contains_key("id"));
+}
+
+#[test]
+fn batch_update_builder_accepts_typed_filter_columns() {
+    let builder = BatchUpdateGuardUser::update_all()
+        .where_eq(BatchUpdateGuardUser::columns.id, 1)
+        .or_where_eq(BatchUpdateGuardUser::columns.name, "alice");
+
+    assert_eq!(builder.conditions.len(), 2);
+    assert_eq!(builder.conditions[0].column, "id");
+    assert_eq!(builder.conditions[1].column, "__OR__name");
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_invalidates_cached_queries() {

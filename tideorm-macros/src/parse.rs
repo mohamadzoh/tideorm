@@ -138,7 +138,16 @@ impl ModelField {
             "Vec<f64>" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Double)
             )),
-            _ => quote!(::tideorm::sea_orm::ColumnType::Text),
+            _ => {
+                let message = format!(
+                    "unsupported TideORM column type '{}' in schema generation; set an explicit column type or use a supported Rust type",
+                    base_type
+                );
+                quote!({
+                    ::core::compile_error!(#message);
+                    ::tideorm::sea_orm::ColumnType::Text
+                })
+            }
         };
 
         if is_nullable || self.nullable {
