@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
 use crate::internal::InternalModel;
 use crate::model::Model;
@@ -48,13 +49,18 @@ impl RelationConstraints {
         Self::default()
     }
 
-    pub fn where_eq(mut self, column: &str, value: impl Into<serde_json::Value>) -> Self {
-        self.conditions.push((column.to_string(), value.into()));
+    pub fn where_eq(
+        mut self,
+        column: impl IntoColumnName,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
+        self.conditions
+            .push((column.column_name().to_string(), value.into()));
         self
     }
 
-    pub fn order_by(mut self, column: &str, order: Order) -> Self {
-        self.order_by = Some((column.to_string(), order));
+    pub fn order_by(mut self, column: impl IntoColumnName, order: Order) -> Self {
+        self.order_by = Some((column.column_name().to_string(), order));
         self
     }
 
@@ -278,12 +284,20 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
-    pub fn where_eq<V: Into<serde_json::Value>>(mut self, column: &str, value: V) -> Self {
+    pub fn where_eq<V: Into<serde_json::Value>>(
+        mut self,
+        column: impl IntoColumnName,
+        value: V,
+    ) -> Self {
         self.query = self.query.where_eq(column, value);
         self
     }
 
-    pub fn where_in<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
+    pub fn where_in<V: Into<serde_json::Value>>(
+        mut self,
+        column: impl IntoColumnName,
+        values: Vec<V>,
+    ) -> Self {
         self.query = self.query.where_in(column, values);
         self
     }
@@ -293,7 +307,7 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
-    pub fn order_by(mut self, column: &str, order: Order) -> Self {
+    pub fn order_by(mut self, column: impl IntoColumnName, order: Order) -> Self {
         self.query = self.query.order_by(column, order);
         self
     }

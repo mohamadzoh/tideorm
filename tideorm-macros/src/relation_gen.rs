@@ -49,8 +49,10 @@ fn build_relation_field_init(
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::HasOne::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -59,8 +61,10 @@ fn build_relation_field_init(
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::HasMany::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -69,8 +73,10 @@ fn build_relation_field_init(
         let ok = field.owner_key.as_deref().unwrap_or("id");
         let fk_ident = ctx.resolve_required_db_field_ident(fk, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::BelongsTo::new(#fk, #ok)
-                .with_fk_value(::serde_json::json!(self.#fk_ident.clone()))
+                .with_fk_value(::serde_json::json!(self.#fk_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -82,6 +88,7 @@ fn build_relation_field_init(
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         let pivot_table = field.pivot.as_deref().unwrap_or("");
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::HasManyThrough::new(
                 #fk,
                 #related_key,
@@ -89,7 +96,8 @@ fn build_relation_field_init(
                 #related_local_key,
                 #pivot_table,
             )
-            .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+            .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -98,11 +106,13 @@ fn build_relation_field_init(
         let local_key = field.local_key.as_deref().unwrap_or("id");
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::MorphOne::new(#morph_name, #local_key)
                 .with_parent(
                     ::serde_json::json!(self.#local_key_ident.clone()),
                     <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
-                )
+                );
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -111,11 +121,13 @@ fn build_relation_field_init(
         let local_key = field.local_key.as_deref().unwrap_or("id");
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::MorphMany::new(#morph_name, #local_key)
                 .with_parent(
                     ::serde_json::json!(self.#local_key_ident.clone()),
                     <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
-                )
+                );
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -126,11 +138,13 @@ fn build_relation_field_init(
         let type_ident = ctx.resolve_required_db_field_ident(&type_column, ident)?;
         let id_ident = ctx.resolve_required_db_field_ident(&id_column, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
                 .with_values(
                     self.#type_ident.clone(),
                     ::serde_json::json!(self.#id_ident.clone()),
-                )
+                );
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -139,8 +153,10 @@ fn build_relation_field_init(
         let local_key = field.local_key.as_deref().unwrap_or("id");
         let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
-                .with_fk_value(::serde_json::json!(self.#foreign_key_ident.clone()))
+                .with_fk_value(::serde_json::json!(self.#foreign_key_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 
@@ -149,8 +165,10 @@ fn build_relation_field_init(
         let local_key = field.local_key.as_deref().unwrap_or("id");
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         return Ok(quote! {
+            let previous = self.#ident.clone();
             self.#ident = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)
-                .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+                .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()));
+            self.#ident.preserve_runtime_state_from(&previous)
         });
     }
 

@@ -1,6 +1,27 @@
 use super::*;
 use std::sync::mpsc;
 
+struct TokenizableProbe {
+    id: i64,
+}
+
+#[async_trait::async_trait]
+impl Tokenizable for TokenizableProbe {
+    fn token_model_name() -> &'static str {
+        "TokenizableProbe"
+    }
+
+    fn token_primary_key(&self) -> i64 {
+        self.id
+    }
+
+    async fn from_token(token: &str) -> Result<Self> {
+        Ok(Self {
+            id: Self::decode_token(token)?,
+        })
+    }
+}
+
 fn init_test_key() {
     TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
 }
@@ -201,6 +222,21 @@ fn test_token_config_setters_overwrite_previous_values() {
     let token = TokenConfig::encode(7, "User").unwrap();
     assert_eq!(token, "two-7");
     assert_eq!(TokenConfig::decode(&token, "User").unwrap(), Some(7));
+}
+
+#[test]
+fn test_tokenizable_decode_token_uses_global_decoder_override() {
+    TokenConfig::reset();
+
+    fn decoder(token: &str, _model_name: &str) -> Result<Option<i64>> {
+        Ok(token
+            .strip_prefix("global-")
+            .and_then(|value| value.parse().ok()))
+    }
+
+    TokenConfig::set_decoder(decoder);
+
+    assert_eq!(TokenizableProbe::decode_token("global-42").unwrap(), 42);
 }
 
 #[test]

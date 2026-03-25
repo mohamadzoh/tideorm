@@ -53,12 +53,12 @@ pub(crate) struct BuildContext {
     pub(crate) relation_state_refreshes: Vec<TokenStream2>,
     pub(crate) internal_entity_mod: Ident,
     pub(crate) sea_orm_field_defs: Vec<TokenStream2>,
-    pub(crate) all_field_names: Vec<Ident>,
     pub(crate) relation_field_defaults: Vec<TokenStream2>,
     pub(crate) default_field_inits: Vec<TokenStream2>,
     pub(crate) derive_field_names: Vec<Ident>,
     pub(crate) derive_field_names_str: Vec<String>,
     pub(crate) serde_field_names: Vec<Ident>,
+    pub(crate) serde_field_types: Vec<Type>,
     pub(crate) serde_field_names_str: Vec<String>,
     pub(crate) columns_struct_name: Ident,
     pub(crate) columns_struct_fields: Vec<TokenStream2>,
@@ -241,7 +241,6 @@ impl BuildContext {
         let internal_entity_mod =
             format_ident!("__tideorm_internal_{}", struct_name_str.to_lowercase());
         let sea_orm_field_defs = build_sea_orm_field_defs(&db_fields);
-        let all_field_names = field_names.clone();
         let relation_field_defaults = build_relation_field_defaults(&relation_fields);
         let default_field_inits = fields
             .iter()
@@ -253,7 +252,11 @@ impl BuildContext {
             .filter_map(|field| field.ident.as_ref().cloned())
             .collect();
         let derive_field_names_str = derive_field_names.iter().map(ToString::to_string).collect();
-        let serde_field_names = field_names.clone();
+        let serde_field_names: Vec<_> = fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref().cloned())
+            .collect();
+        let serde_field_types = fields.iter().map(|field| field.ty.clone()).collect();
         let serde_field_names_str = serde_field_names.iter().map(ToString::to_string).collect();
         let columns_struct_name = format_ident!("{}Columns", struct_name);
         let columns_struct_fields = build_columns_struct_fields(&db_fields);
@@ -305,12 +308,12 @@ impl BuildContext {
             relation_state_refreshes: Vec::new(),
             internal_entity_mod,
             sea_orm_field_defs,
-            all_field_names,
             relation_field_defaults,
             default_field_inits,
             derive_field_names,
             derive_field_names_str,
             serde_field_names,
+            serde_field_types,
             serde_field_names_str,
             columns_struct_name,
             columns_struct_fields,

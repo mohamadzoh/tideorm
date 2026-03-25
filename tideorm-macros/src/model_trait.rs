@@ -110,7 +110,6 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
     let insert_active_model_setters = &ctx.insert_active_model_setters;
-    let all_field_names = &ctx.all_field_names;
     let relation_field_defaults = &ctx.relation_field_defaults;
     let relation_state_refreshes = &ctx.relation_state_refreshes;
     let pk_column_variants = &ctx.pk_column_variants;
@@ -134,7 +133,7 @@ fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
 
             fn from_sea_model(model: #internal_entity_mod::Model) -> Self {
                 Self {
-                    #(#all_field_names: model.#all_field_names),*,
+                    #(#field_names: model.#field_names),*,
                     #(#relation_field_defaults),*
                 }
                 .with_relations()

@@ -112,10 +112,13 @@ impl<Related: Model> MorphOne<Related> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.morph_name == previous.morph_name
+        if (previous.parent_pk.is_none()
+            && previous.parent_table.is_none()
+            && previous.cached.is_some())
+            || (self.morph_name == previous.morph_name
             && self.local_key == previous.local_key
             && self.parent_pk == previous.parent_pk
-            && self.parent_table == previous.parent_table
+            && self.parent_table == previous.parent_table)
         {
             self.cached = previous.cached.clone();
         }
@@ -172,11 +175,15 @@ impl<Related: Model + Serialize> Serialize for MorphOne<Related> {
 }
 
 impl<'de, Related: Model> Deserialize<'de> for MorphOne<Related> {
-    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::default())
+        let cached = Option::<Related>::deserialize(deserializer)?;
+        Ok(Self {
+            cached: cached.map(Box::new),
+            ..Self::default()
+        })
     }
 }
 
@@ -220,10 +227,13 @@ impl<Related: Model> MorphMany<Related> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.morph_name == previous.morph_name
+        if (previous.parent_pk.is_none()
+            && previous.parent_table.is_none()
+            && previous.cached.is_some())
+            || (self.morph_name == previous.morph_name
             && self.local_key == previous.local_key
             && self.parent_pk == previous.parent_pk
-            && self.parent_table == previous.parent_table
+            && self.parent_table == previous.parent_table)
         {
             self.cached = previous.cached.clone();
         }
@@ -329,11 +339,15 @@ impl<Related: Model + Serialize> Serialize for MorphMany<Related> {
 }
 
 impl<'de, Related: Model> Deserialize<'de> for MorphMany<Related> {
-    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::default())
+        let cached = Option::<Vec<Related>>::deserialize(deserializer)?;
+        Ok(Self {
+            cached,
+            ..Self::default()
+        })
     }
 }
 

@@ -67,12 +67,13 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.foreign_key == previous.foreign_key
+        if (previous.parent_pk.is_none() && previous.cached.is_some())
+            || (self.foreign_key == previous.foreign_key
             && self.related_key == previous.related_key
             && self.local_key == previous.local_key
             && self.related_local_key == previous.related_local_key
             && self.pivot_table == previous.pivot_table
-            && self.parent_pk == previous.parent_pk
+            && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }
@@ -252,11 +253,15 @@ impl<Related: Model + Serialize, Pivot: Model> Serialize for HasManyThrough<Rela
 }
 
 impl<'de, Related: Model, Pivot: Model> Deserialize<'de> for HasManyThrough<Related, Pivot> {
-    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::default())
+        let cached = Option::<Vec<Related>>::deserialize(deserializer)?;
+        Ok(Self {
+            cached,
+            ..Self::default()
+        })
     }
 }
 

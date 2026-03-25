@@ -36,9 +36,10 @@ impl<E: Model> SelfRef<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.foreign_key == previous.foreign_key
+        if (previous.fk_value.is_none() && previous.cached.is_some())
+            || (self.foreign_key == previous.foreign_key
             && self.local_key == previous.local_key
-            && self.fk_value == previous.fk_value
+            && self.fk_value == previous.fk_value)
         {
             self.cached = previous.cached.clone();
         }
@@ -108,11 +109,15 @@ impl<E: Model + Serialize> Serialize for SelfRef<E> {
 }
 
 impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
-    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::default())
+        let cached = Option::<E>::deserialize(deserializer)?;
+        Ok(Self {
+            cached: cached.map(Box::new),
+            ..Self::default()
+        })
     }
 }
 
@@ -144,9 +149,10 @@ impl<E: Model> SelfRefMany<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if self.foreign_key == previous.foreign_key
+        if (previous.parent_pk.is_none() && previous.cached.is_some())
+            || (self.foreign_key == previous.foreign_key
             && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk
+            && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }
@@ -260,10 +266,14 @@ impl<E: Model + Serialize> Serialize for SelfRefMany<E> {
 }
 
 impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
-    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::default())
+        let cached = Option::<Vec<E>>::deserialize(deserializer)?;
+        Ok(Self {
+            cached,
+            ..Self::default()
+        })
     }
 }

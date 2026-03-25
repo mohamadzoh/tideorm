@@ -306,7 +306,7 @@ impl TokenConfig {
         *global_token_decoder_state().write() = Some(decoder);
     }
 
-    /// Reset tokenization globals and current-thread overrides.
+    /// Reset tokenization global configuration.
     pub fn reset() {
         *global_encryption_key_state().write() = None;
         *global_token_encoder_state().write() = None;
@@ -687,12 +687,9 @@ pub trait Tokenizable: Sized + Send + Sync {
             ));
         }
 
-        if let Some(decoder) = Self::token_decoder() {
-            return decoder(token, Self::token_model_name())?
-                .ok_or_else(|| Error::invalid_token("Failed to decode token"));
-        }
+        let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
 
-        default_decode(token, Self::token_model_name())?
+        decoder(token, Self::token_model_name())?
             .ok_or_else(|| Error::invalid_token("Failed to decode token"))
     }
 
