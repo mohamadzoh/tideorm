@@ -592,7 +592,7 @@ TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
 let user = User::find(1).await?.unwrap();
 let token = user.tokenize()?;  // "iIBmdKYhJh4_vSKFlBTP..."
 
-// Decode token to ID (doesn't hit database)
+// Decode token to the model's primary key type (doesn't hit database)
 let id = User::detokenize(&token)?;  // 1
 
 // Fetch record directly from token
@@ -621,7 +621,7 @@ When a model has `#[tideorm(tokenize)]`, these methods are available:
 | `user.tokenize()` | Convert record to token (instance method) |
 | `user.to_token()` | Alias for `tokenize()` |
 | `User::tokenize_id(42)` | Tokenize an ID without having the record |
-| `User::detokenize(&token)` | Decode token to ID (doesn't fetch from DB) |
+| `User::detokenize(&token)` | Decode token to the model's primary key type |
 | `User::decode_token(&token)` | Alias for `detokenize()` |
 | `User::from_token(&token).await` | Decode token and fetch record from DB |
 | `user.regenerate_token()` | Generate a fresh token; the default encoder uses a new random nonce each time |
@@ -678,8 +678,10 @@ pub struct Document {
 
 #[async_trait::async_trait]
 impl Tokenizable for Document {
+    type TokenPrimaryKey = i64;
+
     fn token_model_name() -> &'static str { "Document" }
-    fn token_primary_key(&self) -> i64 { self.id }
+    fn token_primary_key(&self) -> Self::TokenPrimaryKey { self.id }
     
     // Custom encoder - prefix with "DOC-"
     fn token_encoder() -> Option<TokenEncoder> {
@@ -689,7 +691,7 @@ impl Tokenizable for Document {
     // Custom decoder
     fn token_decoder() -> Option<TokenDecoder> {
         Some(|token, _model| {
-            Ok(token.strip_prefix("DOC-")?.parse().ok())
+            Ok(token.strip_prefix("DOC-").map(ToOwned::to_owned))
         })
     }
     
@@ -714,7 +716,7 @@ TokenConfig::set_encoder(|id, model| {
 
 TokenConfig::set_decoder(|token, model| {
     let prefix = format!("{}-", model.to_lowercase());
-    Ok(token.strip_prefix(&prefix)?.parse().ok())
+    Ok(token.strip_prefix(&prefix).map(ToOwned::to_owned))
 });
 ```
 

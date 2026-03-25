@@ -23,8 +23,6 @@ pub(crate) struct ModelField {
     #[darling(default)]
     pub(crate) skip: bool,
     #[darling(default)]
-    pub(crate) timestamp: bool,
-    #[darling(default)]
     pub(crate) has_one: Option<String>,
     #[darling(default)]
     pub(crate) has_many: Option<String>,

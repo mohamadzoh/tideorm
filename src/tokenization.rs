@@ -63,11 +63,13 @@
 //!
 //! #[tideorm::migration::async_trait]
 //! impl Tokenizable for User {
+//!     type TokenPrimaryKey = i64;
+//!
 //!     fn token_model_name() -> &'static str {
 //!         "User"
 //!     }
 //!     
-//!     fn token_primary_key(&self) -> i64 {
+//!     fn token_primary_key(&self) -> Self::TokenPrimaryKey {
 //!         self.id
 //!     }
 //!     
@@ -89,7 +91,7 @@
 //! | `user.tokenize()` | Convert record to token (instance method) |
 //! | `user.to_token()` | Alias for `tokenize()` |
 //! | `User::tokenize_id(42)` | Tokenize an ID without having the record |
-//! | `User::detokenize(&token)` | Decode token to ID (doesn't fetch from DB) |
+//! | `User::detokenize(&token)` | Decode token to the model's primary key type |
 //! | `User::decode_token(&token)` | Alias for `detokenize()` |
 //! | `User::from_token(&token).await` | Decode token and fetch record from DB |
 //! | `user.regenerate_token()` | Generate a fresh token; default encoding uses a new random nonce |
@@ -110,8 +112,10 @@
 //!
 //! #[tideorm::migration::async_trait]
 //! impl Tokenizable for SecretDocument {
+//!     type TokenPrimaryKey = i64;
+//!
 //!     fn token_model_name() -> &'static str { "SecretDocument" }
-//!     fn token_primary_key(&self) -> i64 { self.id }
+//!     fn token_primary_key(&self) -> Self::TokenPrimaryKey { self.id }
 //!     
 //!     fn token_encoder() -> Option<TokenEncoder> {
 //!         Some(|record_id, _model_name| {
@@ -121,8 +125,7 @@
 //!     
 //!     fn token_decoder() -> Option<TokenDecoder> {
 //!         Some(|token, _model_name| {
-//!             Ok(token.strip_prefix("DOC-")
-//!                 .and_then(|id| id.parse().ok()))
+//!             Ok(token.strip_prefix("DOC-").map(ToOwned::to_owned))
 //!         })
 //!     }
 //!     
@@ -157,29 +160,29 @@ use crate::error::{Error, Result};
 
 /// Token encoder function type
 ///
-/// Takes the record's primary key (as i64) and model name, returns the encoded token.
+/// Takes the record's primary key payload string and model name, returns the encoded token.
 /// The record parameter allows for model-aware encoding.
 ///
 /// # Arguments
-/// * `record_id` - The primary key value to encode
+/// * `record_id` - The primary key payload to encode
 /// * `model_name` - The name of the model (e.g., "User", "Product")
 ///
 /// # Returns
 /// The encoded token string, or an error if encoding fails
-pub type TokenEncoder = fn(record_id: i64, model_name: &str) -> Result<String>;
+pub type TokenEncoder = fn(record_id: &str, model_name: &str) -> Result<String>;
 
 /// Token decoder function type
 ///
-/// Takes a token and model name, returns the decoded primary key.
+/// Takes a token and model name, returns the decoded primary key payload.
 ///
 /// # Arguments
 /// * `token` - The token string to decode
 /// * `model_name` - The name of the model (e.g., "User", "Product")
 ///
 /// # Returns
-/// The decoded primary key (i64), or None if decoding fails validation.
+/// The decoded primary key payload string, or None if decoding fails validation.
 /// Returns an error when decoding cannot proceed due to misconfiguration.
-pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<i64>>;
+pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<String>>;
 
 // =============================================================================
 // GLOBAL STATE
@@ -298,8 +301,7 @@ impl TokenConfig {
     ///
     /// TokenConfig::set_decoder(|token, model_name| {
     ///     let prefix = format!("{}-", model_name.to_lowercase());
-    ///     Ok(token.strip_prefix(&prefix)
-    ///         .and_then(|id| id.parse().ok()))
+    ///     Ok(token.strip_prefix(&prefix).map(ToOwned::to_owned))
     /// });
     /// ```
     pub fn set_decoder(decoder: TokenDecoder) {
@@ -325,7 +327,7 @@ impl TokenConfig {
             .unwrap_or(default_decode)
     }
 
-    /// Encode a record ID using the global encoder
+    /// Encode a record ID payload using the global encoder
     ///
     /// # Example
     ///
@@ -334,12 +336,12 @@ impl TokenConfig {
     ///
     /// # fn main() -> tideorm::Result<()> {
     /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// let token = TokenConfig::encode(42, "User")?;
+    /// let token = TokenConfig::encode("42", "User")?;
     /// # let _ = token;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn encode(record_id: i64, model_name: &str) -> Result<String> {
+    pub fn encode(record_id: &str, model_name: &str) -> Result<String> {
         Self::get_encoder()(record_id, model_name)
     }
 
@@ -353,14 +355,14 @@ impl TokenConfig {
     ///
     /// # fn main() -> Result<()> {
     /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// # let token = TokenConfig::encode(42, "User")?;
+    /// # let token = TokenConfig::encode("42", "User")?;
     /// let id = TokenConfig::decode(&token, "User")?
     ///     .ok_or_else(|| Error::invalid_token("Invalid token"))?;
     /// # let _ = id;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn decode(token: &str, model_name: &str) -> Result<Option<i64>> {
+    pub fn decode(token: &str, model_name: &str) -> Result<Option<String>> {
         Self::get_decoder()(token, model_name)
     }
 }
@@ -446,8 +448,8 @@ pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
 ///
 /// Token format: base64url(nonce || ciphertext)
 /// - nonce: 24 bytes - random nonce for XChaCha20-Poly1305
-/// - ciphertext: encrypted record ID plus authentication tag
-pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
+/// - ciphertext: encrypted record ID payload plus authentication tag
+pub fn default_encode(record_id: &str, model_name: &str) -> Result<String> {
     let key = TokenConfig::get_derived_encryption_key()?;
     let cipher = XChaCha20Poly1305::new((&key).into());
     let nonce_bytes: [u8; 24] = random();
@@ -457,7 +459,7 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
         .encrypt(
             nonce,
             Payload {
-                msg: &record_id.to_be_bytes(),
+                msg: record_id.as_bytes(),
                 aad: model_name.as_bytes(),
             },
         )
@@ -474,7 +476,7 @@ pub fn default_encode(record_id: i64, model_name: &str) -> Result<String> {
 ///
 /// Returns `Ok(None)` for invalid or tampered tokens and `Err(...)` when
 /// tokenization is misconfigured, such as when no encryption key is set.
-pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
+pub fn default_decode(token: &str, model_name: &str) -> Result<Option<String>> {
     let key = TokenConfig::get_derived_encryption_key()?;
     let cipher = XChaCha20Poly1305::new((&key).into());
 
@@ -498,15 +500,7 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
         Err(_) => return Ok(None),
     };
 
-    if plaintext.len() != 8 {
-        return Ok(None);
-    }
-
-    let Some(id_bytes) = plaintext.try_into().ok() else {
-        return Ok(None);
-    };
-
-    Ok(Some(i64::from_be_bytes(id_bytes)))
+    Ok(String::from_utf8(plaintext).ok())
 }
 
 // =============================================================================
@@ -531,11 +525,14 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<i64>> {
 /// ```
 #[async_trait::async_trait]
 pub trait Tokenizable: Sized + Send + Sync {
+    /// The model primary key type decoded from tokens for this model.
+    type TokenPrimaryKey: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static;
+
     /// Get the model name for tokenization
     fn token_model_name() -> &'static str;
 
     /// Get the primary key value from this record
-    fn token_primary_key(&self) -> i64;
+    fn token_primary_key(&self) -> Self::TokenPrimaryKey;
 
     /// Check if tokenization is enabled for this model
     fn tokenization_enabled() -> bool {
@@ -581,7 +578,10 @@ pub trait Tokenizable: Sized + Send + Sync {
 
         let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
-        encoder(self.token_primary_key(), Self::token_model_name())
+        let primary_key = self.token_primary_key();
+        let payload = serde_json::to_string(&primary_key)
+            .map_err(|error| Error::tokenization(format!("Failed to serialize token primary key: {error}")))?;
+        encoder(&payload, Self::token_model_name())
     }
 
     /// Alias for `to_token()` - Convert this record to a token
@@ -615,7 +615,7 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn tokenize_id(id: i64) -> Result<String> {
+    fn tokenize_id(id: Self::TokenPrimaryKey) -> Result<String> {
         if !Self::tokenization_enabled() {
             return Err(Error::tokenization(
                 "Tokenization is not enabled for this model",
@@ -624,7 +624,9 @@ pub trait Tokenizable: Sized + Send + Sync {
 
         let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
-        encoder(id, Self::token_model_name())
+        let payload = serde_json::to_string(&id)
+            .map_err(|error| Error::tokenization(format!("Failed to serialize token primary key: {error}")))?;
+        encoder(&payload, Self::token_model_name())
     }
 
     /// Find a record from a token
@@ -658,7 +660,7 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn detokenize(token: &str) -> Result<i64> {
+    fn detokenize(token: &str) -> Result<Self::TokenPrimaryKey> {
         Self::decode_token(token)
     }
 
@@ -680,7 +682,7 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// # Ok(())
     /// # }
     /// ```
-    fn decode_token(token: &str) -> Result<i64> {
+    fn decode_token(token: &str) -> Result<Self::TokenPrimaryKey> {
         if !Self::tokenization_enabled() {
             return Err(Error::tokenization(
                 "Tokenization is not enabled for this model",
@@ -688,9 +690,17 @@ pub trait Tokenizable: Sized + Send + Sync {
         }
 
         let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
+        let payload = decoder(token, Self::token_model_name())?
+            .ok_or_else(|| Error::invalid_token("Failed to decode token"))?;
 
-        decoder(token, Self::token_model_name())?
-            .ok_or_else(|| Error::invalid_token("Failed to decode token"))
+        serde_json::from_str::<Self::TokenPrimaryKey>(&payload).map_err(|error| {
+            Error::invalid_token(format!(
+                "Failed to deserialize decoded token payload '{}' for model {}: {}",
+                payload,
+                Self::token_model_name(),
+                error
+            ))
+        })
     }
 
     /// Regenerate a new token for this record

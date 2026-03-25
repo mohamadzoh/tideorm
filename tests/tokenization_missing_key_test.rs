@@ -7,6 +7,8 @@ struct MissingKeyModel {
 
 #[async_trait::async_trait]
 impl Tokenizable for MissingKeyModel {
+    type TokenPrimaryKey = i64;
+
     fn token_model_name() -> &'static str {
         "MissingKeyModel"
     }
@@ -23,7 +25,7 @@ impl Tokenizable for MissingKeyModel {
 
 #[test]
 fn encode_fails_without_configured_key() {
-    let err = TokenConfig::encode(42, "MissingKeyModel").unwrap_err();
+    let err = TokenConfig::encode("42", "MissingKeyModel").unwrap_err();
 
     match err {
         Error::Tokenization { message } => {
@@ -35,7 +37,7 @@ fn encode_fails_without_configured_key() {
 
 #[test]
 fn default_encode_fails_without_configured_key() {
-    let err = default_encode(42, "MissingKeyModel").unwrap_err();
+    let err = default_encode("42", "MissingKeyModel").unwrap_err();
 
     match err {
         Error::Tokenization { message } => {

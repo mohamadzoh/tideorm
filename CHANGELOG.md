@@ -346,7 +346,7 @@ Note: The original tokenization implementation described below was replaced in 0
 - **Model-specific tokens**: Tokens include model name in HMAC, preventing cross-model token reuse
 - **Tamper detection**: HMAC verification ensures tokens haven't been modified
 - **Instance methods**: `user.tokenize()`, `user.to_token()`, `user.regenerate_token()`
-- **Static methods**: `User::tokenize_id(42)`, `User::detokenize(&token)`, `User::decode_token(&token)`
+- **Static methods**: `User::tokenize_id(42)`, `User::detokenize(&token)`, `User::decode_token(&token)` returning the model's primary key type
 - **Async fetch**: `User::from_token(&token).await` - decode and fetch in one call
 - **Configuration hierarchy**: Default → TideConfig → Model (most specific wins)
 - **Global encryption key**: Configure via `TokenConfig::set_encryption_key("your-secret-key")`
@@ -379,7 +379,7 @@ TokenConfig::set_encryption_key("my-super-secret-key-at-least-32-chars");
 let user = User::find(1).await?.unwrap();
 let token = user.tokenize()?;  // "iIBmdKYhJh4_vSKFlBTP..."
 
-// Decode token to ID
+// Decode token to the model's primary key type
 let id = User::detokenize(&token)?;  // 1
 
 // Or fetch directly from token

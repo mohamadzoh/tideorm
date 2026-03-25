@@ -16,12 +16,14 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
     quote! {
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::tokenization::Tokenizable for #struct_name {
+            type TokenPrimaryKey = #pk_type;
+
             fn token_model_name() -> &'static str {
                 #struct_name_str
             }
 
-            fn token_primary_key(&self) -> i64 {
-                self.#pk_ident as i64
+            fn token_primary_key(&self) -> Self::TokenPrimaryKey {
+                self.#pk_ident.clone()
             }
 
             fn tokenization_enabled() -> bool {
@@ -30,10 +32,11 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
 
             async fn from_token(token: &str) -> ::tideorm::Result<Self> {
                 let id = Self::decode_token(token)?;
-                Self::find(id as #pk_type)
+                let display_id = <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id);
+                Self::find(id.clone())
                     .await?
                     .ok_or_else(|| ::tideorm::Error::not_found(
-                        format!("{} with decoded token ID {} not found", #struct_name_str, id)
+                        format!("{} with decoded token ID {} not found", #struct_name_str, display_id)
                     ))
             }
         }

@@ -43,13 +43,13 @@ mod unit_tests {
     fn test_encode_decode_roundtrip() {
         init_test_env();
 
-        let id = 12345i64;
+        let id = "12345";
         let model = "User";
 
         let token = default_encode(id, model).unwrap();
         let decoded = default_decode(&token, model).unwrap();
 
-        assert_eq!(decoded, Some(id));
+        assert_eq!(decoded, Some(id.to_string()));
     }
 
     #[test]
@@ -57,20 +57,20 @@ mod unit_tests {
         init_test_env();
 
         let test_cases = [
-            (0i64, "Zero"),
-            (1i64, "One"),
-            (100i64, "Hundred"),
-            (999999i64, "Large"),
-            (i64::MAX, "Max"),
-            (-1i64, "NegativeOne"),
-            (-999999i64, "NegativeLarge"),
-            (i64::MIN, "Min"),
+            ("0", "Zero"),
+            ("1", "One"),
+            ("100", "Hundred"),
+            ("999999", "Large"),
+            ("9223372036854775807", "Max"),
+            ("-1", "NegativeOne"),
+            ("-999999", "NegativeLarge"),
+            ("-9223372036854775808", "Min"),
         ];
 
         for (id, model) in test_cases {
             let token = default_encode(id, model).unwrap();
             let decoded = default_decode(&token, model).unwrap();
-            assert_eq!(decoded, Some(id), "Failed for id={}, model={}", id, model);
+            assert_eq!(decoded, Some(id.to_string()), "Failed for id={}, model={}", id, model);
         }
     }
 
@@ -79,7 +79,7 @@ mod unit_tests {
         init_test_env();
 
         // Test multiple IDs
-        for id in [1, 42, 999, 123456789, i64::MAX] {
+        for id in ["1", "42", "999", "123456789", "9223372036854775807"] {
             let token = default_encode(id, "User").unwrap();
 
             // Token should only contain URL-safe characters
@@ -102,7 +102,7 @@ mod unit_tests {
     fn test_model_specific_tokens() {
         init_test_env();
 
-        let id = 42i64;
+        let id = "42";
 
         let user_token = default_encode(id, "User").unwrap();
         let product_token = default_encode(id, "Product").unwrap();
@@ -114,16 +114,16 @@ mod unit_tests {
         assert_ne!(product_token, order_token);
 
         // But each decodes correctly with its own model
-        assert_eq!(default_decode(&user_token, "User").unwrap(), Some(id));
-        assert_eq!(default_decode(&product_token, "Product").unwrap(), Some(id));
-        assert_eq!(default_decode(&order_token, "Order").unwrap(), Some(id));
+        assert_eq!(default_decode(&user_token, "User").unwrap(), Some(id.to_string()));
+        assert_eq!(default_decode(&product_token, "Product").unwrap(), Some(id.to_string()));
+        assert_eq!(default_decode(&order_token, "Order").unwrap(), Some(id.to_string()));
     }
 
     #[test]
     fn test_cross_model_decode_fails() {
         init_test_env();
 
-        let id = 42i64;
+        let id = "42";
         let user_token = default_encode(id, "User").unwrap();
 
         // Trying to decode a User token as a Product should fail
@@ -136,7 +136,7 @@ mod unit_tests {
     fn test_tampered_token_fails() {
         init_test_env();
 
-        let token = default_encode(42, "User").unwrap();
+        let token = default_encode("42", "User").unwrap();
 
         // Tamper with different positions
         for pos in [0, 5, 10, 15, 20, 30] {
@@ -185,7 +185,7 @@ mod unit_tests {
     fn test_token_randomization() {
         init_test_env();
 
-        let id = 42i64;
+        let id = "42";
         let model = "User";
 
         // Same ID and model should produce different tokens because the
@@ -198,9 +198,9 @@ mod unit_tests {
         assert_ne!(token2, token3);
         assert_ne!(token1, token3);
 
-        assert_eq!(default_decode(&token1, model).unwrap(), Some(id));
-        assert_eq!(default_decode(&token2, model).unwrap(), Some(id));
-        assert_eq!(default_decode(&token3, model).unwrap(), Some(id));
+        assert_eq!(default_decode(&token1, model).unwrap(), Some(id.to_string()));
+        assert_eq!(default_decode(&token2, model).unwrap(), Some(id.to_string()));
+        assert_eq!(default_decode(&token3, model).unwrap(), Some(id.to_string()));
     }
 
     #[test]
@@ -208,9 +208,9 @@ mod unit_tests {
         init_test_env();
 
         let model = "User";
-        let token1 = default_encode(1, model).unwrap();
-        let token2 = default_encode(2, model).unwrap();
-        let token3 = default_encode(3, model).unwrap();
+        let token1 = default_encode("1", model).unwrap();
+        let token2 = default_encode("2", model).unwrap();
+        let token3 = default_encode("3", model).unwrap();
 
         assert_ne!(token1, token2);
         assert_ne!(token2, token3);
@@ -225,14 +225,9 @@ mod unit_tests {
         // = base64url(24 + (8-byte plaintext + 16-byte tag))
         // = base64url(48 bytes) = 64 chars
 
-        for id in [0, 1, 100, i64::MAX, i64::MIN] {
+        for id in ["0", "1", "100", "9223372036854775807", "-9223372036854775808"] {
             let token = default_encode(id, "User").unwrap();
-            assert_eq!(
-                token.len(),
-                64,
-                "Token should be 64 characters, got {}",
-                token.len()
-            );
+            assert!(token.len() >= 55, "Token should have a stable encrypted payload length floor, got {}", token.len());
         }
     }
 
@@ -240,13 +235,13 @@ mod unit_tests {
     fn test_token_config_encode_decode() {
         init_test_env();
 
-        let id = 123i64;
+        let id = "123";
         let model = "TestModel";
 
         let token = TokenConfig::encode(id, model).unwrap();
         let decoded = TokenConfig::decode(&token, model).unwrap();
 
-        assert_eq!(decoded, Some(id));
+        assert_eq!(decoded, Some(id.to_string()));
     }
 }
 
@@ -263,6 +258,8 @@ mod tokenizable_trait_tests {
 
     #[async_trait::async_trait]
     impl Tokenizable for TestUser {
+        type TokenPrimaryKey = i64;
+
         fn token_model_name() -> &'static str {
             "TestUser"
         }
@@ -286,6 +283,8 @@ mod tokenizable_trait_tests {
 
     #[async_trait::async_trait]
     impl Tokenizable for TestProduct {
+        type TokenPrimaryKey = i64;
+
         fn token_model_name() -> &'static str {
             "TestProduct"
         }
@@ -454,6 +453,80 @@ mod tokenizable_trait_tests {
             assert_eq!(decoded, user.id);
         }
     }
+
+    struct StringKeyModel {
+        id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tokenizable for StringKeyModel {
+        type TokenPrimaryKey = String;
+
+        fn token_model_name() -> &'static str {
+            "StringKeyModel"
+        }
+
+        fn token_primary_key(&self) -> String {
+            self.id.clone()
+        }
+
+        async fn from_token(token: &str) -> Result<Self> {
+            Ok(Self {
+                id: Self::decode_token(token)?,
+            })
+        }
+    }
+
+    struct U64KeyModel {
+        id: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl Tokenizable for U64KeyModel {
+        type TokenPrimaryKey = u64;
+
+        fn token_model_name() -> &'static str {
+            "U64KeyModel"
+        }
+
+        fn token_primary_key(&self) -> u64 {
+            self.id
+        }
+
+        async fn from_token(token: &str) -> Result<Self> {
+            Ok(Self {
+                id: Self::decode_token(token)?,
+            })
+        }
+    }
+
+    #[test]
+    fn test_tokenizable_string_primary_key_roundtrip() {
+        init_test_env();
+
+        let model = StringKeyModel {
+            id: "user_abc-123".to_string(),
+        };
+
+        let token = model.tokenize().unwrap();
+        let decoded = StringKeyModel::decode_token(&token).unwrap();
+
+        assert_eq!(decoded, model.id);
+    }
+
+    #[test]
+    fn test_tokenizable_u64_primary_key_roundtrip() {
+        init_test_env();
+
+        let model = U64KeyModel {
+            id: u64::MAX,
+        };
+
+        let token = model.tokenize().unwrap();
+        let decoded = U64KeyModel::decode_token(&token).unwrap();
+
+        assert_eq!(decoded, u64::MAX);
+    }
 }
 
 mod custom_encoder_tests {
@@ -461,13 +534,13 @@ mod custom_encoder_tests {
     use tideorm::tokenization::{TokenDecoder, TokenEncoder, Tokenizable};
 
     // Custom encoder that uses a simple format
-    fn simple_encoder(id: i64, model: &str) -> tideorm::error::Result<String> {
+    fn simple_encoder(id: &str, model: &str) -> tideorm::error::Result<String> {
         Ok(format!("{}-{}", model.to_lowercase(), id))
     }
 
-    fn simple_decoder(token: &str, model: &str) -> Result<Option<i64>> {
+    fn simple_decoder(token: &str, model: &str) -> Result<Option<String>> {
         let prefix = format!("{}-", model.to_lowercase());
-        Ok(token.strip_prefix(&prefix).and_then(|id| id.parse().ok()))
+        Ok(token.strip_prefix(&prefix).map(ToOwned::to_owned))
     }
 
     // Model with custom encoder
@@ -477,6 +550,8 @@ mod custom_encoder_tests {
 
     #[async_trait::async_trait]
     impl Tokenizable for CustomModel {
+        type TokenPrimaryKey = i64;
+
         fn token_model_name() -> &'static str {
             "custom"
         }
@@ -535,9 +610,9 @@ mod security_tests {
         init_test_env();
 
         // Sequential IDs should not have predictable token patterns
-        let token1 = default_encode(1, "User").unwrap();
-        let token2 = default_encode(2, "User").unwrap();
-        let token3 = default_encode(3, "User").unwrap();
+        let token1 = default_encode("1", "User").unwrap();
+        let token2 = default_encode("2", "User").unwrap();
+        let token3 = default_encode("3", "User").unwrap();
 
         // Tokens should not share common prefixes beyond IV
         // (First 22 chars are IV which is model-specific)
@@ -570,7 +645,8 @@ mod security_tests {
         let mut char_counts = std::collections::HashMap::new();
 
         for id in 1..=1000 {
-            let token = default_encode(id, "User").unwrap();
+            let id = id.to_string();
+            let token = default_encode(&id, "User").unwrap();
             for c in token.chars() {
                 *char_counts.entry(c).or_insert(0) += 1;
             }
@@ -596,13 +672,13 @@ mod security_tests {
         init_test_env();
 
         // The original ID should not appear in the token
-        let id = 12345i64;
+        let id = "12345";
         let token = default_encode(id, "User").unwrap();
 
         // Check that ID doesn't appear in any encoding
-        assert!(!token.contains(&id.to_string()));
-        assert!(!token.contains(&format!("{:x}", id))); // hex
-        assert!(!token.contains(&format!("{:o}", id))); // octal
+        assert!(!token.contains(id));
+        assert!(!token.contains(&format!("{:x}", 12345))); // hex
+        assert!(!token.contains(&format!("{:o}", 12345))); // octal
     }
 
     #[test]
@@ -610,7 +686,7 @@ mod security_tests {
         init_test_env();
 
         // Changing model name should completely change the token
-        let id = 42i64;
+        let id = "42";
         let token_user = default_encode(id, "User").unwrap();
         let token_admin = default_encode(id, "Admin").unwrap();
 
@@ -632,10 +708,10 @@ mod edge_cases {
         init_test_env();
 
         // Empty model name should still work
-        let token = default_encode(42, "").unwrap();
+        let token = default_encode("42", "").unwrap();
         let decoded = default_decode(&token, "").unwrap();
 
-        assert_eq!(decoded, Some(42));
+        assert_eq!(decoded, Some("42".to_string()));
     }
 
     #[test]
@@ -643,10 +719,10 @@ mod edge_cases {
         init_test_env();
 
         let long_name = "A".repeat(1000);
-        let token = default_encode(42, &long_name).unwrap();
+        let token = default_encode("42", &long_name).unwrap();
         let decoded = default_decode(&token, &long_name).unwrap();
 
-        assert_eq!(decoded, Some(42));
+        assert_eq!(decoded, Some("42".to_string()));
     }
 
     #[test]
@@ -654,10 +730,10 @@ mod edge_cases {
         init_test_env();
 
         let unicode_name = "用户模型🔐";
-        let token = default_encode(42, unicode_name).unwrap();
+        let token = default_encode("42", unicode_name).unwrap();
         let decoded = default_decode(&token, unicode_name).unwrap();
 
-        assert_eq!(decoded, Some(42));
+        assert_eq!(decoded, Some("42".to_string()));
     }
 
     #[test]
@@ -670,9 +746,9 @@ mod edge_cases {
             "Model-With-Dashes",
             "model_with_underscores",
         ] {
-            let token = default_encode(42, name).unwrap();
+            let token = default_encode("42", name).unwrap();
             let decoded = default_decode(&token, name).unwrap();
-            assert_eq!(decoded, Some(42), "Failed for model name: {}", name);
+            assert_eq!(decoded, Some("42".to_string()), "Failed for model name: {}", name);
         }
     }
 
@@ -680,12 +756,20 @@ mod edge_cases {
     fn test_boundary_ids() {
         init_test_env();
 
-        let boundary_ids = [i64::MIN, i64::MIN + 1, -1, 0, 1, i64::MAX - 1, i64::MAX];
+        let boundary_ids = [
+            "-9223372036854775808",
+            "-9223372036854775807",
+            "-1",
+            "0",
+            "1",
+            "9223372036854775806",
+            "9223372036854775807",
+        ];
 
         for id in boundary_ids {
             let token = default_encode(id, "Boundary").unwrap();
             let decoded = default_decode(&token, "Boundary").unwrap();
-            assert_eq!(decoded, Some(id), "Failed for boundary ID: {}", id);
+            assert_eq!(decoded, Some(id.to_string()), "Failed for boundary ID: {}", id);
         }
     }
 }

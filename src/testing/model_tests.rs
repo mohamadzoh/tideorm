@@ -1,4 +1,5 @@
 use crate::model::Model as ModelTrait;
+use crate::tokenization::Tokenizable as _;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::{Database, QueryCache, TideConfig};
@@ -28,6 +29,24 @@ struct NumericNaturalKeyModel {
 
 #[tideorm::model(table = "model_test_uuid_natural_keys")]
 struct UuidNaturalKeyModel {
+    #[tideorm(primary_key)]
+    id: uuid::Uuid,
+}
+
+#[tideorm::model(table = "model_test_tokenized_string_keys", tokenize)]
+struct TokenizedStringKeyModel {
+    #[tideorm(primary_key)]
+    id: String,
+}
+
+#[tideorm::model(table = "model_test_tokenized_u64_keys", tokenize)]
+struct TokenizedU64KeyModel {
+    #[tideorm(primary_key)]
+    id: u64,
+}
+
+#[tideorm::model(table = "model_test_tokenized_uuid_keys", tokenize)]
+struct TokenizedUuidKeyModel {
     #[tideorm(primary_key)]
     id: uuid::Uuid,
 }
@@ -90,6 +109,10 @@ async fn setup_model_cache_test_db() -> Database {
     .expect("creating model cache test schema should succeed");
 
     db
+}
+
+fn init_model_tokenization_test_key() {
+    crate::tokenization::TokenConfig::set_encryption_key("model-tokenization-test-key-32chars");
 }
 
 #[cfg(feature = "translations")]
@@ -249,6 +272,52 @@ fn test_is_new_does_not_treat_non_nil_uuid_natural_key_as_unsaved() {
     };
 
     assert!(!model.is_new());
+}
+
+#[test]
+fn test_macro_generated_tokenization_round_trips_string_primary_key() {
+    init_model_tokenization_test_key();
+
+    let model = TokenizedStringKeyModel {
+        id: "user:\"alpha\"\n42".to_string(),
+    };
+
+    let token = model.tokenize().expect("tokenization should succeed");
+    let decoded = TokenizedStringKeyModel::decode_token(&token)
+        .expect("generated tokenization should decode complex string keys");
+
+    assert_eq!(decoded, model.id);
+}
+
+#[test]
+fn test_macro_generated_tokenization_round_trips_u64_primary_key() {
+    init_model_tokenization_test_key();
+
+    let model = TokenizedU64KeyModel { id: u64::MAX };
+
+    let token = model.tokenize().expect("tokenization should succeed");
+    let decoded = TokenizedU64KeyModel::decode_token(&token)
+        .expect("generated tokenization should decode u64 keys");
+
+    assert_eq!(decoded, u64::MAX);
+
+    let direct = TokenizedU64KeyModel::tokenize_id(u64::MAX)
+        .expect("tokenize_id should support u64 keys");
+    assert_eq!(TokenizedU64KeyModel::decode_token(&direct).unwrap(), u64::MAX);
+}
+
+#[test]
+fn test_macro_generated_tokenization_round_trips_uuid_primary_key() {
+    init_model_tokenization_test_key();
+
+    let id = uuid::Uuid::new_v4();
+    let model = TokenizedUuidKeyModel { id };
+
+    let token = model.tokenize().expect("tokenization should succeed");
+    let decoded = TokenizedUuidKeyModel::decode_token(&token)
+        .expect("generated tokenization should decode uuid keys");
+
+    assert_eq!(decoded, id);
 }
 
 #[test]

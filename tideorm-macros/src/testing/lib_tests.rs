@@ -25,7 +25,6 @@ fn field_with_type(ty: Type) -> ModelField {
         nullable: false,
         default: None,
         skip: false,
-        timestamp: false,
         has_one: None,
         has_many: None,
         belongs_to: None,
@@ -147,6 +146,22 @@ fn model_attribute_rejects_mixed_inline_and_stacked_options() {
         .to_string();
 
     assert!(error.contains("use either #[tideorm::model(...)] or a separate #[tideorm(...)]"));
+}
+
+#[test]
+fn field_level_timestamp_attribute_is_rejected() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(timestamp)]
+            created_at: chrono::NaiveDateTime,
+        }
+    };
+
+    let error = ModelInput::from_derive_input(&input)
+        .expect_err("field-level timestamp attribute should be rejected")
+        .to_string();
+
+    assert!(error.contains("timestamp"));
 }
 
 #[test]
