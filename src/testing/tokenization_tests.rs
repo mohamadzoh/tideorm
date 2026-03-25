@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::mpsc;
 
 fn init_test_key() {
     TokenConfig::set_encryption_key("test-encryption-key-for-unit-tests-32");
@@ -211,6 +212,61 @@ fn test_token_config_reset_clears_global_state() {
 
     assert!(!TokenConfig::has_encryption_key());
     assert!(TokenConfig::get_encryption_key().is_err());
+}
+
+#[test]
+fn test_token_config_reset_clears_state_set_on_another_thread() {
+    TokenConfig::reset();
+
+    fn custom_encoder(record_id: i64, _model_name: &str) -> Result<String> {
+        Ok(format!("custom-{record_id}"))
+    }
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (check_tx, check_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+
+    let worker = std::thread::spawn(move || {
+        TokenConfig::set_encryption_key("thread-key");
+        TokenConfig::set_encoder(custom_encoder);
+        ready_tx
+            .send(())
+            .expect("worker should report that token state is configured");
+
+        check_rx
+            .recv()
+            .expect("worker should receive reset signal");
+
+        result_tx
+            .send((
+                TokenConfig::has_encryption_key(),
+                TokenConfig::get_encryption_key(),
+                TokenConfig::encode(7, "User"),
+            ))
+            .expect("worker should report token state after reset");
+    });
+
+    ready_rx
+        .recv()
+        .expect("main thread should observe configured token state");
+
+    TokenConfig::reset();
+
+    check_tx
+        .send(())
+        .expect("main thread should signal worker to validate reset state");
+
+    let (has_key, key_result, encode_result) = result_rx
+        .recv()
+        .expect("main thread should receive worker validation results");
+
+    worker
+        .join()
+        .expect("token config worker thread should finish successfully");
+
+    assert!(!has_key);
+    assert!(key_result.is_err());
+    assert!(encode_result.is_err());
 }
 
 #[test]

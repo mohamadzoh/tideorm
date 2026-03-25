@@ -370,6 +370,9 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
+                if result.rows_affected > 0 {
+                    ::tideorm::QueryCache::global().invalidate_model(#table_name);
+                }
                 Ok(result.rows_affected)
             }
 
@@ -405,6 +408,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
                 let model = <Self as InternalModel>::from_sea_model(result);
+                ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_create()?;
                 Ok(model)
             }
@@ -430,6 +434,9 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
+                if result.rows_affected > 0 {
+                    ::tideorm::QueryCache::global().invalidate_model(#table_name);
+                }
                 (&model).run_after_delete()?;
                 Ok(result.rows_affected)
             }
@@ -485,6 +492,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
                 let model = <Self as InternalModel>::from_sea_model(result);
+                ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_update()?;
                 Ok(model)
             }
@@ -605,6 +613,7 @@ fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context.clone()))?;
+                ::tideorm::QueryCache::global().invalidate_model(#table_name);
 
                 let mut finder = #internal_entity_mod::Entity::find();
                 for conflict_column in &conflict_cols {

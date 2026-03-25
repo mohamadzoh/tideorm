@@ -1952,6 +1952,12 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn invalidate_model_cache(rows_affected: u64) {
+        if rows_affected > 0 {
+            crate::QueryCache::global().invalidate_model(M::table_name());
+        }
+    }
+
     pub async fn delete(self) -> Result<u64> {
         self.ensure_query_is_valid()?;
         self.ensure_mutation_query_is_safe("delete")?;
@@ -1968,10 +1974,12 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        self.current_db()?
+        let rows_affected = self.current_db()?
             .__execute_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context))
+            .map_err(|err| err.with_context(error_context))?;
+        Self::invalidate_model_cache(rows_affected);
+        Ok(rows_affected)
     }
 
     /// Delete every row in the table represented by this query.
@@ -1989,10 +1997,12 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        self.current_db()?
+        let rows_affected = self.current_db()?
             .__execute_with_params(&sql, Vec::new())
             .await
-            .map_err(|err| err.with_context(error_context))
+            .map_err(|err| err.with_context(error_context))?;
+        Self::invalidate_model_cache(rows_affected);
+        Ok(rows_affected)
     }
 
     pub async fn soft_delete(self) -> Result<u64> {
@@ -2023,10 +2033,12 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        self.current_db()?
+        let rows_affected = self.current_db()?
             .__execute_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context))
+            .map_err(|err| err.with_context(error_context))?;
+        Self::invalidate_model_cache(rows_affected);
+        Ok(rows_affected)
     }
 
     pub async fn restore(self) -> Result<u64> {
@@ -2059,10 +2071,12 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        self.current_db()?
+        let rows_affected = self.current_db()?
             .__execute_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context))
+            .map_err(|err| err.with_context(error_context))?;
+        Self::invalidate_model_cache(rows_affected);
+        Ok(rows_affected)
     }
 
     pub async fn force_delete(self) -> Result<u64> {
@@ -2081,10 +2095,12 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        self.current_db()?
+        let rows_affected = self.current_db()?
             .__execute_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context))
+            .map_err(|err| err.with_context(error_context))?;
+        Self::invalidate_model_cache(rows_affected);
+        Ok(rows_affected)
     }
 
     pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {

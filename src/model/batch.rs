@@ -684,7 +684,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
             }
         }
 
-        crate::Database::execute_with_params(&sql, params).await
+        let rows_affected = crate::Database::execute_with_params(&sql, params).await?;
+        if rows_affected > 0 {
+            crate::QueryCache::global().invalidate_model(M::table_name());
+        }
+        Ok(rows_affected)
     }
 
     pub async fn execute_returning(self) -> Result<Vec<M>> {
@@ -722,7 +726,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         sql.push_str(" RETURNING *");
 
-        crate::Database::raw_with_params::<M>(&sql, params).await
+        let models = crate::Database::raw_with_params::<M>(&sql, params).await?;
+        if !models.is_empty() {
+            crate::QueryCache::global().invalidate_model(M::table_name());
+        }
+        Ok(models)
     }
 }
 

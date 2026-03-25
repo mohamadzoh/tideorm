@@ -58,10 +58,6 @@ impl<E: Model> HasOne<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
-        if let Some(cached) = &self.cached {
-            return Ok(Some((**cached).clone()));
-        }
-
         self.ensure_configured()?;
 
         let pk = self
@@ -193,10 +189,6 @@ impl<E: Model> HasMany<E> {
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
-        if let Some(cached) = &self.cached {
-            return Ok(cached.clone());
-        }
-
         self.ensure_configured()?;
 
         let pk = self
@@ -343,10 +335,6 @@ impl<E: Model> BelongsTo<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
-        if let Some(cached) = &self.cached {
-            return Ok(Some((**cached).clone()));
-        }
-
         self.ensure_configured()?;
 
         let fk = self

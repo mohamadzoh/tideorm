@@ -2,6 +2,13 @@ use crate::config::DatabaseType;
 use crate::model::Model as ModelTrait;
 use crate::query::OrGroup;
 
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use crate::{Database, QueryCache, TideConfig};
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::sync::{Mutex, OnceLock};
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::time::Duration;
+
 #[tideorm::model(table = "query_mutation_guard_users")]
 struct MutationGuardUser {
     #[tideorm(primary_key, auto_increment)]
@@ -15,6 +22,40 @@ struct SoftDeleteMutationGuardUser {
     id: i64,
     name: String,
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn query_mutation_cache_test_guard() -> &'static Mutex<()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_query_mutation_cache_test_db() -> Database {
+    Database::reset_global();
+    TideConfig::reset();
+    QueryCache::global().clear();
+    QueryCache::global().enable();
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed for query mutation cache tests");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE query_mutation_guard_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating mutation guard schema should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE query_mutation_guard_soft_delete_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, deleted_at TEXT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating soft delete mutation guard schema should succeed");
+
+    db
 }
 
 #[test]
@@ -218,4 +259,173 @@ fn debug_output_includes_preview_banner_and_parameterized_sql() {
     assert!(debug_info.sql.contains("-- PARAMETERIZED SQL\nSELECT"));
     assert!(debug_info.sql.contains("query_count_guard_users"));
     assert_eq!(debug_info.params.len(), 1);
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn query_delete_invalidates_cached_queries() {
+    let _guard = query_mutation_cache_test_guard()
+        .lock()
+        .expect("query mutation cache test guard should not be poisoned");
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    let saved = MutationGuardUser {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before = MutationGuardUser::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before delete should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let rows_affected = MutationGuardUser::query()
+        .where_eq("id", saved.id)
+        .delete()
+        .await
+        .expect("query delete should succeed");
+
+    assert_eq!(rows_affected, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn query_delete_all_invalidates_cached_queries() {
+    let _guard = query_mutation_cache_test_guard()
+        .lock()
+        .expect("query mutation cache test guard should not be poisoned");
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    MutationGuardUser {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before = MutationGuardUser::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before delete_all should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let rows_affected = MutationGuardUser::query()
+        .delete_all()
+        .await
+        .expect("query delete_all should succeed");
+
+    assert_eq!(rows_affected, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn soft_delete_and_restore_invalidate_cached_queries() {
+    let _guard = query_mutation_cache_test_guard()
+        .lock()
+        .expect("query mutation cache test guard should not be poisoned");
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    let saved = SoftDeleteMutationGuardUser {
+        id: 0,
+        name: "Alice".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before_soft_delete = SoftDeleteMutationGuardUser::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before soft_delete should succeed");
+    assert_eq!(cached_before_soft_delete.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let soft_deleted = SoftDeleteMutationGuardUser::query()
+        .where_eq("id", saved.id)
+        .soft_delete()
+        .await
+        .expect("soft_delete should succeed");
+
+    assert_eq!(soft_deleted, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+
+    let cached_before_restore = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before restore should succeed");
+    assert_eq!(cached_before_restore.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let restored = SoftDeleteMutationGuardUser::query()
+        .where_eq("id", saved.id)
+        .with_trashed()
+        .restore()
+        .await
+        .expect("restore should succeed");
+
+    assert_eq!(restored, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn force_delete_invalidates_cached_queries() {
+    let _guard = query_mutation_cache_test_guard()
+        .lock()
+        .expect("query mutation cache test guard should not be poisoned");
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    let saved = SoftDeleteMutationGuardUser {
+        id: 0,
+        name: "Alice".to_string(),
+        deleted_at: None,
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    SoftDeleteMutationGuardUser::query()
+        .where_eq("id", saved.id)
+        .soft_delete()
+        .await
+        .expect("soft_delete should succeed");
+
+    let cached_before = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before force_delete should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let rows_affected = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .where_eq("id", saved.id)
+        .force_delete()
+        .await
+        .expect("force_delete should succeed");
+
+    assert_eq!(rows_affected, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
 }

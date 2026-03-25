@@ -142,7 +142,6 @@
 //! - The same record may produce different valid tokens with the default encoder
 
 use parking_lot::RwLock;
-use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -195,12 +194,6 @@ static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::
 /// Global token decoder override
 static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::new();
 
-thread_local! {
-    static LOCAL_ENCRYPTION_KEY: RefCell<Option<ConfiguredEncryptionKey>> = const { RefCell::new(None) };
-    static LOCAL_TOKEN_ENCODER: Cell<Option<TokenEncoder>> = const { Cell::new(None) };
-    static LOCAL_TOKEN_DECODER: Cell<Option<TokenDecoder>> = const { Cell::new(None) };
-}
-
 #[derive(Clone)]
 struct ConfiguredEncryptionKey {
     raw: String,
@@ -250,8 +243,7 @@ impl TokenConfig {
     /// ```
     pub fn set_encryption_key(key: &str) {
         let configured_key = ConfiguredEncryptionKey::new(key);
-        *global_encryption_key_state().write() = Some(configured_key.clone());
-        LOCAL_ENCRYPTION_KEY.with(|slot| *slot.borrow_mut() = Some(configured_key));
+        *global_encryption_key_state().write() = Some(configured_key);
     }
 
     /// Get the global encryption key
@@ -271,14 +263,11 @@ impl TokenConfig {
 
     /// Check if an encryption key has been explicitly configured
     pub fn has_encryption_key() -> bool {
-        LOCAL_ENCRYPTION_KEY.with(|slot| slot.borrow().is_some())
-            || global_encryption_key_state().read().is_some()
+        global_encryption_key_state().read().is_some()
     }
 
     fn current_encryption_key() -> Option<ConfiguredEncryptionKey> {
-        LOCAL_ENCRYPTION_KEY
-            .with(|slot| slot.borrow().clone())
-            .or_else(|| global_encryption_key_state().read().clone())
+        global_encryption_key_state().read().clone()
     }
 
     /// Set a custom global token encoder
@@ -296,7 +285,6 @@ impl TokenConfig {
     /// ```
     pub fn set_encoder(encoder: TokenEncoder) {
         *global_token_encoder_state().write() = Some(encoder);
-        LOCAL_TOKEN_ENCODER.with(|slot| slot.set(Some(encoder)));
     }
 
     /// Set a custom global token decoder
@@ -316,7 +304,6 @@ impl TokenConfig {
     /// ```
     pub fn set_decoder(decoder: TokenDecoder) {
         *global_token_decoder_state().write() = Some(decoder);
-        LOCAL_TOKEN_DECODER.with(|slot| slot.set(Some(decoder)));
     }
 
     /// Reset tokenization globals and current-thread overrides.
@@ -324,24 +311,17 @@ impl TokenConfig {
         *global_encryption_key_state().write() = None;
         *global_token_encoder_state().write() = None;
         *global_token_decoder_state().write() = None;
-        LOCAL_ENCRYPTION_KEY.with(|slot| slot.borrow_mut().take());
-        LOCAL_TOKEN_ENCODER.with(|slot| slot.set(None));
-        LOCAL_TOKEN_DECODER.with(|slot| slot.set(None));
     }
 
     /// Get the global token encoder (or default)
     pub fn get_encoder() -> TokenEncoder {
-        LOCAL_TOKEN_ENCODER
-            .with(|slot| slot.get())
-            .or_else(|| *global_token_encoder_state().read())
+        (*global_token_encoder_state().read())
             .unwrap_or(default_encode)
     }
 
     /// Get the global token decoder (or default)
     pub fn get_decoder() -> TokenDecoder {
-        LOCAL_TOKEN_DECODER
-            .with(|slot| slot.get())
-            .or_else(|| *global_token_decoder_state().read())
+        (*global_token_decoder_state().read())
             .unwrap_or(default_decode)
     }
 

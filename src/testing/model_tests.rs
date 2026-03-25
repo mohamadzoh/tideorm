@@ -1,5 +1,12 @@
 use crate::model::Model as ModelTrait;
 
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use crate::{Database, QueryCache, TideConfig};
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::sync::{Mutex, OnceLock};
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::time::Duration;
+
 #[tideorm::model(table = "model_test_users")]
 struct AutoIncrementModel {
     #[tideorm(primary_key, auto_increment)]
@@ -43,6 +50,34 @@ struct CompositePrimaryKeyModel {
     #[tideorm(primary_key)]
     role_id: i64,
     granted_by: String,
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn model_cache_test_guard() -> &'static Mutex<()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_model_cache_test_db() -> Database {
+    Database::reset_global();
+    TideConfig::reset();
+    QueryCache::global().clear();
+    QueryCache::global().enable();
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed for model cache tests");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE model_test_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating model cache test schema should succeed");
+
+    db
 }
 
 #[cfg(feature = "translations")]
@@ -243,6 +278,191 @@ fn test_composite_primary_key_metadata_and_accessors() {
     let _ = <CompositePrimaryKeyModel as crate::internal::InternalModel>::primary_key_condition(&(
         7, 9,
     ));
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn save_invalidates_cached_queries_after_insert() {
+    let _guard = model_cache_test_guard()
+        .lock()
+        .expect("model cache test guard should not be poisoned");
+    let _db = setup_model_cache_test_db().await;
+
+    let cached_before = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("initial cached query should succeed");
+    assert!(cached_before.is_empty());
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let saved = AutoIncrementModel {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("save should insert a new row");
+
+    assert!(saved.id > 0);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+
+    let fresh = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("fresh cached query should succeed after save");
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].name, "Alice");
+
+    QueryCache::global().clear();
+    QueryCache::global().disable();
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn update_invalidates_cached_queries() {
+    let _guard = model_cache_test_guard()
+        .lock()
+        .expect("model cache test guard should not be poisoned");
+    let _db = setup_model_cache_test_db().await;
+
+    let saved = AutoIncrementModel {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before update should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(cached_before[0].name, "Alice");
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let updated = AutoIncrementModel {
+        id: saved.id,
+        name: "Bob".to_string(),
+    }
+    .update()
+    .await
+    .expect("update should succeed");
+
+    assert_eq!(updated.name, "Bob");
+    assert_eq!(QueryCache::global().stats().entries, 0);
+
+    let fresh = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("fresh cached query should succeed after update");
+    assert_eq!(fresh.len(), 1);
+    assert_eq!(fresh[0].name, "Bob");
+
+    QueryCache::global().clear();
+    QueryCache::global().disable();
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn delete_invalidates_cached_queries() {
+    let _guard = model_cache_test_guard()
+        .lock()
+        .expect("model cache test guard should not be poisoned");
+    let _db = setup_model_cache_test_db().await;
+
+    let saved = AutoIncrementModel {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before delete should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let rows_affected = saved.delete().await.expect("delete should succeed");
+
+    assert_eq!(rows_affected, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+
+    let fresh = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("fresh cached query should succeed after delete");
+    assert!(fresh.is_empty());
+
+    QueryCache::global().clear();
+    QueryCache::global().disable();
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn destroy_invalidates_cached_queries() {
+    let _guard = model_cache_test_guard()
+        .lock()
+        .expect("model cache test guard should not be poisoned");
+    let _db = setup_model_cache_test_db().await;
+
+    let saved = AutoIncrementModel {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+
+    let cached_before = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("cached query before destroy should succeed");
+    assert_eq!(cached_before.len(), 1);
+    assert_eq!(QueryCache::global().stats().entries, 1);
+
+    let rows_affected = AutoIncrementModel::destroy(saved.id)
+        .await
+        .expect("destroy should succeed");
+
+    assert_eq!(rows_affected, 1);
+    assert_eq!(QueryCache::global().stats().entries, 0);
+
+    let fresh = AutoIncrementModel::query()
+        .order_by("id", crate::query::Order::Asc)
+        .cache(Duration::from_secs(60))
+        .get()
+        .await
+        .expect("fresh cached query should succeed after destroy");
+    assert!(fresh.is_empty());
+
+    QueryCache::global().clear();
+    QueryCache::global().disable();
+    Database::reset_global();
+    TideConfig::reset();
 }
 
 #[cfg(feature = "translations")]
