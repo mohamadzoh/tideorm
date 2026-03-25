@@ -193,3 +193,30 @@ fn deserialize_impl_requires_missing_non_optional_fields() {
     assert!(normalized.contains("let__field_nickname=seq.next_element()?.unwrap_or_default();"));
     assert!(normalized.contains("let__field_name=seq.next_element()?.ok_or_else(||::serde::de::Error::invalid_length(1usize,&self))?;"));
 }
+
+#[test]
+fn aliased_timestamp_columns_drive_timestamp_codegen() {
+    let input: DeriveInput = parse_quote! {
+        struct AuditLog {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "created_at")]
+            inserted_on: chrono::DateTime<chrono::Utc>,
+            #[tideorm(column = "updated_at")]
+            modified_on: chrono::DateTime<chrono::Utc>,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let ctx = BuildContext::new(&model_input, vec![], vec![], &existing_derives)
+        .expect("build context should be constructed");
+    let generated =
+        generate_model_impl(&model_input, vec![], vec![], &existing_derives).to_string();
+    let normalized = normalize_tokens(&generated);
+
+    assert!(ctx.timestamps_enabled);
+    assert!(normalized.contains("inserted_on:ActiveValue::Set(::tideorm::chrono::Utc::now())"));
+    assert!(normalized.contains("modified_on:ActiveValue::Set(::tideorm::chrono::Utc::now())"));
+    assert!(normalized.contains("fnhas_timestamps()->bool{true}"));
+}

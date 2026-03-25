@@ -111,10 +111,12 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
             let is_option = is_option_type(field_ty);
             let is_auto_increment_primary_key = ctx.pk_auto_increment
                 && ctx.pk_idents.iter().any(|pk_ident| pk_ident == field_ident);
-            let is_relation_field = ctx
-                .relation_fields
-                .iter()
-                .any(|field| field.ident.as_ref().is_some_and(|ident| ident == field_ident));
+            let is_relation_field = ctx.relation_fields.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == field_ident)
+            });
 
             is_option || is_auto_increment_primary_key || is_relation_field
         })
@@ -210,18 +212,20 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                                 }
                             }
                         }
-                        Ok(#struct_name {
+                        let model = #struct_name {
                             #(#field_resolutions,)*
-                        })
+                        };
+                        Ok(model.with_relations())
                     }
                     fn visit_seq<A>(self, mut seq: A) -> ::std::result::Result<#struct_name, A::Error>
                     where
                         A: ::serde::de::SeqAccess<'de>,
                     {
                         #(#seq_field_resolutions)*
-                        Ok(#struct_name {
+                        let model = #struct_name {
                             #(#serde_field_names: #field_names_upper,)*
-                        })
+                        };
+                        Ok(model.with_relations())
                     }
                 }
 

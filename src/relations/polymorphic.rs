@@ -116,9 +116,9 @@ impl<Related: Model> MorphOne<Related> {
             && previous.parent_table.is_none()
             && previous.cached.is_some())
             || (self.morph_name == previous.morph_name
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk
-            && self.parent_table == previous.parent_table)
+                && self.local_key == previous.local_key
+                && self.parent_pk == previous.parent_pk
+                && self.parent_table == previous.parent_table)
         {
             self.cached = previous.cached.clone();
         }
@@ -231,9 +231,9 @@ impl<Related: Model> MorphMany<Related> {
             && previous.parent_table.is_none()
             && previous.cached.is_some())
             || (self.morph_name == previous.morph_name
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk
-            && self.parent_table == previous.parent_table)
+                && self.local_key == previous.local_key
+                && self.parent_pk == previous.parent_pk
+                && self.parent_table == previous.parent_table)
         {
             self.cached = previous.cached.clone();
         }

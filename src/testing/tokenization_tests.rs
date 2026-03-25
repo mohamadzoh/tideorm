@@ -174,8 +174,14 @@ fn test_same_id_generates_different_tokens() {
     let token2 = default_encode("42", "User").unwrap();
 
     assert_ne!(token1, token2);
-    assert_eq!(default_decode(&token1, "User").unwrap(), Some("42".to_string()));
-    assert_eq!(default_decode(&token2, "User").unwrap(), Some("42".to_string()));
+    assert_eq!(
+        default_decode(&token1, "User").unwrap(),
+        Some("42".to_string())
+    );
+    assert_eq!(
+        default_decode(&token2, "User").unwrap(),
+        Some("42".to_string())
+    );
 }
 
 #[test]
@@ -219,7 +225,10 @@ fn test_token_config_setters_overwrite_previous_values() {
 
     let token = TokenConfig::encode("7", "User").unwrap();
     assert_eq!(token, "two-7");
-    assert_eq!(TokenConfig::decode(&token, "User").unwrap(), Some("7".to_string()));
+    assert_eq!(
+        TokenConfig::decode(&token, "User").unwrap(),
+        Some("7".to_string())
+    );
 }
 
 #[test]
@@ -265,9 +274,7 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
             .send(())
             .expect("worker should report that token state is configured");
 
-        check_rx
-            .recv()
-            .expect("worker should receive reset signal");
+        check_rx.recv().expect("worker should receive reset signal");
 
         result_tx
             .send((

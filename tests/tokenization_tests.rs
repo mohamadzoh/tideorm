@@ -70,7 +70,13 @@ mod unit_tests {
         for (id, model) in test_cases {
             let token = default_encode(id, model).unwrap();
             let decoded = default_decode(&token, model).unwrap();
-            assert_eq!(decoded, Some(id.to_string()), "Failed for id={}, model={}", id, model);
+            assert_eq!(
+                decoded,
+                Some(id.to_string()),
+                "Failed for id={}, model={}",
+                id,
+                model
+            );
         }
     }
 
@@ -114,9 +120,18 @@ mod unit_tests {
         assert_ne!(product_token, order_token);
 
         // But each decodes correctly with its own model
-        assert_eq!(default_decode(&user_token, "User").unwrap(), Some(id.to_string()));
-        assert_eq!(default_decode(&product_token, "Product").unwrap(), Some(id.to_string()));
-        assert_eq!(default_decode(&order_token, "Order").unwrap(), Some(id.to_string()));
+        assert_eq!(
+            default_decode(&user_token, "User").unwrap(),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            default_decode(&product_token, "Product").unwrap(),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            default_decode(&order_token, "Order").unwrap(),
+            Some(id.to_string())
+        );
     }
 
     #[test]
@@ -198,9 +213,18 @@ mod unit_tests {
         assert_ne!(token2, token3);
         assert_ne!(token1, token3);
 
-        assert_eq!(default_decode(&token1, model).unwrap(), Some(id.to_string()));
-        assert_eq!(default_decode(&token2, model).unwrap(), Some(id.to_string()));
-        assert_eq!(default_decode(&token3, model).unwrap(), Some(id.to_string()));
+        assert_eq!(
+            default_decode(&token1, model).unwrap(),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            default_decode(&token2, model).unwrap(),
+            Some(id.to_string())
+        );
+        assert_eq!(
+            default_decode(&token3, model).unwrap(),
+            Some(id.to_string())
+        );
     }
 
     #[test]
@@ -225,9 +249,19 @@ mod unit_tests {
         // = base64url(24 + (8-byte plaintext + 16-byte tag))
         // = base64url(48 bytes) = 64 chars
 
-        for id in ["0", "1", "100", "9223372036854775807", "-9223372036854775808"] {
+        for id in [
+            "0",
+            "1",
+            "100",
+            "9223372036854775807",
+            "-9223372036854775808",
+        ] {
             let token = default_encode(id, "User").unwrap();
-            assert!(token.len() >= 55, "Token should have a stable encrypted payload length floor, got {}", token.len());
+            assert!(
+                token.len() >= 55,
+                "Token should have a stable encrypted payload length floor, got {}",
+                token.len()
+            );
         }
     }
 
@@ -518,9 +552,7 @@ mod tokenizable_trait_tests {
     fn test_tokenizable_u64_primary_key_roundtrip() {
         init_test_env();
 
-        let model = U64KeyModel {
-            id: u64::MAX,
-        };
+        let model = U64KeyModel { id: u64::MAX };
 
         let token = model.tokenize().unwrap();
         let decoded = U64KeyModel::decode_token(&token).unwrap();
@@ -748,7 +780,12 @@ mod edge_cases {
         ] {
             let token = default_encode("42", name).unwrap();
             let decoded = default_decode(&token, name).unwrap();
-            assert_eq!(decoded, Some("42".to_string()), "Failed for model name: {}", name);
+            assert_eq!(
+                decoded,
+                Some("42".to_string()),
+                "Failed for model name: {}",
+                name
+            );
         }
     }
 
@@ -769,7 +806,12 @@ mod edge_cases {
         for id in boundary_ids {
             let token = default_encode(id, "Boundary").unwrap();
             let decoded = default_decode(&token, "Boundary").unwrap();
-            assert_eq!(decoded, Some(id.to_string()), "Failed for boundary ID: {}", id);
+            assert_eq!(
+                decoded,
+                Some(id.to_string()),
+                "Failed for boundary ID: {}",
+                id
+            );
         }
     }
 }

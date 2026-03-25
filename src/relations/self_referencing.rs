@@ -38,8 +38,8 @@ impl<E: Model> SelfRef<E> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.fk_value.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.fk_value == previous.fk_value)
+                && self.local_key == previous.local_key
+                && self.fk_value == previous.fk_value)
         {
             self.cached = previous.cached.clone();
         }
@@ -151,8 +151,8 @@ impl<E: Model> SelfRefMany<E> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.parent_pk.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk)
+                && self.local_key == previous.local_key
+                && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }

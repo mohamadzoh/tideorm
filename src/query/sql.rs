@@ -1974,7 +1974,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        let rows_affected = self.current_db()?
+        let rows_affected = self
+            .current_db()?
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
@@ -1997,7 +1998,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        let rows_affected = self.current_db()?
+        let rows_affected = self
+            .current_db()?
             .__execute_with_params(&sql, Vec::new())
             .await
             .map_err(|err| err.with_context(error_context))?;
@@ -2033,7 +2035,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        let rows_affected = self.current_db()?
+        let rows_affected = self
+            .current_db()?
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
@@ -2071,7 +2074,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        let rows_affected = self.current_db()?
+        let rows_affected = self
+            .current_db()?
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
@@ -2095,7 +2099,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.log_query(&sql);
         let error_context = self.build_query_error_context(Some(sql.clone()));
-        let rows_affected = self.current_db()?
+        let rows_affected = self
+            .current_db()?
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;

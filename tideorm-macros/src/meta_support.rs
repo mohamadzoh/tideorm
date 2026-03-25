@@ -1,4 +1,6 @@
-use syn::{Attribute, Meta};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::{Attribute, Meta, Path, Token};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExistingDerives {
@@ -16,25 +18,26 @@ pub(crate) fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
             continue;
         }
         if let Meta::List(list) = &attr.meta {
-            let tokens = list.tokens.to_string();
-            existing.has_debug |= tokens.contains("Debug");
-            existing.has_clone |= tokens.contains("Clone");
-            existing.has_default |= tokens.contains("Default");
-            existing.has_serialize |= tokens.contains("Serialize");
-            if tokens.contains("Deserialize") {
-                existing.has_deserialize = true;
-            }
-            for part in tokens.split(',').map(str::trim) {
-                if part == "Serialize"
-                    || part.ends_with("::Serialize")
-                    || part.starts_with("serde::Serialize")
-                {
-                    existing.has_serialize = true;
+            if let Ok(paths) =
+                Punctuated::<Path, Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            {
+                for path in paths {
+                    existing.has_debug |= path_matches(&path, "Debug");
+                    existing.has_clone |= path_matches(&path, "Clone");
+                    existing.has_default |= path_matches(&path, "Default");
+                    existing.has_serialize |= path_matches(&path, "Serialize");
+                    existing.has_deserialize |= path_matches(&path, "Deserialize");
                 }
             }
         }
     }
     existing
+}
+
+fn path_matches(path: &Path, expected: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == expected)
 }
 
 pub(crate) fn pluralize(word: &str) -> String {
@@ -110,6 +113,37 @@ mod tests {
 
         assert!(existing.has_serialize);
         assert!(!existing.has_deserialize);
+    }
+
+    #[test]
+    fn detect_existing_derives_does_not_match_substrings() {
+        let item: syn::DeriveInput = syn::parse_quote! {
+            #[derive(MyDebugHelper, Cloneable, Defaultish, SerializeWith, DeserializeSeed)]
+            struct Example;
+        };
+
+        let existing = detect_existing_derives(&item.attrs);
+
+        assert!(!existing.has_debug);
+        assert!(!existing.has_clone);
+        assert!(!existing.has_default);
+        assert!(!existing.has_serialize);
+        assert!(!existing.has_deserialize);
+    }
+
+    #[test]
+    fn detect_existing_derives_finds_path_qualified_standard_derives() {
+        let item: syn::DeriveInput = syn::parse_quote! {
+            #[derive(core::fmt::Debug, std::clone::Clone, ::serde::Deserialize, serde::Serialize)]
+            struct Example;
+        };
+
+        let existing = detect_existing_derives(&item.attrs);
+
+        assert!(existing.has_debug);
+        assert!(existing.has_clone);
+        assert!(existing.has_serialize);
+        assert!(existing.has_deserialize);
     }
 
     #[test]

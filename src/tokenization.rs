@@ -317,14 +317,12 @@ impl TokenConfig {
 
     /// Get the global token encoder (or default)
     pub fn get_encoder() -> TokenEncoder {
-        (*global_token_encoder_state().read())
-            .unwrap_or(default_encode)
+        (*global_token_encoder_state().read()).unwrap_or(default_encode)
     }
 
     /// Get the global token decoder (or default)
     pub fn get_decoder() -> TokenDecoder {
-        (*global_token_decoder_state().read())
-            .unwrap_or(default_decode)
+        (*global_token_decoder_state().read()).unwrap_or(default_decode)
     }
 
     /// Encode a record ID payload using the global encoder
@@ -579,8 +577,9 @@ pub trait Tokenizable: Sized + Send + Sync {
         let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
         let primary_key = self.token_primary_key();
-        let payload = serde_json::to_string(&primary_key)
-            .map_err(|error| Error::tokenization(format!("Failed to serialize token primary key: {error}")))?;
+        let payload = serde_json::to_string(&primary_key).map_err(|error| {
+            Error::tokenization(format!("Failed to serialize token primary key: {error}"))
+        })?;
         encoder(&payload, Self::token_model_name())
     }
 
@@ -624,8 +623,9 @@ pub trait Tokenizable: Sized + Send + Sync {
 
         let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
-        let payload = serde_json::to_string(&id)
-            .map_err(|error| Error::tokenization(format!("Failed to serialize token primary key: {error}")))?;
+        let payload = serde_json::to_string(&id).map_err(|error| {
+            Error::tokenization(format!("Failed to serialize token primary key: {error}"))
+        })?;
         encoder(&payload, Self::token_model_name())
     }
 

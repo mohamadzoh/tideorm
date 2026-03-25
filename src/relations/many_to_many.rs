@@ -69,11 +69,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.parent_pk.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.related_key == previous.related_key
-            && self.local_key == previous.local_key
-            && self.related_local_key == previous.related_local_key
-            && self.pivot_table == previous.pivot_table
-            && self.parent_pk == previous.parent_pk)
+                && self.related_key == previous.related_key
+                && self.local_key == previous.local_key
+                && self.related_local_key == previous.related_local_key
+                && self.pivot_table == previous.pivot_table
+                && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }

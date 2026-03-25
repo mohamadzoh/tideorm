@@ -550,21 +550,18 @@ fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()> {
 }
 
 fn has_timestamp_pair(fields: &[ModelField]) -> bool {
-    let has_created_at = fields.iter().any(|field| {
-        field
-            .ident
-            .as_ref()
-            .map(|ident| ident == "created_at")
-            .unwrap_or(false)
-    });
-    let has_updated_at = fields.iter().any(|field| {
-        field
-            .ident
-            .as_ref()
-            .map(|ident| ident == "updated_at")
-            .unwrap_or(false)
-    });
+    let has_created_at = fields
+        .iter()
+        .any(|field| matches_timestamp_field(field, "created_at"));
+    let has_updated_at = fields
+        .iter()
+        .any(|field| matches_timestamp_field(field, "updated_at"));
     has_created_at && has_updated_at
+}
+
+fn matches_timestamp_field(field: &ModelField, expected: &str) -> bool {
+    field.ident.as_ref().is_some_and(|ident| ident == expected)
+        || BuildContext::column_name(field) == expected
 }
 
 fn build_sync_column_attrs(fields: &[ModelField]) -> Vec<TokenStream2> {
@@ -596,10 +593,11 @@ fn build_insert_active_model_setters(fields: &[ModelField]) -> Vec<TokenStream2>
         .iter()
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
-            let field_name = ident.to_string();
             if field.primary_key && field.auto_increment {
                 quote!(#ident: ActiveValue::NotSet)
-            } else if field_name == "created_at" || field_name == "updated_at" {
+            } else if matches_timestamp_field(field, "created_at")
+                || matches_timestamp_field(field, "updated_at")
+            {
                 quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
             } else {
                 quote!(#ident: ActiveValue::Set(self.#ident))
@@ -613,10 +611,9 @@ fn build_update_active_model_setters(fields: &[ModelField]) -> Vec<TokenStream2>
         .iter()
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
-            let field_name = ident.to_string();
             if field.primary_key {
                 quote!(#ident: ActiveValue::Unchanged(self.#ident))
-            } else if field_name == "updated_at" {
+            } else if matches_timestamp_field(field, "updated_at") {
                 quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
             } else {
                 quote!(#ident: ActiveValue::Set(self.#ident))

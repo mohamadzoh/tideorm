@@ -7,9 +7,9 @@ use crate::model::Model as _;
 use serde_json::json;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Mutex, OnceLock};
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use super::HasOne;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::sync::{Mutex, OnceLock};
 
 #[tideorm::model(table = "relation_test_nodes")]
 struct RelationTestNode {
@@ -174,7 +174,10 @@ fn eager_query_builder_accepts_typed_columns() {
         .where_in(RelationTestNode::columns.id, vec![1, 2])
         .order_by(RelationTestNode::columns.slug, crate::query::Order::Asc);
 
-    assert_eq!(builder.get_relation_tree().roots(), vec!["owner".to_string()]);
+    assert_eq!(
+        builder.get_relation_tree().roots(),
+        vec!["owner".to_string()]
+    );
 }
 
 #[test]
@@ -312,7 +315,10 @@ fn direct_relations_deserialize_cached_payloads() {
         "parent_slug": null
     }))
     .expect("belongs_to should deserialize cached payload");
-    assert_eq!(belongs_to.get_cached().map(|node| node.slug.as_str()), Some("parent"));
+    assert_eq!(
+        belongs_to.get_cached().map(|node| node.slug.as_str()),
+        Some("parent")
+    );
 }
 
 #[test]
@@ -337,7 +343,10 @@ fn advanced_relations_deserialize_cached_payloads() {
         }
     ]))
     .expect("self_ref_many should deserialize cached payload");
-    assert_eq!(self_ref_many.get_cached().map(|employees| employees.len()), Some(1));
+    assert_eq!(
+        self_ref_many.get_cached().map(|employees| employees.len()),
+        Some(1)
+    );
 
     let morph_one: MorphOne<RelationTestImage> = serde_json::from_value(json!({
         "id": 9,
@@ -364,7 +373,10 @@ fn advanced_relations_deserialize_cached_payloads() {
             { "id": 5, "slug": "related", "parent_slug": null }
         ]))
         .expect("has_many_through should deserialize cached payload");
-    assert_eq!(has_many_through.get_cached().map(|nodes| nodes.len()), Some(1));
+    assert_eq!(
+        has_many_through.get_cached().map(|nodes| nodes.len()),
+        Some(1)
+    );
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -401,7 +413,10 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
 
     db.__execute_with_params(
         "INSERT INTO relation_test_users (id, name) VALUES (?, ?)",
-        vec![Value::BigInt(Some(1)), Value::String(Some("Fresh User".to_string()))],
+        vec![
+            Value::BigInt(Some(1)),
+            Value::String(Some("Fresh User".to_string())),
+        ],
     )
     .await
     .expect("inserting user should succeed");
@@ -429,20 +444,23 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
     .await
     .expect("inserting posts should succeed");
 
-    let mut has_one = HasOne::<DirectRelationProfile>::new("user_id", "id").with_parent_pk(serde_json::json!(1));
+    let mut has_one =
+        HasOne::<DirectRelationProfile>::new("user_id", "id").with_parent_pk(serde_json::json!(1));
     has_one.set_cached(Some(DirectRelationProfile {
         id: 10,
         user_id: 1,
         name: "Stale Profile".to_string(),
     }));
 
-    let mut belongs_to = BelongsTo::<DirectRelationUser>::new("user_id", "id").with_fk_value(serde_json::json!(1));
+    let mut belongs_to =
+        BelongsTo::<DirectRelationUser>::new("user_id", "id").with_fk_value(serde_json::json!(1));
     belongs_to.set_cached(Some(DirectRelationUser {
         id: 1,
         name: "Stale User".to_string(),
     }));
 
-    let mut has_many = HasMany::<DirectRelationPost>::new("user_id", "id").with_parent_pk(serde_json::json!(1));
+    let mut has_many =
+        HasMany::<DirectRelationPost>::new("user_id", "id").with_parent_pk(serde_json::json!(1));
     has_many.set_cached(vec![DirectRelationPost {
         id: 999,
         user_id: 1,

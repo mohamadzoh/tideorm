@@ -41,13 +41,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
         }
     }
 
-    pub fn set(
-        mut self,
-        field: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Value(value.into()));
+    pub fn set(mut self, field: impl IntoColumnName, value: impl Into<serde_json::Value>) -> Self {
+        self.updates.insert(
+            field.column_name().to_string(),
+            UpdateValue::Value(value.into()),
+        );
         self
     }
 
@@ -103,8 +101,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
         field: impl IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::ArrayAppend(value.into()));
+        self.updates.insert(
+            field.column_name().to_string(),
+            UpdateValue::ArrayAppend(value.into()),
+        );
         self
     }
 
@@ -113,8 +113,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
         field: impl IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::ArrayRemove(value.into()));
+        self.updates.insert(
+            field.column_name().to_string(),
+            UpdateValue::ArrayRemove(value.into()),
+        );
         self
     }
 
@@ -136,8 +138,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
         field: impl IntoColumnName,
         default: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Coalesce(default.into()));
+        self.updates.insert(
+            field.column_name().to_string(),
+            UpdateValue::Coalesce(default.into()),
+        );
         self
     }
 

@@ -51,8 +51,8 @@ impl<E: Model> HasOne<E> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.parent_pk.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk)
+                && self.local_key == previous.local_key
+                && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }
@@ -187,8 +187,8 @@ impl<E: Model> HasMany<E> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.parent_pk.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk)
+                && self.local_key == previous.local_key
+                && self.parent_pk == previous.parent_pk)
         {
             self.cached = previous.cached.clone();
         }
@@ -338,8 +338,8 @@ impl<E: Model> BelongsTo<E> {
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if (previous.fk_value.is_none() && previous.cached.is_some())
             || (self.foreign_key == previous.foreign_key
-            && self.owner_key == previous.owner_key
-            && self.fk_value == previous.fk_value)
+                && self.owner_key == previous.owner_key
+                && self.fk_value == previous.fk_value)
         {
             self.cached = previous.cached.clone();
         }
