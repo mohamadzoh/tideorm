@@ -21,6 +21,7 @@
 //! hooks you need.
 
 use crate::error::Result;
+use crate::validation::Validate;
 
 /// Trait for model lifecycle callbacks
 ///
@@ -144,8 +145,12 @@ pub trait Callbacks: Sized {
 /// You typically don't need to use this directly.
 pub trait CallbackRunner: Callbacks {
     /// Run the full save (create) callback chain
-    fn run_create_callbacks(&mut self) -> Result<()> {
+    fn run_create_callbacks(&mut self) -> Result<()>
+    where
+        Self: Validate,
+    {
         self.before_validation()?;
+        Validate::validate(self).map_err(crate::Error::from)?;
         self.after_validation()?;
         self.before_save()?;
         self.before_create()?;
@@ -160,8 +165,12 @@ pub trait CallbackRunner: Callbacks {
     }
 
     /// Run the full update callback chain
-    fn run_update_callbacks(&mut self) -> Result<()> {
+    fn run_update_callbacks(&mut self) -> Result<()>
+    where
+        Self: Validate,
+    {
         self.before_validation()?;
+        Validate::validate(self).map_err(crate::Error::from)?;
         self.after_validation()?;
         self.before_save()?;
         self.before_update()?;
@@ -196,7 +205,7 @@ pub trait BeforeCreateDispatch<T> {
     fn run_before_create(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> BeforeCreateDispatch<T> for &mut T {
+impl<T: CallbackRunner + Validate> BeforeCreateDispatch<T> for &mut T {
     fn run_before_create(self) -> Result<()> {
         self.run_create_callbacks()
     }
@@ -298,7 +307,7 @@ pub trait BeforeUpdateDispatch<T> {
     fn run_before_update(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> BeforeUpdateDispatch<T> for &mut T {
+impl<T: CallbackRunner + Validate> BeforeUpdateDispatch<T> for &mut T {
     fn run_before_update(self) -> Result<()> {
         self.run_update_callbacks()
     }

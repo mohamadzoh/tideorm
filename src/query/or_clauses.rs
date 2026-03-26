@@ -120,6 +120,60 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    pub fn or_where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self.or_groups.push(group);
+        self
+    }
+
+    pub fn or_where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self.or_groups.push(group);
+        self
+    }
+
+    pub fn or_where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        let mut group = OrGroup::new();
+        group.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self.or_groups.push(group);
+        self
+    }
+
     pub fn or_where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -252,6 +306,30 @@ impl<M: Model> QueryBuilder<M> {
         OrBranchBuilder::new(self).or_where_like(column, pattern)
     }
 
+    pub fn begin_or_where_contains(
+        self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_contains(column, value)
+    }
+
+    pub fn begin_or_where_starts_with(
+        self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_starts_with(column, value)
+    }
+
+    pub fn begin_or_where_ends_with(
+        self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> OrBranchBuilder<M> {
+        OrBranchBuilder::new(self).or_where_ends_with(column, value)
+    }
+
     pub fn begin_or_where_in<V: Into<serde_json::Value>>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -313,6 +391,7 @@ impl<M: Model> QueryBuilder<M> {
             crate::columns::ColumnOperator::Lt => Operator::Lt,
             crate::columns::ColumnOperator::Lte => Operator::Lte,
             crate::columns::ColumnOperator::Like => Operator::Like,
+            crate::columns::ColumnOperator::LikeEscaped => Operator::LikeEscaped,
             crate::columns::ColumnOperator::NotLike => Operator::NotLike,
             crate::columns::ColumnOperator::In => Operator::In,
             crate::columns::ColumnOperator::NotIn => Operator::NotIn,

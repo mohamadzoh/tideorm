@@ -1,4 +1,5 @@
 use crate::config::DatabaseType;
+use crate::columns::ColumnLike;
 use crate::model::Model as ModelTrait;
 use crate::query::OrGroup;
 
@@ -56,6 +57,23 @@ async fn setup_query_mutation_cache_test_db() -> Database {
     .expect("creating soft delete mutation guard schema should succeed");
 
     db
+}
+
+#[test]
+fn query_fragment_preserves_soft_delete_scope_semantics() {
+    let with_trashed = SoftDeleteMutationGuardUser::query().with_trashed();
+    let fragment = with_trashed.consolidate();
+
+    assert!(!fragment.is_empty());
+
+    let rebuilt = SoftDeleteMutationGuardUser::query()
+        .only_trashed()
+        .apply(&fragment)
+        .build_sql_preview();
+
+    assert_eq!(rebuilt, with_trashed.build_sql_preview());
+    assert!(!rebuilt.contains("deleted_at\" IS NOT NULL"), "sql: {rebuilt}");
+    assert!(!rebuilt.contains("deleted_at\" IS NULL"), "sql: {rebuilt}");
 }
 
 #[test]
@@ -243,6 +261,17 @@ fn sql_preview_is_labeled_as_non_executable() {
     assert!(preview.starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n"));
     assert!(preview.contains("query_count_guard_users"));
     assert!(preview.contains("WHERE \"name\" = 'alice'"));
+}
+
+#[test]
+fn sql_preview_marks_escaped_literal_like_helpers() {
+    let name = crate::columns::Column::<String>::new("name");
+    let preview = QueryCountGuardUser::query()
+        .where_col(name.starts_with(r"100%_\done"))
+        .build_sql_preview();
+
+    assert!(preview.contains("LIKE '100\\%\\_\\\\done%'"));
+    assert!(preview.contains("ESCAPE '\\\\'"));
 }
 
 #[test]

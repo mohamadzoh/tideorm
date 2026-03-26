@@ -58,6 +58,7 @@ enum ConditionSpec<'a> {
     },
     Pattern {
         negated: bool,
+        escaped: bool,
         value: &'a serde_json::Value,
     },
     List {
@@ -100,6 +101,7 @@ impl<M: Model> QueryBuilder<M> {
             Operator::Lt => "<",
             Operator::Lte => "<=",
             Operator::Like => "LIKE",
+            Operator::LikeEscaped => "LIKE",
             Operator::NotLike => "NOT LIKE",
             Operator::In => "IN",
             Operator::NotIn => "NOT IN",
@@ -454,10 +456,19 @@ impl<M: Model> QueryBuilder<M> {
             }),
             (Operator::Like, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
                 negated: false,
+                escaped: false,
                 value,
             }),
+            (Operator::LikeEscaped, ConditionValue::Single(value)) => {
+                Some(ConditionSpec::Pattern {
+                    negated: false,
+                    escaped: true,
+                    value,
+                })
+            }
             (Operator::NotLike, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
                 negated: true,
+                escaped: false,
                 value,
             }),
             (Operator::In, ConditionValue::List(values)) => Some(ConditionSpec::List {
@@ -646,24 +657,44 @@ impl<M: Model> QueryBuilder<M> {
     fn build_pattern_expression(
         &self,
         column_expr: SimpleExpr,
+        column_sql: &str,
         negated: bool,
+        escaped: bool,
         value: &serde_json::Value,
     ) -> SimpleExpr {
         let pattern = Self::pattern_value(value);
-        if negated {
+        if escaped {
+            let operator = if negated { "NOT LIKE" } else { "LIKE" };
+            Expr::cust(format!(
+                "{} {} '{}' ESCAPE '\\\\'",
+                column_sql,
+                operator,
+                pattern.replace("'", "''")
+            ))
+        } else if negated {
             column_expr.not_like(pattern)
         } else {
             column_expr.like(pattern)
         }
     }
 
-    fn build_pattern_sql(&self, column: &str, negated: bool, value: &serde_json::Value) -> String {
-        format!(
+    fn build_pattern_sql(
+        &self,
+        column: &str,
+        negated: bool,
+        escaped: bool,
+        value: &serde_json::Value,
+    ) -> String {
+        let mut sql = format!(
             "{} {}LIKE {}",
             column,
             if negated { "NOT " } else { "" },
             self.format_preview_value(value)
-        )
+        );
+        if escaped {
+            sql.push_str(" ESCAPE '\\\\'");
+        }
+        sql
     }
 
     fn build_list_expression(
@@ -1088,9 +1119,17 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Compare { operator, value } => {
                 Some(self.build_compare_expression(column_expr, operator, value))
             }
-            ConditionSpec::Pattern { negated, value } => {
-                Some(self.build_pattern_expression(column_expr, negated, value))
-            }
+            ConditionSpec::Pattern {
+                negated,
+                escaped,
+                value,
+            } => Some(self.build_pattern_expression(
+                column_expr,
+                &column_sql,
+                negated,
+                escaped,
+                value,
+            )),
             ConditionSpec::List { operator, values } => Some(self.build_list_expression(
                 db_type,
                 column_expr,
@@ -1368,9 +1407,11 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Compare { operator, value } => {
                 Some(self.build_compare_sql(&column, operator, value))
             }
-            ConditionSpec::Pattern { negated, value } => {
-                Some(self.build_pattern_sql(&column, negated, value))
-            }
+            ConditionSpec::Pattern {
+                negated,
+                escaped,
+                value,
+            } => Some(self.build_pattern_sql(&column, negated, escaped, value)),
             ConditionSpec::List { operator, values } => {
                 Some(self.build_list_sql(db_type, &column, operator, values))
             }

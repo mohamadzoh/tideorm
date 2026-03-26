@@ -159,6 +159,11 @@ mod tests {
         assert_eq!(pluralize("knife"), "knives");
         assert_eq!(pluralize("profile"), "profiles");
         assert_eq!(pluralize("roof"), "roofs");
+        assert_eq!(pluralize("belief"), "beliefs");
+        assert_eq!(pluralize("chef"), "chefs");
+        assert_eq!(pluralize("cliff"), "cliffs");
+        assert_eq!(pluralize("proof"), "proofs");
+        assert_eq!(pluralize("staff"), "staffs");
     }
 
     #[test]
@@ -168,5 +173,6 @@ mod tests {
         assert_eq!(pluralize("bus"), "buses");
         assert_eq!(pluralize("status"), "statuses");
         assert_eq!(pluralize("topaz"), "topazes");
+        assert_eq!(pluralize("index"), "indexes");
     }
 }

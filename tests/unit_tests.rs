@@ -1325,6 +1325,7 @@ mod relations_tests {
 #[cfg(test)]
 mod callbacks_tests {
     use tideorm::callbacks::{CallbackRunner, Callbacks};
+    use tideorm::validation::{Validate, ValidationErrors};
 
     #[test]
     fn test_callbacks_trait_exists() {
@@ -1350,6 +1351,12 @@ mod callbacks_tests {
         struct TestType;
 
         impl Callbacks for TestType {}
+
+        impl Validate for TestType {
+            fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+                Ok(())
+            }
+        }
 
         let mut model = TestType;
         assert!(model.run_create_callbacks().is_ok());
@@ -2300,10 +2307,17 @@ mod config_edge_cases {
 #[cfg(test)]
 mod callback_edge_cases {
     use tideorm::callbacks::{CallbackRunner, Callbacks};
+    use tideorm::validation::{Validate, ValidationErrors};
 
     struct TestType;
 
     impl Callbacks for TestType {}
+
+    impl Validate for TestType {
+        fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_multiple_callback_invocations() {

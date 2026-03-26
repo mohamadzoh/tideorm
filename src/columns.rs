@@ -105,6 +105,8 @@ pub enum ColumnOperator {
     Lte,
     /// LIKE pattern match
     Like,
+    /// LIKE pattern match using an escaped literal pattern
+    LikeEscaped,
     /// NOT LIKE pattern match
     NotLike,
     /// IN list
@@ -130,6 +132,7 @@ impl ColumnOperator {
             Self::Lt => "<",
             Self::Lte => "<=",
             Self::Like => "LIKE",
+            Self::LikeEscaped => "LIKE",
             Self::NotLike => "NOT LIKE",
             Self::In => "IN",
             Self::NotIn => "NOT IN",
@@ -138,6 +141,20 @@ impl ColumnOperator {
             Self::Between => "BETWEEN",
         }
     }
+}
+
+pub(crate) fn escape_like_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 // =============================================================================
@@ -425,24 +442,24 @@ impl ColumnLike for Column<String> {
     fn contains(self, substr: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("%{}%", substr)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("%{}%", escape_like_literal(substr))),
         }
     }
 
     fn starts_with(self, prefix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("{}%", prefix)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("{}%", escape_like_literal(prefix))),
         }
     }
 
     fn ends_with(self, suffix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("%{}", suffix)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("%{}", escape_like_literal(suffix))),
         }
     }
 }
@@ -522,24 +539,24 @@ impl ColumnLike for Column<Option<String>> {
     fn contains(self, substr: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("%{}%", substr)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("%{}%", escape_like_literal(substr))),
         }
     }
 
     fn starts_with(self, prefix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("{}%", prefix)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("{}%", escape_like_literal(prefix))),
         }
     }
 
     fn ends_with(self, suffix: &str) -> ColumnCondition {
         ColumnCondition {
             column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(format!("%{}", suffix)),
+            operator: ColumnOperator::LikeEscaped,
+            value: serde_json::json!(format!("%{}", escape_like_literal(suffix))),
         }
     }
 }

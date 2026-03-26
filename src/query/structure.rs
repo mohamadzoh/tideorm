@@ -326,10 +326,20 @@ impl CTE {
 pub struct QueryFragment<M: Model> {
     pub(crate) _marker: PhantomData<M>,
     pub conditions: Vec<WhereCondition>,
+    pub or_groups: Vec<super::OrGroup>,
     pub order_by: Vec<(String, Order)>,
+    pub limit_value: Option<u64>,
+    pub offset_value: Option<u64>,
+    pub select_columns: Option<Vec<String>>,
+    pub raw_select_expressions: Vec<String>,
     pub group_by: Vec<String>,
     pub having_conditions: Vec<String>,
     pub joins: Vec<JoinClause>,
+    pub unions: Vec<UnionClause>,
+    pub window_functions: Vec<WindowFunction>,
+    pub ctes: Vec<CTE>,
+    pub cache_options: Option<crate::cache::CacheOptions>,
+    pub cache_key: Option<String>,
     pub invalid_query_reason: Option<String>,
     pub include_trashed: bool,
     pub only_trashed: bool,
@@ -346,10 +356,20 @@ impl<M: Model> QueryFragment<M> {
         Self {
             _marker: PhantomData,
             conditions: Vec::new(),
+            or_groups: Vec::new(),
             order_by: Vec::new(),
+            limit_value: None,
+            offset_value: None,
+            select_columns: None,
+            raw_select_expressions: Vec::new(),
             group_by: Vec::new(),
             having_conditions: Vec::new(),
             joins: Vec::new(),
+            unions: Vec::new(),
+            window_functions: Vec::new(),
+            ctes: Vec::new(),
+            cache_options: None,
+            cache_key: None,
             invalid_query_reason: None,
             include_trashed: false,
             only_trashed: false,
@@ -358,15 +378,32 @@ impl<M: Model> QueryFragment<M> {
 
     pub fn is_empty(&self) -> bool {
         self.conditions.is_empty()
+            && self.or_groups.is_empty()
             && self.order_by.is_empty()
+            && self.limit_value.is_none()
+            && self.offset_value.is_none()
+            && self.select_columns.is_none()
+            && self.raw_select_expressions.is_empty()
             && self.group_by.is_empty()
             && self.having_conditions.is_empty()
             && self.joins.is_empty()
+            && self.unions.is_empty()
+            && self.window_functions.is_empty()
+            && self.ctes.is_empty()
+            && self.cache_options.is_none()
+            && self.cache_key.is_none()
             && self.invalid_query_reason.is_none()
+                && !self.include_trashed
+                && !self.only_trashed
     }
 
     pub fn condition_count(&self) -> usize {
         self.conditions.len()
+            + self
+                .or_groups
+                .iter()
+                .map(super::OrGroup::condition_count)
+                .sum::<usize>()
     }
 }
 

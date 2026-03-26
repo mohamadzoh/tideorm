@@ -1,4 +1,5 @@
 use super::*;
+use crate::validation::{Validate, ValidationErrors};
 use std::cell::RefCell;
 
 struct PlainModel;
@@ -16,6 +17,60 @@ impl HookedModel {
 
     fn events(&self) -> Vec<&'static str> {
         self.events.borrow().clone()
+    }
+}
+
+impl Validate for HookedModel {
+    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+        self.events.borrow_mut().push("validate");
+        Ok(())
+    }
+}
+
+struct InvalidHookedModel {
+    events: RefCell<Vec<&'static str>>,
+}
+
+impl InvalidHookedModel {
+    fn new() -> Self {
+        Self {
+            events: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.events.borrow().clone()
+    }
+}
+
+impl Callbacks for InvalidHookedModel {
+    fn before_validation(&mut self) -> Result<()> {
+        self.events.borrow_mut().push("before_validation");
+        Ok(())
+    }
+
+    fn after_validation(&self) -> Result<()> {
+        self.events.borrow_mut().push("after_validation");
+        Ok(())
+    }
+
+    fn before_save(&mut self) -> Result<()> {
+        self.events.borrow_mut().push("before_save");
+        Ok(())
+    }
+
+    fn before_create(&mut self) -> Result<()> {
+        self.events.borrow_mut().push("before_create");
+        Ok(())
+    }
+}
+
+impl Validate for InvalidHookedModel {
+    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
+        self.events.borrow_mut().push("validate");
+        let mut errors = ValidationErrors::new();
+        errors.add("name", "is invalid");
+        Err(errors)
     }
 }
 
@@ -93,6 +148,7 @@ fn callback_dispatch_runs_create_chain_in_order() {
         model.events(),
         vec![
             "before_validation",
+            "validate",
             "after_validation",
             "before_save",
             "before_create",
@@ -114,6 +170,7 @@ fn callback_dispatch_runs_update_and_delete_chains() {
         model.events(),
         vec![
             "before_validation",
+            "validate",
             "after_validation",
             "before_save",
             "before_update",
@@ -123,4 +180,14 @@ fn callback_dispatch_runs_update_and_delete_chains() {
             "after_delete"
         ]
     );
+}
+
+#[test]
+fn callback_dispatch_stops_create_chain_when_validation_fails() {
+    let mut model = InvalidHookedModel::new();
+
+    let err = (&mut model).run_before_create().unwrap_err();
+
+    assert!(matches!(err, crate::Error::Validation { .. }));
+    assert_eq!(model.events(), vec!["before_validation", "validate"]);
 }

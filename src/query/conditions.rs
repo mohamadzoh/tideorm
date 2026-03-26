@@ -130,6 +130,57 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    /// Add a where LIKE '%value%' condition using literal matching semantics.
+    pub fn where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    /// Add a where LIKE 'value%' condition using literal matching semantics.
+    pub fn where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    /// Add a where LIKE '%value' condition using literal matching semantics.
+    pub fn where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
     /// Add a where NOT LIKE condition
     pub fn where_not_like(
         mut self,

@@ -134,9 +134,14 @@ impl BuildContext {
             .iter()
             .filter_map(|field| {
                 let field_name = field.ident.as_ref()?.to_string();
-                let rules = parse_validation_attributes(&field_name, &field.attrs);
-                (!rules.is_empty()).then_some((field_name, rules))
+                Some((field_name, field))
             })
+            .map(|(field_name, field)| {
+                parse_validation_attributes(&field_name, field).map(|rules| (field_name, rules))
+            })
+            .collect::<syn::Result<Vec<_>>>()?
+            .into_iter()
+            .filter(|(_, rules)| !rules.is_empty())
             .collect();
 
         let pk_fields: Vec<_> = db_fields.iter().filter(|field| field.primary_key).collect();

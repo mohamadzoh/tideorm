@@ -306,6 +306,42 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
+    pub fn where_contains(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.column_name().to_string(),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_starts_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.column_name().to_string(),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_ends_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: column.column_name().to_string(),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
     pub fn or_where_eq(
         mut self,
         column: impl IntoColumnName,
@@ -389,6 +425,42 @@ impl<M: Model> BatchUpdateBuilder<M> {
             value: crate::query::ConditionValue::Single(serde_json::Value::String(
                 pattern.to_string(),
             )),
+        });
+        self
+    }
+
+    pub fn or_where_contains(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column.column_name()),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn or_where_starts_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column.column_name()),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn or_where_ends_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
+        self.conditions.push(crate::query::WhereCondition {
+            column: format!("__OR__{}", column.column_name()),
+            operator: crate::query::Operator::LikeEscaped,
+            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
         });
         self
     }

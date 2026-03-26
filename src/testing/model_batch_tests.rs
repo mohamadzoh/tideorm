@@ -129,6 +129,35 @@ fn batch_update_builder_accepts_typed_filter_columns() {
     assert_eq!(builder.conditions[1].column, "__OR__name");
 }
 
+#[test]
+fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
+    let builder = BatchUpdateGuardUser::update_all()
+        .where_contains("name", r"100%_\done")
+        .or_where_starts_with("name", r"lead%_")
+        .or_where_ends_with("name", r"tail%_");
+
+    assert_eq!(builder.conditions.len(), 3);
+    assert!(matches!(
+        builder.conditions[0].operator,
+        crate::query::Operator::LikeEscaped
+    ));
+    assert!(matches!(
+        &builder.conditions[0].value,
+        crate::query::ConditionValue::Single(serde_json::Value::String(value))
+            if value == r"%100\%\_\\done%"
+    ));
+    assert!(matches!(
+        &builder.conditions[1].value,
+        crate::query::ConditionValue::Single(serde_json::Value::String(value))
+            if value == r"lead\%\_%"
+    ));
+    assert!(matches!(
+        &builder.conditions[2].value,
+        crate::query::ConditionValue::Single(serde_json::Value::String(value))
+            if value == r"%tail\%\_"
+    ));
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_invalidates_cached_queries() {

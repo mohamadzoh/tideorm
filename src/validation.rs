@@ -461,21 +461,21 @@ impl Validator {
             }
             ValidationRule::MinLength(min) => {
                 if let Some(s) = value.as_str_value() {
-                    if s.len() < *min {
+                    if s.chars().count() < *min {
                         return Some(rule.message(field));
                     }
                 }
             }
             ValidationRule::MaxLength(max) => {
                 if let Some(s) = value.as_str_value() {
-                    if s.len() > *max {
+                    if s.chars().count() > *max {
                         return Some(rule.message(field));
                     }
                 }
             }
             ValidationRule::Length(len) => {
                 if let Some(s) = value.as_str_value() {
-                    if s.len() != *len {
+                    if s.chars().count() != *len {
                         return Some(rule.message(field));
                     }
                 }

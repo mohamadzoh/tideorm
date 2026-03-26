@@ -180,10 +180,20 @@ impl<M: Model> QueryBuilder<M> {
         QueryFragment {
             _marker: PhantomData,
             conditions: self.conditions.clone(),
+            or_groups: self.or_groups.clone(),
             order_by: self.order_by.clone(),
+            limit_value: self.limit_value,
+            offset_value: self.offset_value,
+            select_columns: self.select_columns.clone(),
+            raw_select_expressions: self.raw_select_expressions.clone(),
             group_by: self.group_by.clone(),
             having_conditions: self.having_conditions.clone(),
             joins: self.joins.clone(),
+            unions: self.unions.clone(),
+            window_functions: self.window_functions.clone(),
+            ctes: self.ctes.clone(),
+            cache_options: self.cache_options.clone(),
+            cache_key: self.cache_key.clone(),
             invalid_query_reason: self.invalid_query_reason.clone(),
             include_trashed: self.include_trashed,
             only_trashed: self.only_trashed,
@@ -193,25 +203,54 @@ impl<M: Model> QueryBuilder<M> {
     /// Apply a reusable fragment to the current query builder.
     pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
         self.conditions.extend(fragment.conditions.clone());
+        self.or_groups.extend(fragment.or_groups.clone());
 
         if self.order_by.is_empty() {
             self.order_by.extend(fragment.order_by.clone());
         }
 
+        if self.limit_value.is_none() {
+            self.limit_value = fragment.limit_value;
+        }
+
+        if self.offset_value.is_none() {
+            self.offset_value = fragment.offset_value;
+        }
+
+        if self.select_columns.is_none() {
+            self.select_columns = fragment.select_columns.clone();
+        }
+
+        self.raw_select_expressions
+            .extend(fragment.raw_select_expressions.clone());
+
         self.group_by.extend(fragment.group_by.clone());
         self.having_conditions
             .extend(fragment.having_conditions.clone());
         self.joins.extend(fragment.joins.clone());
+        self.unions.extend(fragment.unions.clone());
+        self.window_functions
+            .extend(fragment.window_functions.clone());
+        self.ctes.extend(fragment.ctes.clone());
+
+        if self.cache_options.is_none() {
+            self.cache_options = fragment.cache_options.clone();
+        }
+
+        if self.cache_key.is_none() {
+            self.cache_key = fragment.cache_key.clone();
+        }
 
         if self.invalid_query_reason.is_none() {
             self.invalid_query_reason = fragment.invalid_query_reason.clone();
         }
 
-        if fragment.include_trashed {
-            self.include_trashed = true;
-        }
         if fragment.only_trashed {
             self.only_trashed = true;
+            self.include_trashed = false;
+        } else if fragment.include_trashed {
+            self.include_trashed = true;
+            self.only_trashed = false;
         }
 
         self

@@ -220,3 +220,84 @@ fn aliased_timestamp_columns_drive_timestamp_codegen() {
     assert!(normalized.contains("modified_on:ActiveValue::Set(::tideorm::chrono::Utc::now())"));
     assert!(normalized.contains("fnhas_timestamps()->bool{true}"));
 }
+
+#[test]
+fn validation_rejects_email_rule_on_non_string_field() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(email)]
+            age: i64,
+        }
+    };
+
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let error = match BuildContext::new(&model_input, vec![], vec![], &ExistingDerives::default()) {
+        Ok(_) => panic!("email validation on i64 should fail at macro expansion"),
+        Err(err) => err.to_string(),
+    };
+
+    assert!(error.contains("validation rule 'email' is incompatible"));
+    assert!(error.contains("field 'age'"));
+    assert!(error.contains("type 'i64'"));
+}
+
+#[test]
+fn validation_rejects_length_rule_on_non_string_field() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(min_length = 3)]
+            age: i64,
+        }
+    };
+
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let error = match BuildContext::new(&model_input, vec![], vec![], &ExistingDerives::default()) {
+        Ok(_) => panic!("min_length validation on i64 should fail at macro expansion"),
+        Err(err) => err.to_string(),
+    };
+
+    assert!(error.contains("validation rule 'min_length' is incompatible"));
+    assert!(error.contains("field 'age'"));
+}
+
+#[test]
+fn validation_allows_string_rules_on_optional_string_fields() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(email, max_length = 255)]
+            email: Option<String>,
+        }
+    };
+
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+
+    let ctx = BuildContext::new(&model_input, vec![], vec![], &ExistingDerives::default())
+        .expect("optional string validation rules should be accepted");
+
+    assert_eq!(ctx.validation_rules.len(), 1);
+}
+
+#[test]
+fn validation_allows_string_rules_on_fully_qualified_optional_string_fields() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(email, max_length = 255)]
+            email: std::option::Option<std::string::String>,
+        }
+    };
+
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+
+    let ctx = BuildContext::new(&model_input, vec![], vec![], &ExistingDerives::default())
+        .expect("fully qualified optional string validation rules should be accepted");
+
+    assert_eq!(ctx.validation_rules.len(), 1);
+}

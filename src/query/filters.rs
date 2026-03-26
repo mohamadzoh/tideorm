@@ -32,6 +32,7 @@ pub enum Operator {
     Lt,
     Lte,
     Like,
+    LikeEscaped,
     NotLike,
     In,
     NotIn,
@@ -195,6 +196,54 @@ impl OrGroup {
             column: column.column_name().to_string(),
             operator: Operator::Like,
             value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
+        });
+        self
+    }
+
+    pub fn where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
         });
         self
     }
@@ -419,6 +468,54 @@ impl OrBranch {
         self
     }
 
+    pub fn where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "{}%",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
+    pub fn where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.conditions.push(WhereCondition {
+            column: column.column_name().to_string(),
+            operator: Operator::LikeEscaped,
+            value: ConditionValue::Single(serde_json::Value::String(format!(
+                "%{}",
+                crate::columns::escape_like_literal(value)
+            ))),
+        });
+        self
+    }
+
     pub fn where_not_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -615,6 +712,42 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    pub fn or_where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_contains(column, value);
+        self
+    }
+
+    pub fn or_where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_starts_with(column, value);
+        self
+    }
+
+    pub fn or_where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        if !self.current_branch.is_empty() {
+            self.branches.push(self.current_branch);
+        }
+        self.current_branch = OrBranch::new().where_ends_with(column, value);
+        self
+    }
+
     pub fn or_where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -736,6 +869,33 @@ impl<M: Model> OrBranchBuilder<M> {
         pattern: &str,
     ) -> Self {
         self.current_branch = self.current_branch.where_like(column, pattern);
+        self
+    }
+
+    pub fn and_where_contains(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.current_branch = self.current_branch.where_contains(column, value);
+        self
+    }
+
+    pub fn and_where_starts_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.current_branch = self.current_branch.where_starts_with(column, value);
+        self
+    }
+
+    pub fn and_where_ends_with(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        value: &str,
+    ) -> Self {
+        self.current_branch = self.current_branch.where_ends_with(column, value);
         self
     }
 

@@ -54,6 +54,18 @@ fn test_max_length() {
 }
 
 #[test]
+fn test_length_rules_count_unicode_characters() {
+    let value = "مرحبا".to_string();
+
+    assert!(Validator::validate_rule(&value, &ValidationRule::MinLength(5), "name").is_none());
+    assert!(Validator::validate_rule(&value, &ValidationRule::MinLength(6), "name").is_some());
+    assert!(Validator::validate_rule(&value, &ValidationRule::MaxLength(5), "name").is_none());
+    assert!(Validator::validate_rule(&value, &ValidationRule::MaxLength(4), "name").is_some());
+    assert!(Validator::validate_rule(&value, &ValidationRule::Length(5), "name").is_none());
+    assert!(Validator::validate_rule(&value, &ValidationRule::Length(10), "name").is_some());
+}
+
+#[test]
 fn test_range() {
     let rule = ValidationRule::Range(1.0, 10.0);
     assert!(Validator::validate_rule(&0, &rule, "age").is_some());
