@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.9.0] - 2026-03-26
+
+### Changed — Breaking
 
 - Removed the redundant `Model::insert_many()` and `Model::insert_many_returning()` aliases. `Model::insert_all()` remains the single batch-insert API and continues to return inserted models with database-generated values populated when the backend supports or emulates it.
 
@@ -15,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `Model::save()` and `Model::update()` now invoke `Validate::validate()` automatically during the lifecycle between `before_validation` and `after_validation`, so validation attributes and custom `Validate` implementations are enforced before writes hit the database.
 - Direct read helpers such as `Model::all()`, `Model::count()`, `Model::first()`, `Model::last()`, `Model::exists_any()`, and `Model::paginate()` now honor the default soft-delete scope instead of bypassing it through the lower-level query executor.
+- Escaped literal `LIKE` helpers now use backend-specific `ESCAPE` literals, keep PostgreSQL parameterized SQL correct, and avoid rewriting dollar-sign text inside raw PostgreSQL string literals, dollar-quoted strings, or comments when batch update placeholders are rebased.
+- Query fragment consolidation now preserves nested OR groups, projections, raw selects, pagination, unions, window functions, CTEs, cache options, and soft-delete scope flags instead of silently dropping builder state.
+- Validation length rules now count Unicode characters instead of UTF-8 bytes.
+- Seeder dependency sorting now fails fast on circular dependencies instead of silently appending unresolved seeds.
+- Macro-generated `Default` models now initialize runtime relation handles consistently with deserialized and loaded models, so relation wrappers are configured before a model is first saved.
+- Batch `execute_returning()` now rejects unsupported backends through `DatabaseType::supports_returning()` instead of hardcoding a MySQL-only check.
+
+### Changed
+
+- Query-cache reads now use a read-first fast path and only promote to a write lock when recency updates or expiry cleanup are required.
+- Refreshed dependency examples and macro-crate docs to use the 0.9.0 release version.
+
+### Internal
+
+- Added regression coverage for callback validation order, escaped literal `LIKE` SQL generation, query fragment consolidation, Unicode length validation, circular seed detection, relation-default initialization, and PostgreSQL placeholder rebasing in raw batch SQL.
+- Verified the release prep with `cargo test --lib` and `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ## [0.8.9] - 2026-03-22
 
@@ -663,7 +681,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...v0.9.0
 [0.8.9]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/mohamadzoh/tideorm/compare/v0.8.6...v0.8.7

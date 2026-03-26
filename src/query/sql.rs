@@ -679,7 +679,10 @@ impl<M: Model> QueryBuilder<M> {
                 }
             };
             self.build_custom_expression(
-                format!("{} {} {}{}", column_sql, operator, placeholder, escape_clause),
+                format!(
+                    "{} {} {}{}",
+                    column_sql, operator, placeholder, escape_clause
+                ),
                 vec![Value::String(Some(pattern))],
             )
         } else if negated {
