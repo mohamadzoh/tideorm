@@ -352,6 +352,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    #[cfg(feature = "postgres")]
     fn postgres_array_value(values: &[serde_json::Value]) -> Value {
         if values.iter().all(|value| value.is_string()) {
             return values
@@ -1001,13 +1002,22 @@ impl<M: Model> QueryBuilder<M> {
                     return Expr::cust(self.build_array_sql(db_type, column_sql, operator, values));
                 }
 
-                let operator = match operator {
-                    ArrayOperator::Contains => PgBinOper::Contains,
-                    ArrayOperator::ContainedBy => PgBinOper::Contained,
-                    ArrayOperator::Overlaps => PgBinOper::Overlap,
-                };
+                #[cfg(feature = "postgres")]
+                {
+                    let operator = match operator {
+                        ArrayOperator::Contains => PgBinOper::Contains,
+                        ArrayOperator::ContainedBy => PgBinOper::Contained,
+                        ArrayOperator::Overlaps => PgBinOper::Overlap,
+                    };
 
-                column_expr.binary(operator, Expr::val(Self::postgres_array_value(values)))
+                    column_expr.binary(operator, Expr::val(Self::postgres_array_value(values)))
+                }
+
+                #[cfg(not(feature = "postgres"))]
+                {
+                    let _ = column_expr;
+                    Expr::cust(self.build_array_sql(db_type, column_sql, operator, values))
+                }
             }
             DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
                 ArrayOperator::Contains => self.build_custom_expression(
