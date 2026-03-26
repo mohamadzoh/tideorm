@@ -592,35 +592,188 @@ impl<M: Model> BatchUpdateBuilder<M> {
             return sql.to_string();
         }
 
-        let mut output = String::with_capacity(sql.len());
-        let chars: Vec<char> = sql.chars().collect();
-        let mut index = 0;
+        #[derive(Clone, Copy)]
+        enum ScanState {
+            Normal,
+            SingleQuoted { backslash_escapes: bool },
+            DoubleQuoted,
+            LineComment,
+            BlockComment,
+            DollarQuoted { tag_start: usize, tag_end: usize },
+        }
 
-        while index < chars.len() {
-            if chars[index] == '$' {
-                let start = index + 1;
-                let mut end = start;
-                while end < chars.len() && chars[end].is_ascii_digit() {
-                    end += 1;
-                }
+        fn dollar_quote_tag_bounds(chars: &[char], start: usize) -> Option<usize> {
+            if chars.get(start) != Some(&'$') {
+                return None;
+            }
 
-                if end > start {
-                    let number: usize = chars[start..end]
-                        .iter()
-                        .collect::<String>()
-                        .parse()
-                        .unwrap_or(0);
-                    if number > 0 {
-                        output.push('$');
-                        output.push_str(&(number + offset).to_string());
-                        index = end;
-                        continue;
-                    }
+            let mut index = start + 1;
+            while index < chars.len() {
+                match chars[index] {
+                    '$' => return Some(index),
+                    ch if ch == '_' || ch.is_ascii_alphanumeric() => index += 1,
+                    _ => return None,
                 }
             }
 
-            output.push(chars[index]);
-            index += 1;
+            None
+        }
+
+        fn has_escape_string_prefix(chars: &[char], quote_index: usize) -> bool {
+            if quote_index == 0 {
+                return false;
+            }
+
+            let prefix = chars[quote_index - 1];
+            if prefix != 'e' && prefix != 'E' {
+                return false;
+            }
+
+            if quote_index == 1 {
+                return true;
+            }
+
+            !matches!(chars[quote_index - 2], '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9')
+        }
+
+        let mut output = String::with_capacity(sql.len());
+        let chars: Vec<char> = sql.chars().collect();
+        let mut index = 0;
+        let mut state = ScanState::Normal;
+
+        while index < chars.len() {
+            match state {
+                ScanState::Normal => {
+                    match chars[index] {
+                        '\'' => {
+                            output.push(chars[index]);
+                            state = ScanState::SingleQuoted {
+                                backslash_escapes: has_escape_string_prefix(&chars, index),
+                            };
+                            index += 1;
+                        }
+                        '"' => {
+                            output.push(chars[index]);
+                            state = ScanState::DoubleQuoted;
+                            index += 1;
+                        }
+                        '-' if chars.get(index + 1) == Some(&'-') => {
+                            output.push(chars[index]);
+                            output.push(chars[index + 1]);
+                            state = ScanState::LineComment;
+                            index += 2;
+                        }
+                        '/' if chars.get(index + 1) == Some(&'*') => {
+                            output.push(chars[index]);
+                            output.push(chars[index + 1]);
+                            state = ScanState::BlockComment;
+                            index += 2;
+                        }
+                        '$' => {
+                            if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index) {
+                                if tag_end == index + 1 || !chars[index + 1].is_ascii_digit() {
+                                    output.extend(chars[index..=tag_end].iter());
+                                    state = ScanState::DollarQuoted {
+                                        tag_start: index,
+                                        tag_end,
+                                    };
+                                    index = tag_end + 1;
+                                    continue;
+                                }
+                            }
+
+                            let start = index + 1;
+                            let mut end = start;
+                            while end < chars.len() && chars[end].is_ascii_digit() {
+                                end += 1;
+                            }
+
+                            if end > start {
+                                let number: usize = chars[start..end]
+                                    .iter()
+                                    .collect::<String>()
+                                    .parse()
+                                    .unwrap_or(0);
+                                if number > 0 {
+                                    output.push('$');
+                                    output.push_str(&(number + offset).to_string());
+                                    index = end;
+                                    continue;
+                                }
+                            }
+
+                            output.push(chars[index]);
+                            index += 1;
+                        }
+                        _ => {
+                            output.push(chars[index]);
+                            index += 1;
+                        }
+                    }
+                }
+                ScanState::SingleQuoted { backslash_escapes } => {
+                    output.push(chars[index]);
+                    if backslash_escapes && chars[index] == '\\' {
+                        if let Some(next) = chars.get(index + 1) {
+                            output.push(*next);
+                            index += 2;
+                            continue;
+                        }
+                    }
+                    if chars[index] == '\'' {
+                        if chars.get(index + 1) == Some(&'\'') {
+                            output.push(chars[index + 1]);
+                            index += 2;
+                            continue;
+                        }
+                        state = ScanState::Normal;
+                    }
+                    index += 1;
+                }
+                ScanState::DoubleQuoted => {
+                    output.push(chars[index]);
+                    if chars[index] == '"' {
+                        if chars.get(index + 1) == Some(&'"') {
+                            output.push(chars[index + 1]);
+                            index += 2;
+                            continue;
+                        }
+                        state = ScanState::Normal;
+                    }
+                    index += 1;
+                }
+                ScanState::LineComment => {
+                    output.push(chars[index]);
+                    if chars[index] == '\n' {
+                        state = ScanState::Normal;
+                    }
+                    index += 1;
+                }
+                ScanState::BlockComment => {
+                    output.push(chars[index]);
+                    if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                        output.push(chars[index + 1]);
+                        state = ScanState::Normal;
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                }
+                ScanState::DollarQuoted { tag_start, tag_end } => {
+                    let tag_len = tag_end - tag_start + 1;
+                    if chars[index] == '$'
+                        && chars.get(index..index + tag_len) == Some(&chars[tag_start..=tag_end])
+                    {
+                        output.extend(chars[index..index + tag_len].iter());
+                        state = ScanState::Normal;
+                        index += tag_len;
+                        continue;
+                    }
+
+                    output.push(chars[index]);
+                    index += 1;
+                }
+            }
         }
 
         output
@@ -765,6 +918,17 @@ impl<M: Model> BatchUpdateBuilder<M> {
         Ok((set_parts, params))
     }
 
+    fn ensure_backend_supports_returning(db_type: crate::config::DatabaseType) -> Result<()> {
+        if !db_type.supports_returning() {
+            return Err(Error::query(format!(
+                "{} does not support RETURNING clause",
+                db_type
+            )));
+        }
+
+        Ok(())
+    }
+
     fn build_where_query(&self) -> QueryBuilder<M> {
         let mut query = QueryBuilder::new().with_trashed();
         let mut or_conditions = Vec::new();
@@ -842,12 +1006,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self.ensure_explicit_filters("update")?;
 
         let db_type = crate::database::require_db()?.backend();
-
-        if db_type == crate::config::DatabaseType::MySQL {
-            return Err(Error::query(
-                "MySQL does not support RETURNING clause".to_string(),
-            ));
-        }
+        Self::ensure_backend_supports_returning(db_type)?;
 
         let (set_parts, mut params) = self.build_set_clause_with_params_for_db(db_type)?;
 

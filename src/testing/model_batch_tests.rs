@@ -158,6 +158,74 @@ fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
     ));
 }
 
+#[test]
+fn batch_update_postgres_placeholder_offset_skips_single_quoted_literals() {
+    let sql = "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'";
+
+    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 3);
+
+    assert_eq!(
+        offset,
+        "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'"
+    );
+}
+
+#[test]
+fn batch_update_postgres_placeholder_offset_skips_dollar_quotes_and_comments() {
+    let sql = concat!(
+        "note = $$literal $1$$ AND id = $2 ",
+        "/* keep $3 */ ",
+        "-- keep $4\n",
+        "AND body = $tag$still $5$tag$"
+    );
+
+    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 2);
+
+    assert_eq!(
+        offset,
+        concat!(
+            "note = $$literal $1$$ AND id = $4 ",
+            "/* keep $3 */ ",
+            "-- keep $4\n",
+            "AND body = $tag$still $5$tag$"
+        )
+    );
+}
+
+#[test]
+fn batch_update_postgres_placeholder_offset_skips_escape_string_literals() {
+    let sql = "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'";
+
+    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 4);
+
+    assert_eq!(
+        offset,
+        "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'"
+    );
+}
+
+#[test]
+fn batch_execute_returning_uses_backend_returning_capability() {
+    let err = BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
+        crate::config::DatabaseType::MySQL,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("MySQL does not support RETURNING clause"));
+    assert!(
+        BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
+            crate::config::DatabaseType::SQLite,
+        )
+        .is_ok()
+    );
+    assert!(
+        BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
+            crate::config::DatabaseType::MariaDB,
+        )
+        .is_ok()
+    );
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_invalidates_cached_queries() {
