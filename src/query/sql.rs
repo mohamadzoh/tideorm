@@ -671,8 +671,14 @@ impl<M: Model> QueryBuilder<M> {
                 DatabaseType::Postgres => "$1",
                 DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?",
             };
+            let escape_clause = match db_type {
+                DatabaseType::Postgres => " ESCAPE '\\'",
+                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
+                    " ESCAPE '\\\\'"
+                }
+            };
             self.build_custom_expression(
-                format!("{} {} {} ESCAPE '\\\\'", column_sql, operator, placeholder),
+                format!("{} {} {}{}", column_sql, operator, placeholder, escape_clause),
                 vec![Value::String(Some(pattern))],
             )
         } else if negated {
@@ -684,6 +690,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn build_pattern_sql(
         &self,
+        db_type: DatabaseType,
         column: &str,
         negated: bool,
         escaped: bool,
@@ -696,7 +703,12 @@ impl<M: Model> QueryBuilder<M> {
             self.format_preview_value(value)
         );
         if escaped {
-            sql.push_str(" ESCAPE '\\\\'");
+            sql.push_str(match db_type {
+                DatabaseType::Postgres => " ESCAPE '\\'",
+                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
+                    " ESCAPE '\\\\'"
+                }
+            });
         }
         sql
     }
@@ -1415,7 +1427,7 @@ impl<M: Model> QueryBuilder<M> {
                 negated,
                 escaped,
                 value,
-            } => Some(self.build_pattern_sql(&column, negated, escaped, value)),
+            } => Some(self.build_pattern_sql(db_type, &column, negated, escaped, value)),
             ConditionSpec::List { operator, values } => {
                 Some(self.build_list_sql(db_type, &column, operator, values))
             }

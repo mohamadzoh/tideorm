@@ -868,7 +868,7 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_typed_literal_like_h
         "postgres sql: {postgres_sql}"
     );
     assert!(
-        postgres_sql.contains("ESCAPE '\\\\'"),
+        postgres_sql.contains("ESCAPE '\\'"),
         "postgres sql: {postgres_sql}"
     );
     assert!(postgres_sql.contains("$1"), "postgres sql: {postgres_sql}");
@@ -907,9 +907,9 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_query_contains_helpe
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
-    assert!(sql.contains("$1 ESCAPE '\\\\'"), "sql: {sql}");
-    assert!(sql.contains("$2 ESCAPE '\\\\'"), "sql: {sql}");
-    assert!(sql.contains("$3 ESCAPE '\\\\'"), "sql: {sql}");
+    assert!(sql.contains("$1 ESCAPE '\\'"), "sql: {sql}");
+    assert!(sql.contains("$2 ESCAPE '\\'"), "sql: {sql}");
+    assert!(sql.contains("$3 ESCAPE '\\'"), "sql: {sql}");
     assert_eq!(params.len(), 3, "params: {:?}", params);
     assert!(
         matches!(params.first(), Some(Value::String(Some(value))) if value == r"%100\%\_\\done%")

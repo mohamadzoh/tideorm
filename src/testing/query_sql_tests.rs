@@ -283,7 +283,18 @@ fn sql_preview_marks_escaped_literal_like_helpers() {
         .build_sql_preview();
 
     assert!(preview.contains("LIKE '100\\%\\_\\\\done%'"));
-    assert!(preview.contains("ESCAPE '\\\\'"));
+    assert!(preview.contains("ESCAPE '\\'"));
+}
+
+#[test]
+fn postgres_parameterized_sql_uses_single_character_like_escape() {
+    let name = crate::columns::Column::<String>::new("name");
+    let (sql, params) = QueryCountGuardUser::query()
+        .where_col(name.starts_with(r"100%_\done"))
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains("WHERE \"name\" LIKE $1 ESCAPE '\\'"));
+    assert_eq!(params.len(), 1);
 }
 
 #[test]
