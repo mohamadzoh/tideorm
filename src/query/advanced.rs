@@ -447,6 +447,12 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn having(mut self, condition: &str) -> Self {
+        if let Err(reason) =
+            crate::query::db_sql::validate_raw_sql_fragment("HAVING raw SQL", condition)
+        {
+            self.invalidate_query(reason);
+        }
+
         self.having_conditions.push(condition.to_string());
         self
     }

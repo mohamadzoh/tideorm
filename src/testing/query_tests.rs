@@ -375,6 +375,29 @@ async fn test_or_where_raw_rejects_unsafe_sql_before_db_lookup() {
 }
 
 #[tokio::test]
+async fn test_having_rejects_unsafe_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .group_by("id")
+        .having("COUNT(*) > 0; DROP TABLE users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe HAVING raw SQL"));
+}
+
+#[tokio::test]
+async fn test_select_raw_rejects_unsafe_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .select_raw("id; DROP TABLE users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe SELECT raw SQL"));
+}
+
+#[tokio::test]
 async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() {
     let err = QueryTestUser::query()
         .where_in_subquery(
@@ -391,6 +414,36 @@ async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() 
         err.to_string()
             .contains("invalid subquery for where_in_subquery()")
     );
+}
+
+#[tokio::test]
+async fn test_select_subquery_rejects_invalid_nested_query_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .select_subquery(
+            QueryTestUser::query()
+                .select(vec!["id"])
+                .where_raw("1 = 1; DROP TABLE users"),
+            "nested_id",
+        )
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for select_subquery()")
+    );
+}
+
+#[tokio::test]
+async fn test_select_subquery_rejects_unsafe_alias_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .select_subquery(QueryTestUser::query().select(vec!["id"]), "bad\"alias")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe SELECT alias"));
 }
 
 #[test]

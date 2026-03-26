@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-03-27
+
+### Fixed
+
+- Direct relation `load()` helpers now refresh stale cached values from the active database only when the relation is configured and has a scalar key available, while preserving cached-payload fallback for deserialized or manually attached relations that do not have query context yet.
+- SQL preview generation now supports explicit backend selection for deterministic test coverage, avoiding order-dependent SQLite failures when earlier tests leave a different global database backend active.
+- Hardened raw query-builder entry points so `having()`, `select_raw()`, and `select_subquery()` reject unsafe raw SQL fragments before database access, and `select_subquery()` now validates its nested subquery builder plus the projected alias.
+
+### Changed
+
+- Refreshed dependency examples and macro-crate docs to use the 0.9.2 release version.
+
+### Internal
+
+- Added regression coverage for direct relation cache refresh and cached fallback behavior, deterministic escaped-LIKE SQL previews, and raw HAVING, SELECT, and SELECT-subquery validation.
+- Verified the release prep with `cargo test --lib` and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## [0.9.0] - 2026-03-26
 
 ### Changed — Breaking
@@ -681,7 +698,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/mohamadzoh/tideorm/compare/v0.9.1...v0.9.2
 [0.9.0]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...v0.9.0
 [0.8.9]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/mohamadzoh/tideorm/compare/v0.8.7...v0.8.8

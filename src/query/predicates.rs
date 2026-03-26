@@ -230,12 +230,26 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add a raw SELECT expression.
     pub fn select_raw(mut self, raw_select: &str) -> Self {
+        if let Err(reason) =
+            crate::query::db_sql::validate_raw_sql_fragment("SELECT raw SQL", raw_select)
+        {
+            self.invalidate_query(reason);
+        }
+
         self.raw_select_expressions.push(raw_select.to_string());
         self
     }
 
     /// Add a scalar subquery as a SELECT expression.
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for select_subquery(): {}", err));
+        }
+
+        if let Err(reason) = crate::query::db_sql::validate_identifier("SELECT alias", alias) {
+            self.invalidate_query(reason);
+        }
+
         let subquery_sql = subquery.to_subquery_sql();
         self.raw_select_expressions
             .push(format!("({}) AS \"{}\"", subquery_sql, alias));
