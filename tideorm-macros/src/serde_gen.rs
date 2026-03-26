@@ -28,7 +28,7 @@ fn generate_default_impl(ctx: &BuildContext) -> TokenStream2 {
     quote! {
         impl ::std::default::Default for #struct_name {
             fn default() -> Self {
-                Self { #(#default_field_inits),* }
+                Self { #(#default_field_inits),* }.with_relations()
             }
         }
     }

@@ -643,74 +643,72 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         while index < chars.len() {
             match state {
-                ScanState::Normal => {
-                    match chars[index] {
-                        '\'' => {
-                            output.push(chars[index]);
-                            state = ScanState::SingleQuoted {
-                                backslash_escapes: has_escape_string_prefix(&chars, index),
-                            };
-                            index += 1;
-                        }
-                        '"' => {
-                            output.push(chars[index]);
-                            state = ScanState::DoubleQuoted;
-                            index += 1;
-                        }
-                        '-' if chars.get(index + 1) == Some(&'-') => {
-                            output.push(chars[index]);
-                            output.push(chars[index + 1]);
-                            state = ScanState::LineComment;
-                            index += 2;
-                        }
-                        '/' if chars.get(index + 1) == Some(&'*') => {
-                            output.push(chars[index]);
-                            output.push(chars[index + 1]);
-                            state = ScanState::BlockComment;
-                            index += 2;
-                        }
-                        '$' => {
-                            if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index) {
-                                if tag_end == index + 1 || !chars[index + 1].is_ascii_digit() {
-                                    output.extend(chars[index..=tag_end].iter());
-                                    state = ScanState::DollarQuoted {
-                                        tag_start: index,
-                                        tag_end,
-                                    };
-                                    index = tag_end + 1;
-                                    continue;
-                                }
-                            }
-
-                            let start = index + 1;
-                            let mut end = start;
-                            while end < chars.len() && chars[end].is_ascii_digit() {
-                                end += 1;
-                            }
-
-                            if end > start {
-                                let number: usize = chars[start..end]
-                                    .iter()
-                                    .collect::<String>()
-                                    .parse()
-                                    .unwrap_or(0);
-                                if number > 0 {
-                                    output.push('$');
-                                    output.push_str(&(number + offset).to_string());
-                                    index = end;
-                                    continue;
-                                }
-                            }
-
-                            output.push(chars[index]);
-                            index += 1;
-                        }
-                        _ => {
-                            output.push(chars[index]);
-                            index += 1;
-                        }
+                ScanState::Normal => match chars[index] {
+                    '\'' => {
+                        output.push(chars[index]);
+                        state = ScanState::SingleQuoted {
+                            backslash_escapes: has_escape_string_prefix(&chars, index),
+                        };
+                        index += 1;
                     }
-                }
+                    '"' => {
+                        output.push(chars[index]);
+                        state = ScanState::DoubleQuoted;
+                        index += 1;
+                    }
+                    '-' if chars.get(index + 1) == Some(&'-') => {
+                        output.push(chars[index]);
+                        output.push(chars[index + 1]);
+                        state = ScanState::LineComment;
+                        index += 2;
+                    }
+                    '/' if chars.get(index + 1) == Some(&'*') => {
+                        output.push(chars[index]);
+                        output.push(chars[index + 1]);
+                        state = ScanState::BlockComment;
+                        index += 2;
+                    }
+                    '$' => {
+                        if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index) {
+                            if tag_end == index + 1 || !chars[index + 1].is_ascii_digit() {
+                                output.extend(chars[index..=tag_end].iter());
+                                state = ScanState::DollarQuoted {
+                                    tag_start: index,
+                                    tag_end,
+                                };
+                                index = tag_end + 1;
+                                continue;
+                            }
+                        }
+
+                        let start = index + 1;
+                        let mut end = start;
+                        while end < chars.len() && chars[end].is_ascii_digit() {
+                            end += 1;
+                        }
+
+                        if end > start {
+                            let number: usize = chars[start..end]
+                                .iter()
+                                .collect::<String>()
+                                .parse()
+                                .unwrap_or(0);
+                            if number > 0 {
+                                output.push('$');
+                                output.push_str(&(number + offset).to_string());
+                                index = end;
+                                continue;
+                            }
+                        }
+
+                        output.push(chars[index]);
+                        index += 1;
+                    }
+                    _ => {
+                        output.push(chars[index]);
+                        index += 1;
+                    }
+                },
                 ScanState::SingleQuoted { backslash_escapes } => {
                     output.push(chars[index]);
                     if backslash_escapes && chars[index] == '\\' {

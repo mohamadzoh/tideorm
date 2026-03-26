@@ -292,6 +292,34 @@ fn macro_generated_morph_to_relation_is_configured() {
     assert_eq!(image.owner.id_column, "imageable_id");
 }
 
+#[tokio::test]
+async fn macro_generated_default_initializes_runtime_relations() {
+    let employee = RelationTestEmployee::default();
+
+    assert_eq!(employee.manager.foreign_key, "manager_id");
+    assert_eq!(employee.manager.local_key, "id");
+    assert_eq!(employee.reports.foreign_key, "manager_id");
+    assert_eq!(employee.reports.local_key, "id");
+    assert_eq!(employee.avatar.morph_name, "imageable");
+    assert_eq!(employee.avatar.local_key, "id");
+
+    if let Err(err) = employee.manager.load().await {
+        assert!(!err.to_string().contains("not configured"));
+    }
+
+    if let Err(err) = employee.reports.load().await {
+        assert!(!err.to_string().contains("not configured"));
+    }
+
+    if let Err(err) = employee.avatar.load().await {
+        assert!(!err.to_string().contains("not configured"));
+    }
+
+    let image = RelationTestImage::default();
+    assert_eq!(image.owner.type_column, "imageable_type");
+    assert_eq!(image.owner.id_column, "imageable_id");
+}
+
 #[test]
 fn direct_relations_deserialize_cached_payloads() {
     let has_one: super::HasOne<RelationTestNode> = serde_json::from_value(json!({

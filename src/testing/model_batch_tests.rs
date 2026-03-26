@@ -211,7 +211,10 @@ fn batch_execute_returning_uses_backend_returning_capability() {
     )
     .unwrap_err();
 
-    assert!(err.to_string().contains("MySQL does not support RETURNING clause"));
+    assert!(
+        err.to_string()
+            .contains("MySQL does not support RETURNING clause")
+    );
     assert!(
         BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
             crate::config::DatabaseType::SQLite,
