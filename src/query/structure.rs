@@ -377,24 +377,26 @@ impl<M: Model> QueryFragment<M> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.conditions.is_empty()
-            && self.or_groups.is_empty()
-            && self.order_by.is_empty()
-            && self.limit_value.is_none()
-            && self.offset_value.is_none()
-            && self.select_columns.is_none()
-            && self.raw_select_expressions.is_empty()
-            && self.group_by.is_empty()
-            && self.having_conditions.is_empty()
-            && self.joins.is_empty()
-            && self.unions.is_empty()
-            && self.window_functions.is_empty()
-            && self.ctes.is_empty()
-            && self.cache_options.is_none()
-            && self.cache_key.is_none()
-            && self.invalid_query_reason.is_none()
-                && !self.include_trashed
-                && !self.only_trashed
+        let has_query_state = !self.conditions.is_empty()
+            || !self.or_groups.is_empty()
+            || !self.order_by.is_empty()
+            || self.limit_value.is_some()
+            || self.offset_value.is_some()
+            || self.select_columns.is_some()
+            || !self.raw_select_expressions.is_empty()
+            || !self.group_by.is_empty()
+            || !self.having_conditions.is_empty()
+            || !self.joins.is_empty()
+            || !self.unions.is_empty()
+            || !self.window_functions.is_empty()
+            || !self.ctes.is_empty()
+            || self.cache_options.is_some()
+            || self.cache_key.is_some()
+            || self.invalid_query_reason.is_some();
+
+        let has_soft_delete_scope = self.include_trashed || self.only_trashed;
+
+        !has_query_state && !has_soft_delete_scope
     }
 
     pub fn condition_count(&self) -> usize {

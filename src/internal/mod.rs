@@ -9,6 +9,7 @@
 //! 4. Query translation is centralized
 
 use crate::error::{Error, Result};
+use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
 // Re-export SeaORM internally (but this module itself is #[doc(hidden)])
 // Allow unused_imports here: we re-export broadly so other modules can import selectively
@@ -152,8 +153,10 @@ where
 {
     let mut select = M::Entity::find();
 
-    if M::soft_delete_enabled()
-        && let Some(deleted_at_column) = M::column_from_str(M::deleted_at_column())
+    if matches!(
+        query_scope_for::<M>(false, false),
+        SoftDeleteScope::ActiveOnly
+    ) && let Some(deleted_at_column) = M::column_from_str(M::deleted_at_column())
     {
         select = select.filter(deleted_at_column.is_null());
     }

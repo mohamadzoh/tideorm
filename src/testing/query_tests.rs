@@ -863,25 +863,38 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_typed_literal_like_h
     let (postgres_sql, postgres_params) = query
         .clone()
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
-    assert!(postgres_sql.contains(" LIKE "), "postgres sql: {postgres_sql}");
+    assert!(
+        postgres_sql.contains(" LIKE "),
+        "postgres sql: {postgres_sql}"
+    );
     assert!(
         postgres_sql.contains("ESCAPE '\\\\'"),
         "postgres sql: {postgres_sql}"
     );
-    assert!(
-        postgres_sql.contains("'%100\\%\\_\\\\done%'"),
-        "postgres sql: {postgres_sql}"
+    assert!(postgres_sql.contains("$1"), "postgres sql: {postgres_sql}");
+    assert_eq!(
+        postgres_params.len(),
+        1,
+        "postgres params: {:?}",
+        postgres_params
     );
-    assert!(postgres_params.is_empty(), "postgres params: {:?}", postgres_params);
+    assert!(matches!(
+        postgres_params.first(),
+        Some(Value::String(Some(value))) if value == r"%100\%\_\\done%"
+    ));
 
     let (mysql_sql, mysql_params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
     assert!(mysql_sql.contains(" LIKE "), "mysql sql: {mysql_sql}");
-    assert!(mysql_sql.contains("ESCAPE '\\\\'"), "mysql sql: {mysql_sql}");
     assert!(
-        mysql_sql.contains("'%100\\%\\_\\\\done%'"),
+        mysql_sql.contains("ESCAPE '\\\\'"),
         "mysql sql: {mysql_sql}"
     );
-    assert!(mysql_params.is_empty(), "mysql params: {:?}", mysql_params);
+    assert!(mysql_sql.contains("?"), "mysql sql: {mysql_sql}");
+    assert_eq!(mysql_params.len(), 1, "mysql params: {:?}", mysql_params);
+    assert!(matches!(
+        mysql_params.first(),
+        Some(Value::String(Some(value))) if value == r"%100\%\_\\done%"
+    ));
 }
 
 #[test]
@@ -894,10 +907,15 @@ fn test_build_select_sql_with_params_uses_escape_clause_for_query_contains_helpe
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
-    assert!(sql.contains("'%100\\%\\_\\\\done%' ESCAPE '\\\\'"), "sql: {sql}");
-    assert!(sql.contains("'lead\\%\\_%' ESCAPE '\\\\'"), "sql: {sql}");
-    assert!(sql.contains("'%tail\\%\\_' ESCAPE '\\\\'"), "sql: {sql}");
-    assert!(params.is_empty(), "params: {:?}", params);
+    assert!(sql.contains("$1 ESCAPE '\\\\'"), "sql: {sql}");
+    assert!(sql.contains("$2 ESCAPE '\\\\'"), "sql: {sql}");
+    assert!(sql.contains("$3 ESCAPE '\\\\'"), "sql: {sql}");
+    assert_eq!(params.len(), 3, "params: {:?}", params);
+    assert!(
+        matches!(params.first(), Some(Value::String(Some(value))) if value == r"%100\%\_\\done%")
+    );
+    assert!(matches!(params.get(1), Some(Value::String(Some(value))) if value == r"lead\%\_%"));
+    assert!(matches!(params.get(2), Some(Value::String(Some(value))) if value == r"%tail\%\_"));
 }
 
 #[test]
@@ -911,7 +929,10 @@ fn test_consolidate_preserves_full_query_fragment_state() {
         .limit(5)
         .offset(10)
         .union_all(QueryBuilder::<QueryTestUser>::new().where_eq("name", "carol"))
-        .window(WindowFunction::new(WindowFunctionType::RowNumber, "row_num").order_by("id", Order::Asc))
+        .window(
+            WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
+                .order_by("id", Order::Asc),
+        )
         .with_cte(CTE::new(
             "active_users",
             "SELECT id FROM query_test_users WHERE name IS NOT NULL".to_string(),
@@ -922,15 +943,24 @@ fn test_consolidate_preserves_full_query_fragment_state() {
 
     assert_eq!(fragment.condition_count(), 2);
     assert_eq!(fragment.or_groups.len(), 1);
-    assert_eq!(fragment.select_columns.as_deref(), Some(&["id".to_string(), "name".to_string()][..]));
-    assert_eq!(fragment.raw_select_expressions, vec!["COUNT(*) AS total_count"]);
+    assert_eq!(
+        fragment.select_columns.as_deref(),
+        Some(&["id".to_string(), "name".to_string()][..])
+    );
+    assert_eq!(
+        fragment.raw_select_expressions,
+        vec!["COUNT(*) AS total_count"]
+    );
     assert_eq!(fragment.limit_value, Some(5));
     assert_eq!(fragment.offset_value, Some(10));
     assert_eq!(fragment.unions.len(), 1);
     assert_eq!(fragment.window_functions.len(), 1);
     assert_eq!(fragment.ctes.len(), 1);
     assert_eq!(fragment.cache_key.as_deref(), Some("fragment-key"));
-    let cache_options = fragment.cache_options.as_ref().expect("cache options should be preserved");
+    let cache_options = fragment
+        .cache_options
+        .as_ref()
+        .expect("cache options should be preserved");
     assert_eq!(cache_options.ttl, Duration::from_secs(30));
 
     let rebuilt = QueryBuilder::<QueryTestUser>::from_fragment(&fragment);

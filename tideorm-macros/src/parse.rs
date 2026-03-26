@@ -69,8 +69,7 @@ impl ModelField {
         matches!(
             terminal_type_ident(self.validation_base_ty()).as_deref(),
             Some(
-                "i8"
-                    | "i16"
+                "i8" | "i16"
                     | "i32"
                     | "i64"
                     | "i128"

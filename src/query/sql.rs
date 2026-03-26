@@ -3,6 +3,7 @@ use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::{Condition, Expr, ExprTrait, Value};
 use crate::model::Model;
+use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 use sea_orm::sea_query::{
     Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
     extension::postgres::PgBinOper,
@@ -656,6 +657,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn build_pattern_expression(
         &self,
+        db_type: DatabaseType,
         column_expr: SimpleExpr,
         column_sql: &str,
         negated: bool,
@@ -665,12 +667,14 @@ impl<M: Model> QueryBuilder<M> {
         let pattern = Self::pattern_value(value);
         if escaped {
             let operator = if negated { "NOT LIKE" } else { "LIKE" };
-            Expr::cust(format!(
-                "{} {} '{}' ESCAPE '\\\\'",
-                column_sql,
-                operator,
-                pattern.replace("'", "''")
-            ))
+            let placeholder = match db_type {
+                DatabaseType::Postgres => "$1",
+                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?",
+            };
+            self.build_custom_expression(
+                format!("{} {} {} ESCAPE '\\\\'", column_sql, operator, placeholder),
+                vec![Value::String(Some(pattern))],
+            )
         } else if negated {
             column_expr.not_like(pattern)
         } else {
@@ -1124,6 +1128,7 @@ impl<M: Model> QueryBuilder<M> {
                 escaped,
                 value,
             } => Some(self.build_pattern_expression(
+                db_type,
                 column_expr,
                 &column_sql,
                 negated,
@@ -1188,17 +1193,16 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn build_soft_delete_expression(&self, db_type: DatabaseType) -> Option<SimpleExpr> {
-        if !M::soft_delete_enabled() {
-            return None;
-        }
-
-        let deleted_at = self.sea_column_expr(db_type, M::deleted_at_column());
-        if self.only_trashed {
-            Some(deleted_at.is_not_null())
-        } else if !self.include_trashed {
-            Some(deleted_at.is_null())
-        } else {
-            None
+        match query_scope_for::<M>(self.include_trashed, self.only_trashed) {
+            SoftDeleteScope::Disabled | SoftDeleteScope::WithTrashed => None,
+            SoftDeleteScope::ActiveOnly => Some(
+                self.sea_column_expr(db_type, M::deleted_at_column())
+                    .is_null(),
+            ),
+            SoftDeleteScope::OnlyTrashed => Some(
+                self.sea_column_expr(db_type, M::deleted_at_column())
+                    .is_not_null(),
+            ),
         }
     }
 

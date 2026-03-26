@@ -180,7 +180,7 @@ impl Seeder {
         let database = require_db()?;
 
         // Sort seeds by priority, then by dependency order
-        let sorted_seeds = self.sort_seeds_by_priority_and_deps();
+        let sorted_seeds = self.sort_seeds_by_priority_and_deps()?;
 
         for seed in sorted_seeds {
             let name = seed.name();
@@ -361,7 +361,7 @@ impl Seeder {
         let executed = self.get_executed_seeds().await?;
         let mut status = Vec::new();
 
-        let sorted_seeds = self.sort_seeds_by_priority_and_deps();
+        let sorted_seeds = self.sort_seeds_by_priority_and_deps()?;
 
         for seed in sorted_seeds {
             let is_executed = executed.contains(&seed.name().to_string());
@@ -380,7 +380,7 @@ impl Seeder {
     // =========================================================================
 
     /// Sort seeds by priority, respecting dependencies via topological sort
-    fn sort_seeds_by_priority_and_deps(&self) -> Vec<&dyn Seed> {
+    fn sort_seeds_by_priority_and_deps(&self) -> Result<Vec<&dyn Seed>> {
         use std::collections::{HashMap, HashSet, VecDeque};
 
         let seeds: Vec<_> = self.seeds.iter().collect();
@@ -440,17 +440,27 @@ impl Seeder {
             }
         }
 
-        // Any remaining seeds (circular deps) are appended at the end sorted by priority
+        // Unvisited seeds at this point participate in at least one dependency cycle.
         if sorted_indices.len() < n {
             let mut remaining: Vec<usize> = (0..n).filter(|i| !visited.contains(i)).collect();
             remaining.sort_by_key(|&i| seeds[i].priority());
-            sorted_indices.extend(remaining);
+
+            let cycle_names = remaining
+                .into_iter()
+                .map(|i| seeds[i].name().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            return Err(Error::configuration(format!(
+                "Circular seed dependency detected involving: {}",
+                cycle_names
+            )));
         }
 
-        sorted_indices
+        Ok(sorted_indices
             .into_iter()
             .map(|i| seeds[i].as_ref())
-            .collect()
+            .collect())
     }
 
     // =========================================================================

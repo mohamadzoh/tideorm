@@ -404,27 +404,53 @@ impl QueryCache {
             return None;
         }
 
-        // Check if entry exists and is not expired
+        let strategy = self.config.read().strategy;
+
+        // Fast path: read-only lookup for misses and non-LRU hits.
+        {
+            let cache = self.cache.read();
+
+            match cache.get(key) {
+                Some(entry) if !entry.is_expired() && strategy != CacheStrategy::LRU => {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    return serde_json::from_value(entry.data.clone()).ok();
+                }
+                Some(_) => {}
+                None => {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+            }
+        }
+
+        // Slow path: LRU hits need touch(), and expired entries need removal.
         let mut cache = self.cache.write();
 
-        if let Some(entry) = cache.get_mut(key) {
-            if entry.is_expired() {
+        match cache.get(key) {
+            Some(entry) if entry.is_expired() => {
                 if let Some(expired_entry) = cache.remove(key) {
                     self.record_entries_len(cache.len());
                     self.subtract_size_bytes(expired_entry.size_bytes);
                 }
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                return None;
+                None
             }
-
-            entry.touch();
-
-            self.hits.fetch_add(1, Ordering::Relaxed);
-
-            serde_json::from_value(entry.data.clone()).ok()
-        } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            None
+            Some(_) if strategy == CacheStrategy::LRU => {
+                let entry = cache
+                    .get_mut(key)
+                    .expect("entry must exist after successful immutable lookup");
+                entry.touch();
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                serde_json::from_value(entry.data.clone()).ok()
+            }
+            Some(entry) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                serde_json::from_value(entry.data.clone()).ok()
+            }
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 

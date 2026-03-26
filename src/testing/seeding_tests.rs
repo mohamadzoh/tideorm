@@ -1,5 +1,30 @@
 use super::*;
 
+struct TestSeed {
+    name: &'static str,
+    priority: u32,
+    dependencies: Vec<&'static str>,
+}
+
+#[async_trait]
+impl Seed for TestSeed {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn run(&self, _db: &Database) -> Result<()> {
+        Ok(())
+    }
+
+    fn priority(&self) -> u32 {
+        self.priority
+    }
+
+    fn depends_on(&self) -> Vec<&str> {
+        self.dependencies.clone()
+    }
+}
+
 #[test]
 fn test_seed_result_new() {
     let result = SeedResult::new();
@@ -89,4 +114,60 @@ fn test_seed_info() {
         name: "test_seed".to_string(),
     };
     assert_eq!(info.name, "test_seed");
+}
+
+#[test]
+fn test_sort_seeds_by_priority_and_deps_returns_cycle_error() {
+    let seeder = Seeder::new()
+        .add(TestSeed {
+            name: "seed_a",
+            priority: 10,
+            dependencies: vec!["seed_b"],
+        })
+        .add(TestSeed {
+            name: "seed_b",
+            priority: 20,
+            dependencies: vec!["seed_a"],
+        });
+
+    let err = match seeder.sort_seeds_by_priority_and_deps() {
+        Ok(_) => panic!("expected circular dependency error"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string()
+            .contains("Circular seed dependency detected")
+    );
+    assert!(err.to_string().contains("seed_a"));
+    assert!(err.to_string().contains("seed_b"));
+}
+
+#[test]
+fn test_sort_seeds_by_priority_and_deps_orders_dependencies_before_priority() {
+    let seeder = Seeder::new()
+        .add(TestSeed {
+            name: "independent",
+            priority: 1,
+            dependencies: vec![],
+        })
+        .add(TestSeed {
+            name: "parent",
+            priority: 100,
+            dependencies: vec![],
+        })
+        .add(TestSeed {
+            name: "child",
+            priority: 0,
+            dependencies: vec!["parent"],
+        });
+
+    let ordered = seeder
+        .sort_seeds_by_priority_and_deps()
+        .unwrap()
+        .into_iter()
+        .map(Seed::name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ordered, vec!["independent", "parent", "child"]);
 }

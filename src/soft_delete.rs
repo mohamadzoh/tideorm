@@ -44,6 +44,29 @@ use chrono::{DateTime, Utc};
 use crate::error::Result;
 use crate::model::Model;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SoftDeleteScope {
+    Disabled,
+    ActiveOnly,
+    WithTrashed,
+    OnlyTrashed,
+}
+
+pub(crate) fn query_scope_for<M: Model>(
+    include_trashed: bool,
+    only_trashed: bool,
+) -> SoftDeleteScope {
+    if !M::soft_delete_enabled() {
+        SoftDeleteScope::Disabled
+    } else if only_trashed {
+        SoftDeleteScope::OnlyTrashed
+    } else if include_trashed {
+        SoftDeleteScope::WithTrashed
+    } else {
+        SoftDeleteScope::ActiveOnly
+    }
+}
+
 /// Trait for models that support soft deletion
 ///
 /// `#[tideorm(soft_delete)]` models receive an implementation automatically as long

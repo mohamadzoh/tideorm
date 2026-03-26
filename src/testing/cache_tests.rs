@@ -1,4 +1,5 @@
 use super::*;
+use std::thread;
 
 #[test]
 fn test_cache_config_default() {
@@ -127,6 +128,58 @@ fn test_query_cache_clear_resets_entries_and_size_bytes() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.size_bytes, 0);
     assert!(cache.is_empty());
+}
+
+#[test]
+fn test_query_cache_get_updates_lru_recency() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set_max_entries(2);
+    cache.set_strategy(CacheStrategy::LRU);
+
+    cache.set("key1", &"value1", None, "model").unwrap();
+    thread::sleep(Duration::from_millis(2));
+    cache.set("key2", &"value2", None, "model").unwrap();
+
+    let value: Option<String> = cache.get("key1");
+    assert_eq!(value.as_deref(), Some("value1"));
+
+    cache.set("key3", &"value3", None, "model").unwrap();
+
+    assert!(
+        cache.contains("key1"),
+        "recently read LRU entry should stay cached"
+    );
+    assert!(
+        !cache.contains("key2"),
+        "older untouched LRU entry should be evicted"
+    );
+    assert!(cache.contains("key3"));
+}
+
+#[test]
+fn test_query_cache_get_removes_expired_entries() {
+    let cache = QueryCache::new();
+    cache.enable();
+
+    cache
+        .set(
+            "short_lived",
+            &"value",
+            Some(Duration::from_millis(1)),
+            "model",
+        )
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(5));
+
+    let value: Option<String> = cache.get("short_lived");
+    assert!(value.is_none());
+    assert!(!cache.contains("short_lived"));
+
+    let stats = cache.stats();
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.misses, 1);
 }
 
 #[test]

@@ -1,5 +1,5 @@
-use crate::config::DatabaseType;
 use crate::columns::ColumnLike;
+use crate::config::DatabaseType;
 use crate::model::Model as ModelTrait;
 use crate::query::OrGroup;
 
@@ -72,8 +72,20 @@ fn query_fragment_preserves_soft_delete_scope_semantics() {
         .build_sql_preview();
 
     assert_eq!(rebuilt, with_trashed.build_sql_preview());
-    assert!(!rebuilt.contains("deleted_at\" IS NOT NULL"), "sql: {rebuilt}");
+    assert!(
+        !rebuilt.contains("deleted_at\" IS NOT NULL"),
+        "sql: {rebuilt}"
+    );
     assert!(!rebuilt.contains("deleted_at\" IS NULL"), "sql: {rebuilt}");
+}
+
+#[test]
+fn query_fragment_only_trashed_scope_is_not_empty() {
+    let fragment = SoftDeleteMutationGuardUser::query()
+        .only_trashed()
+        .consolidate();
+
+    assert!(!fragment.is_empty());
 }
 
 #[test]
