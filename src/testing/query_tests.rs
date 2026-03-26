@@ -722,6 +722,7 @@ fn test_build_select_sql_with_params_uses_mysql_identifier_quoting() {
     assert_eq!(params.len(), 1);
 }
 
+#[cfg(feature = "postgres")]
 #[test]
 fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
     let query = QueryBuilder::<QueryTestUser>::new()
@@ -739,6 +740,23 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
     assert!(matches!(params.first(), Some(Value::Array(_, Some(values))) if values.len() == 2));
     assert!(matches!(params.get(1), Some(Value::Array(_, Some(values))) if values.len() == 2));
     assert!(matches!(params.get(2), Some(Value::Array(_, Some(values))) if values.len() == 2));
+}
+
+#[cfg(not(feature = "postgres"))]
+#[test]
+fn test_build_select_sql_with_params_inlines_postgres_array_predicates_without_postgres_feature() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .where_array_contains("tags", vec!["ops'", "core"])
+        .where_array_contained_by("tags", vec!["ops'", "core"])
+        .where_array_overlaps("tags", vec!["ops'", "core"]);
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains("\"tags\" @> ARRAY['ops''','core']"), "sql: {sql}");
+    assert!(sql.contains("\"tags\" <@ ARRAY['ops''','core']"), "sql: {sql}");
+    assert!(sql.contains("\"tags\" && ARRAY['ops''','core']"), "sql: {sql}");
+    assert!(!sql.contains("$1"), "sql: {sql}");
+    assert!(params.is_empty(), "params: {:?}", params);
 }
 
 #[test]
