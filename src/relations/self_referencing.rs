@@ -46,6 +46,10 @@ impl<E: Model> SelfRef<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
+        if let Some(cached) = &self.cached {
+            return Ok(Some((**cached).clone()));
+        }
+
         let fk = match &self.fk_value {
             Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load")?,
             _ => return Ok(None),
@@ -159,6 +163,10 @@ impl<E: Model> SelfRefMany<E> {
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
+        if let Some(cached) = &self.cached {
+            return Ok(cached.clone());
+        }
+
         let pk = self.parent_pk.as_ref().ok_or_else(|| {
             Error::query(String::from(
                 "Parent primary key not set for self-reference",

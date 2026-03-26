@@ -352,43 +352,6 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    #[cfg(feature = "postgres")]
-    fn postgres_array_value(values: &[serde_json::Value]) -> Value {
-        if values.iter().all(|value| value.is_string()) {
-            return values
-                .iter()
-                .map(|value| value.as_str().expect("checked string value").to_string())
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        if values.iter().all(|value| value.is_boolean()) {
-            return values
-                .iter()
-                .map(|value| value.as_bool().expect("checked boolean value"))
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        if values.iter().all(|value| value.as_i64().is_some()) {
-            return values
-                .iter()
-                .map(|value| value.as_i64().expect("checked integer value"))
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        if values.iter().all(|value| value.is_number()) {
-            return values
-                .iter()
-                .map(|value| value.as_f64().expect("checked numeric value"))
-                .collect::<Vec<_>>()
-                .into();
-        }
-
-        values.to_vec().into()
-    }
-
     fn placeholder_list(count: usize) -> String {
         std::iter::repeat_n("?", count)
             .collect::<Vec<_>>()
@@ -1001,26 +964,8 @@ impl<M: Model> QueryBuilder<M> {
     ) -> SimpleExpr {
         match db_type {
             DatabaseType::Postgres => {
-                if values.is_empty() {
-                    return Expr::cust(self.build_array_sql(db_type, column_sql, operator, values));
-                }
-
-                #[cfg(feature = "postgres")]
-                {
-                    let operator = match operator {
-                        ArrayOperator::Contains => PgBinOper::Contains,
-                        ArrayOperator::ContainedBy => PgBinOper::Contained,
-                        ArrayOperator::Overlaps => PgBinOper::Overlap,
-                    };
-
-                    column_expr.binary(operator, Expr::val(Self::postgres_array_value(values)))
-                }
-
-                #[cfg(not(feature = "postgres"))]
-                {
-                    let _ = column_expr;
-                    Expr::cust(self.build_array_sql(db_type, column_sql, operator, values))
-                }
+                let _ = column_expr;
+                Expr::cust(self.build_array_sql(db_type, column_sql, operator, values))
             }
             DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
                 ArrayOperator::Contains => self.build_custom_expression(

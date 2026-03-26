@@ -117,21 +117,21 @@ mod typed_columns {
     #[test]
     fn test_string_column_contains() {
         let cond = user_cols::NAME.contains("test");
-        assert_eq!(cond.operator, ColumnOperator::Like);
+        assert_eq!(cond.operator, ColumnOperator::LikeEscaped);
         assert_eq!(cond.value, serde_json::json!("%test%"));
     }
 
     #[test]
     fn test_string_column_starts_with() {
         let cond = user_cols::NAME.starts_with("Mr.");
-        assert_eq!(cond.operator, ColumnOperator::Like);
+        assert_eq!(cond.operator, ColumnOperator::LikeEscaped);
         assert_eq!(cond.value, serde_json::json!("Mr.%"));
     }
 
     #[test]
     fn test_string_column_ends_with() {
         let cond = user_cols::NAME.ends_with("son");
-        assert_eq!(cond.operator, ColumnOperator::Like);
+        assert_eq!(cond.operator, ColumnOperator::LikeEscaped);
         assert_eq!(cond.value, serde_json::json!("%son"));
     }
 

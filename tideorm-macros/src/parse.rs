@@ -126,8 +126,9 @@ impl ModelField {
         } else {
             &ty_str
         };
+        let base_type = canonical_schema_type(base_type);
 
-        let column_type = match base_type {
+        let column_type = match base_type.as_str() {
             "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::sea_orm::ColumnType::SmallInteger),
             "i32" | "u32" => quote!(::tideorm::sea_orm::ColumnType::Integer),
             "i64" | "u64" => quote!(::tideorm::sea_orm::ColumnType::BigInteger),
@@ -151,31 +152,31 @@ impl ModelField {
             "Decimal" | "rust_decimal::Decimal" => {
                 quote!(::tideorm::sea_orm::ColumnType::Decimal(None))
             }
-            "Json" | "JsonValue" | "Value" | "serde_json::Value" => {
+            "Json" | "JsonValue" | "Value" | "serde_json::Value" | "Jsonb" => {
                 quote!(::tideorm::sea_orm::ColumnType::Json)
             }
             "Vec<u8>" => quote!(::tideorm::sea_orm::ColumnType::Binary(
                 ::tideorm::sea_orm::sea_query::BlobSize::Blob(None)
             )),
-            "Vec<i32>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+            "Vec<i32>" | "IntArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(
                     ::tideorm::sea_orm::ColumnType::Integer
                 )
             )),
-            "Vec<i64>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+            "Vec<i64>" | "BigIntArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(
                     ::tideorm::sea_orm::ColumnType::BigInteger
                 )
             )),
-            "Vec<String>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+            "Vec<String>" | "TextArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Text)
             )),
-            "Vec<bool>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+            "Vec<bool>" | "BoolArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(
                     ::tideorm::sea_orm::ColumnType::Boolean
                 )
             )),
-            "Vec<f64>" => quote!(::tideorm::sea_orm::ColumnType::Array(
+            "Vec<f64>" | "FloatArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
                 ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Double)
             )),
             _ => {
@@ -196,6 +197,34 @@ impl ModelField {
             quote!(#column_type.def())
         }
     }
+}
+
+fn canonical_schema_type(ty: &str) -> String {
+    let normalized = ty.trim();
+
+    for alias in [
+        "Json",
+        "JsonValue",
+        "JsonArray",
+        "Jsonb",
+        "IntArray",
+        "BigIntArray",
+        "TextArray",
+        "BoolArray",
+        "FloatArray",
+        "Decimal",
+        "Uuid",
+        "NaiveDate",
+        "NaiveTime",
+        "NaiveDateTime",
+        "Text",
+    ] {
+        if normalized == alias || normalized.ends_with(&format!("::{}", alias)) {
+            return alias.to_string();
+        }
+    }
+
+    normalized.to_string()
 }
 
 fn validation_base_type(ty: &Type) -> &Type {

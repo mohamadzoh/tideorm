@@ -632,9 +632,10 @@ fn apply_column_type(
         .strip_prefix("Option<")
         .and_then(|s| s.strip_suffix(">"))
         .unwrap_or(&normalized);
+    let inner_type = canonical_schema_type(inner_type);
 
     // Map Rust types to SeaORM column types
-    match inner_type {
+    match inner_type.as_str() {
         "i8" | "u8" | "i16" | "u16" => {
             column.small_integer();
         }
@@ -710,6 +711,34 @@ fn apply_column_type(
             column.text();
         }
     };
+}
+
+fn canonical_schema_type(rust_type: &str) -> String {
+    let normalized = rust_type.trim();
+
+    for alias in [
+        "Json",
+        "JsonValue",
+        "JsonArray",
+        "Jsonb",
+        "IntArray",
+        "BigIntArray",
+        "TextArray",
+        "BoolArray",
+        "FloatArray",
+        "Decimal",
+        "Uuid",
+        "NaiveDate",
+        "NaiveTime",
+        "NaiveDateTime",
+        "Text",
+    ] {
+        if normalized == alias || normalized.ends_with(&format!("::{}", alias)) {
+            return alias.to_string();
+        }
+    }
+
+    normalized.to_string()
 }
 
 /// Normalizes a Rust type string by removing whitespace

@@ -125,6 +125,10 @@ impl<Related: Model> MorphOne<Related> {
     }
 
     pub async fn load(&self) -> Result<Option<Related>> {
+        if let Some(cached) = &self.cached {
+            return Ok(Some((**cached).clone()));
+        }
+
         self.ensure_configured()?;
 
         let pk = self
@@ -240,6 +244,10 @@ impl<Related: Model> MorphMany<Related> {
     }
 
     pub async fn load(&self) -> Result<Vec<Related>> {
+        if let Some(cached) = &self.cached {
+            return Ok(cached.clone());
+        }
+
         self.ensure_configured()?;
 
         let pk = self
