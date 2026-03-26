@@ -7,6 +7,10 @@ use crate::query::QueryBuilder;
 
 use super::require_scalar_relation_key;
 
+fn has_active_database() -> bool {
+    crate::database::__current_db().is_ok()
+}
+
 #[derive(Debug, Clone)]
 pub struct HasOne<E: Model> {
     pub foreign_key: &'static str,
@@ -59,6 +63,19 @@ impl<E: Model> HasOne<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
+        if has_active_database() {
+            if self.ensure_configured().is_ok() {
+                if let Some(pk) = self.parent_pk.as_ref() {
+                    let pk = require_scalar_relation_key(pk, "HasOne::load")?;
+
+                    return E::query()
+                        .where_eq(self.foreign_key, pk.clone())
+                        .first()
+                        .await;
+                }
+            }
+        }
+
         if let Some(cached) = &self.cached {
             return Ok(Some((**cached).clone()));
         }
@@ -199,6 +216,19 @@ impl<E: Model> HasMany<E> {
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
+        if has_active_database() {
+            if self.ensure_configured().is_ok() {
+                if let Some(pk) = self.parent_pk.as_ref() {
+                    let pk = require_scalar_relation_key(pk, "HasMany::load")?;
+
+                    return E::query()
+                        .where_eq(self.foreign_key, pk.clone())
+                        .get()
+                        .await;
+                }
+            }
+        }
+
         if let Some(cached) = &self.cached {
             return Ok(cached.clone());
         }
@@ -354,6 +384,19 @@ impl<E: Model> BelongsTo<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
+        if has_active_database() {
+            if self.ensure_configured().is_ok() {
+                if let Some(fk) = self.fk_value.as_ref() {
+                    let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
+
+                    return E::query()
+                        .where_eq(self.owner_key, fk.clone())
+                        .first()
+                        .await;
+                }
+            }
+        }
+
         if let Some(cached) = &self.cached {
             return Ok(Some((**cached).clone()));
         }

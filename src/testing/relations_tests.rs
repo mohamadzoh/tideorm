@@ -540,3 +540,64 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
 
     crate::Database::reset_global();
 }
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn direct_relation_load_preserves_cached_payloads_without_query_context() {
+    let _guard = direct_relation_db_guard()
+        .lock()
+        .expect("relation test database guard should not be poisoned");
+
+    crate::Database::reset_global();
+    let db = crate::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    crate::Database::set_global(db).expect("setting global database should succeed");
+
+    let has_one: HasOne<DirectRelationProfile> = serde_json::from_value(json!({
+        "id": 10,
+        "user_id": 1,
+        "name": "Cached Profile"
+    }))
+    .expect("has_one should deserialize cached payload");
+
+    let has_many: HasMany<DirectRelationPost> = serde_json::from_value(json!([
+        { "id": 100, "user_id": 1, "title": "Cached Post" }
+    ]))
+    .expect("has_many should deserialize cached payload");
+
+    let belongs_to: BelongsTo<DirectRelationUser> = serde_json::from_value(json!({
+        "id": 1,
+        "name": "Cached User"
+    }))
+    .expect("belongs_to should deserialize cached payload");
+
+    assert_eq!(
+        has_one
+            .load()
+            .await
+            .expect("cached has-one relation should load")
+            .expect("cached profile should exist")
+            .name,
+        "Cached Profile"
+    );
+    assert_eq!(
+        has_many
+            .load()
+            .await
+            .expect("cached has-many relation should load")
+            .len(),
+        1
+    );
+    assert_eq!(
+        belongs_to
+            .load()
+            .await
+            .expect("cached belongs-to relation should load")
+            .expect("cached user should exist")
+            .name,
+        "Cached User"
+    );
+
+    crate::Database::reset_global();
+}

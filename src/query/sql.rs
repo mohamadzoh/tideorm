@@ -1471,7 +1471,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(super) fn build_base_select_sql(&self) -> String {
-        let db_type = self.db_type_for_sql();
+        self.build_base_select_sql_for_db(self.db_type_for_sql())
+    }
+
+    pub(crate) fn build_base_select_sql_for_db(&self, db_type: DatabaseType) -> String {
         let mut sql = String::new();
 
         sql.push_str(&self.build_select_clause_sql(db_type));
@@ -1505,7 +1508,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(super) fn build_select_sql(&self) -> String {
-        let db_type = self.db_type_for_sql();
+        self.build_select_sql_for_db(self.db_type_for_sql())
+    }
+
+    pub(crate) fn build_select_sql_for_db(&self, db_type: DatabaseType) -> String {
         let mut sql = String::new();
 
         if !self.ctes.is_empty() {
@@ -1520,7 +1526,7 @@ impl<M: Model> QueryBuilder<M> {
             sql.push(' ');
         }
 
-        sql.push_str(&self.build_base_select_sql());
+        sql.push_str(&self.build_base_select_sql_for_db(db_type));
 
         for union in &self.unions {
             sql.push_str(&format!(
@@ -1724,9 +1730,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub fn build_sql_preview(&self) -> String {
+        self.build_sql_preview_for_db(self.db_type_for_sql())
+    }
+
+    pub(crate) fn build_sql_preview_for_db(&self, db_type: DatabaseType) -> String {
         format!(
             "-- DEBUG PREVIEW (not executable, values are approximate)\n{}",
-            self.build_select_sql()
+            self.build_select_sql_for_db(db_type)
         )
     }
 

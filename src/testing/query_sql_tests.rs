@@ -280,7 +280,7 @@ fn sql_preview_marks_escaped_literal_like_helpers() {
     let name = crate::columns::Column::<String>::new("name");
     let preview = QueryCountGuardUser::query()
         .where_col(name.starts_with(r"100%_\done"))
-        .build_sql_preview();
+        .build_sql_preview_for_db(DatabaseType::Postgres);
 
     assert!(preview.contains("LIKE '100\\%\\_\\\\done%'"));
     assert!(preview.contains("ESCAPE '\\'"));
