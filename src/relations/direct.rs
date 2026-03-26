@@ -63,16 +63,14 @@ impl<E: Model> HasOne<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
-        if has_active_database() {
-            if self.ensure_configured().is_ok() {
-                if let Some(pk) = self.parent_pk.as_ref() {
-                    let pk = require_scalar_relation_key(pk, "HasOne::load")?;
+        if has_active_database() && self.ensure_configured().is_ok() {
+            if let Some(pk) = self.parent_pk.as_ref() {
+                let pk = require_scalar_relation_key(pk, "HasOne::load")?;
 
-                    return E::query()
-                        .where_eq(self.foreign_key, pk.clone())
-                        .first()
-                        .await;
-                }
+                return E::query()
+                    .where_eq(self.foreign_key, pk.clone())
+                    .first()
+                    .await;
             }
         }
 
@@ -216,16 +214,14 @@ impl<E: Model> HasMany<E> {
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
-        if has_active_database() {
-            if self.ensure_configured().is_ok() {
-                if let Some(pk) = self.parent_pk.as_ref() {
-                    let pk = require_scalar_relation_key(pk, "HasMany::load")?;
+        if has_active_database() && self.ensure_configured().is_ok() {
+            if let Some(pk) = self.parent_pk.as_ref() {
+                let pk = require_scalar_relation_key(pk, "HasMany::load")?;
 
-                    return E::query()
-                        .where_eq(self.foreign_key, pk.clone())
-                        .get()
-                        .await;
-                }
+                return E::query()
+                    .where_eq(self.foreign_key, pk.clone())
+                    .get()
+                    .await;
             }
         }
 
@@ -384,16 +380,14 @@ impl<E: Model> BelongsTo<E> {
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
-        if has_active_database() {
-            if self.ensure_configured().is_ok() {
-                if let Some(fk) = self.fk_value.as_ref() {
-                    let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
+        if has_active_database() && self.ensure_configured().is_ok() {
+            if let Some(fk) = self.fk_value.as_ref() {
+                let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
 
-                    return E::query()
-                        .where_eq(self.owner_key, fk.clone())
-                        .first()
-                        .await;
-                }
+                return E::query()
+                    .where_eq(self.owner_key, fk.clone())
+                    .first()
+                    .await;
             }
         }
 
