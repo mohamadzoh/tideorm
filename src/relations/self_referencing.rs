@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::build_self_ref_tree_sql;
+use super::helpers::{build_self_ref_tree_sql, cached_ref, preserve_cached_value};
 use super::require_scalar_relation_key;
 
 /// SelfRef relation type - represents a self-referencing relationship
@@ -36,13 +36,14 @@ impl<E: Model> SelfRef<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.fk_value.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.fk_value.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.fk_value == previous.fk_value)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.fk_value == previous.fk_value,
+        );
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
@@ -87,7 +88,7 @@ impl<E: Model> SelfRef<E> {
     }
 
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 
@@ -153,13 +154,14 @@ impl<E: Model> SelfRefMany<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.parent_pk == previous.parent_pk)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_pk == previous.parent_pk,
+        );
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
@@ -224,7 +226,7 @@ impl<E: Model> SelfRefMany<E> {
     }
 
     pub fn get_cached(&self) -> Option<&[E]> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 
     pub async fn load_tree(&self, max_depth: usize) -> Result<Vec<E>> {

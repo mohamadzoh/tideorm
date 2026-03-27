@@ -1,6 +1,6 @@
 # Migrations
 
-This chapter covers schema builder column types, migration authoring, and development-time schema synchronization.
+Use migrations for schema changes in deployed environments. The schema builder reference below covers the column helpers TideORM provides.
 
 ### Schema Builder Column Types
 

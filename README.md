@@ -1,6 +1,6 @@
 # TideORM
 
-A developer-friendly ORM for Rust with clean, expressive syntax.
+A Rust ORM with field-declared relations and a fluent query builder.
 
 [![CI](https://github.com/mohamadzoh/tideorm/actions/workflows/ci.yml/badge.svg)](https://github.com/mohamadzoh/tideorm/actions/workflows/ci.yml)
 [![Website](https://img.shields.io/badge/website-tideorm.com-blue.svg)](https://tideorm.com)
@@ -112,86 +112,6 @@ For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-ins
 
 For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
 
-## Profiling
-
-TideORM ships with two profiling layers:
-
-- `GlobalProfiler` records aggregate timings for real executed queries when enabled.
-- `Profiler` builds manual profiling reports from queries you record explicitly.
-
-```rust
-use tideorm::prelude::*;
-use tideorm::profiling::GlobalProfiler;
-
-GlobalProfiler::enable();
-GlobalProfiler::reset();
-
-let _ = User::query().where_eq("active", true).get().await?;
-
-let stats = GlobalProfiler::stats();
-println!("{}", stats);
-
-GlobalProfiler::disable();
-```
-
-The global profiler now observes the main TideORM execution paths, including query-builder reads, raw SQL helpers, aggregate queries, full-text search, and macro-generated CRUD methods.
-
-## Model Relations
-
-TideORM supports SeaORM-style relations defined as struct fields:
-
-```rust
-#[tideorm::model(table = "users")]
-pub struct User {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub name: String,
-    
-    // One-to-one: User has one Profile
-    #[tideorm(has_one = "Profile", foreign_key = "user_id")]
-    pub profile: HasOne<Profile>,
-    
-    // One-to-many: User has many Posts
-    #[tideorm(has_many = "Post", foreign_key = "user_id")]
-    pub posts: HasMany<Post>,
-    
-    // Many-to-many through pivot table
-    #[tideorm(has_many_through = "Role", pivot = "user_roles", foreign_key = "user_id", related_key = "role_id")]
-    pub roles: HasManyThrough<Role, UserRole>,
-}
-
-#[tideorm::model(table = "posts")]
-pub struct Post {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub user_id: i64,
-    pub title: String,
-    
-    // Inverse relation: Post belongs to User
-    #[tideorm(belongs_to = "User", foreign_key = "user_id")]
-    pub author: BelongsTo<User>,
-}
-
-// Loading relations
-let user = User::find(1).await?.unwrap();
-let posts = user.posts.load().await?;              // Vec<Post>
-let profile = user.profile.load().await?;          // Option<Profile>
-
-let post = Post::find(1).await?.unwrap();
-let author = post.author.load().await?;            // Option<User>
-
-// Check if relation exists
-let has_posts = user.posts.exists().await?;        // bool
-let post_count = user.posts.count().await?;        // u64
-
-// Load with constraints
-let recent_posts = user.posts.load_with(|q| {
-    q.where_eq("published", true)
-     .order_desc("created_at")
-     .limit(5)
-}).await?;
-```
-
 ## Installation
 
 ```toml
@@ -234,17 +154,6 @@ Translations are opt-in. Enable the `translations` feature when you want to use 
 
 Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
-## Relation Types
-
-| Type | Description | Example |
-|------|-------------|---------|
-| `HasOne<T>` | One-to-one relationship | User has one Profile |
-| `HasMany<T>` | One-to-many relationship | User has many Posts |
-| `BelongsTo<T>` | Inverse of HasOne/HasMany | Post belongs to User |
-| `HasManyThrough<T, P>` | Many-to-many via pivot | User has many Roles through UserRoles |
-
-Annotated relation fields are initialized automatically on models loaded through TideORM. Polymorphic relation wrappers exist, but they still require manual `.with_parent(...)` setup instead of macro-generated wiring.
-
 ## Documentation
 
 The docs now ship as an mdBook.
@@ -275,7 +184,7 @@ For runnable applications and broader demos, see **[tideorm-examples](https://gi
 
 ## Testing
 
-TideORM ships with unit, integration, and feature-specific test coverage. The repository CI runs cargo fmt, cargo clippy, cargo check, cargo test --lib across PostgreSQL, MySQL, and SQLite feature sets, plus a SQLite end-to-end smoke test.
+Start with the smallest command that covers your change. CI also runs formatting, linting, library tests, and backend-specific checks.
 
 Common local commands:
 
@@ -288,6 +197,9 @@ cargo test --features postgres
 
 # Cross-backend compile/test coverage
 cargo test --all-features
+
+# SQLite smoke test
+cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-default-features
 ```
 
 See [docs/getting-started.md](docs/getting-started.md#testing) for more.

@@ -1,12 +1,10 @@
 # Models
 
-This chapter covers model definition, CRUD behavior, lifecycle hooks, schema sync helpers, validation, tokenization, and the SeaORM 2.0-inspired model features exposed by TideORM.
-
 ## Model Definition
 
 ### Default Behavior (Recommended)
 
-The preferred way to define a model is `#[tideorm::model(table = "...")]`:
+Define most models with `#[tideorm::model(table = "...")]`:
 
 ```rust
 #[tideorm::model(table = "products")]
@@ -453,12 +451,9 @@ let affected = User::update_all()
 
 ---
 
-
----
-
 ## Model Validation
 
-TideORM provides a comprehensive validation system for model data.
+TideORM includes built-in validation rules and validation helpers for model data.
 
 ### Built-in Validation Rules
 

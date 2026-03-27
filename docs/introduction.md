@@ -1,8 +1,8 @@
 # TideORM Book
 
-The documentation has been reorganized into an mdBook so it is easier to navigate, search, and publish.
+TideORM is a Rust ORM built around macro-generated models, a fluent query builder, and field-declared relations.
 
-Use the chapter list on the left to move through the core areas of the library:
+Use the chapter list on the left to move through the main parts of the library:
 
 - Getting Started
 - Models
@@ -11,4 +11,4 @@ Use the chapter list on the left to move through the core areas of the library:
 - Relations
 - Migrations
 
-If you were previously using DOCUMENTATION.md directly, that file now points here and acts as a lightweight index.
+If you were previously using DOCUMENTATION.md directly, it now points here as a lightweight index.

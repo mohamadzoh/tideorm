@@ -1,7 +1,5 @@
 # Getting Started
 
-This chapter covers initial configuration, type mappings, and the quick reference material that helps new users get productive quickly.
-
 ## Configuration
 
 ### Basic Connection
@@ -64,8 +62,6 @@ TideConfig::init()
 ---
 
 ## Data Type Mappings
-
-This section explains how Rust types map to SQL types across different databases, and how to properly configure your models and migrations.
 
 ### Rust to SQL Type Reference
 
@@ -217,21 +213,32 @@ See the [TideORM Examples repository](https://github.com/mohamadzoh/tideorm-exam
 
 ## Testing
 
+Use the smallest command that covers your change.
+
 ```bash
 # Fast library validation
 cargo test --lib
 
-# Run the full suite for one backend feature set
+# Broad compatibility pass
+cargo test --all-features
+
+# Default backend suite
 cargo test --features postgres
 
-# Run specific test
-cargo test query_builder --features postgres
+# SQLite integration suite
+cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features
 
-# Cross-backend compile/test coverage
-cargo test --all-features
+# PostgreSQL integration suite
+cargo test --test postgres_integration_tests
+
+# MySQL integration suite
+cargo test --test mysql_integration_tests --features mysql
+
+# SQLite smoke test
+cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-default-features
 
 # Rebuild the book after documentation changes
 mdbook build
 ```
 
-The CI matrix covers PostgreSQL, MySQL, and SQLite feature sets. For local work, `cargo test --lib` is the fastest smoke test and `cargo test --all-features` is the broadest compatibility check. When a test needs a fresh TideORM setup, clear global state first with `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()`.
+Integration suites may require local database servers and environment variables. When a test needs a fresh TideORM setup, clear global state first with `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()`.

@@ -6,6 +6,7 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value};
 use super::require_scalar_relation_key;
 
 #[derive(Debug, Clone)]
@@ -22,18 +23,16 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
 
 impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.foreign_key.is_empty()
-            || self.related_key.is_empty()
-            || self.local_key.is_empty()
-            || self.related_local_key.is_empty()
-            || self.pivot_table.is_empty()
-        {
-            Err(Error::query(String::from(
-                "HasManyThrough relation is not configured; use HasManyThrough::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured(
+            "HasManyThrough",
+            &[
+                self.foreign_key,
+                self.related_key,
+                self.local_key,
+                self.related_local_key,
+                self.pivot_table,
+            ],
+        )
     }
 
     pub fn new(
@@ -67,16 +66,17 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.related_key == previous.related_key
                 && self.local_key == previous.local_key
                 && self.related_local_key == previous.related_local_key
                 && self.pivot_table == previous.pivot_table
-                && self.parent_pk == previous.parent_pk)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_pk == previous.parent_pk,
+        );
     }
 
     pub async fn load(&self) -> Result<Vec<Related>> {
@@ -224,7 +224,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     }
 
     pub fn get_cached(&self) -> Option<&[Related]> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 

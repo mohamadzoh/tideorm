@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value};
 use super::require_scalar_relation_key;
 
 #[derive(Debug, Clone)]
@@ -84,13 +85,7 @@ pub struct MorphOne<Related: Model> {
 
 impl<Related: Model> MorphOne<Related> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.morph_name.is_empty() || self.local_key.is_empty() {
-            Err(Error::query(String::from(
-                "MorphOne relation is not configured; use MorphOne::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured("MorphOne", &[self.morph_name, self.local_key])
     }
 
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
@@ -112,16 +107,15 @@ impl<Related: Model> MorphOne<Related> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none()
-            && previous.parent_table.is_none()
-            && previous.cached.is_some())
-            || (self.morph_name == previous.morph_name
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk
-                && self.parent_table == previous.parent_table)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_table == previous.parent_table,
+        );
     }
 
     pub async fn load(&self) -> Result<Option<Related>> {
@@ -152,7 +146,7 @@ impl<Related: Model> MorphOne<Related> {
     }
 
     pub fn get_cached(&self) -> Option<&Related> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 
@@ -203,13 +197,7 @@ pub struct MorphMany<Related: Model> {
 
 impl<Related: Model> MorphMany<Related> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.morph_name.is_empty() || self.local_key.is_empty() {
-            Err(Error::query(String::from(
-                "MorphMany relation is not configured; use MorphMany::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured("MorphMany", &[self.morph_name, self.local_key])
     }
 
     pub fn new(morph_name: &'static str, local_key: &'static str) -> Self {
@@ -231,16 +219,15 @@ impl<Related: Model> MorphMany<Related> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none()
-            && previous.parent_table.is_none()
-            && previous.cached.is_some())
-            || (self.morph_name == previous.morph_name
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk
-                && self.parent_table == previous.parent_table)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_table == previous.parent_table,
+        );
     }
 
     pub async fn load(&self) -> Result<Vec<Related>> {
@@ -320,7 +307,7 @@ impl<Related: Model> MorphMany<Related> {
     }
 
     pub fn get_cached(&self) -> Option<&[Related]> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 

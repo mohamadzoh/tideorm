@@ -832,6 +832,18 @@ mod relation_field_type_tests {
         id: i64,
     }
 
+    macro_rules! assert_unconfigured_relation_load_fails {
+        ($test_name:ident, $relation:expr, $message:literal) => {
+            #[tokio::test]
+            async fn $test_name() {
+                let relation = $relation;
+
+                let err = relation.load().await.unwrap_err();
+                assert!(err.to_string().contains($message));
+            }
+        };
+    }
+
     // =========================================================================
     // HasOne TESTS
     // =========================================================================
@@ -845,16 +857,11 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_has_one_default_fails_loudly_when_unconfigured() {
-        let relation = HasOne::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("HasOne relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_has_one_default_fails_loudly_when_unconfigured,
+        HasOne::<RelationFieldTestModel>::default().with_parent_pk(json!(1)),
+        "HasOne relation is not configured"
+    );
 
     // =========================================================================
     // HasMany TESTS
@@ -869,16 +876,11 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_has_many_default_fails_loudly_when_unconfigured() {
-        let relation = HasMany::<RelationFieldTestModel>::default().with_parent_pk(json!(1));
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("HasMany relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_has_many_default_fails_loudly_when_unconfigured,
+        HasMany::<RelationFieldTestModel>::default().with_parent_pk(json!(1)),
+        "HasMany relation is not configured"
+    );
 
     // =========================================================================
     // BelongsTo TESTS
@@ -893,16 +895,11 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_belongs_to_default_fails_loudly_when_unconfigured() {
-        let relation = BelongsTo::<RelationFieldTestModel>::default().with_fk_value(json!(1));
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("BelongsTo relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_belongs_to_default_fails_loudly_when_unconfigured,
+        BelongsTo::<RelationFieldTestModel>::default().with_fk_value(json!(1)),
+        "BelongsTo relation is not configured"
+    );
 
     #[test]
     fn test_has_many_through_default_has_none_cached() {
@@ -917,18 +914,12 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_has_many_through_default_fails_loudly_when_unconfigured() {
-        let relation =
-            HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default()
-                .with_parent_pk(json!(1));
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("HasManyThrough relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_has_many_through_default_fails_loudly_when_unconfigured,
+        HasManyThrough::<RelationFieldTestModel, RelationFieldPivotTestModel>::default()
+            .with_parent_pk(json!(1)),
+        "HasManyThrough relation is not configured"
+    );
 
     #[test]
     fn test_morph_one_default_has_none_cached() {
@@ -939,16 +930,11 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_morph_one_default_fails_loudly_when_unconfigured() {
-        let relation = MorphOne::<RelationFieldTestModel>::default();
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("MorphOne relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_morph_one_default_fails_loudly_when_unconfigured,
+        MorphOne::<RelationFieldTestModel>::default(),
+        "MorphOne relation is not configured"
+    );
 
     #[test]
     fn test_morph_many_default_has_none_cached() {
@@ -959,16 +945,11 @@ mod relation_field_type_tests {
         assert!(relation.get_cached().is_none());
     }
 
-    #[tokio::test]
-    async fn test_morph_many_default_fails_loudly_when_unconfigured() {
-        let relation = MorphMany::<RelationFieldTestModel>::default();
-
-        let err = relation.load().await.unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("MorphMany relation is not configured")
-        );
-    }
+    assert_unconfigured_relation_load_fails!(
+        test_morph_many_default_fails_loudly_when_unconfigured,
+        MorphMany::<RelationFieldTestModel>::default(),
+        "MorphMany relation is not configured"
+    );
 
     // =========================================================================
     // RelationConstraints TESTS

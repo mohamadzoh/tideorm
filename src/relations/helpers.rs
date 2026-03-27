@@ -1,6 +1,39 @@
+use std::ops::Deref;
+
 use crate::error::{Error, Result};
 use crate::internal::Value;
 use crate::model::Model;
+
+pub(crate) fn ensure_relation_configured(
+    relation_name: &str,
+    required_values: &[&str],
+) -> Result<()> {
+    if required_values.iter().any(|value| value.is_empty()) {
+        return Err(Error::query(format!(
+            "{relation_name} relation is not configured; use {relation_name}::new(...) or a macro-generated relation field",
+        )));
+    }
+
+    Ok(())
+}
+
+pub(crate) fn preserve_cached_value<C: Clone>(
+    cached: &mut Option<C>,
+    previous_cached: &Option<C>,
+    allow_cached_without_context: bool,
+    same_runtime_context: bool,
+) {
+    if (allow_cached_without_context && previous_cached.is_some()) || same_runtime_context {
+        *cached = previous_cached.clone();
+    }
+}
+
+pub(crate) fn cached_ref<C>(cached: &Option<C>) -> Option<&C::Target>
+where
+    C: Deref,
+{
+    cached.as_deref()
+}
 
 pub(crate) fn resolve_model_column_name<E: Model>(name: &str) -> Result<&'static str> {
     if E::column_from_str(name).is_none() {

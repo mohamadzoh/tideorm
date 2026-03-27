@@ -1,30 +1,24 @@
 # Queries
 
-This chapter covers the query builder, full-text search, database-specific behavior, raw SQL, logging, and error handling.
-
 For execution metrics and slow-query counters, see [Profiling](profiling.md).
 
 ## Query Builder
-
-TideORM provides a fluent query builder with all common operations.
 
 Query execution paths are aligned on parameterized SQL generation for reads, JOIN clauses are validated before execution, and destructive mutations reject incompatible SELECT, JOIN, ORDER BY, GROUP BY, UNION, CTE, and window-function modifiers instead of silently ignoring them.
 
 ### WHERE Conditions
 
-**Type-Safe Approach (Recommended)**
-
-Use auto-generated typed columns for compile-time safety. The same `where_eq`, `where_gt`, etc. methods accept both strings and typed columns:
+Most `where_*` methods accept either string column names or typed columns:
 
 ```rust
 // Every model gets a `columns` constant with typed column accessors
 // User::columns.id, User::columns.name, User::columns.active, etc.
 
-// SAME method works with both strings AND typed columns:
+// The same method accepts either form:
 User::query().where_eq("active", true)                    // String-based (runtime checked)
 User::query().where_eq(User::columns.active, true)        // Typed column (compile-time checked)
 
-// Type-safe queries with compile-time column name validation
+// Typed columns are usually the better default
 User::query()
     .where_eq(User::columns.status, "active")
     .where_gt(User::columns.age, 18)
@@ -33,55 +27,39 @@ User::query()
     .await?;
 ```
 
-**All WHERE Methods Support Both Approaches**
+Other helpers follow the same pattern:
 
 ```rust
-// Equality - works with string OR typed column
 User::query().where_eq("status", "active")
 User::query().where_eq(User::columns.status, "active")
 User::query().where_not("role", "admin")
 User::query().where_not(User::columns.role, "admin")
 
-// Comparison - works with string OR typed column
 User::query().where_gt("age", 18)
 User::query().where_gt(User::columns.age, 18)
 User::query().where_gte("age", 18)
 User::query().where_lt("age", 65)
 User::query().where_lte("age", 65)
 
-// Pattern matching - works with string OR typed column
 User::query().where_like("name", "%John%")
 User::query().where_like(User::columns.name, "%John%")
 User::query().where_not_like("email", "%spam%")
 
-// IN / NOT IN - works with string OR typed column
 User::query().where_in("role", vec!["admin", "moderator"])
 User::query().where_in(User::columns.role, vec!["admin", "moderator"])
 User::query().where_not_in("status", vec!["banned", "suspended"])
 
-// NULL checks - works with string OR typed column
 User::query().where_null("deleted_at")
 User::query().where_null(User::columns.deleted_at)
 User::query().where_not_null("email_verified_at")
 
-// Range - works with string OR typed column
 User::query().where_between("age", 18, 65)
 User::query().where_between(User::columns.age, 18, 65)
-
-// Combine conditions (AND)
-User::query()
-    .where_eq(User::columns.active, true)
-    .where_gt(User::columns.age, 18)
-    .where_not_null(User::columns.email)
-    .get()
-    .await?;
 ```
-
-> ⚠️ **Tip**: Use typed columns like `User::columns.name` for compile-time safety. Typos in column names will be caught by the compiler instead of at runtime.
 
 ### OR Conditions
 
-TideORM provides comprehensive OR support with two approaches: simple OR methods and the fluent OR API. All OR methods support both string column names and typed columns.
+OR clauses are available as simple query-level helpers or grouped `begin_or()` / `end_or()` blocks. Both accept string column names and typed columns.
 
 #### Simple OR Methods
 

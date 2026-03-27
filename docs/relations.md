@@ -1,10 +1,8 @@
 # Relations
 
-This chapter covers field-declared relations, attachment and translation helpers, and the runtime relation wrappers provided by TideORM.
-
 ## Model Relations
 
-TideORM supports SeaORM-style relations defined as struct fields. Relations are lazy-loaded on demand.
+Relations are declared as struct fields and loaded on demand.
 
 ### Defining Relations
 

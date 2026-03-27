@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value};
 use super::require_scalar_relation_key;
 
 fn has_active_database() -> bool {
@@ -22,13 +23,7 @@ pub struct HasOne<E: Model> {
 
 impl<E: Model> HasOne<E> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.foreign_key.is_empty() || self.local_key.is_empty() {
-            Err(Error::query(String::from(
-                "HasOne relation is not configured; use HasOne::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured("HasOne", &[self.foreign_key, self.local_key])
     }
 
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
@@ -53,13 +48,14 @@ impl<E: Model> HasOne<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.parent_pk == previous.parent_pk)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_pk == previous.parent_pk,
+        );
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
@@ -124,7 +120,7 @@ impl<E: Model> HasOne<E> {
     }
 
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 
@@ -173,13 +169,7 @@ pub struct HasMany<E: Model> {
 
 impl<E: Model> HasMany<E> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.foreign_key.is_empty() || self.local_key.is_empty() {
-            Err(Error::query(String::from(
-                "HasMany relation is not configured; use HasMany::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured("HasMany", &[self.foreign_key, self.local_key])
     }
 
     pub fn new(foreign_key: &'static str, local_key: &'static str) -> Self {
@@ -204,13 +194,14 @@ impl<E: Model> HasMany<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.parent_pk.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.parent_pk.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.parent_pk == previous.parent_pk)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.parent_pk == previous.parent_pk,
+        );
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
@@ -290,7 +281,7 @@ impl<E: Model> HasMany<E> {
     }
 
     pub fn get_cached(&self) -> Option<&[E]> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 
@@ -339,13 +330,7 @@ pub struct BelongsTo<E: Model> {
 
 impl<E: Model> BelongsTo<E> {
     fn ensure_configured(&self) -> Result<()> {
-        if self.foreign_key.is_empty() || self.owner_key.is_empty() {
-            Err(Error::query(String::from(
-                "BelongsTo relation is not configured; use BelongsTo::new(...) or a macro-generated relation field",
-            )))
-        } else {
-            Ok(())
-        }
+        ensure_relation_configured("BelongsTo", &[self.foreign_key, self.owner_key])
     }
 
     pub fn new(foreign_key: &'static str, owner_key: &'static str) -> Self {
@@ -370,13 +355,14 @@ impl<E: Model> BelongsTo<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        if (previous.fk_value.is_none() && previous.cached.is_some())
-            || (self.foreign_key == previous.foreign_key
+        preserve_cached_value(
+            &mut self.cached,
+            &previous.cached,
+            previous.fk_value.is_none(),
+            self.foreign_key == previous.foreign_key
                 && self.owner_key == previous.owner_key
-                && self.fk_value == previous.fk_value)
-        {
-            self.cached = previous.cached.clone();
-        }
+                && self.fk_value == previous.fk_value,
+        );
     }
 
     pub async fn load(&self) -> Result<Option<E>> {
@@ -441,7 +427,7 @@ impl<E: Model> BelongsTo<E> {
     }
 
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
+        cached_ref(&self.cached)
     }
 }
 
