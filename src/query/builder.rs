@@ -1,5 +1,6 @@
 use super::{
-    ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, WhereCondition, db_sql,
+    CTE, ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, UnionClause,
+    WhereCondition, WindowFunction, WindowFunctionType, db_sql,
 };
 use crate::error::{Error, Result};
 use crate::model::Model;
@@ -107,6 +108,71 @@ impl<M: Model> QueryBuilder<M> {
         Ok(())
     }
 
+    pub(super) fn validate_union_clause(union: &UnionClause) -> std::result::Result<(), String> {
+        db_sql::validate_subquery_sql(&union.query_sql)
+    }
+
+    pub(super) fn validate_window_function(
+        window_function: &WindowFunction,
+    ) -> std::result::Result<(), String> {
+        db_sql::validate_identifier("window alias", &window_function.alias)?;
+
+        for column in &window_function.partition_by {
+            Self::validate_model_column_reference("window PARTITION BY column", column)?;
+        }
+
+        for (column, _) in &window_function.order_by {
+            Self::validate_model_column_reference("window ORDER BY column", column)?;
+        }
+
+        match &window_function.function {
+            WindowFunctionType::Lag(column, _, default)
+            | WindowFunctionType::Lead(column, _, default) => {
+                Self::validate_model_column_reference("window function column", column)?;
+
+                if let Some(default) = default {
+                    db_sql::validate_raw_sql_fragment("LAG/LEAD default expression", default)?;
+                }
+            }
+            WindowFunctionType::FirstValue(column)
+            | WindowFunctionType::LastValue(column)
+            | WindowFunctionType::Sum(column)
+            | WindowFunctionType::Avg(column)
+            | WindowFunctionType::Min(column)
+            | WindowFunctionType::Max(column) => {
+                Self::validate_model_column_reference("window function column", column)?;
+            }
+            WindowFunctionType::NthValue(column, _) => {
+                Self::validate_model_column_reference("window function column", column)?;
+            }
+            WindowFunctionType::Count(Some(column)) => {
+                Self::validate_model_column_reference("window function column", column)?;
+            }
+            WindowFunctionType::Custom(expression) => {
+                db_sql::validate_raw_sql_fragment("window function expression", expression)?;
+            }
+            WindowFunctionType::RowNumber
+            | WindowFunctionType::Rank
+            | WindowFunctionType::DenseRank
+            | WindowFunctionType::Ntile(_)
+            | WindowFunctionType::Count(None) => {}
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn validate_cte_clause(cte: &CTE) -> std::result::Result<(), String> {
+        db_sql::validate_identifier("CTE name", &cte.name)?;
+
+        if let Some(columns) = &cte.columns {
+            for column in columns {
+                db_sql::validate_identifier("CTE column", column)?;
+            }
+        }
+
+        db_sql::validate_subquery_sql(&cte.query_sql)
+    }
+
     fn validate_query_fragments(&self) -> Result<()> {
         for condition in &self.conditions {
             Self::validate_condition(condition).map_err(Error::invalid_query)?;
@@ -131,6 +197,18 @@ impl<M: Model> QueryBuilder<M> {
                 Self::validate_model_column_reference("SELECT column", column)
                     .map_err(Error::invalid_query)?;
             }
+        }
+
+        for union in &self.unions {
+            Self::validate_union_clause(union).map_err(Error::invalid_query)?;
+        }
+
+        for window_function in &self.window_functions {
+            Self::validate_window_function(window_function).map_err(Error::invalid_query)?;
+        }
+
+        for cte in &self.ctes {
+            Self::validate_cte_clause(cte).map_err(Error::invalid_query)?;
         }
 
         Ok(())

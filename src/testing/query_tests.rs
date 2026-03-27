@@ -446,6 +446,117 @@ async fn test_select_subquery_rejects_unsafe_alias_before_db_lookup() {
     assert!(err.to_string().contains("unsafe SELECT alias"));
 }
 
+#[tokio::test]
+async fn test_union_raw_rejects_invalid_subquery_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .union_raw("DELETE FROM users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("invalid subquery for union_raw()"));
+}
+
+#[tokio::test]
+async fn test_union_all_raw_rejects_invalid_subquery_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .union_all_raw("DELETE FROM users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for union_all_raw()")
+    );
+}
+
+#[tokio::test]
+async fn test_with_cte_rejects_non_select_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .with_cte(CTE::new(
+            "active_users",
+            "DELETE FROM users RETURNING id".to_string(),
+        ))
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("invalid CTE for with_cte()"));
+}
+
+#[tokio::test]
+async fn test_with_cte_columns_rejects_non_select_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .with_cte_columns("active_users", vec!["id"], "DELETE FROM users RETURNING id")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for with_cte_columns()")
+    );
+}
+
+#[tokio::test]
+async fn test_with_recursive_cte_rejects_non_select_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .with_recursive_cte(
+            "user_tree",
+            vec!["id"],
+            "SELECT id FROM users",
+            "DELETE FROM users RETURNING id",
+        )
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for with_recursive_cte() recursive query")
+    );
+}
+
+#[tokio::test]
+async fn test_lag_rejects_unsafe_default_expression_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .lag(
+            "previous_id",
+            "id",
+            1,
+            Some("0; DROP TABLE users"),
+            "name",
+            "id",
+            Order::Asc,
+        )
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("unsafe LAG/LEAD default expression")
+    );
+}
+
+#[tokio::test]
+async fn test_custom_window_expression_rejects_unsafe_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .window(WindowFunction::new(
+            WindowFunctionType::Custom("SUM(id); DROP TABLE users".to_string()),
+            "unsafe_sum",
+        ))
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("unsafe window function expression")
+    );
+}
+
 #[test]
 fn test_union_type_sql() {
     assert_eq!(UnionType::Union.as_sql(), "UNION");

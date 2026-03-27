@@ -805,6 +805,10 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn union_raw(mut self, sql: &str) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
+            self.invalidate_query(format!("invalid subquery for union_raw(): {}", reason));
+        }
+
         self.unions.push(UnionClause {
             union_type: UnionType::Union,
             query_sql: sql.to_string(),
@@ -814,6 +818,10 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add a raw UNION ALL query
     pub fn union_all_raw(mut self, sql: &str) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
+            self.invalidate_query(format!("invalid subquery for union_all_raw(): {}", reason));
+        }
+
         self.unions.push(UnionClause {
             union_type: UnionType::UnionAll,
             query_sql: sql.to_string(),
@@ -843,6 +851,10 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
+        if let Err(reason) = Self::validate_window_function(&window_fn) {
+            self.invalidate_query(reason);
+        }
+
         self.window_functions.push(window_fn);
         self
     }
@@ -959,6 +971,11 @@ impl<M: Model> QueryBuilder<M> {
         )
         .partition_by(partition_by)
         .order_by(order_by, order);
+
+        if let Err(reason) = Self::validate_window_function(&wf) {
+            self.invalidate_query(reason);
+        }
+
         self.window_functions.push(wf);
         self
     }
@@ -999,6 +1016,11 @@ impl<M: Model> QueryBuilder<M> {
         )
         .partition_by(partition_by)
         .order_by(order_by, order);
+
+        if let Err(reason) = Self::validate_window_function(&wf) {
+            self.invalidate_query(reason);
+        }
+
         self.window_functions.push(wf);
         self
     }
@@ -1139,6 +1161,10 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn with_cte(mut self, cte: CTE) -> Self {
+        if let Err(reason) = Self::validate_cte_clause(&cte) {
+            self.invalidate_query(format!("invalid CTE for with_cte(): {}", reason));
+        }
+
         self.ctes.push(cte);
         self
     }
@@ -1164,6 +1190,14 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
+            self.invalidate_query(reason);
+        }
+
+        if let Err(err) = query.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for with_query(): {}", err));
+        }
+
         self.ctes
             .push(CTE::new(name, query.build_base_select_sql()));
         self
@@ -1189,6 +1223,24 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub fn with_cte_columns(mut self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
+            self.invalidate_query(reason);
+        }
+
+        for column in &columns {
+            if let Err(reason) = crate::query::db_sql::validate_identifier("CTE column", column) {
+                self.invalidate_query(reason);
+                break;
+            }
+        }
+
+        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
+            self.invalidate_query(format!(
+                "invalid subquery for with_cte_columns(): {}",
+                reason
+            ));
+        }
+
         self.ctes
             .push(CTE::with_columns(name, columns, sql.to_string()));
         self
@@ -1228,6 +1280,31 @@ impl<M: Model> QueryBuilder<M> {
         base_case: &str,
         recursive_case: &str,
     ) -> Self {
+        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
+            self.invalidate_query(reason);
+        }
+
+        for column in &columns {
+            if let Err(reason) = crate::query::db_sql::validate_identifier("CTE column", column) {
+                self.invalidate_query(reason);
+                break;
+            }
+        }
+
+        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(base_case) {
+            self.invalidate_query(format!(
+                "invalid subquery for with_recursive_cte() base query: {}",
+                reason
+            ));
+        }
+
+        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(recursive_case) {
+            self.invalidate_query(format!(
+                "invalid subquery for with_recursive_cte() recursive query: {}",
+                reason
+            ));
+        }
+
         let full_sql = format!("{} UNION ALL {}", base_case, recursive_case);
         let cte = CTE::with_columns(name, columns, full_sql).recursive();
         self.ctes.push(cte);

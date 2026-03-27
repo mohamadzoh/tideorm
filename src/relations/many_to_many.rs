@@ -1,12 +1,13 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value};
+use super::helpers::{
+    cached_ref, ensure_relation_configured, preserve_cached_value, push_param, quote_ident,
+};
 use super::require_scalar_relation_key;
 
 #[derive(Debug, Clone)]
@@ -157,32 +158,35 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     pub async fn attach(&self, related_id: impl Into<serde_json::Value>) -> Result<()> {
         self.ensure_configured()?;
 
+        let db = crate::database::require_db()?;
+        let db_type = db.backend();
         let pk = self
             .parent_pk
             .as_ref()
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasManyThrough::attach")?;
 
-        let mut data = HashMap::new();
-        data.insert(self.foreign_key.to_string(), pk.clone());
-        data.insert(self.related_key.to_string(), related_id.into());
-
-        let columns: Vec<&str> = data.keys().map(|s| s.as_str()).collect();
-        let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("${}", i)).collect();
+        let mut params = Vec::new();
+        let parent_placeholder = push_param(
+            db_type,
+            &mut params,
+            crate::internal::Value::from(pk.clone()),
+        );
+        let related_placeholder = push_param(
+            db_type,
+            &mut params,
+            crate::internal::Value::from(related_id.into()),
+        );
         let sql = format!(
-            "INSERT INTO {} ({}) VALUES ({})",
-            self.pivot_table,
-            columns.join(", "),
-            placeholders.join(", ")
+            "INSERT INTO {} ({}, {}) VALUES ({}, {})",
+            quote_ident(db_type, self.pivot_table),
+            quote_ident(db_type, self.foreign_key),
+            quote_ident(db_type, self.related_key),
+            parent_placeholder,
+            related_placeholder
         );
 
-        let params: Vec<crate::internal::Value> = columns
-            .iter()
-            .filter_map(|col| data.get(*col))
-            .map(|v| crate::internal::Value::from(v.clone()))
-            .collect();
-
-        crate::database::Database::execute_with_params(&sql, params).await?;
+        db.__execute_with_params(&sql, params).await?;
         Ok(())
     }
 

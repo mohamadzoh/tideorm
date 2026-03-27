@@ -4,9 +4,7 @@
 
 #[cfg(test)]
 mod validation_tests {
-    use tideorm::validation::{
-        ValidatableValue, ValidationErrors, ValidationRule, Validator,
-    };
+    use tideorm::validation::{ValidatableValue, ValidationErrors, ValidationRule, Validator};
 
     #[test]
     fn test_validation_rule_required() {

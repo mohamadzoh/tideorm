@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-03-27
+
+### Fixed
+
+- Restored backend-safe `HasManyThrough::attach()` writes by switching the pivot insert path to quoted identifiers and backend-specific parameter placeholders, so SQLite and MySQL/MariaDB no longer depend on PostgreSQL-style `$n` bindings.
+- Hardened raw query-builder escape hatches so `union_raw()`, `union_all_raw()`, `with_cte()`, `with_cte_columns()`, `with_recursive_cte()`, `lag()`, `lead()`, and custom window expressions reject unsafe or non-subquery SQL before any database lookup.
+
+### Changed
+
+- Refreshed dependency examples and macro-crate docs to use the 0.9.3 release version.
+
+### Internal
+
+- Reduced duplicated relation-helper and relation-test boilerplate while keeping the public API unchanged.
+- Verified the release prep with `cargo test --lib`.
+
 ## [0.9.2] - 2026-03-27
 
 ### Fixed
@@ -698,7 +714,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/mohamadzoh/tideorm/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mohamadzoh/tideorm/compare/v0.9.1...v0.9.2
 [0.9.0]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...v0.9.0
 [0.8.9]: https://github.com/mohamadzoh/tideorm/compare/v0.8.8...v0.8.9

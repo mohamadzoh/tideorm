@@ -162,4 +162,3 @@ mod prelude_tests {
         let _: DateTime<Utc> = now;
     }
 }
-

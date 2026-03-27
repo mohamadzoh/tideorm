@@ -537,6 +537,49 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
             .len(),
         1
     );
+    crate::Database::reset_global();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn has_many_through_attach_uses_backend_specific_placeholders() {
+    let _guard = direct_relation_db_guard()
+        .lock()
+        .expect("relation test database guard should not be poisoned");
+
+    crate::Database::reset_global();
+    let db = crate::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    crate::Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_pivots (id INTEGER PRIMARY KEY, left_id INTEGER NOT NULL, right_id INTEGER NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_pivots should succeed");
+
+    HasManyThrough::<RelationTestNode, RelationTestPivot>::new(
+        "left_id",
+        "right_id",
+        "id",
+        "id",
+        "relation_test_pivots",
+    )
+    .with_parent_pk(json!(1))
+    .attach(json!(2))
+    .await
+    .expect("attaching pivot row should succeed on sqlite");
+
+    let pivots = RelationTestPivot::query()
+        .get()
+        .await
+        .expect("loading pivot rows should succeed");
+
+    assert_eq!(pivots.len(), 1);
+    assert_eq!(pivots[0].left_id, 1);
+    assert_eq!(pivots[0].right_id, 2);
 
     crate::Database::reset_global();
 }

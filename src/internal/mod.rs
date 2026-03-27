@@ -273,7 +273,9 @@ impl QueryExecutor {
             exists_result: i32,
         }
 
-        let result = build_exists_any_select::<M>().into_model::<ExistsResult>().one(conn);
+        let result = build_exists_any_select::<M>()
+            .into_model::<ExistsResult>()
+            .one(conn);
         let result: Option<ExistsResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
