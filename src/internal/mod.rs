@@ -147,6 +147,16 @@ where
     select
 }
 
+fn build_exists_any_select<M>() -> Select<M::Entity>
+where
+    M: InternalModel + crate::model::Model,
+{
+    scoped_find::<M>()
+        .select_only()
+        .column_as(Expr::val(1), "exists_result")
+        .limit(1)
+}
+
 fn scoped_find<M>() -> Select<M::Entity>
 where
     M: InternalModel + crate::model::Model,
@@ -258,11 +268,18 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let result = scoped_find::<M>().one(conn);
-        let result = crate::profiling::__profile_future(result)
+        #[derive(Debug, FromQueryResult)]
+        struct ExistsResult {
+            exists_result: i32,
+        }
+
+        let result = build_exists_any_select::<M>().into_model::<ExistsResult>().one(conn);
+        let result: Option<ExistsResult> = crate::profiling::__profile_future(result)
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
+
+        let _ = result.as_ref().map(|row| row.exists_result);
 
         Ok(result.is_some())
     }
