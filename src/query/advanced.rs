@@ -53,10 +53,24 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    /// Paginate results
+    /// Paginate results using 1-based page numbers.
     pub fn page(self, page: u64, per_page: u64) -> Self {
-        let offset = (page.saturating_sub(1)) * per_page;
-        self.limit(per_page).offset(offset)
+        let mut query = self;
+
+        if page == 0 {
+            query.invalidate_query("invalid pagination: page must be at least 1".to_string());
+            return query;
+        }
+
+        if per_page == 0 {
+            query.invalidate_query(
+                "invalid pagination: per_page must be greater than 0".to_string(),
+            );
+            return query;
+        }
+
+        let offset = (page - 1) * per_page;
+        query.limit(per_page).offset(offset)
     }
 
     /// Take only the first N records

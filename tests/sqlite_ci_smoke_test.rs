@@ -692,6 +692,58 @@ async fn sqlite_direct_crud_helpers_remain_unchanged_for_regular_models() {
 }
 
 #[tokio::test]
+async fn sqlite_paginate_rejects_zero_page_number() {
+    TideConfig::init()
+        .database_type(DatabaseType::SQLite)
+        .database("sqlite::memory:")
+        .max_connections(1)
+        .connect()
+        .await
+        .expect("failed to connect to SQLite");
+
+    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+
+    Database::execute(
+        r#"
+        CREATE TABLE ci_users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    "#,
+    )
+    .await
+    .expect("failed to create ci_users table");
+
+    CiUser {
+        id: 0,
+        email: "first@example.com".to_string(),
+        name: "First".to_string(),
+        active: true,
+    }
+    .save()
+    .await
+    .expect("failed to insert regular user");
+
+    let paginate_err = CiUser::paginate(0, 10)
+        .await
+        .expect_err("paginate should reject page 0");
+    assert!(paginate_err.is_validation_error());
+    assert!(paginate_err.to_string().contains("page"));
+    assert!(paginate_err.to_string().contains("at least 1"));
+
+    let query_err = CiUser::query()
+        .page(0, 10)
+        .get()
+        .await
+        .expect_err("query builder should reject page 0");
+    assert!(query_err.is_query_error());
+    assert!(query_err.to_string().contains("page"));
+    assert!(query_err.to_string().contains("at least 1"));
+}
+
+#[tokio::test]
 async fn sqlite_transaction_model_methods_use_transaction_connection() {
     TideConfig::init()
         .database_type(DatabaseType::SQLite)

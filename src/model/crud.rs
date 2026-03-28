@@ -120,7 +120,15 @@ pub(crate) async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
 where
     M: Model + Sized,
 {
-    let offset = (page.saturating_sub(1)) * per_page;
+    if page == 0 {
+        return Err(Error::validation("page", "must be at least 1"));
+    }
+
+    if per_page == 0 {
+        return Err(Error::validation("per_page", "must be greater than 0"));
+    }
+
+    let offset = (page - 1) * per_page;
     match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::paginate::<M, _>(conn.connection(), per_page, offset)

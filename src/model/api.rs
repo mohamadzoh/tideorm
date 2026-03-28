@@ -141,6 +141,9 @@ pub trait Model:
         crud::last::<Self>().await
     }
 
+    /// Return one page of models using 1-based page numbers.
+    ///
+    /// Returns a validation error when `page == 0` or `per_page == 0`.
     async fn paginate(page: u64, per_page: u64) -> Result<Vec<Self>>
     where
         Self: Sized,

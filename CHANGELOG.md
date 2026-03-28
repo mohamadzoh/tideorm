@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-03-28
+
+### Fixed
+
+- Rejected invalid 1-based pagination inputs so `page = 0` no longer aliases `page = 1`. `Model::paginate()` now returns a validation error for zero `page` or `per_page`, and `QueryBuilder::page()` now invalidates the builder before execution for the same misuse.
+
+### Changed
+
+- Refreshed public API docs to remove tutorial-heavy and promotional rustdoc blocks in favor of shorter operational guidance focused on behavior, failure modes, and debugging paths.
+- Refreshed dependency snippets and macro-crate docs to use the 0.9.4 release version.
+
+### Internal
+
+- Added SQLite regression coverage for invalid page-zero pagination.
+- Verified the release prep with `cargo test --all` and `cargo test --lib`.
+
 ## [0.9.3] - 2026-03-27
 
 ### Fixed
