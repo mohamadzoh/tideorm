@@ -1,85 +1,23 @@
 //! Translations System
 //!
-//! This module provides translation functionality for TideORM models.
+//! This module stores per-language field values in a JSON or JSONB column.
 //!
-//! ## Overview
+//! The data shape is:
+//! `{field_name: {lang_code: value, ...}, ...}`
 //!
-//! Translations allow you to store localized content in a JSONB column with
-//! the format: `{field_name: {lang_code: "value", ...}, ...}`
+//! Use it when the model keeps a default value on the struct but also needs
+//! per-language overrides.
 //!
-//! Example JSONB structure:
-//! ```json
-//! {
-//!     "name": {"en": "Product Name", "ar": "اسم المنتج"},
-//!     "description": {"en": "Description", "ar": "الوصف"}
-//! }
-//! ```
+//! If a translation lookup returns the fallback value unexpectedly, check that:
+//! - the field is listed in `#[tideorm(translatable = ...)]`
+//! - the language key was stored under the expected field name
+//! - the model was saved after mutating the translations payload
 //!
-//! ## Setup
-//!
-//! Add a `translations` JSONB column to your table and use the `#[tideorm(translatable)]` attribute:
-//!
-//! ```rust,ignore
-//! #[tideorm::model(table = "products")]
-//! #[tideorm(translatable = "name,description")]
-//! pub struct Product {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     
-//!     // Default/fallback values stored directly on the model
-//!     pub name: String,
-//!     pub description: String,
-//!     
-//!     pub price: f64,
-//!     
-//!     // JSONB column storing translations
-//!     pub translations: Option<Json>,
-//! }
-//! ```
-//!
-//! ## Usage
-//!
-//! ### Setting Translations
-//!
-//! ```rust,ignore
-//! // Set translation for a field
-//! product.set_translation("name", "ar", "اسم المنتج")?;
-//! product.set_translation("description", "ar", "وصف المنتج")?;
-//!
-//! // Set multiple translations at once
-//! product.set_translations("name", hashmap! {
-//!     "en" => "Product Name",
-//!     "ar" => "اسم المنتج",
-//!     "fr" => "Nom du produit",
-//! })?;
-//!
-//! product.update().await?;
-//! ```
-//!
-//! ### Getting Translations
-//!
-//! ```rust,ignore
-//! // Get translation for specific language
-//! let name_ar = product.get_translation("name", "ar")?;
-//!
-//! // Get translation with fallback chain
-//! let name = product.get_translated("name", "ar")?; // Falls back to default if not found
-//!
-//! // Get all translations for a field
-//! let all_names = product.get_all_translations("name")?;
-//! ```
-//!
-//! ### JSON Output with Translations
-//!
-//! ```rust,ignore
-//! // Get model as JSON with translated fields
-//! let mut opts = HashMap::new();
-//! opts.insert("language".to_string(), "ar".to_string());
-//! let json = product.to_json(Some(opts));
-//!
-//! // Result: {"id": 1, "name": "اسم المنتج", "description": "وصف المنتج", ...}
-//! // Note: The translations JSONB column is removed from output
-//! ```
+//! Typical workflow:
+//! - declare the `translations` JSON or JSONB column plus `#[tideorm(translatable = ...)]`
+//! - use `set_translation()` or `set_translations()` to update per-language overrides
+//! - use `get_translated()` when the caller wants the fallback chain applied automatically
+//! - save the model afterward so the updated translations payload is persisted
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -228,8 +166,7 @@ impl TranslationsData {
 
 /// Trait for models with translations
 ///
-/// This trait is automatically implemented for models with translation configuration.
-/// You can also implement it manually for custom behavior.
+/// This trait is usually macro-generated from translation configuration.
 pub trait HasTranslations {
     /// Get the list of translatable field names
     fn translatable_fields() -> Vec<&'static str>;
@@ -253,14 +190,7 @@ pub trait HasTranslations {
     // SET TRANSLATION METHODS
     // =========================================================================
 
-    /// Set a translation for a field in a specific language
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// product.set_translation("name", "ar", "اسم المنتج")?;
-    /// product.set_translation("name", "fr", "Nom du produit")?;
-    /// product.update().await?;
-    /// ```
+    /// Set one translated value for one field and language.
     fn set_translation(
         &mut self,
         field: &str,
@@ -275,16 +205,7 @@ pub trait HasTranslations {
         self.set_translations_data(data)
     }
 
-    /// Set multiple translations for a field at once
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let mut names = HashMap::new();
-    /// names.insert("en", "Product Name");
-    /// names.insert("ar", "اسم المنتج");
-    /// names.insert("fr", "Nom du produit");
-    /// product.set_translations("name", names)?;
-    /// ```
+    /// Set multiple translated values for one field.
     fn set_translations<V: Into<serde_json::Value>>(
         &mut self,
         field: &str,
@@ -300,15 +221,7 @@ pub trait HasTranslations {
         self.set_translations_data(data)
     }
 
-    /// Set all translations for a field from a map (replaces existing)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// product.sync_translations("name", hashmap! {
-    ///     "en" => "New Name",
-    ///     "ar" => "اسم جديد",
-    /// })?;
-    /// ```
+    /// Replace all stored translations for one field.
     fn sync_translations<V: Into<serde_json::Value>>(
         &mut self,
         field: &str,
@@ -329,16 +242,9 @@ pub trait HasTranslations {
     // GET TRANSLATION METHODS
     // =========================================================================
 
-    /// Get the translation for a field in a specific language
+    /// Return the translation stored for one field and language.
     ///
-    /// Returns `None` if no translation exists for that language.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// if let Some(name) = product.get_translation("name", "ar")? {
-    ///     println!("Arabic name: {}", name);
-    /// }
-    /// ```
+    /// Returns `None` when that language has no stored override.
     fn get_translation(
         &self,
         field: &str,
@@ -348,15 +254,10 @@ pub trait HasTranslations {
         Ok(data.get(field, lang).cloned())
     }
 
-    /// Get the translation with fallback chain
+    /// Return a translated value using the normal fallback chain.
     ///
-    /// Tries: requested language -> fallback language -> default field value
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // If Arabic not available, falls back to English, then to field value
-    /// let name = product.get_translated("name", "ar")?;
-    /// ```
+    /// The lookup order is: requested language, fallback language, then the
+    /// default value stored directly on the model.
     fn get_translated(
         &self,
         field: &str,
@@ -381,15 +282,7 @@ pub trait HasTranslations {
         self.get_default_value(field)
     }
 
-    /// Get all translations for a field
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let all_names = product.get_all_translations("name")?;
-    /// for (lang, value) in all_names {
-    ///     println!("{}: {}", lang, value);
-    /// }
-    /// ```
+    /// Return every stored translation for one field.
     fn get_all_translations(
         &self,
         field: &str,
@@ -401,13 +294,7 @@ pub trait HasTranslations {
             .unwrap_or_default())
     }
 
-    /// Get translations for all fields in a specific language
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let arabic = product.get_translations_for_language("ar")?;
-    /// // Returns: {"name": "اسم المنتج", "description": "وصف المنتج"}
-    /// ```
+    /// Return all translated fields that have a value for one language.
     fn get_translations_for_language(
         &self,
         lang: &str,
@@ -476,27 +363,10 @@ pub trait HasTranslations {
     // JSON OUTPUT
     // =========================================================================
 
-    /// Convert model to JSON with translations applied
+    /// Serialize the model with translated values applied.
     ///
-    /// This method:
-    /// 1. Serializes the model to JSON
-    /// 2. Replaces translatable fields with their translated values
-    /// 3. Removes the raw `translations` JSONB column from output
-    ///
-    /// # Arguments
-    /// * `options` - Optional HashMap with:
-    ///   - `language`: Language code (e.g., "en", "ar", "fr")
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Without options (uses default values)
-    /// let json = product.to_translated_json(None);
-    ///
-    /// // With Arabic translations
-    /// let mut opts = HashMap::new();
-    /// opts.insert("language".to_string(), "ar".to_string());
-    /// let json = product.to_translated_json(Some(opts));
-    /// ```
+    /// The raw `translations` column is removed from the returned JSON.
+    /// Pass `options["language"]` to choose the requested language.
     fn to_translated_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value
     where
         Self: serde::Serialize,
@@ -540,15 +410,7 @@ pub trait HasTranslations {
         serde_json::Value::Object(json)
     }
 
-    /// Convert to JSON including all translations
-    ///
-    /// Useful for admin interfaces or APIs that need to show all translations.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let json = product.to_json_with_all_translations();
-    /// // Result includes: {"name": "Default", "translations": {"name": {"en": "...", "ar": "..."}}}
-    /// ```
+    /// Serialize the model without removing the raw translations payload.
     fn to_json_with_all_translations(&self) -> serde_json::Value
     where
         Self: serde::Serialize,
@@ -588,13 +450,6 @@ pub trait HasTranslations {
 /// Helper to create translations from input data
 ///
 /// Use this when processing form data or API requests that include translations.
-///
-/// # Example
-/// ```rust,ignore
-/// // Input format: {"name": {"en": "Name", "ar": "اسم"}, "description": {"en": "Desc"}}
-/// let translations = TranslationInput::from_json(&input)?;
-/// product.apply_translations(translations)?;
-/// ```
 #[derive(Debug, Clone)]
 pub struct TranslationInput {
     /// Field translations
@@ -650,14 +505,7 @@ impl Default for TranslationInput {
 
 /// Extension trait for applying translation input to models
 pub trait ApplyTranslations: HasTranslations {
-    /// Apply translations from TranslationInput
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let input = TranslationInput::from_json(&request_body["translations"])?;
-    /// product.apply_translations(input)?;
-    /// product.update().await?;
-    /// ```
+    /// Apply a batch of parsed translations to the model payload.
     fn apply_translations(&mut self, input: TranslationInput) -> Result<(), TranslationError> {
         let mut data = self.get_translations_data()?;
 

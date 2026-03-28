@@ -1,7 +1,8 @@
 //! Model Relations System
 //!
-//! This module provides model relations using SeaORM-style field declarations.
-//! Relations are defined as struct fields with attributes, following SeaORM's pattern.
+//! This module defines model relations using SeaORM-style field declarations.
+//! Relations are declared as struct fields with attributes that the macros turn
+//! into relation metadata.
 //!
 //! ## Supported Relations
 //!

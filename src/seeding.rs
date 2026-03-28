@@ -1,20 +1,10 @@
 //! Database seeding system
 //!
-//! This module provides a database seeding system for TideORM.
-//! Seeds are tracked in the database to prevent duplicate runs.
+//! This module runs repeatable database seeders and tracks which ones already
+//! executed in the `_seeds` table.
 //!
-//! ## Features
-//!
-//! - Define reusable seed classes
-//! - Track executed seeds in the database (`_seeds` table)
-//! - Prevent duplicate seed runs
-//! - Support for seed dependencies
-//! - Rollback/unseed support
-//!
-//! ## Example
-//!
-//! Implement `Seed` for your seeders and register them through
-//! `TideConfig::seeds::<(...)>()`.
+//! If a seed does not run when expected, check its stored name, dependency list,
+//! and whether it was already recorded as executed.
 
 use std::fmt;
 
@@ -37,31 +27,6 @@ pub use async_trait::async_trait;
 /// - A unique name string
 /// - A `run` method that inserts the seed data
 /// - An optional `rollback` method that removes the seed data
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use tideorm::prelude::*;
-/// use tideorm::Result;
-/// use tideorm::seeding::{Seed, async_trait};
-///
-/// struct AdminUserSeeder;
-///
-/// #[async_trait]
-/// impl Seed for AdminUserSeeder {
-///     fn name(&self) -> &str { "admin_user_seeder" }
-///
-///     async fn run(&self, db: &Database) -> Result<()> {
-///         let _ = db;
-///         Ok(())
-///     }
-///
-///     async fn rollback(&self, db: &Database) -> Result<()> {
-///         let _ = db;
-///         Ok(())
-///     }
-/// }
-/// ```
 #[async_trait]
 pub trait Seed: Send + Sync {
     /// Unique name identifier for this seed
@@ -104,46 +69,6 @@ pub trait Seed: Send + Sync {
 /// Seed runner
 ///
 /// Manages and executes database seeds with tracking to prevent duplicates.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use tideorm::prelude::*;
-/// use tideorm::Result;
-/// use tideorm::seeding::{Seed, Seeder, async_trait};
-///
-/// #[derive(Default)]
-/// struct UserSeeder;
-/// #[derive(Default)]
-/// struct CategorySeeder;
-/// #[derive(Default)]
-/// struct ProductSeeder;
-///
-/// #[async_trait]
-/// impl Seed for UserSeeder {
-///     fn name(&self) -> &str { "user_seeder" }
-///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
-/// }
-/// #[async_trait]
-/// impl Seed for CategorySeeder {
-///     fn name(&self) -> &str { "category_seeder" }
-///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
-/// }
-/// #[async_trait]
-/// impl Seed for ProductSeeder {
-///     fn name(&self) -> &str { "product_seeder" }
-///     async fn run(&self, _db: &Database) -> Result<()> { Ok(()) }
-/// }
-///
-/// # tideorm::__doctest_async! {
-/// Seeder::new()
-///     .add(UserSeeder)
-///     .add(CategorySeeder)
-///     .add(ProductSeeder)
-///     .run()
-///     .await?;
-/// # }
-/// ```
 pub struct Seeder {
     seeds: Vec<Box<dyn Seed>>,
 }

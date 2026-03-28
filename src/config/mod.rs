@@ -1,31 +1,11 @@
 //! Global TideORM configuration
 //!
-//! This module provides global configuration for TideORM, including
+//! This module defines the global TideORM configuration surface, including
 //! database connection, pool settings, translation settings, and other defaults.
 //!
-//! ## Example
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//!
-//! // Configure and connect in one unified call
-//! TideConfig::init()
-//!     .database_type(DatabaseType::Postgres)
-//!     .database("postgres://localhost/mydb")
-//!     .max_connections(20)
-//!     .min_connections(5)
-//!     .languages(&["en", "fr", "ar", "es"])
-//!     .fallback_language("en")
-//!     .connect()
-//!     .await?;
-//!
-//! // Now use models - database is automatically available
-//! let users = User::all().await?;
-//! # let _ = users;
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
+//! Use this as the startup entry point when you need one place to initialize
+//! the global database handle, pool limits, languages, file URL generation, and
+//! related defaults before models start issuing queries.
 
 #[allow(missing_docs)]
 mod builder;

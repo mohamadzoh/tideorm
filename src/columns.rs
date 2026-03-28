@@ -1,13 +1,14 @@
 //! Strongly-Typed Columns
 //!
-//! This module provides compile-time type safety for column operations.
-//! Instead of using string column names that can have runtime errors,
-//! typed columns catch type mismatches at compile time.
+//! Typed columns let query builders refer to generated column constants instead
+//! of raw strings.
 //!
-//! ## Example
+//! The practical benefit is earlier failure: misspelled local model columns are
+//! caught by the compiler or by model-column validation instead of surfacing as
+//! a runtime SQL error later.
 //!
-//! Define `Column<T>` constants for your model fields and use them with
-//! `where_col` to get compile-time checked query expressions.
+//! Use these helpers when raw string column names become hard to audit or easy
+//! to misspell in larger query builders.
 
 use std::marker::PhantomData;
 

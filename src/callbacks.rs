@@ -1,6 +1,11 @@
 //! Callbacks and Hooks for Model Lifecycle Events
 //!
-//! This module provides a trait-based callback system for model lifecycle events.
+//! This module defines the lifecycle hooks around validation, writes, and
+//! deletes.
+//!
+//! If a save or delete is failing before SQL execution, check the relevant
+//! `before_*` callback first. Returning `Err` from a callback stops the write
+//! path immediately.
 //!
 //! ## Available Callbacks
 //!
@@ -15,10 +20,8 @@
 //! - `before_validation` - Called before validation runs
 //! - `after_validation` - Called after validation passes
 //!
-//! ## Usage
-//!
-//! Implement `Callbacks` on your model type and override only the lifecycle
-//! hooks you need.
+//! Implement `Callbacks` on your model type and override only the hooks you
+//! actually need.
 
 use crate::error::Result;
 use crate::validation::Validate;

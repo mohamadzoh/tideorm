@@ -1,28 +1,18 @@
 //! Attribute types and casting
 //!
-//! This module provides type definitions and casting utilities for model attributes.
+//! This module groups custom field types and attribute-casting helpers.
 //!
-//! ## Attribute Casting
+//! Use these types when a plain Rust scalar is not enough for the storage or
+//! serialization behavior you need, such as encrypted values, hashes, JSON, or
+//! database enums.
 //!
-//! TideORM supports automatic casting of attribute values when reading from and writing
-//! to the database. This is useful for complex types like encrypted strings, JSON objects,
-//! enums, dates, and more.
+//! If a field loads or saves with the wrong representation, this module is the
+//! first place to check.
 //!
-//! ### Built-in Casters
-//!
-//! - `StringCaster` - Basic string type
-//! - `IntCaster` - Integer types (i32, i64)
-//! - `FloatCaster` - Floating point types (f32, f64)
-//! - `BoolCaster` - Boolean values
-//! - `JsonCaster` - JSON/JSONB columns
-//! - `DateTimeCaster` - DateTime values
-//! - `UuidCaster` - UUID values
-//! - `DecimalCaster` - Decimal numbers
-//! - `EncryptedCaster` - Encrypted string storage using TideORM's encrypted payload format
-//! - `HashCaster` - Hashed values (one-way) stored as Argon2 hashes
-//! - `EnumCaster` - Database enum types
-//! - `ArrayCaster` - Array columns (PostgreSQL)
-//! - `CommaSeparatedCaster` - Store arrays as comma-separated strings
+//! Practical split:
+//! - use `Encrypted` and `Hashed` when the stored value should not round-trip as plain text
+//! - use `DbEnum`, JSON aliases, and collection helpers when the database representation is more complex than a scalar
+//! - check `cast` and `defaults` first when a value is being transformed unexpectedly during load or save
 
 mod aliases;
 mod cast;

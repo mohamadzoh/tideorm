@@ -1,34 +1,30 @@
 //! Database Schema Synchronization Module
 //!
-//! This module provides automatic schema synchronization between TideORM models
-//! and the database using SeaORM built-in SchemaBuilder capabilities.
+//! This module applies model or entity schema definitions to a live database.
+//!
+//! Use it in local development and tests when you want missing tables or
+//! columns created automatically. It is not a replacement for migrations in
+//! deployed environments.
 //!
 //! ## Two Synchronization Approaches
 //!
-//! ### 1. TideORM Models (Primary)
+//! ### 1. TideORM Models
 //!
-//! TideORM models use `ModelSchema` for schema definition. This is automatically
-//! handled by TideORM's model macros:
+//! TideORM models use `ModelSchema`, which the macros generate for you.
 //!
 //! Register TideORM models through `TideConfig::models::<(... )>()` and enable
 //! synchronization with `sync(true)`.
 //!
-//! ### 2. SeaORM Entities (Advanced)
+//! ### 2. SeaORM Entities
 //!
-//! For SeaORM entities, you can use `SyncRegistry::register_entity::<E>()` to
-//! leverage SeaORM  native SchemaBuilder with incremental sync:
+//! SeaORM entities can be registered through
+//! `SyncRegistry::register_entity::<E>()`.
 //!
 //! Register SeaORM entities with `SyncRegistry::register_entity::<Entity>()`.
 //!
-//! ## SeaORM Schema Sync Features
-//!
-//! When using SeaORM entities, the sync uses SeaORM  native capabilities:
-//!
-//! - **Incremental Schema Sync**: Creates missing tables, columns, indexes, and foreign keys
-//! - **Schema Discovery**: Automatically discovers existing database schema
-//! - **Type-safe Entity Registration**: Uses SeaORM's EntityTrait for schema generation
-//! - **Enum Support**: Creates PostgreSQL enums when needed
-//! - **Foreign Key Management**: Properly handles foreign key relationships
+//! When sync fails, inspect the reported SQL/backend error first. Common causes
+//! are unsupported type changes, existing tables with incompatible columns, or a
+//! production database being pointed at a development-only sync path.
 //!
 //! ## Sync Modes
 //!
@@ -43,19 +39,15 @@
 //!
 //! ### Force Sync (`force_sync(true)`)
 //!
-//! - For SeaORM entities: Uses `apply` mode (fresh creation, fails if tables exist)
-//! - For TideORM models: Drops and recreates tables
+//! - For SeaORM entities: uses `apply` mode and fails if tables already exist
+//! - For TideORM models: drops and recreates tables
 //!
 //! ## ⚠️ Warning
 //!
-//! **DO NOT use sync mode in production!** It can cause data loss if column types
-//! change in incompatible ways. Use proper migrations for production deployments.
+//! **Do not use sync mode in production.** It can still fail or damage data when
+//! a schema change is not additive. Use explicit migrations for deployed systems.
 //!
-//! **NEVER use force_sync in production!** It WILL delete tables and their data!
-//!
-//! ## Usage
-//!
-//! Enable sync during TideORM initialization:
+//! **Do not use force_sync in production.** It deletes tables and their data.
 //!
 //! Enable synchronization with `TideConfig::init().sync(true)` or call
 //! `Database::sync()` directly after connecting.
@@ -67,7 +59,7 @@ use crate::database::Database;
 use crate::error::{Error, Result};
 use crate::{tide_debug, tide_info, tide_warn};
 
-// Use SeaORM  schema management
+// Use SeaORM schema management
 use sea_orm::{
     ConnectionTrait, DbBackend, EntityTrait, Statement,
     schema::{Schema, SchemaBuilder},

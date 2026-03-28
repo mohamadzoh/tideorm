@@ -1,73 +1,16 @@
 //! Performance Profiling for TideORM
 //!
-//! This module provides performance profiling, benchmarking, and optimization tools
-//! for monitoring and improving query performance.
+//! Use this module to answer performance questions with actual timings instead
+//! of guesses.
 //!
-//! # Quick Start
+//! `GlobalProfiler` records statistics for real query execution paths.
+//! `Profiler` is for manually assembled reports in tests, benchmarks, or local
+//! experiments.
 //!
-//! Use `GlobalProfiler` when you want aggregate statistics for real executed
-//! TideORM queries:
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//!
-//! GlobalProfiler::enable();
-//! GlobalProfiler::reset();
-//!
-//! let users = User::query().where_eq("active", true).get().await?;
-//! let stats = GlobalProfiler::stats();
-//! println!("{}", stats);
-//!
-//! GlobalProfiler::disable();
-//! # let _ = users;
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
-//!
-//! Use `Profiler` when you want to construct a detailed report manually:
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # use tideorm::profiling::{ProfiledQuery, Profiler};
-//! # fn demo() -> tideorm::Result<()> {
-//!
-//! let mut profiler = Profiler::start();
-//! profiler.record("SELECT * FROM users", Duration::from_millis(8));
-//! profiler.record_full(
-//!     ProfiledQuery::new("SELECT * FROM posts WHERE user_id = 1", Duration::from_millis(12))
-//!         .with_table("posts")
-//!         .with_rows(3),
-//! );
-//! let report = profiler.stop();
-//! println!("{}", report);
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
-//!
-//! # Features
-//!
-//! - **Query Timing**: Measure individual query execution times
-//! - **Slow Query Detection**: Automatically identify queries exceeding threshold
-//! - **Query Analysis**: Get insights on query patterns and optimization opportunities
-//! - **Memory Tracking**: Monitor memory usage during query execution (optional)
-//! - **Connection Pool Stats**: Monitor pool utilization
-//!
-//! # Performance Tips
-//!
-//! The profiler can suggest optimizations:
-//!
-//! ```rust,no_run
-//! use tideorm::QueryAnalyzer;
-//!
-//! let tips = QueryAnalyzer::analyze("SELECT * FROM users WHERE email = 'test'");
-//! for tip in tips {
-//!     println!("💡 {}", tip);
-//! }
-//! // Output:
-//! // 💡 Consider adding an index on 'email' column for faster lookups
-//! // 💡 Use User::find_by_email() instead of raw WHERE for type safety
-//! ```
+//! Practical split:
+//! - use `GlobalProfiler` when you want process-wide timings for real query execution paths
+//! - use `Profiler` when you want to build a focused report around one benchmark, test, or experiment
+//! - use `QueryAnalyzer` only as a heuristic pass over rendered SQL, not as a substitute for backend query plans
 
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -76,34 +19,34 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-/// Performance profiler for tracking query execution
+/// Manual profiler for collecting query timings into one report.
 pub struct Profiler {
     start_time: Instant,
     queries: Vec<ProfiledQuery>,
     is_active: bool,
 }
 
-/// A profiled query with timing and metadata
+/// One recorded query plus timing metadata.
 #[derive(Debug, Clone)]
 pub struct ProfiledQuery {
-    /// The SQL query
+    /// Rendered SQL text.
     pub sql: String,
-    /// Table involved
+    /// Table name used for grouping, if known.
     pub table: Option<String>,
-    /// Execution duration
+    /// Recorded duration.
     pub duration: Duration,
-    /// Number of rows affected/returned
+    /// Affected or returned rows, if known.
     pub rows: Option<u64>,
-    /// Whether query was from cache
+    /// Whether the data came from cache.
     pub cached: bool,
-    /// Operation type
+    /// Operation label such as `SELECT` or `UPDATE`.
     pub operation: String,
-    /// Timestamp
+    /// Capture time.
     pub timestamp: SystemTime,
 }
 
 impl ProfiledQuery {
-    /// Create a new profiled query
+    /// Capture one SQL statement and its duration.
     pub fn new(sql: impl Into<String>, duration: Duration) -> Self {
         let sql = sql.into();
         let operation = detect_operation(&sql);
@@ -118,19 +61,19 @@ impl ProfiledQuery {
         }
     }
 
-    /// Set table name
+    /// Attach the table name so grouped reports can point to the hotspot.
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
 
-    /// Set row count
+    /// Store how many rows the query touched or returned.
     pub fn with_rows(mut self, rows: u64) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Mark as cached
+    /// Mark this entry as served from cache.
     pub fn cached(mut self) -> Self {
         self.cached = true;
         self
@@ -138,7 +81,7 @@ impl ProfiledQuery {
 }
 
 impl Profiler {
-    /// Start a new profiling session
+    /// Begin collecting queries for a manual profiling run.
     pub fn start() -> Self {
         Self {
             start_time: Instant::now(),
@@ -147,57 +90,57 @@ impl Profiler {
         }
     }
 
-    /// Record a query execution
+    /// Append a SQL statement if the profiler is still active.
     pub fn record(&mut self, sql: impl Into<String>, duration: Duration) {
         if self.is_active {
             self.queries.push(ProfiledQuery::new(sql, duration));
         }
     }
 
-    /// Record a query with full details
+    /// Append a fully populated query entry.
     pub fn record_full(&mut self, query: ProfiledQuery) {
         if self.is_active {
             self.queries.push(query);
         }
     }
 
-    /// Stop profiling and generate report
+    /// Freeze the session and build the final report.
     pub fn stop(mut self) -> ProfileReport {
         self.is_active = false;
         let total_duration = self.start_time.elapsed();
         ProfileReport::from_queries(self.queries, total_duration)
     }
 
-    /// Get current query count
+    /// Return how many queries have been collected so far.
     pub fn query_count(&self) -> usize {
         self.queries.len()
     }
 
-    /// Get elapsed time since start
+    /// Return wall-clock time since `start()`, including non-query work.
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
 }
 
-/// Performance report generated from profiling session
+/// Summary report built from a profiling session.
 #[derive(Debug, Clone)]
 pub struct ProfileReport {
-    /// Total profiling duration
+    /// Total wall-clock duration for the profiled scope.
     pub total_duration: Duration,
-    /// Total time spent in queries
+    /// Sum of recorded query durations.
     pub query_duration: Duration,
-    /// All profiled queries
+    /// All recorded queries.
     pub queries: Vec<ProfiledQuery>,
-    /// Query count by operation type
+    /// Query counts grouped by operation.
     pub operations: HashMap<String, u64>,
-    /// Slowest queries
+    /// Slowest recorded queries.
     pub slowest: Vec<ProfiledQuery>,
-    /// Query count by table
+    /// Query counts grouped by table.
     pub tables: HashMap<String, u64>,
 }
 
 impl ProfileReport {
-    /// Create report from queries
+    /// Build a report from recorded queries and wall-clock duration.
     fn from_queries(queries: Vec<ProfiledQuery>, total_duration: Duration) -> Self {
         let query_duration: Duration = queries.iter().map(|q| q.duration).sum();
 
@@ -225,12 +168,12 @@ impl ProfileReport {
         }
     }
 
-    /// Get total number of queries
+    /// Total number of recorded queries.
     pub fn query_count(&self) -> usize {
         self.queries.len()
     }
 
-    /// Get average query time
+    /// Average per-query duration, or zero when the report is empty.
     pub fn avg_query_time(&self) -> Duration {
         if self.queries.is_empty() {
             Duration::ZERO
@@ -239,7 +182,7 @@ impl ProfileReport {
         }
     }
 
-    /// Get percentage of time spent in queries
+    /// Share of total wall-clock time spent inside recorded queries.
     pub fn query_time_percentage(&self) -> f64 {
         if self.total_duration.as_nanos() == 0 {
             0.0
@@ -248,7 +191,7 @@ impl ProfileReport {
         }
     }
 
-    /// Get queries slower than threshold
+    /// Return queries at or above the supplied threshold.
     pub fn queries_slower_than(&self, threshold: Duration) -> Vec<&ProfiledQuery> {
         self.queries
             .iter()
@@ -256,7 +199,7 @@ impl ProfileReport {
             .collect()
     }
 
-    /// Get optimization suggestions
+    /// Return simple heuristics that highlight likely hotspots in the report.
     pub fn suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
 
@@ -416,7 +359,7 @@ impl fmt::Display for ProfileReport {
     }
 }
 
-/// Global profiling statistics
+/// Global flag controlling process-wide profiling collection.
 static GLOBAL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -434,26 +377,26 @@ static GLOBAL_STATS: RwLock<GlobalStatsState> = RwLock::new(GlobalStatsState {
 
 static GLOBAL_SLOW_THRESHOLD_MS: RwLock<u64> = RwLock::new(100);
 
-/// Global profiling utilities
+/// Process-wide profiling controls.
 pub struct GlobalProfiler;
 
 impl GlobalProfiler {
-    /// Enable global profiling
+    /// Start collecting aggregate timings for profiled execution paths.
     pub fn enable() {
         GLOBAL_PROFILING_ENABLED.store(true, Ordering::SeqCst);
     }
 
-    /// Disable global profiling
+    /// Stop collecting aggregate timings.
     pub fn disable() {
         GLOBAL_PROFILING_ENABLED.store(false, Ordering::SeqCst);
     }
 
-    /// Check if global profiling is enabled
+    /// Return whether global profiling is currently active.
     pub fn is_enabled() -> bool {
         GLOBAL_PROFILING_ENABLED.load(Ordering::SeqCst)
     }
 
-    /// Record a query execution globally
+    /// Add one query duration to the global counters when profiling is enabled.
     pub fn record(duration: Duration) {
         if Self::is_enabled() {
             let threshold_ms = *GLOBAL_SLOW_THRESHOLD_MS.read();
@@ -468,7 +411,7 @@ impl GlobalProfiler {
         }
     }
 
-    /// Get global statistics
+    /// Snapshot the current global counters.
     pub fn stats() -> GlobalStats {
         let stats = *GLOBAL_STATS.read();
 
@@ -480,12 +423,12 @@ impl GlobalProfiler {
         }
     }
 
-    /// Reset global statistics
+    /// Clear all global counters.
     pub fn reset() {
         *GLOBAL_STATS.write() = GlobalStatsState::default();
     }
 
-    /// Set slow query threshold
+    /// Change the duration, in milliseconds, used to classify slow queries.
     pub fn set_slow_threshold(ms: u64) {
         *GLOBAL_SLOW_THRESHOLD_MS.write() = ms;
     }
@@ -506,26 +449,26 @@ where
     output
 }
 
-/// Global profiling statistics
+/// Aggregate counters collected by `GlobalProfiler`.
 #[derive(Debug, Clone, Copy)]
 pub struct GlobalStats {
-    /// Total queries executed
+    /// Number of recorded queries.
     pub total_queries: u64,
-    /// Total time in nanoseconds
+    /// Sum of recorded query time in nanoseconds.
     pub total_time_ns: u64,
-    /// Number of slow queries
+    /// Number of queries at or above the slow threshold.
     pub slow_queries: u64,
-    /// Slow query threshold in milliseconds
+    /// Slow-query threshold in milliseconds.
     pub slow_threshold_ms: u64,
 }
 
 impl GlobalStats {
-    /// Get total time as Duration
+    /// Convert the accumulated nanoseconds into a `Duration`.
     pub fn total_time(&self) -> Duration {
         Duration::from_nanos(self.total_time_ns)
     }
 
-    /// Get average query time
+    /// Average duration per recorded query, or zero when nothing ran.
     pub fn avg_query_time(&self) -> Duration {
         if self.total_queries == 0 {
             Duration::ZERO
@@ -534,7 +477,7 @@ impl GlobalStats {
         }
     }
 
-    /// Get slow query percentage
+    /// Percentage of recorded queries that crossed the slow-query threshold.
     pub fn slow_percentage(&self) -> f64 {
         if self.total_queries == 0 {
             0.0
@@ -568,11 +511,11 @@ impl fmt::Display for GlobalStats {
     }
 }
 
-/// Query analyzer for optimization suggestions
+/// Heuristic analyzer for rendered SQL strings.
 pub struct QueryAnalyzer;
 
 impl QueryAnalyzer {
-    /// Analyze a query and return optimization suggestions
+    /// Run simple SQL heuristics against a rendered query string.
     pub fn analyze(sql: &str) -> Vec<QuerySuggestion> {
         let mut suggestions = Vec::new();
         let sql_upper = sql.to_uppercase();
@@ -667,7 +610,7 @@ impl QueryAnalyzer {
         suggestions
     }
 
-    /// Estimate query complexity
+    /// Classify query shape using a rough score for joins, subqueries, and aggregations.
     pub fn estimate_complexity(sql: &str) -> QueryComplexity {
         let sql_upper = sql.to_uppercase();
         let mut score = 0;
@@ -709,19 +652,19 @@ impl QueryAnalyzer {
     }
 }
 
-/// Suggestion severity level
+/// Severity used by query-analysis suggestions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionLevel {
-    /// Informational suggestion
+    /// Informational observation.
     Info,
-    /// Warning that may impact performance
+    /// Warning about likely performance cost.
     Warning,
-    /// Critical issue that should be addressed
+    /// High-risk issue that should be addressed first.
     Critical,
 }
 
 impl SuggestionLevel {
-    /// Get emoji for display
+    /// Display marker for formatted suggestions.
     pub fn emoji(&self) -> &'static str {
         match self {
             Self::Info => "ℹ️",
@@ -730,7 +673,7 @@ impl SuggestionLevel {
         }
     }
 
-    /// Get label
+    /// Stable uppercase label for logs and reports.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Info => "INFO",
@@ -740,21 +683,21 @@ impl SuggestionLevel {
     }
 }
 
-/// A query optimization suggestion
+/// One query-analysis suggestion.
 #[derive(Debug, Clone)]
 pub struct QuerySuggestion {
-    /// Severity level
+    /// Severity bucket.
     pub level: SuggestionLevel,
-    /// Short title
+    /// Short summary.
     pub title: String,
-    /// Detailed explanation
+    /// Explanation of why the suggestion was emitted.
     pub explanation: String,
-    /// Suggested fix
+    /// Suggested next step.
     pub suggestion: String,
 }
 
 impl QuerySuggestion {
-    /// Create a new suggestion
+    /// Build one analyzer suggestion.
     pub fn new(
         level: SuggestionLevel,
         title: impl Into<String>,
@@ -784,16 +727,16 @@ impl fmt::Display for QuerySuggestion {
     }
 }
 
-/// Query complexity estimate
+/// Rough complexity bucket for rendered SQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryComplexity {
-    /// Simple query (single table, no joins)
+    /// Single-table or otherwise low-complexity query.
     Simple,
-    /// Moderate complexity (few joins or conditions)
+    /// Moderate complexity with some joins or conditions.
     Moderate,
-    /// Complex query (multiple joins, subqueries)
+    /// Complex query with joins, subqueries, or heavier aggregation.
     Complex,
-    /// Very complex query
+    /// Very complex query shape.
     VeryComplex,
 }
 
@@ -807,7 +750,7 @@ impl QueryComplexity {
         }
     }
 
-    /// Get description
+    /// Human-readable summary of the complexity bucket.
     pub fn description(&self) -> &'static str {
         match self {
             Self::Simple => "Simple query, should be fast",

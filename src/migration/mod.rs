@@ -1,61 +1,10 @@
 //! Database migration system
 //!
-//! This module provides a schema migration system for TideORM.
+//! This module defines TideORM's schema migration entry points.
 //!
-//! ## Features
-//!
-//! - Create, alter, and drop tables
-//! - Add, modify, and remove columns
-//! - Create and drop indexes
-//! - Track applied migrations in the database
-//! - Rollback support
-//!
-//! ## Example
-//!
-//! ```rust,no_run
-//! use tideorm::migration::*;
-//! use tideorm::prelude::*;
-//! use tideorm::Result;
-//!
-//! // Define a migration
-//! struct CreateUsersTable;
-//!
-//! #[async_trait]
-//! impl Migration for CreateUsersTable {
-//!     fn version(&self) -> &str { "20260106_001" }
-//!     fn name(&self) -> &str { "create_users_table" }
-//!
-//!     async fn up(&self, schema: &mut Schema) -> Result<()> {
-//!         schema.create_table("users", |t| {
-//!             t.id();
-//!             t.string("email").unique();
-//!             t.string("name");
-//!             t.boolean("active").default(true);
-//!             t.timestamps();
-//!         }).await
-//!     }
-//!
-//!     async fn down(&self, schema: &mut Schema) -> Result<()> {
-//!         schema.drop_table("users").await
-//!     }
-//! }
-//!
-//! // Run migrations
-//! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     TideConfig::init()
-//!         .database("postgres://localhost/myapp")
-//!         .connect()
-//!         .await?;
-//!
-//!     Migrator::new()
-//!         .add(CreateUsersTable)
-//!         .run()
-//!         .await?;
-//!
-//!     Ok(())
-//! }
-//! ```
+//! Use this path for additive, reviewable schema changes in deployed systems.
+//! Reach for sync only in local or test environments where destructive or
+//! additive auto-reconciliation is acceptable.
 
 use crate::config::DatabaseType;
 use crate::database::Database;

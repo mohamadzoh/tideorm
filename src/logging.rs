@@ -1,31 +1,17 @@
 //! Query Logging and Debugging
 //!
-//! This module provides comprehensive logging and debugging capabilities for TideORM queries,
-//! including query logging, timing information, slow query detection, and debug output.
+//! Use this module when you need to answer questions like:
+//! - what SQL TideORM actually executed
+//! - which query is slow
+//! - which parameters were bound on a failing query
 //!
-//! # Quick Start
+//! `QueryLogger` controls runtime logging. `QueryBuilder::debug()` is better
+//! when you want to inspect one query locally without turning on global logs.
 //!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//!
-//! // Enable query logging globally
-//! QueryLogger::global()
-//!     .set_level(LogLevel::Debug)
-//!     .enable_timing(true)
-//!     .set_slow_query_threshold_ms(100)
-//!     .enable();
-//!
-//! // All queries are now logged
-//! let users = User::query()
-//!     .where_eq("active", true)
-//!     .get()
-//!     .await?;
-//! // Output: [TIDE] SELECT * FROM users WHERE active = true (took 12ms)
-//! # let _ = users;
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
+//! Typical workflow:
+//! - enable `QueryLogger` globally when you need runtime SQL history or slow-query tracking
+//! - use `QueryBuilder::debug()` when you only need to inspect one query locally
+//! - raise the level to `Trace` only when you need bound parameters in the output
 //!
 //! # Log Levels
 //!
@@ -44,33 +30,8 @@
 //! - `TIDE_LOG_LEVEL=debug` - Set log level (off, error, warn, info, debug, trace)
 //! - `TIDE_SLOW_QUERY_MS=100` - Slow query threshold in milliseconds
 //!
-//! # Query Debugging
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # fn demo() -> tideorm::Result<()> {
-//! // Debug a specific query without executing
-//! let debug_info = User::query()
-//!     .where_eq("email", "test@example.com")
-//!     .where_gt("age", 18)
-//!     .debug();
-//!
-//! println!("{}", debug_info);
-//! // Output:
-//! // ═══════════════════════════════════════════════════
-//! // TIDEORM QUERY DEBUG
-//! // ═══════════════════════════════════════════════════
-//! // Table: users
-//! // Operation: SELECT
-//! // Conditions:
-//! //   - email = 'test@example.com'
-//! //   - age > 18
-//! // SQL: SELECT * FROM users WHERE email = $1 AND age > $2
-//! // Params: ["test@example.com", 18]
-//! // ═══════════════════════════════════════════════════
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
+//! `QueryBuilder::debug()` is the better first stop when a query shape looks
+//! wrong but you do not want global logging enabled for the whole process.
 
 use parking_lot::RwLock;
 use std::collections::VecDeque;
@@ -97,7 +58,7 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
-    /// Parse log level from string
+    /// Parse a log level from environment-style text.
     pub fn parse_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "off" | "none" | "0" => Self::Off,
@@ -110,7 +71,7 @@ impl LogLevel {
         }
     }
 
-    /// Convert to string representation
+    /// Return the stable uppercase label used in logs.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "OFF",
@@ -149,7 +110,7 @@ pub enum QueryOperation {
 }
 
 impl QueryOperation {
-    /// Detect operation from SQL string
+    /// Classify a rendered SQL statement by its leading keyword.
     pub fn from_sql(sql: &str) -> Self {
         let sql_upper = sql.trim().to_uppercase();
         if sql_upper.starts_with("SELECT") {
@@ -170,7 +131,7 @@ impl QueryOperation {
         }
     }
 
-    /// Get operation name
+    /// Return the display label for this operation.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Select => "SELECT",
@@ -214,7 +175,7 @@ pub struct QueryLogEntry {
 }
 
 impl QueryLogEntry {
-    /// Create a new query log entry
+    /// Start a log entry from raw SQL.
     pub fn new(sql: impl Into<String>) -> Self {
         let sql = sql.into();
         let operation = QueryOperation::from_sql(&sql);
@@ -231,45 +192,45 @@ impl QueryLogEntry {
         }
     }
 
-    /// Set query parameters
+    /// Attach rendered parameter values.
     pub fn with_params(mut self, params: Vec<String>) -> Self {
         self.params = params;
         self
     }
 
-    /// Set table name
+    /// Attach the table name when it is known.
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
 
-    /// Set execution duration
+    /// Attach the measured execution time.
     pub fn with_duration(mut self, duration: Duration) -> Self {
         self.duration = Some(duration);
         self
     }
 
-    /// Set number of rows
+    /// Attach affected or returned row count.
     pub fn with_rows(mut self, rows: u64) -> Self {
         self.rows = Some(rows);
         self
     }
 
-    /// Mark as failed with error
+    /// Mark the entry as failed and store the error message.
     pub fn with_error(mut self, error: impl Into<String>) -> Self {
         self.success = false;
         self.error = Some(error.into());
         self
     }
 
-    /// Check if this is a slow query
+    /// True when the recorded duration meets the slow-query threshold.
     pub fn is_slow(&self, threshold_ms: u64) -> bool {
         self.duration
             .map(|d| d.as_millis() as u64 >= threshold_ms)
             .unwrap_or(false)
     }
 
-    /// Format for console output
+    /// Render the entry in the multiline console format used by trace logging.
     pub fn format_console(&self) -> String {
         let mut output = format!("[TIDE][{}]", self.operation);
 
@@ -310,7 +271,7 @@ pub struct QueryTimer {
 }
 
 impl QueryTimer {
-    /// Start a new query timer
+    /// Start timing one query.
     pub fn start(sql: impl Into<String>) -> Self {
         Self {
             start: Instant::now(),
@@ -319,18 +280,18 @@ impl QueryTimer {
         }
     }
 
-    /// Set table name for the query
+    /// Attach the table name to the finished entry.
     pub fn with_table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
 
-    /// Stop the timer and return duration
+    /// Return elapsed time without building a log entry.
     pub fn stop(&self) -> Duration {
         self.start.elapsed()
     }
 
-    /// Stop and create a log entry
+    /// Stop timing and build a successful log entry.
     pub fn finish(self) -> QueryLogEntry {
         let duration = self.start.elapsed();
         let mut entry = QueryLogEntry::new(self.sql).with_duration(duration);
@@ -340,12 +301,12 @@ impl QueryTimer {
         entry
     }
 
-    /// Stop, create entry with row count
+    /// Stop timing and attach row count to the resulting entry.
     pub fn finish_with_rows(self, rows: u64) -> QueryLogEntry {
         self.finish().with_rows(rows)
     }
 
-    /// Stop, create entry with error
+    /// Stop timing and build a failed log entry.
     pub fn finish_with_error(self, error: impl Into<String>) -> QueryLogEntry {
         self.finish().with_error(error)
     }
@@ -367,37 +328,37 @@ static HISTORY_LIMIT: RwLock<usize> = RwLock::new(100);
 pub struct QueryLogger;
 
 impl QueryLogger {
-    /// Get the global query logger instance
+    /// Start configuring the global query logger.
     pub fn global() -> QueryLoggerBuilder {
         QueryLoggerBuilder::new()
     }
 
-    /// Enable logging (convenience method)
+    /// Enable logging with the current global settings.
     pub fn enable() {
         LOGGER_ENABLED.store(true, Ordering::SeqCst);
     }
 
-    /// Disable logging (convenience method)
+    /// Disable logging without clearing counters or history.
     pub fn disable() {
         LOGGER_ENABLED.store(false, Ordering::SeqCst);
     }
 
-    /// Check if logging is enabled
+    /// Return whether global logging is currently active.
     pub fn is_enabled() -> bool {
         LOGGER_ENABLED.load(Ordering::SeqCst)
     }
 
-    /// Get current log level
+    /// Return the current global log level.
     pub fn level() -> LogLevel {
         *LOG_LEVEL.read()
     }
 
-    /// Set log level
+    /// Replace the current global log level.
     pub fn set_level(level: LogLevel) {
         *LOG_LEVEL.write() = level;
     }
 
-    /// Log a query entry
+    /// Record one query entry, update counters, and emit output if the level allows it.
     pub fn log(entry: QueryLogEntry) {
         if !Self::is_enabled() {
             return;
@@ -459,7 +420,7 @@ impl QueryLogger {
         }
     }
 
-    /// Log a query with timing
+    /// Log a successful query using just SQL and duration.
     pub fn log_timed(sql: impl Into<String>, duration: Duration) {
         if !Self::is_enabled() {
             return;
@@ -468,7 +429,7 @@ impl QueryLogger {
         Self::log(entry);
     }
 
-    /// Log a query error
+    /// Log a failed query using just SQL and an error message.
     pub fn log_error(sql: impl Into<String>, error: impl Into<String>) {
         if !Self::is_enabled() {
             return;
@@ -477,7 +438,7 @@ impl QueryLogger {
         Self::log(entry);
     }
 
-    /// Get query statistics
+    /// Snapshot the current aggregate query counters.
     pub fn stats() -> QueryStats {
         QueryStats {
             total_queries: QUERY_COUNT.load(Ordering::SeqCst),
@@ -487,24 +448,24 @@ impl QueryLogger {
         }
     }
 
-    /// Reset query statistics
+    /// Clear the aggregate query counters.
     pub fn reset_stats() {
         QUERY_COUNT.store(0, Ordering::SeqCst);
         SLOW_QUERY_COUNT.store(0, Ordering::SeqCst);
         TOTAL_QUERY_TIME_MS.store(0, Ordering::SeqCst);
     }
 
-    /// Get query history
+    /// Return the stored query history as a new vector.
     pub fn history() -> Vec<QueryLogEntry> {
         QUERY_HISTORY.read().iter().cloned().collect()
     }
 
-    /// Clear query history
+    /// Drop all stored history entries.
     pub fn clear_history() {
         QUERY_HISTORY.write().clear();
     }
 
-    /// Get slow queries from history
+    /// Return history entries that meet the current slow-query threshold.
     pub fn slow_queries() -> Vec<QueryLogEntry> {
         let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
         QUERY_HISTORY
@@ -515,7 +476,7 @@ impl QueryLogger {
             .collect()
     }
 
-    /// Initialize from environment variables
+    /// Load logger settings from TIDE_LOG_QUERIES, TIDE_LOG_LEVEL, and TIDE_SLOW_QUERY_MS.
     pub fn init_from_env() {
         // TIDE_LOG_QUERIES
         if let Ok(val) = std::env::var("TIDE_LOG_QUERIES") {
@@ -560,31 +521,31 @@ impl QueryLoggerBuilder {
         }
     }
 
-    /// Set the log level
+    /// Set the log level that will be applied on enable.
     pub fn set_level(mut self, level: LogLevel) -> Self {
         self.level = Some(level);
         self
     }
 
-    /// Enable or disable timing
+    /// Control whether timing data should be emitted with log output.
     pub fn enable_timing(mut self, enable: bool) -> Self {
         self.timing = Some(enable);
         self
     }
 
-    /// Set slow query threshold in milliseconds
+    /// Set the slow-query threshold in milliseconds.
     pub fn set_slow_query_threshold_ms(mut self, ms: u64) -> Self {
         self.threshold_ms = Some(ms);
         self
     }
 
-    /// Set query history limit
+    /// Cap how many recent queries are kept in memory.
     pub fn set_history_limit(mut self, limit: usize) -> Self {
         self.history_limit = Some(limit);
         self
     }
 
-    /// Enable the logger with configured settings
+    /// Apply the builder settings and enable global logging.
     pub fn enable(self) {
         if let Some(level) = self.level {
             *LOG_LEVEL.write() = level;
@@ -601,7 +562,7 @@ impl QueryLoggerBuilder {
         LOGGER_ENABLED.store(true, Ordering::SeqCst);
     }
 
-    /// Disable the logger
+    /// Disable global logging.
     pub fn disable(self) {
         LOGGER_ENABLED.store(false, Ordering::SeqCst);
     }
@@ -621,7 +582,7 @@ pub struct QueryStats {
 }
 
 impl QueryStats {
-    /// Get average query time in milliseconds
+    /// Average duration in milliseconds, or zero when nothing has run.
     pub fn avg_query_time_ms(&self) -> f64 {
         if self.total_queries == 0 {
             0.0
@@ -630,7 +591,7 @@ impl QueryStats {
         }
     }
 
-    /// Get percentage of slow queries
+    /// Percentage of recorded queries that counted as slow.
     pub fn slow_query_percentage(&self) -> f64 {
         if self.total_queries == 0 {
             0.0
@@ -687,7 +648,7 @@ pub struct QueryDebugInfo {
 }
 
 impl QueryDebugInfo {
-    /// Create new debug info
+    /// Start building a debug snapshot for one query.
     pub fn new(table: impl Into<String>) -> Self {
         Self {
             table: table.into(),
@@ -704,29 +665,29 @@ impl QueryDebugInfo {
         }
     }
 
-    /// Set operation type
+    /// Override the detected operation shown in the debug output.
     pub fn with_operation(mut self, op: QueryOperation) -> Self {
         self.operation = op;
         self
     }
 
-    /// Add a condition
+    /// Add one rendered condition line.
     pub fn add_condition(&mut self, condition: impl Into<String>) {
         self.conditions.push(condition.into());
     }
 
-    /// Add order by clause
+    /// Add one ORDER BY fragment.
     pub fn add_order_by(&mut self, order: impl Into<String>) {
         self.order_by.push(order.into());
     }
 
-    /// Set SQL
+    /// Attach the rendered SQL or preview text.
     pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
         self.sql = sql.into();
         self
     }
 
-    /// Set params
+    /// Attach rendered parameter values.
     pub fn with_params(mut self, params: Vec<String>) -> Self {
         self.params = params;
         self

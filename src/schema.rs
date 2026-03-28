@@ -1,24 +1,13 @@
 //! Schema generation module
 //!
-//! This module provides functionality to generate SQL schema files
-//! from TideORM model definitions.
+//! This module writes SQL schema output from TideORM model definitions.
 //!
-//! ## Usage
+//! It is mainly for exporting or inspecting schema SQL, not for applying live
+//! migrations. If generated SQL looks wrong, check the model metadata and index
+//! declarations first.
 //!
-//! Schema generation is configured via TideConfig:
-//!
-//! Configure schema generation with `TideConfig::schema_file(...)`.
-//!
-//! Or generate manually:
-//!
-//! Use `SchemaWriter::write_schema(...)` to write a schema file directly.
-//!
-//! ## Index Definitions
-//!
-//! Define indexes using attribute macros:
-//!
-//! Use `#[index(...)]` and `#[unique_index(...)]` on TideORM models to define
-//! regular and unique indexes.
+//! You can wire schema generation through `TideConfig::schema_file(...)` or use
+//! `SchemaWriter::write_schema(...)` directly.
 
 use parking_lot::RwLock;
 use std::fs;
@@ -545,15 +534,7 @@ impl SchemaWriter {
         }
     }
 
-    /// Generate and write schema to file
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// # use tideorm::SchemaWriter;
-    /// # tideorm::__doctest_async! {
-    /// SchemaWriter::write_schema("schema.sql").await?;
-    /// # }
-    /// ```
+    /// Generate schema SQL and write it to a file.
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
         let db_type =
             crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);

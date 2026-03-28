@@ -6,13 +6,13 @@ use crate::internal::InternalConnection;
 use super::Database;
 
 impl Database {
-    /// Create a new database builder for advanced configuration
+    /// Create a database builder when `Database::connect(url)` is not enough.
     pub fn builder() -> DatabaseBuilder {
         DatabaseBuilder::new()
     }
 }
 
-/// Builder for configuring database connections
+/// Builder for connection-pool settings such as limits and timeouts.
 #[derive(Debug, Clone)]
 pub struct DatabaseBuilder {
     url: Option<String>,
@@ -24,7 +24,7 @@ pub struct DatabaseBuilder {
 }
 
 impl DatabaseBuilder {
-    /// Create a new DatabaseBuilder
+    /// Create a new builder with no URL or pool overrides configured yet.
     pub fn new() -> Self {
         Self {
             url: None,
@@ -36,43 +36,45 @@ impl DatabaseBuilder {
         }
     }
 
-    /// Set the database connection URL
+    /// Set the database connection URL.
     pub fn url(mut self, url: impl Into<String>) -> Self {
         self.url = Some(url.into());
         self
     }
 
-    /// Set the maximum number of connections in the pool
+    /// Set the maximum number of pooled connections.
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = Some(n);
         self
     }
 
-    /// Set the minimum number of connections in the pool
+    /// Set the minimum number of pooled connections.
     pub fn min_connections(mut self, n: u32) -> Self {
         self.min_connections = Some(n);
         self
     }
 
-    /// Set the connection timeout
+    /// Set how long to wait while opening a connection.
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.connect_timeout = Some(duration);
         self
     }
 
-    /// Set the idle connection timeout
+    /// Set how long an idle pooled connection may stay open.
     pub fn idle_timeout(mut self, duration: Duration) -> Self {
         self.idle_timeout = Some(duration);
         self
     }
 
-    /// Set the maximum connection lifetime
+    /// Set the maximum lifetime for a pooled connection before recycle.
     pub fn max_lifetime(mut self, duration: Duration) -> Self {
         self.max_lifetime = Some(duration);
         self
     }
 
-    /// Build and connect to the database with pool configuration
+    /// Connect using the configured URL and pool settings.
+    ///
+    /// Returns a configuration error if no URL was provided.
     pub async fn build(self) -> Result<Database> {
         let url = self
             .url

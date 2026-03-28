@@ -1,82 +1,34 @@
 //! Query caching and prepared statement caching for TideORM
 //!
-//! This module provides two types of caching to improve database performance:
+//! This module contains two separate caches:
+//! - query-result caching for repeated reads
+//! - prepared-statement caching for repeated SQL shapes
 //!
-//! 1. **Query Result Caching** - Cache the results of SELECT queries to avoid
-//!    repeated database round-trips for frequently accessed data.
+//! Start here when a query is correct but slower than expected, or when you
+//! need to understand why cached reads are not being reused.
 //!
-//! 2. **Prepared Statement Caching** - Cache prepared statements to avoid
-//!    repeated parsing and planning of SQL queries.
+//! Common causes of cache misses are:
+//! - a different generated SQL shape than expected
+//! - a different explicit cache key
+//! - writes invalidating model-scoped cache entries
+//! - TTL expiry
 //!
-//! ## Query Result Caching
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//!
-//! // Enable query caching globally
-//! QueryCache::global()
-//!     .set_max_entries(1000)
-//!     .set_default_ttl(Duration::from_secs(60))
-//!     .enable();
-//!
-//! // Cache a specific query
-//! let users = User::query()
-//!     .where_eq("active", true)
-//!     .cache(Duration::from_secs(300))  // Cache for 5 minutes
-//!     .get()
-//!     .await?;
-//!
-//! // Cache with a custom key
-//! let users = User::query()
-//!     .where_eq("role", "admin")
-//!     .cache_with_key("admin_users", Duration::from_secs(600))
-//!     .get()
-//!     .await?;
-//!
-//! // Invalidate cache
-//! QueryCache::global().invalidate("admin_users");
-//! QueryCache::global().invalidate_model(User::table_name());  // Invalidate all User queries
-//! QueryCache::global().clear();  // Clear entire cache
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
-//!
-//! ## Prepared Statement Caching
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//!
-//! // Enable prepared statement caching globally
-//! PreparedStatementCache::global()
-//!     .set_max_statements(500)
-//!     .enable();
-//!
-//! // Statements are automatically cached when queries are executed
-//! // The cache key is based on the SQL structure (parameterized)
-//!
-//! // View cache statistics
-//! let stats = PreparedStatementCache::global().stats();
-//! println!("Cache hits: {}", stats.hits);
-//! println!("Cache misses: {}", stats.misses);
-//! println!("Cached statements: {}", stats.cached_count);
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
+//! Practical split:
+//! - enable `QueryCache` when repeated reads should return the same payload for a while
+//! - use explicit cache keys only when the generated SQL shape is not enough to describe reuse
+//! - inspect `PreparedStatementCache` stats when repeated queries are still paying parse or planning cost
 //!
 //! ## Cache Strategies
 //!
-//! TideORM supports different caching strategies:
+//! The query cache can evict entries using different strategies:
 //!
 //! - **TTL (Time To Live)** - Entries expire after a fixed duration
 //! - **LRU (Least Recently Used)** - Oldest entries are evicted when cache is full
-//! - **Write-Through** - Cache is updated on writes
-//! - **Write-Behind** - Cache updates are batched and written asynchronously
 //!
 //! ## Thread Safety
 //!
-//! All cache implementations are thread-safe and can be shared across async tasks.
+//! The cache types are shared and synchronized internally, so they can be used
+//! from multiple async tasks in the same process.
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -115,7 +67,7 @@ pub struct CacheConfig {
     pub strategy: CacheStrategy,
     /// Whether to cache empty results
     pub cache_empty_results: bool,
-    /// Prefix for all cache keys (useful for namespacing)
+    /// Prefix applied to every cache key to avoid collisions across namespaces
     pub key_prefix: Option<String>,
 }
 

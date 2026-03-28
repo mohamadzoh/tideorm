@@ -1,62 +1,26 @@
 //! Database connection and pool management
 //!
-//! This module provides the main `Database` struct for connecting to and
-//! interacting with databases. It completely hides the underlying connection
-//! pool and ORM implementation.
+//! This module exposes the `Database` handle used by query builders, model
+//! helpers, and transactions.
 //!
-//! ## Example
+//! If database calls fail early, the most common causes are:
+//! - the global database was never initialized with `Database::init()` or
+//!   `Database::set_global()`
+//! - the connection URL is wrong for the selected backend
+//! - the current code is running outside the transaction or database scope you
+//!   expected
 //!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
+//! Use `Database::connect()` for straightforward setup. Use
+//! `Database::builder()` when you need to adjust pool limits or timeouts.
 //!
-//! // Simple connection
-//! let db = Database::connect("postgres://localhost/myapp").await?;
+//! Practical split:
+//! - use `Database::connect()` when you already know the URL and defaults are fine
+//! - use `Database::builder()` when pool sizing, idle counts, or timeouts need tuning
+//! - use the global handle only after startup initialization is finished, otherwise model helpers fail before they ever reach the backend
 //!
-//! // With options
-//! let db = Database::builder()
-//!     .url("postgres://localhost/myapp")
-//!     .max_connections(10)
-//!     .min_connections(2)
-//!     .connect_timeout(Duration::from_secs(5))
-//!     .build()
-//!     .await?;
-//!
-//! // Transactions
-//! db.transaction(|tx| Box::pin(async move {
-//!     // tx.connection() gives you the transaction connection
-//!     Ok(())
-//! })).await?;
-//! # let _ = db;
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
-//!
-//! ## Global Database Connection
-//!
-//! TideORM supports a global database connection, allowing models to access
-//! the database without explicitly passing a connection reference:
-//!
-//! ```rust,no_run
-//! # tideorm::__doctest_prelude!();
-//! # async fn demo() -> tideorm::Result<()> {
-//! // Initialize global connection (call once at startup)
-//! Database::init("postgres://localhost/myapp").await?;
-//!
-//! // Now models can use the global connection automatically
-//! let user = User {
-//!     id: 0,
-//!     email: "john@example.com".to_string(),
-//!     name: "John".to_string(),
-//!     ..Default::default()
-//! };
-//!
-//! // No need to pass &db - uses global connection automatically
-//! let user = user.save().await?;
-//! # let _ = user;
-//! # Ok::<(), tideorm::Error>(())
-//! # }
-//! ```
+//! If a query unexpectedly uses the wrong connection, check whether code is
+//! still inside the intended transaction scope or whether it fell back to the
+//! global handle.
 
 mod builder;
 mod core;

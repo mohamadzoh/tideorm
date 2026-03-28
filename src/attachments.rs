@@ -1,77 +1,27 @@
 //! File Attachments System
 //!
-//! This module provides file attachment functionality for TideORM models.
+//! This module stores file references inside a JSON or JSONB model column.
 //!
-//! ## Overview
+//! Use it when the database needs to keep attachment metadata such as keys,
+//! filenames, and timestamps, but the actual file bytes live somewhere else.
 //!
-//! File attachments allow you to associate files with your models using a JSONB column.
-//! Files can be attached as:
-//! - **HasOne**: Single file attachment (e.g., `thumbnail`, `avatar`)
-//! - **HasMany**: Multiple file attachments (e.g., `images`, `documents`)
+//! The two supported shapes are:
+//! - single-file relations such as `thumbnail` or `avatar`
+//! - multi-file relations such as `images` or `documents`
 //!
-//! ## Setup
+//! If attachment calls appear to succeed but nothing is persisted, the usual
+//! cause is that the model was not saved after mutating the in-memory `files`
+//! payload.
 //!
-//! Add a `files` JSONB column to your table and use the `#[tideorm(has_one_file)]` or
-//! `#[tideorm(has_many_files)]` attributes:
-//!
-//! ```rust,ignore
-//! #[tideorm::model(table = "products")]
-//! #[tideorm(has_one_file = "thumbnail")]
-//! #[tideorm(has_many_files = "images,documents")]
-//! pub struct Product {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub name: String,
-//!     pub files: Option<Json>,  // JSONB column storing attachments
-//! }
-//! ```
-//!
-//! ## Usage
-//!
-//! ### Attaching Files
-//!
-//! ```rust,ignore
-//! // Attach a single file (hasOne)
-//! product.attach("thumbnail", "uploads/thumb.jpg")?;
-//!
-//! // Attach multiple files (hasMany)
-//! product.attach("images", "uploads/img1.jpg")?;
-//! product.attach("images", "uploads/img2.jpg")?;
-//!
-//! // Or attach multiple at once
-//! product.attach_many("images", vec!["uploads/img3.jpg", "uploads/img4.jpg"])?;
-//!
-//! // Save the model to persist changes
-//! product.update().await?;
-//! ```
-//!
-//! ### Detaching Files
-//!
-//! ```rust,ignore
-//! // Detach a specific file
-//! product.detach("images", Some("uploads/img1.jpg"))?;
-//!
-//! // Detach all files from a relation
-//! product.detach("images", None)?;
-//!
-//! product.update().await?;
-//! ```
-//!
-//! ### Syncing Files (Replace All)
-//!
-//! ```rust,ignore
-//! // Replace all images with new ones
-//! product.sync("images", vec!["uploads/new1.jpg", "uploads/new2.jpg"])?;
-//!
-//! // Clear all images
-//! product.sync("images", vec![])?;
-//!
-//! product.update().await?;
-//! ```
+//! Typical workflow:
+//! - declare the `files` JSON or JSONB column plus `#[tideorm(has_one_file = ...)]` or `#[tideorm(has_many_files = ...)]`
+//! - use `attach()` or `attach_many()` to append metadata-backed file references
+//! - use `detach()` or `sync()` when the relation should be removed or replaced wholesale
+//! - save the model afterward so the updated payload is persisted
 //!
 //! ## File Metadata
 //!
-//! Each attachment stores metadata:
+//! Each attachment stores:
 //! - `key`: The file path/key
 //! - `filename`: Extracted filename
 //! - `created_at`: Timestamp when attached
@@ -144,49 +94,16 @@ impl FileAttachment {
         self
     }
 
-    /// Get the full URL for this file attachment using the global URL generator
+    /// Generate a public URL using the global file URL generator.
     ///
-    /// This uses the global file URL generator configured via `TideConfig`.
-    /// For model-specific URL generation, use the model's `generate_file_url` method.
-    ///
-    /// # Arguments
-    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let attachment = FileAttachment::new("uploads/2024/image.jpg");
-    /// let url = attachment.url("thumbnail");
-    /// // Returns: "https://cdn.example.com/uploads/2024/image.jpg"
-    /// ```
+    /// Use `url_with_generator()` when one call site needs different URL rules
+    /// without changing the process-wide configuration.
     #[inline]
     pub fn url(&self, field_name: &str) -> String {
         crate::config::Config::generate_file_url(field_name, self)
     }
 
-    /// Get the full URL for this file attachment using a specific URL generator
-    ///
-    /// # Arguments
-    /// * `field_name` - The name of the attachment field (e.g., "thumbnail", "avatar")
-    /// * `generator` - Custom URL generator function
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let attachment = FileAttachment::with_metadata(
-    ///     "uploads/2024/image.jpg",
-    ///     None,
-    ///     Some(1024),
-    ///     Some("image/jpeg"),
-    /// );
-    /// let url = attachment.url_with_generator("thumbnail", |field_name, file| {
-    ///     // Generate different URLs based on field name and mime type
-    ///     match field_name {
-    ///         "thumbnail" => format!("https://images-cdn.example.com/thumb/{}", file.key),
-    ///         _ => format!("https://cdn.example.com/{}", file.key),
-    ///     }
-    /// });
-    /// ```
+    /// Generate a public URL using a one-off generator function.
     #[inline]
     pub fn url_with_generator(
         &self,
@@ -204,8 +121,7 @@ impl FileAttachment {
 
 /// Trait for models with file attachments
 ///
-/// This trait is automatically implemented for models with file attachment configuration.
-/// You can also implement it manually for custom behavior.
+/// This trait is usually macro-generated from file attachment configuration.
 pub trait HasAttachments {
     /// Get the list of hasOne file relations
     fn has_one_files() -> Vec<&'static str>;
@@ -240,35 +156,15 @@ pub trait HasAttachments {
     // ATTACH METHODS
     // =========================================================================
 
-    /// Attach a file to a relation
+    /// Attach one file to a relation.
     ///
-    /// For hasOne relations, this replaces any existing attachment.
-    /// For hasMany relations, this adds to the existing attachments.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Attach a thumbnail (hasOne)
-    /// product.attach("thumbnail", "uploads/thumb.jpg")?;
-    ///
-    /// // Attach an image (hasMany)
-    /// product.attach("images", "uploads/img1.jpg")?;
-    /// ```
+    /// For `hasOne` relations this replaces the previous attachment. For
+    /// `hasMany` relations it appends another entry.
     fn attach(&mut self, relation: &str, file_key: &str) -> Result<(), AttachmentError> {
         self.attach_with_metadata(relation, FileAttachment::new(file_key))
     }
 
-    /// Attach a file with custom metadata
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let attachment = FileAttachment::with_metadata(
-    ///     "uploads/document.pdf",
-    ///     Some("My Document.pdf"),
-    ///     Some(1024 * 1024), // 1MB
-    ///     Some("application/pdf"),
-    /// );
-    /// product.attach_with_metadata("documents", attachment)?;
-    /// ```
+    /// Attach one file using fully prepared attachment metadata.
     fn attach_with_metadata(
         &mut self,
         relation: &str,
@@ -287,12 +183,7 @@ pub trait HasAttachments {
         self.set_files_data(files)
     }
 
-    /// Attach multiple files at once (hasMany only)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// product.attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])?;
-    /// ```
+    /// Attach multiple files to a `hasMany` relation.
     fn attach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         if !Self::is_has_many_relation(relation) {
             return Err(AttachmentError::InvalidRelation(format!(
@@ -314,22 +205,10 @@ pub trait HasAttachments {
     // DETACH METHODS
     // =========================================================================
 
-    /// Detach a file from a relation
+    /// Remove attachments from a relation.
     ///
-    /// For hasOne, pass `None` as `file_key` to remove the attachment.
-    /// For hasMany, pass `Some(key)` to remove a specific file, or `None` to remove all.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Remove thumbnail (hasOne)
-    /// product.detach("thumbnail", None)?;
-    ///
-    /// // Remove specific image (hasMany)
-    /// product.detach("images", Some("uploads/img1.jpg"))?;
-    ///
-    /// // Remove all images (hasMany)
-    /// product.detach("images", None)?;
-    /// ```
+    /// For `hasOne`, pass `None` to clear the attachment. For `hasMany`, pass
+    /// `Some(key)` to remove one entry or `None` to clear the whole relation.
     fn detach(&mut self, relation: &str, file_key: Option<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
 
@@ -346,12 +225,7 @@ pub trait HasAttachments {
         self.set_files_data(files)
     }
 
-    /// Detach multiple files at once (hasMany only)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// product.detach_many("images", vec!["img1.jpg", "img2.jpg"])?;
-    /// ```
+    /// Remove multiple keys from a `hasMany` relation.
     fn detach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         if !Self::is_has_many_relation(relation) {
             return Err(AttachmentError::InvalidRelation(format!(
@@ -373,22 +247,7 @@ pub trait HasAttachments {
     // SYNC METHODS
     // =========================================================================
 
-    /// Sync files for a relation (replace all existing with new ones)
-    ///
-    /// This is useful when you have a form with file inputs and want to
-    /// replace the entire collection.
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// // Replace all images with new ones
-    /// product.sync("images", vec!["new1.jpg", "new2.jpg"])?;
-    ///
-    /// // Clear all images
-    /// product.sync("images", vec![])?;
-    ///
-    /// // Replace thumbnail
-    /// product.sync("thumbnail", vec!["new-thumb.jpg"])?;
-    /// ```
+    /// Replace the current relation contents with a new list of file keys.
     fn sync(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
 
@@ -411,16 +270,7 @@ pub trait HasAttachments {
         self.set_files_data(files)
     }
 
-    /// Sync files with custom metadata
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let attachments = vec![
-    ///     FileAttachment::with_metadata("img1.jpg", Some("Photo 1"), Some(1024), Some("image/jpeg")),
-    ///     FileAttachment::with_metadata("img2.jpg", Some("Photo 2"), Some(2048), Some("image/jpeg")),
-    /// ];
-    /// product.sync_with_metadata("images", attachments)?;
-    /// ```
+    /// Replace the current relation contents with pre-built attachment metadata.
     fn sync_with_metadata(
         &mut self,
         relation: &str,
@@ -450,28 +300,13 @@ pub trait HasAttachments {
     // GETTER METHODS
     // =========================================================================
 
-    /// Get a single file attachment (hasOne)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// if let Some(thumb) = product.get_file("thumbnail")? {
-    ///     println!("Thumbnail: {}", thumb.key);
-    /// }
-    /// ```
+    /// Return the single attachment for a `hasOne` relation.
     fn get_file(&self, relation: &str) -> Result<Option<FileAttachment>, AttachmentError> {
         let files = self.get_files_data()?;
         Ok(files.get_one(relation))
     }
 
-    /// Get multiple file attachments (hasMany)
-    ///
-    /// # Example
-    /// ```rust,ignore
-    /// let images = product.get_files("images")?;
-    /// for img in images {
-    ///     println!("Image: {}", img.key);
-    /// }
-    /// ```
+    /// Return all attachments for a `hasMany` relation.
     fn get_files(&self, relation: &str) -> Result<Vec<FileAttachment>, AttachmentError> {
         let files = self.get_files_data()?;
         Ok(files.get_many(relation))

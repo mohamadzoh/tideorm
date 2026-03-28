@@ -1,18 +1,19 @@
 //! Record Tokenization
 //!
-//! This module provides secure tokenization for TideORM records. Tokenization
-//! converts a record's primary key into an encrypted token that can be safely
-//! shared externally (e.g., in URLs, API responses) without exposing the actual ID.
+//! This module turns model primary keys into signed or encrypted tokens that can
+//! be shared outside the database layer.
 //!
-//! ## Features
+//! Use it when you want external identifiers in URLs or APIs without exposing
+//! the raw primary key directly.
 //!
-//! - **Secure encryption**: Uses XChaCha20-Poly1305 authenticated encryption
-//! - **Configurable at multiple levels**: Global (TideConfig), Model-specific, or default
-//! - **Override priority**: Model → TideConfig → Default
-//! - **Tamper detection**: Authenticated encryption rejects modified tokens
-//! - **URL-safe encoding**: Base64-URL encoding for safe use in URLs
-//! - **Model-specific tokens**: Tokens are bound to model type (User token ≠ Product token)
-//! - **Randomized tokens**: The default encoder uses a fresh nonce for every token
+//! If token decoding fails, the most common causes are:
+//! - no encryption key or token override was configured at startup
+//! - a token was generated for a different model type
+//! - the token was tampered with or truncated
+//!
+//! The default implementation uses authenticated encryption plus URL-safe
+//! encoding. Tokens are also bound to the model type, so a `User` token does
+//! not decode as a different model.
 //!
 //! ## Configuration Hierarchy
 //!
@@ -20,67 +21,10 @@
 //! 2. **TideConfig-level** - Set via `TokenConfig::set_encoder()` / `TokenConfig::set_decoder()`
 //! 3. **Default** - Built-in authenticated encryption using the configured encryption key
 //!
-//! ## Quick Start
-//!
-//! The easiest way to enable tokenization is using the `#[tideorm(tokenize)]` attribute:
-//!
-//! ```rust,no_run
-//! tideorm::__doctest_tokenizable_user!();
-//! use tideorm::tokenization::TokenConfig;
-//!
-//! # tideorm::__doctest_async! {
-//! // Configure encryption key (do this once at startup)
-//! TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-//!
-//! // Now you can tokenize records
-//! let user = User::find(1).await?.unwrap();
-//! let token = user.tokenize()?;
-//!
-//! // Decode without fetching
-//! let id = User::detokenize(&token)?;
-//!
-//! // Or fetch directly from token
-//! let same_user = User::from_token(&token).await?;
-//! assert_eq!(user.id, same_user.id);
-//! # let _ = id;
-//! # }
-//! ```
-//!
-//! ## Manual Implementation
-//!
-//! You can also implement the `Tokenizable` trait manually:
-//!
-//! ```rust,no_run
-//! use tideorm::prelude::*;
-//! use tideorm::tokenization::Tokenizable;
-//!
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key)]
-//!     pub id: i64,
-//!     pub name: String,
-//! }
-//!
-//! #[tideorm::migration::async_trait]
-//! impl Tokenizable for User {
-//!     type TokenPrimaryKey = i64;
-//!
-//!     fn token_model_name() -> &'static str {
-//!         "User"
-//!     }
-//!     
-//!     fn token_primary_key(&self) -> Self::TokenPrimaryKey {
-//!         self.id
-//!     }
-//!     
-//!     async fn from_token(token: &str) -> tideorm::Result<Self> {
-//!         let id = Self::decode_token(token)?;
-//!         Self::find(id)
-//!             .await?
-//!             .ok_or_else(|| tideorm::Error::not_found("User not found"))
-//!     }
-//! }
-//! ```
+//! Typical setup:
+//! - configure the encryption key once during startup if you rely on the default encoder
+//! - enable `#[tideorm(tokenize)]` on models that should expose tokens externally
+//! - use `decode_token()` when you only need the primary key and `from_token()` when you want the record lookup too
 //!
 //! ## Available Methods
 //!
@@ -96,45 +40,10 @@
 //! | `User::from_token(&token).await` | Decode token and fetch record from DB |
 //! | `user.regenerate_token()` | Generate a fresh token; default encoding uses a new random nonce |
 //!
-//! ## Custom Encoder/Decoder
-//!
-//! For models that need custom tokenization logic:
-//!
-//! ```rust,no_run
-//! use tideorm::prelude::*;
-//! use tideorm::tokenization::{TokenDecoder, TokenEncoder, Tokenizable};
-//!
-//! #[tideorm::model(table = "secret_documents")]
-//! struct SecretDocument {
-//!     #[tideorm(primary_key)]
-//!     id: i64,
-//! }
-//!
-//! #[tideorm::migration::async_trait]
-//! impl Tokenizable for SecretDocument {
-//!     type TokenPrimaryKey = i64;
-//!
-//!     fn token_model_name() -> &'static str { "SecretDocument" }
-//!     fn token_primary_key(&self) -> Self::TokenPrimaryKey { self.id }
-//!     
-//!     fn token_encoder() -> Option<TokenEncoder> {
-//!         Some(|record_id, _model_name| {
-//!             Ok(format!("DOC-{}", record_id))
-//!         })
-//!     }
-//!     
-//!     fn token_decoder() -> Option<TokenDecoder> {
-//!         Some(|token, _model_name| {
-//!             Ok(token.strip_prefix("DOC-").map(ToOwned::to_owned))
-//!         })
-//!     }
-//!     
-//!     async fn from_token(token: &str) -> tideorm::Result<Self> {
-//!         let id = Self::decode_token(token)?;
-//!         Self::find(id).await?.ok_or_else(|| tideorm::Error::not_found("Not found"))
-//!     }
-//! }
-//! ```
+//! Override `token_encoder()` and `token_decoder()` on the model only when you
+//! need a model-specific token format. Otherwise, keep the default encrypted
+//! path so invalid or tampered tokens stay in the `Ok(None)` path instead of
+//! becoming configuration errors.
 //!
 //! ## Security Notes
 //!
@@ -158,30 +67,16 @@ use crate::error::{Error, Result};
 // TYPE DEFINITIONS
 // =============================================================================
 
-/// Token encoder function type
+/// Function signature for token encoders.
 ///
-/// Takes the record's primary key payload string and model name, returns the encoded token.
-/// The record parameter allows for model-aware encoding.
-///
-/// # Arguments
-/// * `record_id` - The primary key payload to encode
-/// * `model_name` - The name of the model (e.g., "User", "Product")
-///
-/// # Returns
-/// The encoded token string, or an error if encoding fails
+/// Receives the serialized primary-key payload plus the model name and returns
+/// the external token string.
 pub type TokenEncoder = fn(record_id: &str, model_name: &str) -> Result<String>;
 
-/// Token decoder function type
+/// Function signature for token decoders.
 ///
-/// Takes a token and model name, returns the decoded primary key payload.
-///
-/// # Arguments
-/// * `token` - The token string to decode
-/// * `model_name` - The name of the model (e.g., "User", "Product")
-///
-/// # Returns
-/// The decoded primary key payload string, or None if decoding fails validation.
-/// Returns an error when decoding cannot proceed due to misconfiguration.
+/// Returns `Ok(None)` for invalid or mismatched tokens and `Err(...)` when
+/// decoding cannot proceed because configuration is missing.
 pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<String>>;
 
 // =============================================================================
@@ -232,26 +127,17 @@ fn global_token_decoder_state() -> &'static RwLock<Option<TokenDecoder>> {
 pub struct TokenConfig;
 
 impl TokenConfig {
-    /// Set the global encryption key for tokenization
+    /// Set the global encryption key used by the default encoder and decoder.
     ///
-    /// The key should be at least 32 bytes for secure encryption.
-    /// This key is used by the default encoder/decoder.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// ```
+    /// If this key changes, previously issued default tokens stop decoding.
     pub fn set_encryption_key(key: &str) {
         let configured_key = ConfiguredEncryptionKey::new(key);
         *global_encryption_key_state().write() = Some(configured_key);
     }
 
-    /// Get the global encryption key
+    /// Return the configured raw encryption key.
     ///
-    /// Returns an error if no encryption key has been configured.
+    /// Fails when no global key has been configured yet.
     pub fn get_encryption_key() -> Result<String> {
         Self::current_encryption_key()
             .map(|configured| configured.raw)
@@ -264,7 +150,7 @@ impl TokenConfig {
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
-    /// Check if an encryption key has been explicitly configured
+    /// Return whether a global encryption key is currently configured.
     pub fn has_encryption_key() -> bool {
         global_encryption_key_state().read().is_some()
     }
@@ -273,93 +159,45 @@ impl TokenConfig {
         global_encryption_key_state().read().clone()
     }
 
-    /// Set a custom global token encoder
+    /// Set a global token encoder override.
     ///
-    /// This encoder will be used for all models unless overridden at the model level.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// TokenConfig::set_encoder(|record_id, model_name| {
-    ///     Ok(format!("{}-{}", model_name.to_lowercase(), record_id))
-    /// });
-    /// ```
+    /// Model-level encoders still take precedence over this setting.
     pub fn set_encoder(encoder: TokenEncoder) {
         *global_token_encoder_state().write() = Some(encoder);
     }
 
-    /// Set a custom global token decoder
+    /// Set a global token decoder override.
     ///
-    /// This decoder will be used for all models unless overridden at the model level.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// TokenConfig::set_decoder(|token, model_name| {
-    ///     let prefix = format!("{}-", model_name.to_lowercase());
-    ///     Ok(token.strip_prefix(&prefix).map(ToOwned::to_owned))
-    /// });
-    /// ```
+    /// Model-level decoders still take precedence over this setting.
     pub fn set_decoder(decoder: TokenDecoder) {
         *global_token_decoder_state().write() = Some(decoder);
     }
 
-    /// Reset tokenization global configuration.
+    /// Clear the global key and any global encoder or decoder overrides.
     pub fn reset() {
         *global_encryption_key_state().write() = None;
         *global_token_encoder_state().write() = None;
         *global_token_decoder_state().write() = None;
     }
 
-    /// Get the global token encoder (or default)
+    /// Return the active global encoder, falling back to the default implementation.
     pub fn get_encoder() -> TokenEncoder {
         (*global_token_encoder_state().read()).unwrap_or(default_encode)
     }
 
-    /// Get the global token decoder (or default)
+    /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
         (*global_token_decoder_state().read()).unwrap_or(default_decode)
     }
 
-    /// Encode a record ID payload using the global encoder
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// # fn main() -> tideorm::Result<()> {
-    /// TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// let token = TokenConfig::encode("42", "User")?;
-    /// # let _ = token;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Encode a serialized primary-key payload using the active global encoder.
     pub fn encode(record_id: &str, model_name: &str) -> Result<String> {
         Self::get_encoder()(record_id, model_name)
     }
 
-    /// Decode a token using the global decoder
+    /// Decode a token using the active global decoder.
     ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use tideorm::{Error, Result};
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// # fn main() -> Result<()> {
-    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// # let token = TokenConfig::encode("42", "User")?;
-    /// let id = TokenConfig::decode(&token, "User")?
-    ///     .ok_or_else(|| Error::invalid_token("Invalid token"))?;
-    /// # let _ = id;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Returns `Ok(None)` for invalid, tampered, or wrong-model tokens.
     pub fn decode(token: &str, model_name: &str) -> Result<Option<String>> {
         Self::get_decoder()(token, model_name)
     }
@@ -510,63 +348,42 @@ pub fn default_decode(token: &str, model_name: &str) -> Result<Option<String>> {
 /// This trait is automatically implemented by TideORM's model macros
 /// when tokenization is enabled via `tokenize`.
 ///
-/// ## Example
-///
-/// ```rust,no_run
-/// tideorm::__doctest_tokenizable_user!();
-/// # tideorm::__doctest_async! {
-/// let user = User::find(1).await?.unwrap();
-/// let token = user.to_token()?;
-/// let restored = User::from_token(&token).await?;
-/// # let _ = restored;
-/// # }
-/// ```
+/// Most callers use the macro-generated implementation and only override the
+/// encoder or decoder when one model needs a different external token format.
 #[async_trait::async_trait]
 pub trait Tokenizable: Sized + Send + Sync {
     /// The model primary key type decoded from tokens for this model.
     type TokenPrimaryKey: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static;
 
-    /// Get the model name for tokenization
+    /// Return the model name bound into generated tokens.
     fn token_model_name() -> &'static str;
 
-    /// Get the primary key value from this record
+    /// Return the primary key value that should be encoded into the token.
     fn token_primary_key(&self) -> Self::TokenPrimaryKey;
 
-    /// Check if tokenization is enabled for this model
+    /// Return whether token helpers should be available for this model.
     fn tokenization_enabled() -> bool {
         true
     }
 
-    /// Get the token encoder for this model
+    /// Return a model-specific encoder override.
     ///
-    /// Override to provide model-specific encoding logic.
-    /// Returns `None` to use the global encoder.
+    /// Return `None` to use the global encoder path instead.
     fn token_encoder() -> Option<TokenEncoder> {
         None
     }
 
-    /// Get the token decoder for this model
+    /// Return a model-specific decoder override.
     ///
-    /// Override to provide model-specific decoding logic.
-    /// Returns `None` to use the global decoder.
+    /// Return `None` to use the global decoder path instead.
     fn token_decoder() -> Option<TokenDecoder> {
         None
     }
 
-    /// Convert this record to a token
+    /// Encode this record's primary key into an external token.
     ///
-    /// Encrypts the record's primary key into a secure, URL-safe token.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// # tideorm::__doctest_async! {
-    /// let user = User::find(42).await?.unwrap();
-    /// let token = user.to_token()?;
-    /// # let _ = token;
-    /// # }
-    /// ```
+    /// Fails when tokenization is disabled, the key cannot be serialized, or
+    /// the active encoder reports an error.
     fn to_token(&self) -> Result<String> {
         if !Self::tokenization_enabled() {
             return Err(Error::tokenization(
@@ -583,37 +400,12 @@ pub trait Tokenizable: Sized + Send + Sync {
         encoder(&payload, Self::token_model_name())
     }
 
-    /// Alias for `to_token()` - Convert this record to a token
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// # tideorm::__doctest_async! {
-    /// let user = User::find(42).await?.unwrap();
-    /// let token = user.tokenize()?;
-    /// # let _ = token;
-    /// # }
-    /// ```
+    /// Alias for `to_token()`.
     fn tokenize(&self) -> Result<String> {
         self.to_token()
     }
 
-    /// Tokenize a specific ID without having the full record
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// # fn main() -> tideorm::Result<()> {
-    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// let token = User::tokenize_id(42)?;
-    /// # let _ = token;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Encode one primary-key value without loading a record first.
     fn tokenize_id(id: Self::TokenPrimaryKey) -> Result<String> {
         if !Self::tokenization_enabled() {
             return Err(Error::tokenization(
@@ -629,59 +421,18 @@ pub trait Tokenizable: Sized + Send + Sync {
         encoder(&payload, Self::token_model_name())
     }
 
-    /// Find a record from a token
-    ///
-    /// Decrypts the token to get the primary key, then fetches the record.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// # tideorm::__doctest_async! {
-    /// let user = User::from_token("eyJhbGciOiJ...").await?;
-    /// # let _ = user;
-    /// # }
-    /// ```
+    /// Decode a token and load the matching record.
     async fn from_token(token: &str) -> Result<Self>;
 
-    /// Alias for `decode_token()` - Decode a token to get the record ID
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// # fn main() -> tideorm::Result<()> {
-    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// # let token = User::tokenize_id(42)?;
-    /// let id = User::detokenize("eyJhbGciOiJ...")?;
-    /// # let _ = id;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Alias for `decode_token()`.
     fn detokenize(token: &str) -> Result<Self::TokenPrimaryKey> {
         Self::decode_token(token)
     }
 
-    /// Decode a token to get the record ID without fetching
+    /// Decode a token into the model primary key without loading the record.
     ///
-    /// Useful when you just need the ID without loading the full record.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// use tideorm::tokenization::TokenConfig;
-    ///
-    /// # fn main() -> tideorm::Result<()> {
-    /// # TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
-    /// # let token = User::tokenize_id(42)?;
-    /// let id = User::decode_token("eyJhbGciOiJ...")?;
-    /// # let _ = id;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// Fails when tokenization is disabled, the token does not belong to this
+    /// model, or the decoded payload cannot be deserialized into the primary-key type.
     fn decode_token(token: &str) -> Result<Self::TokenPrimaryKey> {
         if !Self::tokenization_enabled() {
             return Err(Error::tokenization(
@@ -703,22 +454,10 @@ pub trait Tokenizable: Sized + Send + Sync {
         })
     }
 
-    /// Regenerate a new token for this record
+    /// Generate a fresh token for this record.
     ///
-    /// Creates a fresh token. With the default encoder, tokens for the same
-    /// record differ because a new random nonce is used each time.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// tideorm::__doctest_tokenizable_user!();
-    /// # tideorm::__doctest_async! {
-    /// let user = User::find(42).await?.unwrap();
-    /// let token1 = user.to_token()?;
-    /// let token2 = user.regenerate_token()?;
-    /// # let _ = (token1, token2);
-    /// # }
-    /// ```
+    /// With the default encoder, the token changes because a new random nonce
+    /// is used each time.
     fn regenerate_token(&self) -> Result<String> {
         self.to_token()
     }

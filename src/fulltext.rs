@@ -1,43 +1,14 @@
 //! Full-Text Search Support for TideORM
 //!
-//! This module provides full-text search capabilities across PostgreSQL, MySQL, MariaDB, and SQLite.
+//! This module builds backend-specific full-text search SQL for PostgreSQL,
+//! MySQL or MariaDB, and SQLite.
 //!
-//! ## Features
+//! The generated query shape depends on the active backend, so if search works
+//! on one database and fails on another, start by checking backend selection,
+//! index setup, and the exact search mode being requested.
 //!
-//! - **PostgreSQL**: Native `tsvector`/`tsquery` support with GIN/GiST indexes
-//! - **MySQL/MariaDB**: FULLTEXT index support with natural language and boolean modes
-//! - **SQLite**: FTS5 virtual table support
-//! - **Search Ranking**: Result relevance scoring
-//! - **Highlighting**: Mark matching terms in search results
-//!
-//! ## Example
-//!
-//! ```rust,ignore
-//! use tideorm::prelude::*;
-//!
-//! #[tideorm::model(table = "articles")]
-//! #[derive(Clone, Debug)]
-//! pub struct Article {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     pub title: String,
-//!     pub content: String,
-//! }
-//!
-//! // Simple search
-//! let results = Article::search(&["title", "content"], "rust programming")
-//!     .await?;
-//!
-//! // Search with ranking
-//! let results = Article::search_ranked(&["title", "content"], "rust programming")
-//!     .limit(10)
-//!     .get()
-//!     .await?;
-//!
-//! // Search with highlighting
-//! let results = Article::search_with_highlights(&["content"], "rust", "<b>", "</b>")
-//!     .await?;
-//! ```
+//! Use plain search first, then add ranking or highlighting only after the base
+//! query shape and index coverage are behaving correctly on the active backend.
 
 use std::fmt;
 use std::marker::PhantomData;

@@ -1,11 +1,8 @@
 //! Prelude module for TideORM
 //!
-//! This module re-exports the most commonly used types and traits.
-//! Import everything with:
-//!
-//! ```rust,no_run
-//! use tideorm::prelude::*;
-//! ```
+//! This module re-exports the types most applications use frequently.
+//! Import this when you want the common model, query, migration, and relation
+//! types in scope without pulling each module in separately.
 
 // Core types
 pub use crate::database::{Database, DatabaseBuilder, Transaction};

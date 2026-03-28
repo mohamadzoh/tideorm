@@ -2,47 +2,15 @@
 //!
 //! All database errors are translated into these types before reaching user code.
 //!
-//! ## Error Handling
+//! The goal here is to preserve enough context to answer:
+//! - what operation failed
+//! - which table or query was involved
+//! - whether the problem is configuration, validation, connection, or SQL
 //!
-//! provides detailed, actionable error messages to help you debug issues quickly:
-//!
-//! ```rust,no_run
-//! use tideorm::prelude::*;
-//!
-//! #[tideorm::model(table = "users")]
-//! struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     id: i64,
-//!     name: String,
-//! }
-//!
-//! // Errors include helpful context
-//! # async fn demo() -> tideorm::Result<()> {
-//! match User::find(999).await {
-//!     Ok(Some(user)) => println!("Found: {}", user.name),
-//!     Ok(None) => println!("User not found"),
-//!     Err(e) => {
-//!         eprintln!("Error: {}", e);
-//!         eprintln!("Suggestion: {}", e.suggestion());
-//!         if let Some(ctx) = e.context() {
-//!             eprintln!("Table: {:?}", ctx.table);
-//!         }
-//!     }
-//! }
-//! # Ok(())
-//! # }
-//! ```
-//!
-//! ## Error Types
-//!
-//! | Error Type | Description | Common Causes |
-//! |------------|-------------|---------------|
-//! | `NotFound` | Record doesn't exist | Wrong ID, deleted record |
-//! | `Connection` | Can't connect to database | Wrong URL, DB down |
-//! | `Query` | SQL execution failed | Syntax error, constraint violation |
-//! | `Validation` | Data validation failed | Invalid input |
-//! | `Transaction` | Transaction failed | Deadlock, timeout |
-//! | `Configuration` | Config issue | Missing settings |
+//! Practical split:
+//! - inspect `suggestion()` first when you need the next debugging step quickly
+//! - inspect `context()` when the failure depends on rendered SQL or table metadata
+//! - use `code()` and `http_status()` only when you need stable external handling for logs or APIs
 
 use thiserror::Error;
 
@@ -70,149 +38,131 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// A specialized Result type for TideORM operations
-///
-/// Note: Named `TideResult` to avoid conflicts with `std::result::Result` in derive macros.
-/// You can also use the re-exported `Result` from the prelude in most contexts.
+/// Result alias for TideORM operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The main error type for TideORM
+/// The main error type for TideORM.
 ///
-/// These errors are designed to be helpful and actionable for developers.
-/// They never expose internal ORM implementation details.
+/// The variants are grouped by failure source so callers can decide whether to
+/// retry, fix input, or stop and inspect configuration.
 #[derive(Error, Debug)]
 pub enum Error {
-    /// Record was not found in the database
+    /// Requested record was not found.
     #[error("Record not found: {message}")]
     NotFound {
-        /// Description of what was not found
+        /// Missing-record description.
         message: String,
-        /// Optional table name for context
+        /// Optional query or table context.
         context: Option<Box<ErrorContext>>,
     },
 
-    /// Database connection failed
+    /// Database connection failed.
     #[error("Connection error: {message}")]
     Connection {
-        /// Details about the connection failure
+        /// Backend error text.
         message: String,
     },
 
-    /// Query execution failed
+    /// Query building or execution failed.
     #[error("Query error: {message}")]
     Query {
-        /// Details about the query failure
+        /// Backend or validation error text.
         message: String,
-        /// Optional context about the query
+        /// Optional rendered SQL context.
         context: Option<Box<ErrorContext>>,
     },
 
-    /// Data validation failed
+    /// Validation failed before the write reached the database.
     #[error("Validation error: {field} - {message}")]
     Validation {
-        /// The field that failed validation
+        /// Field name.
         field: String,
-        /// Description of the validation failure
+        /// Validation message.
         message: String,
     },
 
-    /// Type conversion failed
+    /// Type conversion failed.
     #[error("Conversion error: {message}")]
     Conversion {
-        /// Details about the conversion failure
+        /// Conversion error text.
         message: String,
     },
 
-    /// Transaction failed
+    /// Transaction failed.
     #[error("Transaction error: {message}")]
     Transaction {
-        /// Details about the transaction failure
+        /// Transaction error text.
         message: String,
     },
 
-    /// Configuration error
+    /// Configuration error.
     #[error("Configuration error: {message}")]
     Configuration {
-        /// Details about the configuration issue
+        /// Configuration error text.
         message: String,
     },
 
-    /// Internal error (should rarely happen)
+    /// Internal error.
     #[error("Internal error: {message}")]
     Internal {
-        /// Details about the internal error
+        /// Internal error text.
         message: String,
     },
 
-    /// Backend not supported for the requested operation
-    ///
-    /// Thrown when an operation is attempted that is not supported
-    /// by the current database backend.
+    /// Operation is not supported by the active backend.
     #[error("Backend not supported: {message}")]
     BackendNotSupported {
-        /// Details about what operation is not supported
+        /// Unsupported-operation message.
         message: String,
-        /// The backend that doesn't support the operation
+        /// Backend name.
         backend: String,
     },
 
-    /// Primary key not set when required
-    ///
-    /// Thrown when an operation requires a primary key value
-    /// but the model instance doesn't have one set.
+    /// Operation required a primary key that was not set.
     #[error("Primary key not set: {message}")]
     PrimaryKeyNotSet {
-        /// Details about the error
+        /// Primary-key error text.
         message: String,
-        /// The model type involved
+        /// Model name.
         model: String,
     },
 
-    /// Insert with RETURNING not supported by this backend
-    ///
-    /// Thrown when trying to use insert().returning() on a database
-    /// that doesn't support the RETURNING clause.
+    /// `INSERT ... RETURNING` is not supported by the active backend.
     #[error("Insert returning not supported: {message}")]
     InsertReturningNotSupported {
-        /// Details about the error
+        /// Unsupported-RETURNING message.
         message: String,
-        /// The backend that doesn't support RETURNING
+        /// Backend name.
         backend: String,
     },
 
-    /// Tokenization error
-    ///
-    /// Thrown when tokenization operations fail, such as encoding
-    /// a record to a token or decoding a token back to a record ID.
+    /// Tokenization failed because configuration or encoding work could not proceed.
     #[error("Tokenization error: {message}")]
     Tokenization {
-        /// Details about the tokenization error
+        /// Tokenization error text.
         message: String,
     },
 
-    /// Invalid token error
-    ///
-    /// Thrown when attempting to decode an invalid, expired, or
-    /// tampered token.
+    /// Token was invalid, mismatched, expired, or tampered.
     #[error("Invalid token: {message}")]
     InvalidToken {
-        /// Details about why the token is invalid
+        /// Invalid-token message.
         message: String,
     },
 }
 
-/// Additional context for errors
+/// Extra rendered context attached to query-oriented errors.
 #[derive(Debug, Clone)]
 pub struct ErrorContext {
-    /// Table name involved in the error
+    /// Table name, if known.
     pub table: Option<String>,
-    /// Column name involved in the error
+    /// Column name, if known.
     pub column: Option<String>,
-    /// Rendered query conditions involved in the error
+    /// Rendered conditions involved in the failure.
     pub conditions: Vec<String>,
-    /// Logical operator chain used to combine the conditions
+    /// Logical operator chain for the rendered conditions.
     pub operator_chain: Option<String>,
-    /// The SQL query that caused the error (if available)
+    /// Rendered SQL query, if available.
     pub query: Option<String>,
 }
 
@@ -239,7 +189,7 @@ impl std::fmt::Display for ErrorContext {
 }
 
 impl ErrorContext {
-    /// Create a new error context
+    /// Start building extra table, column, and query details for an error.
     pub fn new() -> Self {
         Self {
             table: None,
@@ -250,37 +200,37 @@ impl ErrorContext {
         }
     }
 
-    /// Set the table name
+    /// Attach the table name involved in the failure.
     pub fn table(mut self, table: impl Into<String>) -> Self {
         self.table = Some(table.into());
         self
     }
 
-    /// Set the column name
+    /// Attach the column name involved in the failure.
     pub fn column(mut self, column: impl Into<String>) -> Self {
         self.column = Some(column.into());
         self
     }
 
-    /// Add a rendered condition to the context
+    /// Add one rendered condition to the context.
     pub fn condition(mut self, condition: impl Into<String>) -> Self {
         self.conditions.push(condition.into());
         self
     }
 
-    /// Set all rendered conditions for the context
+    /// Replace the collected rendered conditions.
     pub fn conditions(mut self, conditions: Vec<String>) -> Self {
         self.conditions = conditions;
         self
     }
 
-    /// Set the logical operator chain
+    /// Attach the rendered logical operator chain.
     pub fn operator_chain(mut self, operator_chain: impl Into<String>) -> Self {
         self.operator_chain = Some(operator_chain.into());
         self
     }
 
-    /// Set the query
+    /// Attach the rendered SQL query.
     pub fn query(mut self, query: impl Into<String>) -> Self {
         self.query = Some(query.into());
         self
@@ -294,7 +244,7 @@ impl Default for ErrorContext {
 }
 
 impl Error {
-    /// Create a NotFound error
+    /// Construct a missing-record error without extra context.
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound {
             message: message.into(),
@@ -302,7 +252,7 @@ impl Error {
         }
     }
 
-    /// Create a NotFound error with context
+    /// Construct a missing-record error and attach table or query context.
     pub fn not_found_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::NotFound {
             message: message.into(),
@@ -310,14 +260,14 @@ impl Error {
         }
     }
 
-    /// Create a Connection error
+    /// Construct a connection error.
     pub fn connection(message: impl Into<String>) -> Self {
         Self::Connection {
             message: message.into(),
         }
     }
 
-    /// Create a Query error
+    /// Construct a query error without extra context.
     pub fn query(message: impl Into<String>) -> Self {
         Self::Query {
             message: message.into(),
@@ -325,7 +275,7 @@ impl Error {
         }
     }
 
-    /// Create a Query error with context
+    /// Construct a query error and attach rendered SQL context.
     pub fn query_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
         Self::Query {
             message: message.into(),
@@ -333,7 +283,7 @@ impl Error {
         }
     }
 
-    /// Create a Validation error
+    /// Construct a validation error for one field.
     pub fn validation(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Validation {
             field: field.into(),
@@ -341,37 +291,35 @@ impl Error {
         }
     }
 
-    /// Create a Conversion error
+    /// Construct a conversion error.
     pub fn conversion(message: impl Into<String>) -> Self {
         Self::Conversion {
             message: message.into(),
         }
     }
 
-    /// Create a Transaction error
+    /// Construct a transaction error.
     pub fn transaction(message: impl Into<String>) -> Self {
         Self::Transaction {
             message: message.into(),
         }
     }
 
-    /// Create a Configuration error
+    /// Construct a configuration error.
     pub fn configuration(message: impl Into<String>) -> Self {
         Self::Configuration {
             message: message.into(),
         }
     }
 
-    /// Create an Internal error
+    /// Construct an internal error.
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
         }
     }
 
-    /// Create a BackendNotSupported error
-    ///
-    /// Use when an operation is not supported by the current database backend.
+    /// Construct an error for a backend-specific unsupported operation.
     pub fn backend_not_supported(message: impl Into<String>, backend: impl Into<String>) -> Self {
         Self::BackendNotSupported {
             message: message.into(),
@@ -379,9 +327,7 @@ impl Error {
         }
     }
 
-    /// Create a PrimaryKeyNotSet error
-    ///
-    /// Use when an operation requires a primary key but it's not set.
+    /// Construct an error for operations that require a missing primary key.
     pub fn primary_key_not_set(message: impl Into<String>, model: impl Into<String>) -> Self {
         Self::PrimaryKeyNotSet {
             message: message.into(),
@@ -389,9 +335,7 @@ impl Error {
         }
     }
 
-    /// Create an InsertReturningNotSupported error
-    ///
-    /// Use when trying to use RETURNING on a database that doesn't support it.
+    /// Construct an error for `INSERT ... RETURNING` on an unsupported backend.
     pub fn insert_returning_not_supported(
         message: impl Into<String>,
         backend: impl Into<String>,
@@ -402,28 +346,21 @@ impl Error {
         }
     }
 
-    /// Create a Tokenization error
-    ///
-    /// Use when token encoding/decoding fails.
+    /// Construct a tokenization error.
     pub fn tokenization(message: impl Into<String>) -> Self {
         Self::Tokenization {
             message: message.into(),
         }
     }
 
-    /// Create an InvalidToken error
-    ///
-    /// Use when a token is invalid, tampered, or for the wrong model.
+    /// Construct an invalid-token error.
     pub fn invalid_token(message: impl Into<String>) -> Self {
         Self::InvalidToken {
             message: message.into(),
         }
     }
 
-    /// Create an invalid query error (semantic query issues, not DB errors)
-    ///
-    /// Use this for errors like using soft_delete() on a non-soft-delete model,
-    /// or other query builder usage errors.
+    /// Construct a query-builder misuse error before any SQL runs.
     pub fn invalid_query(message: impl Into<String>) -> Self {
         Self::Query {
             message: message.into(),
@@ -431,7 +368,7 @@ impl Error {
         }
     }
 
-    /// Get the error context if available
+    /// Return attached context for `NotFound` and `Query` errors.
     pub fn context(&self) -> Option<&ErrorContext> {
         match self {
             Self::NotFound { context, .. } => context.as_deref(),
@@ -440,7 +377,9 @@ impl Error {
         }
     }
 
-    /// Add context to an error
+    /// Attach context to `NotFound` or `Query` errors.
+    ///
+    /// Other variants are returned unchanged.
     pub fn with_context(self, ctx: ErrorContext) -> Self {
         match self {
             Self::NotFound { message, .. } => Self::NotFound {
@@ -455,62 +394,52 @@ impl Error {
         }
     }
 
-    /// Check if this is a NotFound error
+    /// True when the variant is `NotFound`.
     pub fn is_not_found(&self) -> bool {
         matches!(self, Self::NotFound { .. })
     }
 
-    /// Check if this is a Connection error
+    /// True when the variant is `Connection`.
     pub fn is_connection_error(&self) -> bool {
         matches!(self, Self::Connection { .. })
     }
 
-    /// Check if this is a Validation error
+    /// True when the variant is `Validation`.
     pub fn is_validation_error(&self) -> bool {
         matches!(self, Self::Validation { .. })
     }
 
-    /// Check if this is a Query error
+    /// True when the variant is `Query`.
     pub fn is_query_error(&self) -> bool {
         matches!(self, Self::Query { .. })
     }
 
-    /// Check if this is a Transaction error
+    /// True when the variant is `Transaction`.
     pub fn is_transaction_error(&self) -> bool {
         matches!(self, Self::Transaction { .. })
     }
 
-    /// Check if this is a Configuration error
+    /// True when the variant is `Configuration`.
     pub fn is_configuration_error(&self) -> bool {
         matches!(self, Self::Configuration { .. })
     }
 
-    /// Check if this is a BackendNotSupported error
+    /// True when the variant is `BackendNotSupported`.
     pub fn is_backend_not_supported(&self) -> bool {
         matches!(self, Self::BackendNotSupported { .. })
     }
 
-    /// Check if this is a PrimaryKeyNotSet error
+    /// True when the variant is `PrimaryKeyNotSet`.
     pub fn is_primary_key_not_set(&self) -> bool {
         matches!(self, Self::PrimaryKeyNotSet { .. })
     }
 
-    /// Check if this is an InsertReturningNotSupported error
+    /// True when the variant is `InsertReturningNotSupported`.
     pub fn is_insert_returning_not_supported(&self) -> bool {
         matches!(self, Self::InsertReturningNotSupported { .. })
     }
 
-    /// Get a helpful suggestion for fixing this error
-    ///
-    /// Returns actionable advice based on the error type and message.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// let error = tideorm::Error::not_found("User 999 was not found");
-    /// eprintln!("Error: {}", error);
-    /// eprintln!("Suggestion: {}", error.suggestion());
-    /// ```
+    /// Return a user-facing next step derived from the variant and message.
     pub fn suggestion(&self) -> String {
         match self {
             Self::NotFound { message, .. } => {
@@ -650,25 +579,7 @@ impl Error {
         }
     }
 
-    /// Get the error code for programmatic handling
-    ///
-    /// Returns a unique code for each error type that can be used
-    /// for error handling, logging, or API responses.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use serde_json::json;
-    ///
-    /// let e = tideorm::Error::query("invalid SQL");
-    /// let error_response = json!({
-    ///     "error": {
-    ///         "code": e.code(),
-    ///         "message": e.to_string(),
-    ///         "suggestion": e.suggestion(),
-    ///     }
-    /// });
-    /// ```
+    /// Return a stable error code for logs, metrics, or API responses.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound { .. } => "TIDE_NOT_FOUND",
@@ -687,17 +598,7 @@ impl Error {
         }
     }
 
-    /// Get the HTTP status code appropriate for this error
-    ///
-    /// Useful when building REST APIs.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// let e = tideorm::Error::validation("email", "must be present");
-    /// let status = e.http_status();
-    /// assert_eq!(status, 422);
-    /// ```
+    /// Map the error to a generic HTTP status code.
     pub fn http_status(&self) -> u16 {
         match self {
             Self::NotFound { .. } => 404,
@@ -716,16 +617,7 @@ impl Error {
         }
     }
 
-    /// Check if this error is retryable
-    ///
-    /// Some errors (like connection timeouts or deadlocks) may succeed on retry.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// let error = tideorm::Error::connection("pool timeout");
-    /// assert!(error.is_retryable());
-    /// ```
+    /// Best-effort retry hint based on transient-looking error messages.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Connection { message } => {
@@ -747,17 +639,7 @@ impl Error {
         }
     }
 
-    /// Format error for logging with full details
-    ///
-    /// Includes error type, message, context, and suggestion.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// let e = tideorm::Error::query("syntax error near FROM");
-    /// let formatted = e.log_format();
-    /// assert!(formatted.contains("TIDE_QUERY"));
-    /// ```
+    /// Render the error with its code, context, and suggestion for logs.
     pub fn log_format(&self) -> String {
         let mut output = format!("[{}] {}", self.code(), self);
 

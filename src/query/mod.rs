@@ -1,6 +1,17 @@
 //! Fluent query builder
 //!
-//! This module provides a fluent, chainable query builder API for TideORM.
+//! This module contains the query builder, its condition types, and the SQL
+//! rendering and execution pipeline behind model reads and bulk mutations.
+//!
+//! When a query behaves unexpectedly, the fastest path is usually:
+//! - inspect the builder with `debug()`
+//! - check whether the builder was invalidated before execution
+//! - inspect raw SQL validation errors for unsafe fragments or invalid subqueries
+//!
+//! Use the fluent builder for normal reads and mutations. Drop to raw SQL only
+//! when the builder cannot express the query shape you need, and expect those
+//! paths to fail validation earlier if the fragment is unsafe or not shaped like
+//! the API expects.
 
 use std::marker::PhantomData;
 
@@ -53,7 +64,7 @@ pub struct QueryBuilder<M: Model> {
 }
 
 impl<M: Model> QueryBuilder<M> {
-    /// Create a new QueryBuilder from a QueryFragment.
+    /// Rebuild a query builder from a reusable fragment.
     pub fn from_fragment(fragment: &QueryFragment<M>) -> Self {
         Self::new().apply(fragment)
     }

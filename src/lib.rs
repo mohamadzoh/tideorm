@@ -1,7 +1,13 @@
-//! TideORM is a developer-friendly ORM for Rust.
+//! TideORM is a Rust ORM with macro-generated models, a query builder, and
+//! field-declared relation helpers.
 //!
-//! See the module-level documentation for examples covering models, queries,
-//! relations, schema generation, profiling, logging, and error handling.
+//! When you are trying to debug behavior, start with:
+//! - `query::QueryBuilder::debug()` to inspect generated SQL before execution
+//! - `logging::QueryLogger` to see executed queries and slow-query timing
+//! - `database::Database::init()` or `Database::set_global()` errors when models
+//!   report that no global database has been configured
+//!
+//! The module docs below cover the public surface area in more detail.
 
 #![recursion_limit = "256"]
 #![warn(missing_docs)]

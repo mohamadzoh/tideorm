@@ -11,35 +11,6 @@ use super::Schema;
 /// - A descriptive name
 /// - An `up` method that applies the migration
 /// - A `down` method that reverts the migration
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use tideorm::{ColumnType, Migration, Result, Schema};
-/// use tideorm::migration::async_trait;
-///
-/// struct AddEmailVerifiedToUsers;
-///
-/// #[async_trait]
-/// impl Migration for AddEmailVerifiedToUsers {
-///     fn version(&self) -> &str { "20260106_002" }
-///     fn name(&self) -> &str { "add_email_verified_to_users" }
-///
-///     async fn up(&self, schema: &mut Schema) -> Result<()> {
-///         schema.alter_table("users", |t| {
-///             t.add_column("email_verified", ColumnType::Boolean)
-///                 .default(false)
-///                 .not_null();
-///         }).await
-///     }
-///
-///     async fn down(&self, schema: &mut Schema) -> Result<()> {
-///         schema.alter_table("users", |t| {
-///             t.drop_column("email_verified");
-///         }).await
-///     }
-/// }
-/// ```
 #[super::async_trait]
 pub trait Migration: Send + Sync {
     /// Unique version identifier for this migration

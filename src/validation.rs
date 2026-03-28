@@ -1,97 +1,18 @@
 //! Model Validation System
 //!
-//! This module provides a validation system for TideORM models.
+//! This module validates model data before writes.
 //!
-//! ## Built-in Validation Rules
+//! Validation can come from field attributes, custom `Validate` logic, or both.
+//! If `save()` or `update()` returns a validation error, inspect the collected
+//! field messages here before looking at database-side constraints.
 //!
-//! - `required` - Field must not be empty
-//! - `email` - Must be a valid email address
-//! - `url` - Must be a valid URL
-//! - `min_length` - Minimum string length
-//! - `max_length` - Maximum string length
-//! - `min` - Minimum numeric value
-//! - `max` - Maximum numeric value
-//! - `range` - Value must be within a range
-//! - `regex` - Must match a regular expression
-//! - `alpha` - Must contain only letters
-//! - `alphanumeric` - Must contain only letters and numbers
-//! - `numeric` - Must be a number
-//! - `uuid` - Must be a valid UUID
-//! - `custom` - Custom validation function
+//! Typical flow:
+//! - field attributes catch simple shape problems like missing values, invalid email, or range failures
+//! - `custom_validations()` handles business rules that need model-aware logic
+//! - `validate_all()` is the better entry point when the caller needs every field error instead of the first one
 //!
-//! ## Usage
-//!
-//! ```no_run
-//! use tideorm::prelude::*;
-//! use tideorm::validation::{Validate, ValidationRule};
-//!
-//! #[tideorm::model(table = "users")]
-//! pub struct User {
-//!     #[tideorm(primary_key, auto_increment)]
-//!     pub id: i64,
-//!     
-//!     #[validate(email)]
-//!     pub email: String,
-//!     
-//!     #[validate(min_length = 2, max_length = 100)]
-//!     pub name: String,
-//!     
-//!     #[validate(min = 0, max = 150)]
-//!     pub age: i32,
-//! }
-//!
-//! // Validation is automatic on save/update, or call manually:
-//! let user = User {
-//!     id: 0,
-//!     email: "demo@example.com".into(),
-//!     name: "Demo User".into(),
-//!     age: 42,
-//! };
-//! user.validate()?;  // Returns Result<(), ValidationErrors>
-//!
-//! // Or get all errors:
-//! match user.validate_all() {
-//!     Ok(()) => println!("Valid!"),
-//!     Err(errors) => {
-//!         for (field, messages) in errors.iter() {
-//!             println!("{}: {:?}", field, messages);
-//!         }
-//!     }
-//! }
-//! # Ok::<(), tideorm::validation::ValidationErrors>(())
-//! ```
-//!
-//! ## Custom Validation
-//!
-//! ```no_run
-//! use tideorm::validation::{Validate, ValidationErrors};
-//!
-//! struct User {
-//!     email: String,
-//! }
-//!
-//! impl Validate for User {
-//!     fn validate(&self) -> std::result::Result<(), ValidationErrors> {
-//!         self.custom_validations()
-//!     }
-//!
-//!     fn custom_validations(&self) -> std::result::Result<(), ValidationErrors> {
-//!         let mut errors = ValidationErrors::new();
-//!         
-//!         // Custom business logic
-//!         if self.email.ends_with("@blocked.com") {
-//!             errors.add("email", "This email domain is not allowed");
-//!         }
-//!         
-//!         if errors.is_empty() {
-//!             Ok(())
-//!         } else {
-//!             Err(errors)
-//!         }
-//!     }
-//! }
-//! # Ok::<(), tideorm::validation::ValidationErrors>(())
-//! ```
+//! If validation unexpectedly passes, check whether the value type implements `ValidatableValue`
+//! the way you expect and whether the rule actually runs in `Validator` versus model-level custom logic.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -104,14 +25,14 @@ pub struct ValidationErrors {
 }
 
 impl ValidationErrors {
-    /// Create a new empty ValidationErrors
+    /// Start an empty validation-error collection.
     pub fn new() -> Self {
         Self {
             errors: HashMap::new(),
         }
     }
 
-    /// Add an error message for a field
+    /// Append one error message to a field.
     pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
         self.errors
             .entry(field.into())
@@ -119,42 +40,42 @@ impl ValidationErrors {
             .push(message.into());
     }
 
-    /// Check if there are any errors
+    /// True when no field errors have been collected.
     pub fn is_empty(&self) -> bool {
         self.errors.is_empty()
     }
 
-    /// Check if there are any errors (alias for !is_empty())
+    /// True when at least one field has an error.
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 
-    /// Get the number of fields with errors
+    /// Number of fields that currently have at least one error.
     pub fn len(&self) -> usize {
         self.errors.len()
     }
 
-    /// Get errors for a specific field
+    /// Borrow the full error list for one field.
     pub fn get(&self, field: &str) -> Option<&Vec<String>> {
         self.errors.get(field)
     }
 
-    /// Get errors for a specific field (alias for get())
+    /// Clone the error messages for one field.
     pub fn field_errors(&self, field: &str) -> Vec<String> {
         self.errors.get(field).cloned().unwrap_or_default()
     }
 
-    /// Get all errors
+    /// Borrow the whole field-to-errors map.
     pub fn all(&self) -> &HashMap<String, Vec<String>> {
         &self.errors
     }
 
-    /// Iterate over all errors
+    /// Iterate through all field-error pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
         self.errors.iter()
     }
 
-    /// Get the first error message (useful for simple error display)
+    /// Return the first field/message pair, if any.
     pub fn first(&self) -> Option<(&String, &String)> {
         self.errors
             .iter()
@@ -162,7 +83,7 @@ impl ValidationErrors {
             .and_then(|(field, messages)| messages.first().map(|msg| (field, msg)))
     }
 
-    /// Get all error messages as a flat list
+    /// Flatten all field errors into display strings.
     pub fn messages(&self) -> Vec<String> {
         self.errors
             .iter()
@@ -174,7 +95,7 @@ impl ValidationErrors {
             .collect()
     }
 
-    /// Merge another ValidationErrors into this one
+    /// Append all errors from another collection.
     pub fn merge(&mut self, other: ValidationErrors) {
         for (field, messages) in other.errors {
             for message in messages {
@@ -183,14 +104,12 @@ impl ValidationErrors {
         }
     }
 
-    /// Convert to a Result, returning Ok if empty
+    /// Return `Ok(())` when empty, otherwise return the collection as `Err`.
     pub fn to_result(self) -> Result<(), Self> {
         if self.is_empty() { Ok(()) } else { Err(self) }
     }
 
-    /// Get all errors as (field, message) pairs for backwards compatibility
-    ///
-    /// Returns a flat list of all errors
+    /// Flatten all errors into `(field, message)` pairs.
     pub fn errors(&self) -> Vec<(String, String)> {
         self.errors
             .iter()
@@ -200,7 +119,7 @@ impl ValidationErrors {
             .collect()
     }
 
-    /// Convert to a single Error (takes the first error) for backwards compatibility
+    /// Convert the first collected message into the crate error type.
     pub fn into_error(self) -> Option<crate::error::Error> {
         self.first()
             .map(|(field, message)| crate::error::Error::Validation {
@@ -280,7 +199,7 @@ pub enum ValidationRule {
 }
 
 impl ValidationRule {
-    /// Get the error message for this rule
+    /// Render the default error message for this rule and field.
     pub fn message(&self, field: &str) -> String {
         match self {
             ValidationRule::Required => format!("The {} field is required", field),
@@ -322,11 +241,10 @@ impl ValidationRule {
         }
     }
 
-    /// Validate a value against this rule.
+    /// Validate one value against this rule.
     ///
-    /// Returns `Ok(())` if the value passes validation, or `Err` with an error
-    /// message. `ValidationRule::Custom` is treated as a no-op here because
-    /// custom checks run through `Validate::custom_validations()`.
+    /// `ValidationRule::Custom` is a no-op here because custom checks run
+    /// through `Validate::custom_validations()`.
     pub fn validate<T: ValidatableValue>(&self, value: &T) -> Result<(), String> {
         match Validator::validate_rule(value, self, "field") {
             Some(error) => Err(error),
@@ -348,15 +266,15 @@ fn compiled_validation_regex(pattern: &str) -> Option<regex::Regex> {
         .clone()
 }
 
-/// Trait for validatable values
+/// Value adapter used by the generic validator helpers.
 pub trait ValidatableValue {
-    /// Check if the value is empty (for Required validation)
+    /// Return whether the value counts as empty for `Required`.
     fn is_empty_value(&self) -> bool;
 
-    /// Get the string representation for string validations
+    /// Return a string view for string-oriented rules.
     fn as_str_value(&self) -> Option<&str>;
 
-    /// Get the numeric value for numeric validations
+    /// Return a numeric representation for numeric rules.
     fn as_f64_value(&self) -> Option<f64>;
 }
 
@@ -433,7 +351,7 @@ impl_validatable_for_int!(
 pub struct Validator;
 
 impl Validator {
-    /// Validate a single value against a rule
+    /// Apply one validation rule and return the generated message on failure.
     pub fn validate_rule<T: ValidatableValue>(
         value: &T,
         rule: &ValidationRule,
@@ -562,7 +480,7 @@ impl Validator {
         None
     }
 
-    /// Check if a string is a valid email address
+    /// Minimal email-shape check used by the built-in email rule.
     pub fn is_valid_email(s: &str) -> bool {
         static EMAIL_REGEX: OnceLock<regex::Regex> = OnceLock::new();
         let email_regex = EMAIL_REGEX.get_or_init(|| {
@@ -572,7 +490,7 @@ impl Validator {
         email_regex.is_match(s)
     }
 
-    /// Check if a string is a valid URL
+    /// URL check used by the built-in URL rule.
     pub fn is_valid_url(s: &str) -> bool {
         match url::Url::parse(s) {
             Ok(url) => matches!(url.scheme(), "http" | "https") && url.has_host(),
@@ -587,25 +505,25 @@ impl Validator {
 /// when validation attributes are present. You can also implement it manually
 /// for custom validation logic.
 pub trait Validate {
-    /// Get the validation rules for this model
+    /// Return the static field-to-rules mapping for this model.
     fn validation_rules() -> Vec<(&'static str, Vec<ValidationRule>)> {
         vec![]
     }
 
-    /// Validate all rules and return the first error
+    /// Validate and stop at the first reported error.
     fn validate(&self) -> Result<(), ValidationErrors>;
 
-    /// Validate all rules and collect all errors
+    /// Validate and collect all reported field errors.
     fn validate_all(&self) -> Result<(), ValidationErrors> {
         self.validate()
     }
 
-    /// Custom validations that can be overridden
+    /// Hook for model-specific business-rule validation.
     fn custom_validations(&self) -> Result<(), ValidationErrors> {
         Ok(())
     }
 
-    /// Validate and return self, useful for chaining
+    /// Validate and return `self` for builder-style call chains.
     fn validated(self) -> Result<Self, ValidationErrors>
     where
         Self: Sized,
@@ -622,7 +540,7 @@ pub struct ValidationBuilder {
 }
 
 impl ValidationBuilder {
-    /// Create a new validation builder for a field
+    /// Start collecting rules for one field.
     pub fn new(field: impl Into<String>) -> Self {
         Self {
             field: field.into(),
@@ -630,91 +548,91 @@ impl ValidationBuilder {
         }
     }
 
-    /// Add required rule
+    /// Append the `Required` rule.
     pub fn required(mut self) -> Self {
         self.rules.push(ValidationRule::Required);
         self
     }
 
-    /// Add email rule
+    /// Append the `Email` rule.
     pub fn email(mut self) -> Self {
         self.rules.push(ValidationRule::Email);
         self
     }
 
-    /// Add URL rule
+    /// Append the `Url` rule.
     pub fn url(mut self) -> Self {
         self.rules.push(ValidationRule::Url);
         self
     }
 
-    /// Add minimum length rule
+    /// Append a minimum-length rule.
     pub fn min_length(mut self, len: usize) -> Self {
         self.rules.push(ValidationRule::MinLength(len));
         self
     }
 
-    /// Add maximum length rule
+    /// Append a maximum-length rule.
     pub fn max_length(mut self, len: usize) -> Self {
         self.rules.push(ValidationRule::MaxLength(len));
         self
     }
 
-    /// Add exact length rule
+    /// Append an exact-length rule.
     pub fn length(mut self, len: usize) -> Self {
         self.rules.push(ValidationRule::Length(len));
         self
     }
 
-    /// Add minimum value rule
+    /// Append a minimum-value rule.
     pub fn min(mut self, val: f64) -> Self {
         self.rules.push(ValidationRule::Min(val));
         self
     }
 
-    /// Add maximum value rule
+    /// Append a maximum-value rule.
     pub fn max(mut self, val: f64) -> Self {
         self.rules.push(ValidationRule::Max(val));
         self
     }
 
-    /// Add range rule
+    /// Append an inclusive numeric range rule.
     pub fn range(mut self, min: f64, max: f64) -> Self {
         self.rules.push(ValidationRule::Range(min, max));
         self
     }
 
-    /// Add regex rule
+    /// Append a regex-match rule.
     pub fn regex(mut self, pattern: impl Into<String>) -> Self {
         self.rules.push(ValidationRule::Regex(pattern.into()));
         self
     }
 
-    /// Add alpha rule
+    /// Append an alphabetic-only rule.
     pub fn alpha(mut self) -> Self {
         self.rules.push(ValidationRule::Alpha);
         self
     }
 
-    /// Add alphanumeric rule
+    /// Append an alphanumeric-only rule.
     pub fn alphanumeric(mut self) -> Self {
         self.rules.push(ValidationRule::Alphanumeric);
         self
     }
 
-    /// Add numeric rule
+    /// Append a numeric-string rule.
     pub fn numeric(mut self) -> Self {
         self.rules.push(ValidationRule::Numeric);
         self
     }
 
-    /// Add UUID rule
+    /// Append a UUID-shape rule.
     pub fn uuid(mut self) -> Self {
         self.rules.push(ValidationRule::Uuid);
         self
     }
 
-    /// Add "in" rule (must be one of the values)
+    /// Append an allowed-values rule.
     pub fn in_list(mut self, values: Vec<impl Into<String>>) -> Self {
         self.rules.push(ValidationRule::In(
             values.into_iter().map(|v| v.into()).collect(),
@@ -722,7 +640,7 @@ impl ValidationBuilder {
         self
     }
 
-    /// Add "not in" rule (must not be one of the values)
+    /// Append a disallowed-values rule.
     pub fn not_in(mut self, values: Vec<impl Into<String>>) -> Self {
         self.rules.push(ValidationRule::NotIn(
             values.into_iter().map(|v| v.into()).collect(),
@@ -739,7 +657,7 @@ impl ValidationBuilder {
         self
     }
 
-    /// Build the field name and rules tuple
+    /// Finish the builder and return the field plus its rules.
     pub fn build(self) -> (String, Vec<ValidationRule>) {
         (self.field, self.rules)
     }
