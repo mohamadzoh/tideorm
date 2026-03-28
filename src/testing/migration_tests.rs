@@ -49,6 +49,20 @@ fn test_default_value() {
 }
 
 #[test]
+fn test_migration_parameter_placeholders_are_backend_aware() {
+    assert_eq!(
+        migration_parameter_list(DatabaseType::Postgres, 2),
+        "$1, $2"
+    );
+    assert_eq!(migration_parameter_placeholder(DatabaseType::Postgres, 1), "$1");
+
+    assert_eq!(migration_parameter_list(DatabaseType::MySQL, 2), "?, ?");
+    assert_eq!(migration_parameter_list(DatabaseType::MariaDB, 2), "?, ?");
+    assert_eq!(migration_parameter_list(DatabaseType::SQLite, 2), "?, ?");
+    assert_eq!(migration_parameter_placeholder(DatabaseType::SQLite, 1), "?");
+}
+
+#[test]
 fn test_table_builder_create() {
     let mut builder = TableBuilder::new("users", DatabaseType::Postgres);
     builder.id();

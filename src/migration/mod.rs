@@ -39,6 +39,20 @@ pub(super) fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> S
     quote_identifier_for_db(name, db_type)
 }
 
+pub(super) fn migration_parameter_placeholder(db_type: DatabaseType, index: usize) -> String {
+    match db_type {
+        DatabaseType::Postgres => format!("${index}"),
+        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?".to_string(),
+    }
+}
+
+pub(super) fn migration_parameter_list(db_type: DatabaseType, count: usize) -> String {
+    (1..=count)
+        .map(|index| migration_parameter_placeholder(db_type, index))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(super) fn log_migration_sql(sql: &str) {
     if std::env::var("TIDE_LOG_QUERIES").is_ok() {
         tide_debug!("Migration SQL: {}", sql);

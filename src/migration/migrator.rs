@@ -5,7 +5,7 @@ use crate::internal::{ConnectionTrait, Statement, Value};
 use super::{
     DatabaseType, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
     detect_database_type, log_migration_complete, log_migration_rollback, log_migration_start,
-    quote_migration_identifier,
+    migration_parameter_list, migration_parameter_placeholder, quote_migration_identifier,
 };
 
 /// Migration runner
@@ -261,12 +261,14 @@ impl Migrator {
         let db = require_db()?;
         let db_type = detect_database_type(&db);
         let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
+        let placeholders = migration_parameter_list(db_type, 2);
 
         let sql = format!(
-            "INSERT INTO {} ({}, {}) VALUES (?, ?)",
+            "INSERT INTO {} ({}, {}) VALUES ({})",
             quote("_migrations"),
             quote("version"),
-            quote("name")
+            quote("name"),
+            placeholders
         );
 
         db.__execute_with_params(
@@ -285,11 +287,13 @@ impl Migrator {
         let db = require_db()?;
         let db_type = detect_database_type(&db);
         let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
+        let placeholder = migration_parameter_placeholder(db_type, 1);
 
         let sql = format!(
-            "DELETE FROM {} WHERE {} = ?",
+            "DELETE FROM {} WHERE {} = {}",
             quote("_migrations"),
-            quote("version")
+            quote("version"),
+            placeholder
         );
 
         db.__execute_with_params(&sql, vec![Value::String(Some(version.to_string()))])
