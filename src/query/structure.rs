@@ -332,6 +332,7 @@ pub struct QueryFragment<M: Model> {
     pub offset_value: Option<u64>,
     pub select_columns: Option<Vec<String>>,
     pub raw_select_expressions: Vec<String>,
+    pub subquery_select_expressions: Vec<(String, String)>,
     pub group_by: Vec<String>,
     pub having_conditions: Vec<String>,
     pub joins: Vec<JoinClause>,
@@ -362,6 +363,7 @@ impl<M: Model> QueryFragment<M> {
             offset_value: None,
             select_columns: None,
             raw_select_expressions: Vec::new(),
+            subquery_select_expressions: Vec::new(),
             group_by: Vec::new(),
             having_conditions: Vec::new(),
             joins: Vec::new(),
@@ -384,6 +386,7 @@ impl<M: Model> QueryFragment<M> {
             || self.offset_value.is_some()
             || self.select_columns.is_some()
             || !self.raw_select_expressions.is_empty()
+            || !self.subquery_select_expressions.is_empty()
             || !self.group_by.is_empty()
             || !self.having_conditions.is_empty()
             || !self.joins.is_empty()

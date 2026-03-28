@@ -2,6 +2,7 @@
 
 use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::quote_ident;
 use crate::query::{LogicalOp, OrGroup, QueryBuilder};
 
 use super::Model;
@@ -523,11 +524,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     }
 
     fn quote_identifier(name: &str, db_type: crate::config::DatabaseType) -> String {
-        let quote = match db_type {
-            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => '`',
-            _ => '"',
-        };
-        format!("{0}{1}{0}", quote, name)
+        quote_ident(db_type, name)
     }
 
     fn has_explicit_filters(&self) -> bool {

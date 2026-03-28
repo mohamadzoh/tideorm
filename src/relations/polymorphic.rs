@@ -34,6 +34,10 @@ impl<Morphable> MorphTo<Morphable> {
         self
     }
 
+    pub fn get_cached(&self) -> Option<&Morphable> {
+        None
+    }
+
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         if self.type_column == previous.type_column && self.id_column == previous.id_column {

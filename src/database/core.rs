@@ -81,6 +81,10 @@ impl Database {
                 "Current database context is a transaction, not a pooled database connection"
                     .to_string(),
             )),
+            #[cfg(test)]
+            DatabaseHandle::TestScope => {
+                unreachable!("test scope marker does not carry a pooled connection")
+            }
         }
     }
 
@@ -181,6 +185,10 @@ impl Database {
         Ok(match self.current_handle()? {
             DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
             DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+            #[cfg(test)]
+            DatabaseHandle::TestScope => {
+                unreachable!("test scope marker does not carry a database backend")
+            }
         })
     }
 }

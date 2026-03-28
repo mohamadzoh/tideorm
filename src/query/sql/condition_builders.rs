@@ -967,6 +967,9 @@ impl<M: Model> QueryBuilder<M> {
             serde_json::Value::Null => "NULL".to_string(),
             serde_json::Value::Bool(boolean) => boolean.to_string(),
             serde_json::Value::Number(number) => number.to_string(),
+            // This is only for the non-executable debug preview path. It renders
+            // approximate inline literals for humans and must never be reused for
+            // executable SQL; real query paths stay parameterized instead.
             serde_json::Value::String(text) => format!("'{}'", text.replace("'", "''")),
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
                 format!("'{}'", value.to_string().replace("'", "''"))

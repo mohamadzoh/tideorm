@@ -104,7 +104,7 @@ async fn main() -> tideorm::Result<()> {
 }
 ```
 
-Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only. TideORM's generated serde support skips them, so they do not appear in JSON payloads and are restored with defaults on deserialize.
+Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only wrappers, not persisted columns. TideORM's generated serde support serializes their cached payloads when present and rebuilds the runtime wrappers on deserialize, so round-tripped JSON can preserve loaded relations without turning the wrappers themselves into stored schema fields.
 
 Composite primary keys are supported by marking multiple fields with `#[tideorm(primary_key)]`. Composite keys are used as tuples in CRUD APIs, for example `UserRole::find((user_id, role_id))`. `auto_increment` and tokenization remain single-primary-key features.
 
@@ -117,22 +117,22 @@ For tests and reconfiguration-heavy workflows, TideORM's global state is resetta
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.4", features = ["postgres"] }
+tideorm = { version = "0.9.5", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.4", features = ["mysql"] }
+tideorm = { version = "0.9.5", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.4", features = ["sqlite"] }
+tideorm = { version = "0.9.5", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.4", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.5", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.4", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.5", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.4", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.5", features = ["postgres", "fulltext"] }
 ```
 
 ### Feature Flags

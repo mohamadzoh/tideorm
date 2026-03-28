@@ -1,5 +1,5 @@
 use super::{
-    build_count_select, build_exists_any_select, count_to_u64, scoped_find,
+    build_count_select, build_exists_any_statement, count_to_u64, scoped_find,
     supports_batch_insert_returning,
 };
 use crate::config::DatabaseType;
@@ -73,14 +73,14 @@ fn count_select_omits_where_without_condition() {
 }
 
 #[test]
-fn exists_any_select_uses_select_one_with_limit() {
-    let statement = build_exists_any_select::<InternalCountUser>().build(DbBackend::Postgres);
+fn exists_any_statement_uses_select_exists_probe() {
+    let statement = build_exists_any_statement::<InternalCountUser>(DbBackend::Postgres);
 
     assert_eq!(
         statement.sql,
-        "SELECT $1 AS \"exists_result\" FROM \"internal_count_users\" LIMIT $2"
+        "SELECT EXISTS(SELECT 1 FROM \"internal_count_users\")"
     );
-    assert!(statement.values.is_some());
+    assert!(statement.values.is_none());
 }
 
 #[test]
@@ -110,20 +110,20 @@ fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
 }
 
 #[test]
-fn exists_any_select_preserves_soft_delete_scope() {
-    let statement = build_exists_any_select::<InternalSoftDeleteUser>().build(DbBackend::Postgres);
+fn exists_any_statement_preserves_soft_delete_scope() {
+    let statement = build_exists_any_statement::<InternalSoftDeleteUser>(DbBackend::Postgres);
 
     assert!(
         statement
             .sql
-            .contains("FROM \"internal_soft_delete_users\"")
+            .contains("SELECT EXISTS(SELECT 1 FROM \"internal_soft_delete_users\"")
     );
     assert!(
         statement
             .sql
             .contains("WHERE \"internal_soft_delete_users\".\"deleted_at\" IS NULL")
     );
-    assert!(statement.sql.ends_with("LIMIT $2"));
+    assert!(statement.values.is_none());
 }
 
 #[test]

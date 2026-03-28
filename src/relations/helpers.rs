@@ -4,6 +4,8 @@ use crate::error::{Error, Result};
 use crate::internal::Value;
 use crate::model::Model;
 
+pub(crate) use crate::internal::sql_safety::quote_ident;
+
 pub(crate) fn ensure_relation_configured(
     relation_name: &str,
     required_values: &[&str],
@@ -96,12 +98,6 @@ pub(crate) fn push_param(
     };
     params.push(value);
     placeholder
-}
-
-pub(crate) fn quote_ident(db_type: crate::config::DatabaseType, name: &str) -> String {
-    let q = db_type.quote_char();
-    let escaped = name.replace(q, &format!("{q}{q}"));
-    format!("{}{}{}", q, escaped, q)
 }
 
 pub(crate) fn scoped_column(

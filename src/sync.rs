@@ -57,6 +57,7 @@ use std::sync::OnceLock;
 
 use crate::database::Database;
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::{tide_debug, tide_info, tide_warn};
 
 // Use SeaORM schema management
@@ -463,14 +464,14 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
         if force_sync && table_exists {
             // Drop existing table for force sync
+            let quoted_table = quote_ident_for_backend(backend, &model.table_name);
             let drop_sql = match backend {
                 DbBackend::Postgres => format!(
-                    "DROP TABLE IF EXISTS \"{}\".\"{}\" CASCADE",
-                    model.schema_name, model.table_name
+                    "DROP TABLE IF EXISTS {}.{} CASCADE",
+                    quote_ident_for_backend(backend, &model.schema_name),
+                    quoted_table
                 ),
-                DbBackend::MySql => format!("DROP TABLE IF EXISTS `{}`", model.table_name),
-                DbBackend::Sqlite => format!("DROP TABLE IF EXISTS \"{}\"", model.table_name),
-                _ => format!("DROP TABLE IF EXISTS \"{}\"", model.table_name),
+                _ => format!("DROP TABLE IF EXISTS {}", quoted_table),
             };
 
             let drop_stmt = Statement::from_string(backend, drop_sql);
@@ -500,32 +501,35 @@ async fn check_table_exists(
     table: &str,
     backend: DbBackend,
 ) -> Result<bool> {
-    let sql = match backend {
-        DbBackend::Postgres => format!(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '{}')",
-            schema, table
+    let stmt = match backend {
+        DbBackend::Postgres => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)",
+            vec![schema.into(), table.into()],
         ),
-        DbBackend::MySql => format!(
-            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '{}'",
-            table
+        DbBackend::MySql => Statement::from_sql_and_values(
+            DbBackend::MySql,
+            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+            vec![table.into()],
         ),
-        DbBackend::Sqlite => format!(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
-            table
+        DbBackend::Sqlite => Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            vec![table.into()],
         ),
         other => {
             tide_warn!(
                 "Unknown backend {:?} in check_table_exists, falling back to SQLite SQL",
                 other
             );
-            format!(
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '{}'",
-                table
+            Statement::from_sql_and_values(
+                other,
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                vec![table.into()],
             )
         }
     };
 
-    let stmt = Statement::from_string(backend, sql);
     let result = conn
         .query_one_raw(stmt)
         .await

@@ -192,6 +192,11 @@ impl<M: Model> QueryBuilder<M> {
                 .map_err(Error::invalid_query)?;
         }
 
+        for having in &self.having_conditions {
+            db_sql::validate_having_sql_fragment("HAVING raw SQL", having)
+                .map_err(Error::invalid_query)?;
+        }
+
         if let Some(columns) = &self.select_columns {
             for column in columns {
                 Self::validate_model_column_reference("SELECT column", column)
@@ -226,6 +231,7 @@ impl<M: Model> QueryBuilder<M> {
             offset_value: None,
             select_columns: None,
             raw_select_expressions: Vec::new(),
+            subquery_select_expressions: Vec::new(),
             include_trashed: false,
             only_trashed: false,
             joins: Vec::new(),
@@ -264,6 +270,7 @@ impl<M: Model> QueryBuilder<M> {
             offset_value: self.offset_value,
             select_columns: self.select_columns.clone(),
             raw_select_expressions: self.raw_select_expressions.clone(),
+            subquery_select_expressions: self.subquery_select_expressions.clone(),
             group_by: self.group_by.clone(),
             having_conditions: self.having_conditions.clone(),
             joins: self.joins.clone(),
@@ -301,6 +308,8 @@ impl<M: Model> QueryBuilder<M> {
 
         self.raw_select_expressions
             .extend(fragment.raw_select_expressions.clone());
+        self.subquery_select_expressions
+            .extend(fragment.subquery_select_expressions.clone());
 
         self.group_by.extend(fragment.group_by.clone());
         self.having_conditions

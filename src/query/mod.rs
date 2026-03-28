@@ -50,6 +50,7 @@ pub struct QueryBuilder<M: Model> {
     offset_value: Option<u64>,
     select_columns: Option<Vec<String>>,
     raw_select_expressions: Vec<String>,
+    subquery_select_expressions: Vec<(String, String)>,
     include_trashed: bool,
     only_trashed: bool,
     joins: Vec<JoinClause>,

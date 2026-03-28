@@ -105,6 +105,10 @@ impl Connection for Database {
         Ok(match self.current_handle()? {
             DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner),
             DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
+            #[cfg(test)]
+            DatabaseHandle::TestScope => {
+                unreachable!("test scope marker does not carry a connection reference")
+            }
         })
     }
 }

@@ -345,6 +345,44 @@ fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
 }
 
 #[test]
+fn test_having_validation_rejects_subquery_like_payload() {
+    let err = db_sql::validate_having_sql_fragment(
+        "HAVING raw SQL",
+        "1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'",
+    )
+    .unwrap_err();
+
+    assert!(err.contains("unsafe HAVING raw SQL"));
+}
+
+#[test]
+fn test_having_validation_allows_basic_aggregate_predicates() {
+    db_sql::validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > 1")
+        .expect("COUNT(*) predicate should be allowed");
+    db_sql::validate_having_sql_fragment(
+        "HAVING raw SQL",
+        "SUM(\"amount\") >= 10 AND AVG(\"amount\") < 20",
+    )
+    .expect("aggregate predicates over quoted identifiers should be allowed");
+}
+
+#[test]
+fn test_having_validation_allows_custom_functions_and_from_based_expressions() {
+    db_sql::validate_having_sql_fragment("HAVING raw SQL", "STDDEV(\"amount\") > 0")
+        .expect("custom aggregate functions should be allowed");
+    db_sql::validate_having_sql_fragment(
+        "HAVING raw SQL",
+        "EXTRACT(YEAR FROM \"created_at\") >= 2024",
+    )
+    .expect("FROM-based expression syntax should be allowed");
+    db_sql::validate_having_sql_fragment(
+        "HAVING raw SQL",
+        "\"status\" IS DISTINCT FROM 'archived'",
+    )
+    .expect("IS DISTINCT FROM predicates should be allowed");
+}
+
+#[test]
 fn test_subquery_validation_rejects_non_select_sql() {
     let err = db_sql::validate_subquery_sql("DELETE FROM users").unwrap_err();
     assert!(err.contains("unsafe subquery"));
@@ -379,6 +417,18 @@ async fn test_having_rejects_unsafe_sql_before_db_lookup() {
     let err = QueryTestUser::query()
         .group_by("id")
         .having("COUNT(*) > 0; DROP TABLE users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe HAVING raw SQL"));
+}
+
+#[tokio::test]
+async fn test_having_rejects_subquery_like_sql_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .group_by("id")
+        .having("1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'")
         .count()
         .await
         .unwrap_err();
@@ -444,6 +494,20 @@ async fn test_select_subquery_rejects_unsafe_alias_before_db_lookup() {
         .unwrap_err();
 
     assert!(err.to_string().contains("unsafe SELECT alias"));
+}
+
+#[test]
+fn test_select_subquery_uses_backend_specific_alias_quoting() {
+    let query = QueryTestUser::query().select_subquery(
+        QueryTestUser::query().select(vec!["id"]).limit(1),
+        "nested_id",
+    );
+
+    let postgres_sql = query.build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(postgres_sql.contains("AS \"nested_id\""));
+
+    let mysql_sql = query.build_select_sql_for_db(DatabaseType::MySQL);
+    assert!(mysql_sql.contains("AS `nested_id`"));
 }
 
 #[tokio::test]
@@ -1205,10 +1269,25 @@ fn test_fulltext_build_postgres_ranked_sql_binds_prefix_query_and_min_rank() {
     assert!(sql.contains(" >= $4"));
     assert!(matches!(params.first(), Some(Value::String(Some(language))) if language == "english"));
     assert!(
-        matches!(params.get(1), Some(Value::String(Some(query))) if query == "quick:* & fox:*")
+        matches!(params.get(1), Some(Value::String(Some(query))) if query == "'quick':* & 'fox':*")
     );
     assert!(
         matches!(params.get(3), Some(Value::Double(Some(rank))) if (*rank - 0.75).abs() < f64::EPSILON)
+    );
+}
+
+#[cfg(feature = "fulltext")]
+#[test]
+fn test_fulltext_build_postgres_boolean_sql_sanitizes_tsquery_operators() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "test* OR 1")
+        .mode(SearchMode::Boolean);
+
+    let (sql, params) = builder.build_sql(DatabaseType::Postgres).unwrap();
+
+    assert!(sql.contains("to_tsquery(CAST($1 AS regconfig), $2)"));
+    assert!(matches!(params.first(), Some(Value::String(Some(language))) if language == "english"));
+    assert!(
+        matches!(params.get(1), Some(Value::String(Some(query))) if query == "'test' & 'OR' & '1'")
     );
 }
 
@@ -1248,8 +1327,20 @@ fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
     assert!(sql.contains("WHERE \"query_test_users_fts\" MATCH ?"));
     assert!(sql.contains("LIMIT ? OFFSET ?"));
     assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "say \"\"hello\"\" to it''s")
+        matches!(params.first(), Some(Value::String(Some(query))) if query == "\"say\" \"hello\" \"to\" \"it's\"")
     );
     assert!(matches!(params.get(1), Some(Value::BigInt(Some(limit))) if *limit == 5));
     assert!(matches!(params.get(2), Some(Value::BigInt(Some(offset))) if *offset == 2));
+}
+
+#[cfg(feature = "fulltext")]
+#[test]
+fn test_fulltext_build_sqlite_sql_neutralizes_fts_operators() {
+    let builder = FullTextSearchBuilder::<QueryTestUser>::new(&["name"], "test* OR 1");
+
+    let (_, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
+
+    assert!(
+        matches!(params.first(), Some(Value::String(Some(query))) if query == "\"test*\" \"OR\" \"1\"")
+    );
 }

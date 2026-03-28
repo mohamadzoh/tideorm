@@ -11,6 +11,8 @@
 use crate::error::{Error, Result};
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
+pub(crate) mod sql_safety;
+
 // Re-export SeaORM internally (but this module itself is #[doc(hidden)])
 // Allow unused_imports here: we re-export broadly so other modules can import selectively
 #[allow(unused_imports)]
@@ -22,7 +24,10 @@ pub use sea_orm::{
     LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     Related, RelationDef, RelationTrait, Statement, TransactionTrait, TryGetable, Value,
     entity::prelude::*,
-    sea_query::{Alias, Asterisk, Expr, ExprTrait},
+    sea_query::{
+        Asterisk, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query,
+        SqliteQueryBuilder,
+    },
 };
 
 /// Internal trait that maps TideORM models to SeaORM entities
@@ -147,14 +152,28 @@ where
     select
 }
 
-fn build_exists_any_select<M>() -> Select<M::Entity>
+fn build_exists_any_statement<M>(backend: DbBackend) -> Statement
 where
     M: InternalModel + crate::model::Model,
 {
-    scoped_find::<M>()
-        .select_only()
-        .column_as(Expr::val(1), "exists_result")
-        .limit(1)
+    let mut probe_select = scoped_find::<M>();
+    let mut probe_query = QueryTrait::query(&mut probe_select).to_owned();
+    probe_query.clear_selects();
+    probe_query.expr(Expr::cust("1"));
+    probe_query.reset_limit();
+    probe_query.reset_offset();
+    probe_query.clear_order_by();
+
+    let exists_query = Query::select().expr(Expr::exists(probe_query)).to_owned();
+
+    let sql = match backend {
+        DbBackend::Postgres => exists_query.to_string(PostgresQueryBuilder),
+        DbBackend::MySql => exists_query.to_string(MysqlQueryBuilder),
+        DbBackend::Sqlite => exists_query.to_string(SqliteQueryBuilder),
+        _ => exists_query.to_string(PostgresQueryBuilder),
+    };
+
+    Statement::from_string(backend, sql)
 }
 
 fn scoped_find<M>() -> Select<M::Entity>
@@ -268,22 +287,26 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        #[derive(Debug, FromQueryResult)]
-        struct ExistsResult {
-            exists_result: i32,
-        }
-
-        let result = build_exists_any_select::<M>()
-            .into_model::<ExistsResult>()
-            .one(conn);
-        let result: Option<ExistsResult> = crate::profiling::__profile_future(result)
+        let backend = conn.get_database_backend();
+        let statement = build_exists_any_statement::<M>(backend);
+        let result = crate::profiling::__profile_future(conn.query_one_raw(statement))
             .await
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
 
-        let _ = result.as_ref().map(|row| row.exists_result);
-
-        Ok(result.is_some())
+        match result {
+            Some(row) => {
+                let exists = match backend {
+                    DbBackend::Postgres => row.try_get_by_index(0).unwrap_or(false),
+                    _ => {
+                        let value: i32 = row.try_get_by_index(0).unwrap_or(0);
+                        value > 0
+                    }
+                };
+                Ok(exists)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Paginate records

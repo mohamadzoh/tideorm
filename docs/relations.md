@@ -78,7 +78,7 @@ pub struct Post {
 
 ### Loading Relations
 
-Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are runtime helpers, not persisted columns. TideORM's generated serde implementation skips them during serialization and restores them with defaults during deserialization, so they do not leak into JSON payloads.
+Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are runtime helpers, not persisted columns. TideORM's generated serde implementation serializes cached relation payloads when they are loaded and rebuilds the wrappers with runtime context during deserialization, so JSON round trips can preserve loaded relations without treating the wrappers as stored schema fields.
 
 Runtime relation helpers operate on a single local or foreign key value per query. For composite-key models, define `local_key` explicitly when needed and use custom queries when the relation requires matching multiple columns.
 
@@ -214,7 +214,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.4", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.5", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -549,7 +549,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.4", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.5", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup

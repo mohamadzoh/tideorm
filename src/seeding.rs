@@ -12,6 +12,8 @@ use crate::config::DatabaseType;
 use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
+use crate::internal::Value;
+use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::tide_info;
 
 // Re-export async_trait for users
@@ -443,7 +445,7 @@ impl Seeder {
         use crate::internal::Statement;
 
         let backend = database.__internal_connection()?.get_database_backend();
-        let q = |id: &str| quote_identifier(id, backend);
+        let q = |id: &str| quote_ident_for_backend(backend, id);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
             q("name"),
@@ -473,20 +475,13 @@ impl Seeder {
     async fn record_seed(&self, name: &str) -> Result<()> {
         let database = require_db()?;
         let backend = database.__internal_connection()?.get_database_backend();
-        let q = |id: &str| quote_identifier(id, backend);
+        let q = |id: &str| quote_ident_for_backend(backend, id);
 
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES ('{}')",
-            q("_seeds"),
-            q("name"),
-            name.replace('\'', "''")
-        );
+        let sql = format!("INSERT INTO {} ({}) VALUES (?)", q("_seeds"), q("name"));
 
         database
-            .__internal_connection()?
-            .execute_unprepared(&sql)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
+            .await?;
 
         Ok(())
     }
@@ -495,20 +490,13 @@ impl Seeder {
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
         let database = require_db()?;
         let backend = database.__internal_connection()?.get_database_backend();
-        let q = |id: &str| quote_identifier(id, backend);
+        let q = |id: &str| quote_ident_for_backend(backend, id);
 
-        let sql = format!(
-            "DELETE FROM {} WHERE {} = '{}'",
-            q("_seeds"),
-            q("name"),
-            name.replace('\'', "''")
-        );
+        let sql = format!("DELETE FROM {} WHERE {} = ?", q("_seeds"), q("name"));
 
         database
-            .__internal_connection()?
-            .execute_unprepared(&sql)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
+            .await?;
 
         Ok(())
     }
@@ -623,15 +611,6 @@ impl fmt::Display for SeedStatus {
 /// Detect database type from connection
 fn detect_database_type(database: &Database) -> DatabaseType {
     database.backend()
-}
-
-/// Quote an identifier (table/column name) for the current database backend
-fn quote_identifier(name: &str, backend: crate::internal::DbBackend) -> String {
-    use crate::internal::DbBackend;
-    match backend {
-        DbBackend::MySql => format!("`{}`", name),
-        _ => format!(r#""{}""#, name), // Postgres & SQLite use double quotes
-    }
 }
 
 /// Log seed start

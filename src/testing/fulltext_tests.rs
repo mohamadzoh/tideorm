@@ -110,6 +110,15 @@ fn test_escape_string() {
 }
 
 #[test]
+fn test_pg_headline_sql_escapes_literals_and_quotes_identifiers() {
+    let sql = pg_headline_sql("posts.body\"text", "don't panic", "en'g", "<b>'", "</b>'");
+
+    assert!(sql.contains("\"posts\".\"body\"\"text\""));
+    assert!(sql.contains("plainto_tsquery('en''g', 'don''t panic')"));
+    assert!(sql.contains("StartSel=<b>'', StopSel=</b>'', MaxWords=35, MinWords=15"));
+}
+
+#[test]
 fn test_fulltext_config() {
     let config = FullTextConfig::new()
         .language("german")
@@ -121,6 +130,27 @@ fn test_fulltext_config() {
     assert_eq!(config.mode, SearchMode::Boolean);
     assert_eq!(config.min_word_length, Some(3));
     assert_eq!(config.max_word_length, Some(50));
+}
+
+#[test]
+fn test_escape_fts5_query_quotes_each_literal_term() {
+    assert_eq!(escape_fts5_query("test* OR 1"), "\"test*\" \"OR\" \"1\"");
+    assert_eq!(
+        escape_fts5_query("say \"hello world\" now"),
+        "\"say\" \"hello world\" \"now\""
+    );
+}
+
+#[test]
+fn test_sanitize_postgres_tsquery_builds_literal_terms() {
+    assert_eq!(
+        sanitize_postgres_tsquery("test* OR 1", false),
+        "'test' & 'OR' & '1'"
+    );
+    assert_eq!(
+        sanitize_postgres_tsquery("quick \"brown fox\"", true),
+        "'quick':* & ('brown':* <-> 'fox':*)"
+    );
 }
 
 #[test]
@@ -207,7 +237,7 @@ fn test_mysql_and_sqlite_fulltext_sql_parameterize_pagination() {
     assert_eq!(
         sqlite_params,
         vec![
-            Value::String(Some("portable query".to_string())),
+            Value::String(Some("\"portable\" \"query\"".to_string())),
             Value::BigInt(Some(7)),
             Value::BigInt(Some(4)),
         ]

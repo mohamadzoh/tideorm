@@ -80,8 +80,13 @@ impl<M: Model> QueryBuilder<M> {
     fn build_select_clause_sql(&self, db_type: DatabaseType) -> String {
         let table = M::table_name();
 
-        if !self.raw_select_expressions.is_empty() {
+        if !self.raw_select_expressions.is_empty() || !self.subquery_select_expressions.is_empty() {
             let mut expressions = self.raw_select_expressions.clone();
+            expressions.extend(self.subquery_select_expressions.iter().map(
+                |(query_sql, alias)| {
+                    format!("({}) AS {}", query_sql, db_sql::quote_ident(db_type, alias))
+                },
+            ));
             for window_function in &self.window_functions {
                 expressions.push(window_function.to_sql_for_db(db_type));
             }
@@ -148,6 +153,95 @@ impl<M: Model> QueryBuilder<M> {
         if !self.having_conditions.is_empty() {
             sql.push_str(&format!("HAVING {} ", self.having_conditions.join(" AND ")));
         }
+    }
+
+    fn append_cte_sql(&self, sql: &mut String) {
+        if self.ctes.is_empty() {
+            return;
+        }
+
+        let recursive = self.ctes.iter().any(|cte| cte.recursive);
+        sql.push_str(if recursive {
+            "WITH RECURSIVE "
+        } else {
+            "WITH "
+        });
+        let cte_parts: Vec<String> = self.ctes.iter().map(CTE::to_sql).collect();
+        sql.push_str(&cte_parts.join(", "));
+        sql.push(' ');
+    }
+
+    fn append_union_sql(&self, sql: &mut String, wrap_subqueries: bool) {
+        for union in &self.unions {
+            if wrap_subqueries {
+                sql.push_str(&format!(
+                    " {} ({})",
+                    union.union_type.as_sql(),
+                    union.query_sql
+                ));
+            } else {
+                sql.push_str(&format!(
+                    " {} {}",
+                    union.union_type.as_sql(),
+                    union.query_sql
+                ));
+            }
+        }
+    }
+
+    fn append_order_limit_offset_sql(&self, sql: &mut String, db_type: DatabaseType) {
+        if !self.order_by.is_empty() {
+            let order_parts: Vec<String> = self
+                .order_by
+                .iter()
+                .map(|(column, direction)| {
+                    format!(
+                        "{} {}",
+                        self.format_column_for_db(db_type, column),
+                        direction.as_str()
+                    )
+                })
+                .collect();
+            sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+        }
+
+        if let Some(limit) = self.limit_value {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+
+        if let Some(offset) = self.offset_value {
+            sql.push_str(&format!(" OFFSET {}", offset));
+        }
+    }
+
+    fn assemble_base_select_sql(&self, db_type: DatabaseType, where_sql: &str) -> String {
+        let mut sql = String::new();
+
+        sql.push_str(&self.build_select_clause_sql(db_type));
+        self.append_from_and_join_sql(&mut sql, db_type);
+
+        if !where_sql.is_empty() {
+            sql.push_str(&format!("WHERE {} ", where_sql));
+        }
+
+        self.append_group_by_and_having_sql(&mut sql, db_type);
+        sql.trim().to_string()
+    }
+
+    fn assemble_select_sql(
+        &self,
+        db_type: DatabaseType,
+        base_sql: &str,
+        wrap_union_subqueries: bool,
+    ) -> String {
+        let mut sql = String::new();
+
+        self.append_cte_sql(&mut sql);
+        sql.push_str(base_sql);
+        self.append_union_sql(&mut sql, wrap_union_subqueries);
+        self.append_order_limit_offset_sql(&mut sql, db_type);
+
+        sql.trim().to_string()
     }
 
     fn build_condition_sql_for_db(
@@ -262,36 +356,16 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(crate) fn build_base_select_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let mut sql = String::new();
-
-        sql.push_str(&self.build_select_clause_sql(db_type));
-        self.append_from_and_join_sql(&mut sql, db_type);
-
         let where_sql = self.build_where_sql_for_db(db_type);
-        if !where_sql.is_empty() {
-            sql.push_str(&format!("WHERE {} ", where_sql));
-        }
-
-        self.append_group_by_and_having_sql(&mut sql, db_type);
-        sql.trim().to_string()
+        self.assemble_base_select_sql(db_type, &where_sql)
     }
 
     fn build_base_select_sql_with_params_for_db(
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
-        let mut sql = String::new();
-
-        sql.push_str(&self.build_select_clause_sql(db_type));
-        self.append_from_and_join_sql(&mut sql, db_type);
-
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        if !where_sql.is_empty() {
-            sql.push_str(&format!("WHERE {} ", where_sql));
-        }
-
-        self.append_group_by_and_having_sql(&mut sql, db_type);
-        (sql.trim().to_string(), params)
+        (self.assemble_base_select_sql(db_type, &where_sql), params)
     }
 
     pub(crate) fn build_select_sql(&self) -> String {
@@ -299,109 +373,16 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(crate) fn build_select_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let mut sql = String::new();
-
-        if !self.ctes.is_empty() {
-            let recursive = self.ctes.iter().any(|cte| cte.recursive);
-            sql.push_str(if recursive {
-                "WITH RECURSIVE "
-            } else {
-                "WITH "
-            });
-            let cte_parts: Vec<String> = self.ctes.iter().map(CTE::to_sql).collect();
-            sql.push_str(&cte_parts.join(", "));
-            sql.push(' ');
-        }
-
-        sql.push_str(&self.build_base_select_sql_for_db(db_type));
-
-        for union in &self.unions {
-            sql.push_str(&format!(
-                " {} {}",
-                union.union_type.as_sql(),
-                union.query_sql
-            ));
-        }
-
-        if !self.order_by.is_empty() {
-            let order_parts: Vec<String> = self
-                .order_by
-                .iter()
-                .map(|(column, direction)| {
-                    format!(
-                        "{} {}",
-                        self.format_column_for_db(db_type, column),
-                        direction.as_str()
-                    )
-                })
-                .collect();
-            sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
-        }
-
-        if let Some(limit) = self.limit_value {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        if let Some(offset) = self.offset_value {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
-        sql.trim().to_string()
+        let base_sql = self.build_base_select_sql_for_db(db_type);
+        self.assemble_select_sql(db_type, &base_sql, false)
     }
 
     pub(crate) fn build_select_sql_with_params_for_db(
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
-        let mut sql = String::new();
-
-        if !self.ctes.is_empty() {
-            let recursive = self.ctes.iter().any(|cte| cte.recursive);
-            sql.push_str(if recursive {
-                "WITH RECURSIVE "
-            } else {
-                "WITH "
-            });
-            let cte_parts: Vec<String> = self.ctes.iter().map(CTE::to_sql).collect();
-            sql.push_str(&cte_parts.join(", "));
-            sql.push(' ');
-        }
-
         let (base_sql, params) = self.build_base_select_sql_with_params_for_db(db_type);
-        sql.push_str(&base_sql);
-
-        for union in &self.unions {
-            sql.push_str(&format!(
-                " {} ({})",
-                union.union_type.as_sql(),
-                union.query_sql
-            ));
-        }
-
-        if !self.order_by.is_empty() {
-            let order_parts: Vec<String> = self
-                .order_by
-                .iter()
-                .map(|(column, direction)| {
-                    format!(
-                        "{} {}",
-                        self.format_column_for_db(db_type, column),
-                        direction.as_str()
-                    )
-                })
-                .collect();
-            sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
-        }
-
-        if let Some(limit) = self.limit_value {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        if let Some(offset) = self.offset_value {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
-        (sql.trim().to_string(), params)
+        (self.assemble_select_sql(db_type, &base_sql, true), params)
     }
 
     pub(super) fn build_select_sql_with_params(&self) -> (String, Vec<Value>) {
@@ -444,6 +425,7 @@ impl<M: Model> QueryBuilder<M> {
         if exists_query.unions.is_empty() {
             exists_query.select_columns = None;
             exists_query.raw_select_expressions = vec!["1".to_string()];
+            exists_query.subquery_select_expressions.clear();
             exists_query.window_functions.clear();
         }
 

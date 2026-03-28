@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-03-28
+
+### Fixed
+
+- Hardened the remaining runtime and tooling SQL assembly paths so seed and migration bookkeeping use bound parameters for user-controlled values, schema/sync helpers reuse backend-safe identifier quoting, and SQLite schema introspection no longer interpolates PRAGMA identifiers directly.
+- Reworked non-Tokio connection override scoping so transaction and scoped-connection helpers reinstall the override on every poll instead of leaking thread-local state across await spans.
+- Neutralized parser-injection edges in PostgreSQL full-text boolean, prefix, and proximity builders plus SQLite FTS5 query text by sanitizing user input into literal search terms.
+- Restored cached relation round-trip serialization for models with generated serde implementations, so relation wrapper payloads now survive serialize/deserialize flows instead of being dropped.
+
+### Changed
+
+- `exists_any()` now uses a scalar `SELECT EXISTS(...)` probe instead of selecting a dummy row and hydrating an intermediate model.
+- Centralized runtime SQL safety helpers in `src/internal/sql_safety.rs` so identifier quoting, raw-fragment validation, and full-text sanitization are shared across query, schema, sync, migration, relation, and seeding paths.
+- Refreshed dependency snippets and relation-serialization docs to use the 0.9.5 release version and describe cached relation serde behavior accurately.
+
+### Internal
+
+- Added regression coverage for non-Tokio scoped overrides, HAVING validation, backend-specific subquery alias quoting, full-text sanitization, schema identifier escaping, cached relation round trips, and highlighted full-text SQL escaping.
+- Verified the release prep with `cargo test --lib --all-features` and `cargo clippy --workspace --all-targets -- -D warnings`.
+
 ## [0.9.4] - 2026-03-28
 
 ### Fixed

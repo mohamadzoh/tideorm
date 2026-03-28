@@ -15,6 +15,12 @@ use std::marker::PhantomData;
 
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::{
+    escape_fts5_query_literal_terms as escape_fts5_query, escape_sql_literal,
+    format_identifier_reference, quote_ident,
+    sanitize_postgres_proximity_tsquery_literals as sanitize_postgres_proximity_tsquery,
+    sanitize_postgres_tsquery_literals as sanitize_postgres_tsquery,
+};
 use crate::internal::{ConnectionTrait, FromQueryResult, Statement, Value};
 use crate::model::Model;
 
@@ -90,13 +96,17 @@ pub enum SearchMode {
     #[default]
     Natural,
     /// Boolean search mode
-    /// Supports operators like +, -, *, "phrase"
+    /// Uses backend-specific boolean search behavior.
+    /// MySQL forwards native boolean operators, while PostgreSQL and SQLite
+    /// sanitize user input into literal terms to avoid query-parser injection.
     Boolean,
     /// Phrase search mode
     /// Matches exact phrases
     Phrase,
     /// Prefix search mode
-    /// Matches words that start with the given prefix
+    /// Matches words that start with the given prefix.
+    /// Backends that require parser syntax build that syntax from sanitized
+    /// literal terms instead of trusting raw user operators.
     Prefix,
     /// Fuzzy search mode (PostgreSQL only)
     /// Matches similar words using trigrams
@@ -661,15 +671,28 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 )
             }
             SearchMode::Boolean => {
+                let tsquery = sanitize_postgres_tsquery(&self.query, false);
+                let use_plain = tsquery.is_empty();
                 let placeholder = self.push_param(
                     DatabaseType::Postgres,
                     params,
-                    Value::String(Some(self.query.clone())),
+                    Value::String(Some(if use_plain {
+                        self.query.clone()
+                    } else {
+                        tsquery
+                    })),
                 );
-                format!(
-                    "to_tsquery(CAST({} AS regconfig), {})",
-                    language_placeholder, placeholder
-                )
+                if use_plain {
+                    format!(
+                        "plainto_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                } else {
+                    format!(
+                        "to_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                }
             }
             SearchMode::Phrase => {
                 let placeholder = self.push_param(
@@ -683,17 +706,28 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 )
             }
             SearchMode::Prefix => {
-                let words: Vec<&str> = self.query.split_whitespace().collect();
-                let prefixed: Vec<String> = words.iter().map(|w| format!("{}:*", w)).collect();
+                let prefixed = sanitize_postgres_tsquery(&self.query, true);
+                let use_plain = prefixed.is_empty();
                 let placeholder = self.push_param(
                     DatabaseType::Postgres,
                     params,
-                    Value::String(Some(prefixed.join(" & "))),
+                    Value::String(Some(if use_plain {
+                        self.query.clone()
+                    } else {
+                        prefixed
+                    })),
                 );
-                format!(
-                    "to_tsquery(CAST({} AS regconfig), {})",
-                    language_placeholder, placeholder
-                )
+                if use_plain {
+                    format!(
+                        "plainto_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                } else {
+                    format!(
+                        "to_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                }
             }
             SearchMode::Fuzzy => {
                 let placeholder = self.push_param(
@@ -707,17 +741,28 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 )
             }
             SearchMode::Proximity(distance) => {
-                let words: Vec<&str> = self.query.split_whitespace().collect();
-                let proximity: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+                let proximity = sanitize_postgres_proximity_tsquery(&self.query, distance);
+                let use_plain = proximity.is_empty();
                 let placeholder = self.push_param(
                     DatabaseType::Postgres,
                     params,
-                    Value::String(Some(proximity.join(&format!(" <{}> ", distance)))),
+                    Value::String(Some(if use_plain {
+                        self.query.clone()
+                    } else {
+                        proximity
+                    })),
                 );
-                format!(
-                    "to_tsquery(CAST({} AS regconfig), {})",
-                    language_placeholder, placeholder
-                )
+                if use_plain {
+                    format!(
+                        "plainto_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                } else {
+                    format!(
+                        "to_tsquery(CAST({} AS regconfig), {})",
+                        language_placeholder, placeholder
+                    )
+                }
             }
         }
     }
@@ -1284,15 +1329,17 @@ pub fn pg_headline_sql(
     start_tag: &str,
     end_tag: &str,
 ) -> String {
+    let column = format_identifier_reference(DatabaseType::Postgres, column)
+        .unwrap_or_else(|| quote_ident(DatabaseType::Postgres, column));
+    let language = escape_string(language);
+    let query = escape_string(query);
+    let start_tag = escape_string(start_tag);
+    let end_tag = escape_string(end_tag);
+
     format!(
-        "ts_headline('{}', \"{}\", plainto_tsquery('{}', '{}'), \
+        "ts_headline('{}', {}, plainto_tsquery('{}', '{}'), \
          'StartSel={}, StopSel={}, MaxWords=35, MinWords=15')",
-        language,
-        column,
-        language,
-        escape_string(query),
-        start_tag,
-        end_tag
+        language, column, language, query, start_tag, end_tag
     )
 }
 
@@ -1302,23 +1349,7 @@ pub fn pg_headline_sql(
 
 /// Escape a string for SQL queries
 fn escape_string(s: &str) -> String {
-    s.replace('\'', "''").replace('\\', "\\\\")
-}
-
-/// Escape a query for SQLite FTS5
-fn escape_fts5_query(s: &str) -> String {
-    // FTS5 uses double quotes for phrases
-    // Escape special characters
-    s.replace('"', "\"\"").replace('\'', "''")
-}
-
-fn quote_ident(db_type: DatabaseType, name: &str) -> String {
-    let quote = match db_type {
-        DatabaseType::Postgres | DatabaseType::SQLite => '"',
-        DatabaseType::MySQL | DatabaseType::MariaDB => '`',
-    };
-    let escaped = name.replace(quote, &format!("{quote}{quote}"));
-    format!("{}{}{}", quote, escaped, quote)
+    escape_sql_literal(s).replace('\\', "\\\\")
 }
 
 // =============================================================================

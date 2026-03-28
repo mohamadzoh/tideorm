@@ -15,6 +15,7 @@ use std::path::Path;
 
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::quote_ident;
 use crate::model::IndexDefinition;
 
 // Global schema registry for auto-generation
@@ -207,11 +208,7 @@ impl SchemaGenerator {
 
     /// Quote identifier based on database type
     fn quote_identifier(&self, name: &str) -> String {
-        match self.database_type {
-            DatabaseType::Postgres => format!("\"{}\"", name),
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!("`{}`", name),
-            DatabaseType::SQLite => format!("\"{}\"", name),
-        }
+        quote_ident(self.database_type, name)
     }
 }
 
@@ -900,12 +897,13 @@ impl SchemaWriter {
             let table_name: String = row
                 .try_get("", "name")
                 .map_err(|e| Error::query(e.to_string()))?;
+            let quoted_table_name = quote_ident(DatabaseType::SQLite, &table_name);
 
             // Get table info (columns)
             let col_rows = conn
                 .query_all_raw(Statement::from_string(
                     DbBackend::Sqlite,
-                    format!("PRAGMA table_info(\"{}\")", table_name),
+                    format!("PRAGMA table_info({})", quoted_table_name),
                 ))
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -914,7 +912,7 @@ impl SchemaWriter {
             let index_list = conn
                 .query_all_raw(Statement::from_string(
                     DbBackend::Sqlite,
-                    format!("PRAGMA index_list(\"{}\")", table_name),
+                    format!("PRAGMA index_list({})", quoted_table_name),
                 ))
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -934,7 +932,10 @@ impl SchemaWriter {
                 let idx_info = conn
                     .query_all_raw(Statement::from_string(
                         DbBackend::Sqlite,
-                        format!("PRAGMA index_info(\"{}\")", idx_name),
+                        format!(
+                            "PRAGMA index_info({})",
+                            quote_ident(DatabaseType::SQLite, &idx_name)
+                        ),
                     ))
                     .await
                     .map_err(|e| Error::query(e.to_string()))?;

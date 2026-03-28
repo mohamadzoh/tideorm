@@ -72,7 +72,47 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
         return quote! {};
     }
     let struct_name = &ctx.struct_name;
-    let serialized_fields: Vec<_> = ctx
+    let relation_field_idents: Vec<_> = ctx
+        .serde_field_names
+        .iter()
+        .filter(|field_ident| {
+            ctx.relation_fields.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == *field_ident)
+            })
+        })
+        .cloned()
+        .collect();
+    let relation_field_names_str: Vec<_> = ctx
+        .serde_field_names
+        .iter()
+        .zip(ctx.serde_field_names_str.iter())
+        .filter(|(field_ident, _)| {
+            ctx.relation_fields.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == *field_ident)
+            })
+        })
+        .map(|(_, field_name)| field_name.clone())
+        .collect();
+    let non_relation_field_names: Vec<_> = ctx
+        .serde_field_names
+        .iter()
+        .filter(|field_ident| {
+            !ctx.relation_fields.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == *field_ident)
+            })
+        })
+        .cloned()
+        .collect();
+    let non_relation_field_names_str: Vec<_> = ctx
         .serde_field_names
         .iter()
         .zip(ctx.serde_field_names_str.iter())
@@ -84,17 +124,9 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
                     .is_some_and(|ident| ident == *field_ident)
             })
         })
-        .map(|(field_ident, field_name)| (field_ident.clone(), field_name.clone()))
+        .map(|(_, field_name)| field_name.clone())
         .collect();
-    let serialized_field_names: Vec<_> = serialized_fields
-        .iter()
-        .map(|(field_ident, _)| field_ident)
-        .collect();
-    let serialized_field_names_str: Vec<_> = serialized_fields
-        .iter()
-        .map(|(_, field_name)| field_name)
-        .collect();
-    let field_count = serialized_field_names.len();
+    let base_field_count = non_relation_field_names.len();
     quote! {
         impl ::serde::Serialize for #struct_name {
             fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
@@ -102,8 +134,15 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 S: ::serde::Serializer,
             {
                 use ::serde::ser::SerializeStruct;
-                let mut state = serializer.serialize_struct(stringify!(#struct_name), #field_count)?;
-                #(state.serialize_field(#serialized_field_names_str, &self.#serialized_field_names)?;)*
+                let relation_field_count = 0usize #( + usize::from(self.#relation_field_idents.get_cached().is_some()))*;
+                let mut state = serializer.serialize_struct(
+                    stringify!(#struct_name),
+                    #base_field_count + relation_field_count,
+                )?;
+                #(state.serialize_field(#non_relation_field_names_str, &self.#non_relation_field_names)?;)*
+                #(if self.#relation_field_idents.get_cached().is_some() {
+                    state.serialize_field(#relation_field_names_str, &self.#relation_field_idents)?;
+                })*
                 state.end()
             }
         }

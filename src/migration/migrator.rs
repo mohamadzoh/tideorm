@@ -1,6 +1,6 @@
 use crate::database::require_db;
 use crate::error::{Error, Result};
-use crate::internal::{ConnectionTrait, Statement};
+use crate::internal::{ConnectionTrait, Statement, Value};
 
 use super::{
     DatabaseType, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
@@ -263,18 +263,20 @@ impl Migrator {
         let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
 
         let sql = format!(
-            "INSERT INTO {} ({}, {}) VALUES ('{}', '{}')",
+            "INSERT INTO {} ({}, {}) VALUES (?, ?)",
             quote("_migrations"),
             quote("version"),
-            quote("name"),
-            version.replace('\'', "''"),
-            name.replace('\'', "''")
+            quote("name")
         );
 
-        db.__internal_connection()?
-            .execute_unprepared(&sql)
-            .await
-            .map_err(|error| Error::query(error.to_string()))?;
+        db.__execute_with_params(
+            &sql,
+            vec![
+                Value::String(Some(version.to_string())),
+                Value::String(Some(name.to_string())),
+            ],
+        )
+        .await?;
 
         Ok(())
     }
@@ -285,16 +287,13 @@ impl Migrator {
         let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
 
         let sql = format!(
-            "DELETE FROM {} WHERE {} = '{}'",
+            "DELETE FROM {} WHERE {} = ?",
             quote("_migrations"),
-            quote("version"),
-            version.replace('\'', "''")
+            quote("version")
         );
 
-        db.__internal_connection()?
-            .execute_unprepared(&sql)
-            .await
-            .map_err(|error| Error::query(error.to_string()))?;
+        db.__execute_with_params(&sql, vec![Value::String(Some(version.to_string()))])
+            .await?;
 
         Ok(())
     }

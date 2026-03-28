@@ -194,8 +194,13 @@ impl<M: Model> QueryBuilder<M> {
         info.limit = self.limit_value;
         info.offset = self.offset_value;
 
-        if !self.raw_select_expressions.is_empty() {
+        if !self.raw_select_expressions.is_empty() || !self.subquery_select_expressions.is_empty() {
             info.select = self.raw_select_expressions.clone();
+            info.select.extend(
+                self.subquery_select_expressions
+                    .iter()
+                    .map(|(query_sql, alias)| format!("({}) AS {}", query_sql, alias)),
+            );
         } else if let Some(columns) = &self.select_columns {
             info.select = columns.clone();
         }

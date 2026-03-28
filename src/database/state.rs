@@ -1,6 +1,10 @@
 use arc_swap::ArcSwapOption;
 use std::future::Future;
+#[cfg(not(feature = "runtime-tokio"))]
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+#[cfg(not(feature = "runtime-tokio"))]
+use std::task::{Context, Poll};
 
 #[cfg(not(feature = "runtime-tokio"))]
 use std::cell::RefCell;
@@ -27,6 +31,9 @@ thread_local! {
 pub(crate) enum DatabaseHandle {
     Connection(Arc<InternalConnection>),
     Transaction(Arc<crate::internal::DatabaseTransaction>),
+    #[cfg(test)]
+    #[allow(dead_code)]
+    TestScope,
 }
 
 pub(super) fn global_connection_slot() -> &'static ArcSwapOption<InternalConnection> {
@@ -93,6 +100,24 @@ fn current_override_handle() -> Option<DatabaseHandle> {
     THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
+#[cfg(not(feature = "runtime-tokio"))]
+struct ResetThreadOverride(Option<DatabaseHandle>);
+
+#[cfg(not(feature = "runtime-tokio"))]
+impl Drop for ResetThreadOverride {
+    fn drop(&mut self) {
+        THREAD_DB_OVERRIDE.with(|slot| {
+            slot.replace(self.0.take());
+        });
+    }
+}
+
+#[cfg(not(feature = "runtime-tokio"))]
+fn install_thread_override(handle: &DatabaseHandle) -> ResetThreadOverride {
+    let previous = THREAD_DB_OVERRIDE.with(|slot| slot.replace(Some(handle.clone())));
+    ResetThreadOverride(previous)
+}
+
 #[doc(hidden)]
 pub fn __current_db() -> Result<Database> {
     if let Some(handle) = current_override_handle() {
@@ -128,24 +153,37 @@ where
 }
 
 #[cfg(not(feature = "runtime-tokio"))]
-pub(super) async fn with_connection_override<F>(handle: DatabaseHandle, future: F) -> F::Output
+pub(super) fn with_connection_override<F>(
+    handle: DatabaseHandle,
+    future: F,
+) -> impl Future<Output = F::Output>
 where
     F: Future,
 {
-    let previous = THREAD_DB_OVERRIDE.with(|slot| slot.replace(Some(handle)));
+    struct ScopedOverrideFuture<F> {
+        handle: DatabaseHandle,
+        future: Pin<Box<F>>,
+    }
 
-    struct ResetThreadOverride(Option<DatabaseHandle>);
+    impl<F> Future for ScopedOverrideFuture<F>
+    where
+        F: Future,
+    {
+        type Output = F::Output;
 
-    impl Drop for ResetThreadOverride {
-        fn drop(&mut self) {
-            THREAD_DB_OVERRIDE.with(|slot| {
-                slot.replace(self.0.take());
-            });
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+            let guard = install_thread_override(&this.handle);
+            let result = this.future.as_mut().poll(cx);
+            drop(guard);
+            result
         }
     }
 
-    let _reset = ResetThreadOverride(previous);
-    future.await
+    ScopedOverrideFuture {
+        handle,
+        future: Box::pin(future),
+    }
 }
 
 #[doc(hidden)]
@@ -153,6 +191,8 @@ pub fn __current_connection() -> Result<ConnectionRef> {
     Ok(match current_scope_handle()? {
         DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner),
         DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
+        #[cfg(test)]
+        DatabaseHandle::TestScope => unreachable!("test scope marker does not carry a connection"),
     })
 }
 
@@ -163,5 +203,77 @@ pub fn __current_backend() -> Result<DbBackend> {
     Ok(match current_scope_handle()? {
         DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
         DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+        #[cfg(test)]
+        DatabaseHandle::TestScope => unreachable!("test scope marker does not carry a backend"),
     })
+}
+
+#[cfg(all(test, not(feature = "runtime-tokio")))]
+mod tests {
+    use super::{DatabaseHandle, current_override_handle, with_connection_override};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Waker};
+
+    struct OverrideVisibleAcrossPolls {
+        polled_threads: Arc<Mutex<Vec<std::thread::ThreadId>>>,
+        stage: usize,
+    }
+
+    impl Future for OverrideVisibleAcrossPolls {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            assert!(current_override_handle().is_some());
+            self.polled_threads
+                .lock()
+                .expect("thread list lock should not be poisoned")
+                .push(std::thread::current().id());
+
+            if self.stage == 0 {
+                self.stage = 1;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+
+            Poll::Ready(())
+        }
+    }
+
+    #[test]
+    fn thread_override_is_poll_scoped_and_survives_cross_thread_polls() {
+        let polled_threads = Arc::new(Mutex::new(Vec::new()));
+        let mut future = Box::pin(with_connection_override(
+            DatabaseHandle::TestScope,
+            OverrideVisibleAcrossPolls {
+                polled_threads: polled_threads.clone(),
+                stage: 0,
+            },
+        ));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        assert!(current_override_handle().is_none());
+
+        let join = std::thread::spawn(move || {
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            assert!(matches!(
+                future.as_mut().poll(&mut context),
+                Poll::Ready(())
+            ));
+            assert!(current_override_handle().is_none());
+        });
+
+        join.join()
+            .expect("cross-thread poll should complete successfully");
+
+        let polled_threads = polled_threads
+            .lock()
+            .expect("thread list lock should not be poisoned");
+        assert_eq!(polled_threads.len(), 2);
+        assert_ne!(polled_threads[0], polled_threads[1]);
+    }
 }

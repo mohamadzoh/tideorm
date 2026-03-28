@@ -8,6 +8,7 @@
 
 use crate::config::DatabaseType;
 use crate::database::Database;
+use crate::internal::sql_safety::quote_ident;
 use crate::{tide_debug, tide_info};
 
 mod alter;
@@ -31,12 +32,7 @@ pub(super) fn detect_database_type(db: &Database) -> DatabaseType {
 }
 
 pub(super) fn quote_identifier_for_db(name: &str, db_type: DatabaseType) -> String {
-    match db_type {
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            format!("`{}`", name.replace('`', "``"))
-        }
-        _ => format!("\"{}\"", name.replace('"', "\"\"")),
-    }
+    quote_ident(db_type, name)
 }
 
 pub(super) fn quote_migration_identifier(name: &str, db_type: DatabaseType) -> String {

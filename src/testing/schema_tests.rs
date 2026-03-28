@@ -150,6 +150,29 @@ fn test_schema_generator_sqlite() {
 }
 
 #[test]
+fn test_schema_generator_escapes_embedded_identifier_quotes() {
+    let mut postgres = SchemaGenerator::new(DatabaseType::Postgres);
+    postgres.add_table(
+        TableSchemaBuilder::new("user\"roles")
+            .column(ColumnSchema::new("display\"name", "TEXT").not_null())
+            .build(),
+    );
+    let postgres_sql = postgres.generate();
+    assert!(postgres_sql.contains("\"user\"\"roles\""));
+    assert!(postgres_sql.contains("\"display\"\"name\" TEXT"));
+
+    let mut mysql = SchemaGenerator::new(DatabaseType::MySQL);
+    mysql.add_table(
+        TableSchemaBuilder::new("user`roles")
+            .column(ColumnSchema::new("display`name", "TEXT").not_null())
+            .build(),
+    );
+    let mysql_sql = mysql.generate();
+    assert!(mysql_sql.contains("`user``roles`"));
+    assert!(mysql_sql.contains("`display``name` TEXT"));
+}
+
+#[test]
 fn test_column_schema_builder() {
     let col = ColumnSchema::new("email", "VARCHAR(255)")
         .not_null()

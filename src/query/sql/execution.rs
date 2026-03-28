@@ -59,6 +59,10 @@ impl<M: Model> QueryBuilder<M> {
         for raw_select in &self.raw_select_expressions {
             raw_select.hash(&mut hasher);
         }
+        for (query_sql, alias) in &self.subquery_select_expressions {
+            query_sql.hash(&mut hasher);
+            alias.hash(&mut hasher);
+        }
 
         for join in &self.joins {
             join.table.hash(&mut hasher);
@@ -196,6 +200,7 @@ impl<M: Model> QueryBuilder<M> {
             || !self.window_functions.is_empty()
             || self.select_columns.is_some()
             || !self.raw_select_expressions.is_empty()
+            || !self.subquery_select_expressions.is_empty()
             || !self.order_by.is_empty()
             || self.limit_value.is_some()
             || self.offset_value.is_some()

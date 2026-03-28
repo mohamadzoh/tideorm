@@ -251,8 +251,8 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let subquery_sql = subquery.to_subquery_sql();
-        self.raw_select_expressions
-            .push(format!("({}) AS \"{}\"", subquery_sql, alias));
+        self.subquery_select_expressions
+            .push((subquery_sql, alias.to_string()));
         self
     }
 
