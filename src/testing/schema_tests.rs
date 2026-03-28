@@ -173,6 +173,41 @@ fn test_schema_generator_escapes_embedded_identifier_quotes() {
 }
 
 #[test]
+fn test_schema_generator_qualifies_postgres_schema_names() {
+    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+    generator.add_table(
+        TableSchemaBuilder::new("posts")
+            .schema("public")
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .build(),
+    );
+
+    let sql = generator.generate();
+    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"posts\""));
+}
+
+#[test]
+fn test_schema_generator_supports_identifier_references() {
+    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+    generator.add_table(
+        TableSchemaBuilder::new("public.posts")
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .build(),
+    );
+
+    let sql = generator.generate();
+    assert!(sql.contains("CREATE TABLE IF NOT EXISTS \"public\".\"posts\""));
+}
+
+#[test]
 fn test_column_schema_builder() {
     let col = ColumnSchema::new("email", "VARCHAR(255)")
         .not_null()
@@ -331,6 +366,7 @@ fn test_schema_writer_registry() {
     let schemas = SchemaWriter::get_registered_schemas();
     assert_eq!(schemas.len(), 1);
     assert_eq!(schemas[0].name, "test_table");
+    assert_eq!(schemas[0].schema_name, None);
 
     SchemaWriter::register_schema(table);
     let schemas = SchemaWriter::get_registered_schemas();
@@ -339,4 +375,32 @@ fn test_schema_writer_registry() {
     SchemaWriter::clear_registry();
     let schemas = SchemaWriter::get_registered_schemas();
     assert!(schemas.is_empty());
+}
+
+#[test]
+fn test_schema_writer_registry_keeps_distinct_schemas() {
+    SchemaWriter::clear_registry();
+
+    let public_table = TableSchemaBuilder::new("posts")
+        .schema("public")
+        .column(ColumnSchema::new("id", "BIGINT").primary_key())
+        .build();
+    let audit_table = TableSchemaBuilder::new("posts")
+        .schema("audit")
+        .column(ColumnSchema::new("id", "BIGINT").primary_key())
+        .build();
+
+    SchemaWriter::register_schema(public_table);
+    SchemaWriter::register_schema(audit_table);
+
+    let schemas = SchemaWriter::get_registered_schemas();
+    assert_eq!(schemas.len(), 2);
+    assert!(schemas.iter().any(|schema| {
+        schema.name == "posts" && schema.schema_name.as_deref() == Some("public")
+    }));
+    assert!(schemas.iter().any(|schema| {
+        schema.name == "posts" && schema.schema_name.as_deref() == Some("audit")
+    }));
+
+    SchemaWriter::clear_registry();
 }

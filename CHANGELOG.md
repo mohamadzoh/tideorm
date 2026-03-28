@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-03-28
+
+### Fixed
+
+- Restored schema generation for qualified table names by tracking schema names explicitly in `TableSchema`, emitting schema-qualified `CREATE TABLE` and `CREATE INDEX` targets when present, allowing safe dotted identifier references for direct generator usage, and preserving non-system PostgreSQL schemas during database introspection.
+- Made schema registry de-duplication schema-aware so tables with the same name in different schemas no longer collapse into a single registered entry.
+- Updated migration bookkeeping writes to use backend-specific parameter placeholders, so `_migrations` inserts and deletes stay parameterized on PostgreSQL as well as MySQL/MariaDB and SQLite.
+
+### Internal
+
+- Added schema-generation regression coverage for schema-qualified table output, dotted identifier references, and schema-aware registry behavior.
+- Verified the release prep with `cargo test --all-features`, `cargo clippy --workspace --all-targets -- -D warnings`, and `mdbook build`.
+
 ## [0.9.5] - 2026-03-28
 
 ### Fixed

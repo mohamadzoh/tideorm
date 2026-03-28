@@ -15,7 +15,7 @@ use std::path::Path;
 
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
-use crate::internal::sql_safety::quote_ident;
+use crate::internal::sql_safety::{format_identifier_reference, quote_ident};
 use crate::model::IndexDefinition;
 
 // Global schema registry for auto-generation
@@ -32,6 +32,8 @@ pub struct SchemaGenerator {
 pub struct TableSchema {
     /// Table name
     pub name: String,
+    /// Optional schema name for qualified table references
+    pub schema_name: Option<String>,
     /// Column definitions
     pub columns: Vec<ColumnSchema>,
     /// Index definitions (regular and unique)
@@ -107,7 +109,7 @@ impl SchemaGenerator {
     fn generate_create_table(&self, table: &TableSchema) -> String {
         let mut sql = format!(
             "CREATE TABLE IF NOT EXISTS {} (\n",
-            self.quote_identifier(&table.name)
+            self.quote_table_identifier(table)
         );
 
         let column_defs: Vec<String> = table
@@ -198,7 +200,7 @@ impl SchemaGenerator {
                 "CREATE {} IF NOT EXISTS {} ON {} ({});\n",
                 index_type,
                 self.quote_identifier(&index.name),
-                self.quote_identifier(&table.name),
+                self.quote_table_identifier(table),
                 columns.join(", ")
             ));
         }
@@ -210,11 +212,29 @@ impl SchemaGenerator {
     fn quote_identifier(&self, name: &str) -> String {
         quote_ident(self.database_type, name)
     }
+
+    fn quote_identifier_reference(&self, name: &str) -> String {
+        format_identifier_reference(self.database_type, name)
+            .unwrap_or_else(|| self.quote_identifier(name))
+    }
+
+    fn quote_table_identifier(&self, table: &TableSchema) -> String {
+        if let Some(schema_name) = &table.schema_name {
+            return format!(
+                "{}.{}",
+                self.quote_identifier(schema_name),
+                self.quote_identifier(&table.name)
+            );
+        }
+
+        self.quote_identifier_reference(&table.name)
+    }
 }
 
 /// Builder for table schemas from model metadata
 pub struct TableSchemaBuilder {
     name: String,
+    schema_name: Option<String>,
     columns: Vec<ColumnSchema>,
     indexes: Vec<IndexDefinition>,
     primary_key: String,
@@ -226,11 +246,18 @@ impl TableSchemaBuilder {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            schema_name: None,
             columns: Vec::new(),
             indexes: Vec::new(),
             primary_key: String::new(),
             primary_keys: Vec::new(),
         }
+    }
+
+    /// Set the schema name for this table.
+    pub fn schema(mut self, schema_name: impl Into<String>) -> Self {
+        self.schema_name = Some(schema_name.into());
+        self
     }
 
     /// Add a column
@@ -363,6 +390,7 @@ impl TableSchemaBuilder {
     pub fn build(self) -> TableSchema {
         TableSchema {
             name: self.name,
+            schema_name: self.schema_name,
             columns: self.columns,
             indexes: self.indexes,
             primary_key: self.primary_key,
@@ -526,7 +554,10 @@ impl SchemaWriter {
     pub fn register_schema(schema: TableSchema) {
         let mut registry = SCHEMA_REGISTRY.write();
         // Check if table already exists (avoid duplicates)
-        if !registry.iter().any(|t| t.name == schema.name) {
+        if !registry
+            .iter()
+            .any(|t| t.name == schema.name && t.schema_name == schema.schema_name)
+        {
             registry.push(schema);
         }
     }
@@ -589,9 +620,12 @@ impl SchemaWriter {
         let table_rows = conn
             .query_all_raw(Statement::from_string(
                 DbBackend::Postgres,
-                "SELECT table_name FROM information_schema.tables 
-             WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-             ORDER BY table_name",
+                "SELECT table_schema, table_name FROM information_schema.tables 
+             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+             AND table_schema NOT LIKE 'pg_toast%'
+             AND table_schema NOT LIKE 'pg_temp_%'
+             AND table_type = 'BASE TABLE'
+             ORDER BY table_schema, table_name",
             ))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
@@ -599,6 +633,9 @@ impl SchemaWriter {
         let mut schemas = Vec::new();
 
         for row in table_rows {
+            let table_schema: String = row
+                .try_get("", "table_schema")
+                .map_err(|e| Error::query(e.to_string()))?;
             let table_name: String = row
                 .try_get("", "table_name")
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -609,9 +646,9 @@ impl SchemaWriter {
                     DbBackend::Postgres,
                     "SELECT column_name, data_type, is_nullable, column_default
                  FROM information_schema.columns
-                 WHERE table_schema = 'public' AND table_name = $1
+                 WHERE table_schema = $1 AND table_name = $2
                  ORDER BY ordinal_position",
-                    vec![table_name.clone().into()],
+                    vec![table_schema.clone().into(), table_name.clone().into()],
                 ))
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -624,10 +661,13 @@ impl SchemaWriter {
                  FROM information_schema.table_constraints tc
                  JOIN information_schema.constraint_column_usage AS ccu 
                      ON ccu.constraint_name = tc.constraint_name
+                     AND ccu.constraint_schema = tc.constraint_schema
+                     AND ccu.table_schema = tc.table_schema
+                     AND ccu.table_name = tc.table_name
                  JOIN information_schema.columns AS c 
-                     ON c.table_name = tc.table_name AND ccu.column_name = c.column_name
-                 WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1",
-                    vec![table_name.clone().into()],
+                     ON c.table_schema = ccu.table_schema AND c.table_name = ccu.table_name AND c.column_name = ccu.column_name
+                 WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2",
+                    vec![table_schema.clone().into(), table_name.clone().into()],
                 ))
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -643,13 +683,14 @@ impl SchemaWriter {
                     DbBackend::Postgres,
                     "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
                  FROM pg_class t
+                      JOIN pg_namespace ns ON ns.oid = t.relnamespace
                  JOIN pg_index ix ON t.oid = ix.indrelid
                  JOIN pg_class i ON i.oid = ix.indexrelid
                  JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-                 WHERE t.relkind = 'r' AND t.relname = $1
+                      WHERE t.relkind = 'r' AND ns.nspname = $1 AND t.relname = $2
                  AND NOT ix.indisprimary
                  ORDER BY i.relname, a.attnum",
-                    vec![table_name.clone().into()],
+                    vec![table_schema.clone().into(), table_name.clone().into()],
                 ))
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -675,7 +716,7 @@ impl SchemaWriter {
                 .collect();
 
             // Build table schema
-            let mut builder = TableSchemaBuilder::new(&table_name);
+            let mut builder = TableSchemaBuilder::new(&table_name).schema(&table_schema);
 
             for row in col_rows {
                 let col_name: String = row.try_get("", "column_name").unwrap_or_default();
