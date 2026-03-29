@@ -140,6 +140,25 @@ mod cache_tests {
     }
 
     #[test]
+    fn test_query_cache_replacing_existing_key_at_capacity_does_not_evict_other_entry() {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set_max_entries(2);
+        cache.set_strategy(CacheStrategy::LRU);
+
+        cache.set("key1", &1, None, "model").unwrap();
+        cache.set("key2", &2, None, "model").unwrap();
+
+        cache.set("key1", &10, None, "model").unwrap();
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get::<i32>("key1"), Some(10));
+        assert_eq!(cache.get::<i32>("key2"), Some(2));
+
+        cache.clear();
+    }
+
+    #[test]
     fn test_query_cache_complex_types() {
         let cache = QueryCache::new();
         cache.enable();

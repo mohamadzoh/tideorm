@@ -1,13 +1,11 @@
 use super::{
-    BelongsTo, EagerLoadExt, HasMany, HasManyThrough, MorphOne, MorphTo, RelationConstraints,
-    SelfRef, SelfRefMany, Value, build_self_ref_tree_sql,
+    BelongsTo, EagerLoadExt, HasMany, HasManyThrough, HasOne, MorphOne, MorphTo,
+    RelationConstraints, RelationExt, SelfRef, SelfRefMany, Value, build_self_ref_tree_sql,
 };
 use crate::config::DatabaseType;
 use crate::model::Model as _;
 use serde_json::json;
 
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use super::HasOne;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::sync::{Mutex, OnceLock};
 
@@ -52,6 +50,32 @@ struct RelationTestEmployee {
 
     #[tideorm(morph_name = "imageable")]
     avatar: MorphOne<RelationTestImage>,
+}
+
+#[tideorm::model(table = "relation_ext_lookup_models")]
+struct RelationExtLookupModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(column = "owner_id")]
+    account_id: i64,
+}
+
+#[tideorm::model(table = "relation_ext_parent_models")]
+struct RelationExtParentModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: String,
+
+    #[tideorm(foreign_key = "parent_id")]
+    child: HasOne<RelationExtChildModel>,
+}
+
+#[tideorm::model(table = "relation_ext_child_models")]
+struct RelationExtChildModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    parent_id: i64,
+    label: String,
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -190,6 +214,42 @@ fn relation_constraints_accept_typed_columns() {
 
     assert_eq!(query.conditions.len(), 1);
     assert_eq!(query.conditions[0].column, "slug");
+}
+
+#[test]
+fn relation_ext_get_field_value_reads_single_fields_by_field_or_column_name() {
+    let model = RelationExtLookupModel {
+        id: 7,
+        account_id: 41,
+    }
+    .with_relations();
+
+    assert_eq!(model.get_field_value("account_id").unwrap(), json!(41));
+    assert_eq!(model.get_field_value("owner_id").unwrap(), json!(41));
+    assert_eq!(model.get_field_value("id").unwrap(), json!(7));
+}
+
+#[test]
+fn relation_ext_get_field_value_falls_back_to_serialized_relation_fields() {
+    let mut parent = RelationExtParentModel {
+        id: 42,
+        name: "parent".to_string(),
+        child: Default::default(),
+    }
+    .with_relations();
+
+    parent.child.set_cached(Some(
+        RelationExtChildModel {
+            id: 7,
+            parent_id: 42,
+            label: "child".to_string(),
+        }
+    ));
+
+    assert_eq!(
+        parent.get_field_value("child").unwrap(),
+        json!({ "id": 7, "parent_id": 42, "label": "child" })
+    );
 }
 
 #[tokio::test]

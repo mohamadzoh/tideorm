@@ -405,6 +405,10 @@ impl<T: Model> EagerLoadExt for T {}
 #[async_trait]
 pub trait RelationExt: Model {
     fn get_field_value(&self, field: &str) -> Result<serde_json::Value> {
+        if let Some(value) = <Self as InternalModel>::field_json_value(self, field)? {
+            return Ok(value);
+        }
+
         let json = serde_json::to_value(self)
             .map_err(|e| Error::query(format!("Failed to serialize model: {}", e)))?;
 

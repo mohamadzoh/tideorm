@@ -14,24 +14,12 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::sync::OnceLock;
 use std::time::Duration;
 use tideorm::prelude::*;
-use tideorm::{Database, TideConfig};
-use tokio::runtime::Runtime;
+mod support;
 
-fn database_url() -> String {
-    let _ = dotenvy::dotenv();
-    std::env::var("POSTGRESQL_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string())
-}
-
-// Global runtime for all benchmarks
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+use support::{init_postgres_database, runtime, truncate_table};
 
 // Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
-
-fn get_runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().unwrap())
-}
 
 // =============================================================================
 // BENCHMARK MODEL
@@ -56,22 +44,11 @@ pub struct OrBenchUser {
 // =============================================================================
 
 fn init_database() {
-    DB_INITIALIZED.get_or_init(|| {
-        get_runtime().block_on(async {
-            TideConfig::init()
-                .database(&database_url())
-                .max_connections(50)
-                .min_connections(5)
-                .acquire_timeout(Duration::from_secs(30))
-                .connect()
-                .await
-                .expect("Failed to connect to database");
-
-            // Create benchmark table
-            let _ = Database::execute("DROP TABLE IF EXISTS or_bench_users CASCADE").await;
-
-            Database::execute(
-                r#"
+    init_postgres_database(
+        &DB_INITIALIZED,
+        &[
+            "DROP TABLE IF EXISTS or_bench_users CASCADE",
+            r#"
                 CREATE TABLE or_bench_users (
                     id BIGSERIAL PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
@@ -83,34 +60,21 @@ fn init_database() {
                     active BOOLEAN NOT NULL DEFAULT true
                 )
             "#,
-            )
-            .await
-            .expect("Failed to create table");
-
-            // Create indexes for query benchmarks
-            let _ = Database::execute("CREATE INDEX idx_or_bench_status ON or_bench_users(status)")
-                .await;
-            let _ =
-                Database::execute("CREATE INDEX idx_or_bench_role ON or_bench_users(role)").await;
-            let _ = Database::execute(
-                "CREATE INDEX idx_or_bench_department ON or_bench_users(department)",
-            )
-            .await;
-            let _ = Database::execute("CREATE INDEX idx_or_bench_age ON or_bench_users(age)").await;
-            let _ = Database::execute("CREATE INDEX idx_or_bench_active ON or_bench_users(active)")
-                .await;
-        });
-    });
+            "CREATE INDEX idx_or_bench_status ON or_bench_users(status)",
+            "CREATE INDEX idx_or_bench_role ON or_bench_users(role)",
+            "CREATE INDEX idx_or_bench_department ON or_bench_users(department)",
+            "CREATE INDEX idx_or_bench_age ON or_bench_users(age)",
+            "CREATE INDEX idx_or_bench_active ON or_bench_users(active)",
+        ],
+    );
 }
 
 fn cleanup_data() {
-    get_runtime().block_on(async {
-        let _ = Database::execute("TRUNCATE TABLE or_bench_users RESTART IDENTITY CASCADE").await;
-    });
+    truncate_table("or_bench_users");
 }
 
 fn seed_data(count: usize) {
-    let rt = get_runtime();
+    let rt = runtime();
     let statuses = ["active", "pending", "inactive", "banned"];
     let roles = ["admin", "moderator", "editor", "user", "guest"];
     let departments = ["Engineering", "Marketing", "Sales", "Support", "HR"];
@@ -229,7 +193,7 @@ fn bench_or_clause_query_execution(c: &mut Criterion) {
     cleanup_data();
     seed_data(1000);
 
-    let rt = get_runtime();
+    let rt = runtime();
     let mut group = c.benchmark_group("or_clause_execution");
     group.measurement_time(Duration::from_secs(10));
 
@@ -323,7 +287,7 @@ fn bench_or_vs_in_comparison(c: &mut Criterion) {
     cleanup_data();
     seed_data(1000);
 
-    let rt = get_runtime();
+    let rt = runtime();
     let mut group = c.benchmark_group("or_vs_in_comparison");
     group.measurement_time(Duration::from_secs(10));
 
@@ -384,7 +348,7 @@ fn bench_or_vs_in_comparison(c: &mut Criterion) {
 fn bench_or_clause_scaling(c: &mut Criterion) {
     init_database();
 
-    let rt = get_runtime();
+    let rt = runtime();
     let mut group = c.benchmark_group("or_clause_scaling");
     group.measurement_time(Duration::from_secs(10));
 
@@ -427,7 +391,7 @@ fn bench_or_conditions_count(c: &mut Criterion) {
     cleanup_data();
     seed_data(1000);
 
-    let rt = get_runtime();
+    let rt = runtime();
     let mut group = c.benchmark_group("or_conditions_count");
     group.measurement_time(Duration::from_secs(10));
 
@@ -622,7 +586,7 @@ fn bench_fluent_or_execution(c: &mut Criterion) {
     cleanup_data();
     seed_data(1000);
 
-    let rt = get_runtime();
+    let rt = runtime();
     let mut group = c.benchmark_group("fluent_or_execution");
     group.measurement_time(Duration::from_secs(10));
 

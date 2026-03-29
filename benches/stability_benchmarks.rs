@@ -1,324 +1,160 @@
+//! Non-database TideORM stability benchmarks.
+//!
+//! These benches cover stable internal workloads that are useful to keep clean:
+//! query debugging, schema generation, and Rust-to-SQL type mapping.
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use tideorm::prelude::*;
+use tideorm::schema::rust_type_to_sql;
 
-// =============================================================================
-// STABILITY AND EDGE CASE BENCHMARKS
-// =============================================================================
-
-fn bench_empty_result_handling(c: &mut Criterion) {
-    c.bench_function("empty_vec_iteration", |b| {
-        b.iter(|| {
-            let empty: Vec<i32> = black_box(vec![]);
-            empty.len()
-        });
-    });
-
-    c.bench_function("empty_vec_first", |b| {
-        b.iter(|| {
-            let empty: Vec<i32> = black_box(vec![]);
-            !empty.is_empty()
-        });
-    });
-
-    c.bench_function("option_unwrap_or", |b| {
-        b.iter(|| {
-            let none: Option<i32> = black_box(None);
-            none.unwrap_or(0)
-        });
-    });
+#[derive(Model, PartialEq)]
+#[tideorm(table = "audit_events")]
+struct AuditEvent {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    tenant_id: i64,
+    actor_id: i64,
+    status: String,
+    severity: String,
+    attempts: i32,
+    archived: bool,
 }
 
-fn bench_null_handling(c: &mut Criterion) {
-    c.bench_function("option_is_some_check", |b| {
-        b.iter(|| {
-            let opt: Option<String> = black_box(Some("value".to_string()));
-            opt.is_some()
-        });
-    });
-
-    c.bench_function("option_is_none_check", |b| {
-        b.iter(|| {
-            let opt: Option<String> = black_box(None);
-            opt.is_none()
-        });
-    });
+fn build_simple_debug_info() -> QueryDebugInfo {
+    AuditEvent::query()
+        .where_eq("tenant_id", 7)
+        .where_eq("archived", false)
+        .order_by("id", Order::Desc)
+        .limit(25)
+        .debug()
 }
 
-fn bench_large_data(c: &mut Criterion) {
-    c.bench_function("large_string_creation", |b| {
-        b.iter(|| {
-            let large = "x".repeat(black_box(10000));
-            large.len()
-        });
-    });
+fn build_complex_debug_info() -> QueryDebugInfo {
+    AuditEvent::query()
+        .where_eq("tenant_id", 7)
+        .where_in("severity", vec!["warn", "error", "critical"])
+        .where_eq("status", "open")
+        .where_gte("attempts", 2)
+        .where_lte("attempts", 8)
+        .or_where(|query| {
+            query
+                .where_eq("actor_id", 10)
+                .where_eq("actor_id", 11)
+                .where_eq("actor_id", 12)
+        })
+        .order_by("severity", Order::Desc)
+        .order_by("id", Order::Desc)
+        .page(3, 50)
+        .debug()
+}
 
-    let mut group = c.benchmark_group("large_vector");
-    for size in [100, 1000, 10000].iter() {
-        group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
-            b.iter(|| {
-                let mut vec = Vec::new();
-                for i in 0..black_box(size) {
-                    vec.push(i);
-                }
-                vec.len()
-            });
-        });
-    }
+fn audit_event_schema() -> TableSchema {
+    TableSchemaBuilder::new("audit_events")
+        .schema("analytics")
+        .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+        .column(ColumnSchema::new("tenant_id", "BIGINT").not_null())
+        .column(ColumnSchema::new("actor_id", "BIGINT").not_null())
+        .column(ColumnSchema::new("status", "VARCHAR(32)").not_null())
+        .column(ColumnSchema::new("severity", "VARCHAR(16)").not_null())
+        .column(ColumnSchema::new("attempts", "INTEGER").not_null().default("0"))
+        .column(ColumnSchema::new("archived", "BOOLEAN").not_null().default("false"))
+        .index(IndexDefinition::new(
+            "idx_audit_events_tenant_status",
+            vec!["tenant_id".to_string(), "status".to_string()],
+            false,
+        ))
+        .index(IndexDefinition::new(
+            "idx_audit_events_severity_attempts",
+            vec!["severity".to_string(), "attempts".to_string()],
+            false,
+        ))
+        .index(IndexDefinition::new(
+            "uidx_audit_events_tenant_actor",
+            vec!["tenant_id".to_string(), "actor_id".to_string()],
+            true,
+        ))
+        .build()
+}
+
+fn bench_query_debug_snapshot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_debug_snapshot");
+
+    group.bench_function("simple", |b| b.iter(|| black_box(build_simple_debug_info())));
+    group.bench_function("complex", |b| b.iter(|| black_box(build_complex_debug_info())));
+
     group.finish();
 }
 
-fn bench_json_operations(c: &mut Criterion) {
-    use serde_json::json;
+fn bench_query_debug_rendering(c: &mut Criterion) {
+    let simple = build_simple_debug_info();
+    let complex = build_complex_debug_info();
+    let mut group = c.benchmark_group("query_debug_rendering");
 
-    c.bench_function("json_creation", |b| {
-        b.iter(|| {
-            json!({
-                "name": "test",
-                "age": 30,
-                "active": true
-            })
-        });
-    });
+    group.bench_function("simple", |b| b.iter(|| black_box(simple.to_string())));
+    group.bench_function("complex", |b| b.iter(|| black_box(complex.to_string())));
 
-    c.bench_function("json_nesting", |b| {
-        b.iter(|| {
-            json!({
-                "level1": {
-                    "level2": {
-                        "level3": {
-                            "value": 42
-                        }
-                    }
-                }
-            })
-        });
-    });
-
-    c.bench_function("json_serialization", |b| {
-        let obj = json!({
-            "name": "test",
-            "age": 30,
-            "items": [1, 2, 3, 4, 5]
-        });
-        b.iter(|| serde_json::to_string(&obj).unwrap());
-    });
-
-    c.bench_function("json_deserialization", |b| {
-        let json_str = r#"{"name":"test","age":30,"items":[1,2,3,4,5]}"#;
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(json_str)).unwrap());
-    });
-}
-
-fn bench_special_characters(c: &mut Criterion) {
-    c.bench_function("unicode_string_operations", |b| {
-        b.iter(|| {
-            let unicode = black_box("Привет 世界 مرحبا ");
-            unicode.chars().count()
-        });
-    });
-
-    c.bench_function("escape_sensitive_chars", |b| {
-        b.iter(|| {
-            let dangerous = black_box("'; DROP TABLE users; --");
-            dangerous.contains(';')
-        });
-    });
-
-    c.bench_function("multiline_text_split", |b| {
-        b.iter(|| {
-            let multiline = black_box("line1\nline2\nline3\nline4\nline5");
-            multiline.lines().count()
-        });
-    });
-}
-
-fn bench_numeric_operations(c: &mut Criterion) {
-    use rust_decimal::Decimal;
-
-    c.bench_function("i64_max_check", |b| {
-        b.iter(|| {
-            let max = black_box(i64::MAX);
-            max > 0
-        });
-    });
-
-    c.bench_function("decimal_creation", |b| {
-        b.iter(|| Decimal::from(black_box(123456789i64)));
-    });
-
-    c.bench_function("decimal_to_string", |b| {
-        let dec = Decimal::from(123456789i64);
-        b.iter(|| dec.to_string());
-    });
-}
-
-fn bench_iteration_patterns(c: &mut Criterion) {
-    let mut group = c.benchmark_group("iteration");
-
-    for size in [10, 100, 1000].iter() {
-        group.bench_with_input(BenchmarkId::new("simple_loop", size), size, |b, &size| {
-            b.iter(|| {
-                let vec: Vec<i32> = (0..black_box(size)).collect();
-                vec.iter().sum::<i32>()
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("filter_map", size), size, |b, &size| {
-            b.iter(|| {
-                let vec: Vec<i32> = (0..black_box(size)).collect();
-                vec.iter()
-                    .filter(|x| **x % 2 == 0)
-                    .map(|x| x * 2)
-                    .sum::<i32>()
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("find_first", size), size, |b, &size| {
-            b.iter(|| {
-                let vec: Vec<i32> = (0..black_box(size)).collect();
-                vec.iter().any(|x| *x > size / 2)
-            });
-        });
-    }
     group.finish();
 }
 
-fn bench_comparison_operations(c: &mut Criterion) {
-    c.bench_function("string_comparison", |b| {
-        b.iter(|| {
-            let a = black_box("abc");
-            let b_str = black_box("abd");
-            a < b_str
-        });
-    });
+fn bench_schema_generation(c: &mut Criterion) {
+    let table = audit_event_schema();
+    let mut group = c.benchmark_group("schema_generation");
 
-    c.bench_function("numeric_comparison", |b| {
-        b.iter(|| {
-            let a = black_box(100i64);
-            let b_val = black_box(200i64);
-            a < b_val
-        });
-    });
+    for db_type in [DatabaseType::Postgres, DatabaseType::MySQL, DatabaseType::SQLite] {
+        group.bench_with_input(
+            BenchmarkId::new("generate", format!("{db_type:?}")),
+            &db_type,
+            |b, db_type| {
+                let table = table.clone();
+                b.iter(|| {
+                    let mut generator = SchemaGenerator::new(*db_type);
+                    generator.add_table(table.clone());
+                    black_box(generator.generate())
+                })
+            },
+        );
+    }
 
-    c.bench_function("option_comparison", |b| {
-        b.iter(|| {
-            let a: Option<i32> = black_box(Some(1));
-            let b_val: Option<i32> = black_box(Some(2));
-            a < b_val
-        });
-    });
+    group.finish();
 }
 
-fn bench_clone_and_copy(c: &mut Criterion) {
-    c.bench_function("vec_clone", |b| {
-        b.iter(|| {
-            let original = black_box(vec![1, 2, 3, 4, 5]);
-            original.clone()
-        });
-    });
+fn bench_rust_type_mapping(c: &mut Criterion) {
+    let rust_types = [
+        "i64",
+        "String",
+        "chrono::DateTime<chrono::Utc>",
+        "Option<Vec<String>>",
+        "serde_json::Value",
+    ];
+    let mut group = c.benchmark_group("rust_type_to_sql");
 
-    c.bench_function("string_clone", |b| {
-        b.iter(|| {
-            let original = black_box(String::from("test string"));
-            original.clone()
-        });
-    });
+    for db_type in [DatabaseType::Postgres, DatabaseType::MySQL, DatabaseType::SQLite] {
+        group.bench_with_input(
+            BenchmarkId::new("map_five_types", format!("{db_type:?}")),
+            &db_type,
+            |b, db_type| {
+                b.iter(|| {
+                    black_box(
+                        rust_types
+                            .iter()
+                            .map(|rust_type| rust_type_to_sql(black_box(rust_type), *db_type))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            },
+        );
+    }
 
-    c.bench_function("large_vec_clone", |b| {
-        b.iter(|| {
-            let original: Vec<i32> = (0..1000).collect();
-            black_box(original).clone()
-        });
-    });
-}
-
-fn bench_hash_operations(c: &mut Criterion) {
-    use std::collections::HashMap;
-
-    c.bench_function("hashmap_insert", |b| {
-        b.iter(|| {
-            let mut map = HashMap::new();
-            for i in 0..100 {
-                map.insert(black_box(i), i * 2);
-            }
-            map
-        });
-    });
-
-    c.bench_function("hashmap_lookup", |b| {
-        let mut map = HashMap::new();
-        for i in 0..100 {
-            map.insert(i, i * 2);
-        }
-        b.iter(|| map.get(&black_box(50)));
-    });
-
-    c.bench_function("hashmap_contains", |b| {
-        let mut map = HashMap::new();
-        for i in 0..100 {
-            map.insert(i, i * 2);
-        }
-        b.iter(|| map.contains_key(&black_box(50)));
-    });
-}
-
-fn bench_timestamp_operations(c: &mut Criterion) {
-    use chrono::Utc;
-
-    c.bench_function("utc_now", |b| {
-        b.iter(Utc::now);
-    });
-
-    c.bench_function("timestamp_comparison", |b| {
-        let time1 = Utc::now();
-        let time2 = Utc::now();
-        b.iter(|| black_box(time1) < black_box(time2));
-    });
-
-    c.bench_function("timestamp_format", |b| {
-        let now = Utc::now();
-        b.iter(|| now.to_rfc3339());
-    });
-}
-
-#[allow(clippy::unnecessary_literal_unwrap)]
-fn bench_error_handling(c: &mut Criterion) {
-    c.bench_function("result_ok_unwrap", |b| {
-        b.iter(|| {
-            let result: Result<i32, String> = Ok(black_box(42));
-            result.unwrap()
-        });
-    });
-
-    c.bench_function("result_err_unwrap_or", |b| {
-        b.iter(|| {
-            let result: Result<i32, String> = Err(black_box("error".to_string()));
-            result.unwrap_or(0)
-        });
-    });
-
-    c.bench_function("option_unwrap_or_else", |b| {
-        b.iter(|| {
-            let none: Option<i32> = black_box(None);
-            none.unwrap_or(99)
-        });
-    });
+    group.finish();
 }
 
 criterion_group!(
     benches,
-    bench_empty_result_handling,
-    bench_null_handling,
-    bench_large_data,
-    bench_json_operations,
-    bench_special_characters,
-    bench_numeric_operations,
-    bench_iteration_patterns,
-    bench_comparison_operations,
-    bench_clone_and_copy,
-    bench_hash_operations,
-    bench_timestamp_operations,
-    bench_error_handling,
+    bench_query_debug_snapshot,
+    bench_query_debug_rendering,
+    bench_schema_generation,
+    bench_rust_type_mapping,
 );
 
 criterion_main!(benches);

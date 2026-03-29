@@ -182,13 +182,13 @@ fn count_sql_preserves_joins() {
         .build_count_sql_with_params_for_db(DatabaseType::Postgres);
 
     assert_eq!(params.len(), 1);
-    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
+    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM \"query_count_guard_users\" "));
     assert!(sql.contains(" FROM \"query_count_guard_users\" "));
     assert!(sql.contains(
         "INNER JOIN \"profiles\" ON \"query_count_guard_users\".\"id\" = \"profiles\".\"user_id\""
     ));
     assert!(sql.contains("WHERE \"profiles\".\"active\" = $1"));
-    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
+    assert!(!sql.contains("tideorm_count_subquery"));
 }
 
 #[test]
@@ -204,6 +204,18 @@ fn count_sql_preserves_group_by_and_having() {
     assert!(sql.contains("\"name\" FROM \"query_count_guard_users\""));
     assert!(sql.contains("GROUP BY \"name\""));
     assert!(sql.contains("HAVING COUNT(*) > 1"));
+    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
+}
+
+#[test]
+fn count_sql_preserves_subquery_wrapper_for_raw_aggregate_projection() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .select_raw("COUNT(*) AS total_count")
+        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(params.is_empty());
+    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
+    assert!(sql.contains("COUNT(*) AS total_count FROM \"query_count_guard_users\""));
     assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
 }
 
@@ -230,10 +242,10 @@ fn exists_sql_uses_select_one_with_limit() {
         .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
 
     assert_eq!(params.len(), 1);
-    assert!(sql.starts_with("SELECT 1 FROM (SELECT 1 FROM "));
+    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM "));
     assert!(sql.contains("FROM \"query_count_guard_users\""));
     assert!(sql.contains("WHERE \"name\" = $1"));
-    assert!(sql.ends_with("AS \"tideorm_exists_subquery\" LIMIT 1"));
+    assert!(sql.ends_with("LIMIT 1) AS \"exists_result\""));
 }
 
 #[test]
@@ -243,7 +255,7 @@ fn exists_sql_discards_original_projection_for_non_union_queries() {
         .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
 
     assert!(params.is_empty());
-    assert!(sql.starts_with("SELECT 1 FROM (SELECT 1 FROM "));
+    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM "));
     assert!(!sql.contains("SELECT \"query_count_guard_users\".\"name\""));
 }
 
@@ -260,8 +272,22 @@ fn exists_sql_ignores_order_limit_and_offset() {
     assert!(!sql.contains("ORDER BY"));
     assert!(!sql.contains("LIMIT 10"));
     assert!(!sql.contains("OFFSET 20"));
-    assert!(sql.ends_with("LIMIT 1"));
+    assert!(sql.ends_with("LIMIT 1) AS \"exists_result\""));
     assert!(sql.contains("WHERE \"name\" = $1"));
+}
+
+#[test]
+fn exists_sql_preserves_subquery_wrapper_for_union_queries() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .where_eq("name", "alice")
+        .union_all(QueryCountGuardUser::query().where_eq("name", "bob"))
+        .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert_eq!(params.len(), 1);
+    assert!(sql.starts_with("SELECT 1 FROM (SELECT "));
+    assert!(sql.contains("UNION ALL (SELECT"));
+    assert!(sql.contains("tideorm_exists_subquery"));
+    assert!(sql.ends_with("LIMIT 1"));
 }
 
 #[test]

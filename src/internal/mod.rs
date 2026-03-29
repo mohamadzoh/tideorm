@@ -66,6 +66,11 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
 
     /// Rebuild runtime-only relation wrappers after an in-memory model overwrite.
     fn refresh_runtime_relations_from(&mut self, _previous: &Self) {}
+
+    /// Get one model field as JSON without serializing the full model.
+    fn field_json_value(&self, _field: &str) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
 }
 
 /// Internal connection wrapper

@@ -33,6 +33,19 @@ fn test_query_cache_basic() {
 }
 
 #[test]
+fn test_query_cache_respects_empty_results_toggle_for_empty_vectors() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set_cache_empty_results(false);
+
+    cache.set("empty_vec", &Vec::<i32>::new(), None, "test_model").unwrap();
+
+    let result: Option<Vec<i32>> = cache.get("empty_vec");
+    assert!(result.is_none());
+    assert_eq!(cache.len(), 0);
+}
+
+#[test]
 fn test_query_cache_invalidation() {
     let cache = QueryCache::new();
     cache.enable();

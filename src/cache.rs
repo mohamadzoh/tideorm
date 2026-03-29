@@ -32,7 +32,8 @@
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -112,43 +113,176 @@ impl std::fmt::Display for CacheStrategy {
 /// A cache entry storing query results
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    /// Cached data as JSON
-    data: serde_json::Value,
-    /// Approximate serialized size in bytes
+    /// Cached data as serialized JSON bytes.
+    data: Vec<u8>,
+    /// Serialized size in bytes.
     size_bytes: usize,
-    /// When this entry was created
-    created_at: Instant,
-    /// When this entry was last accessed
-    last_accessed: Instant,
-    /// Time to live for this entry
-    ttl: Duration,
+    /// Absolute expiration time for efficient TTL eviction.
+    expires_at: Instant,
     /// The model/table this entry is for (for targeted invalidation)
     model_name: String,
     /// Number of times this entry has been accessed
     hit_count: u64,
+    /// Monotonic insertion sequence used by FIFO/TTL eviction indexes.
+    insert_order: u64,
+    /// Monotonic access sequence used by the LRU eviction index.
+    access_order: u64,
 }
 
 impl CacheEntry {
-    fn new(data: serde_json::Value, size_bytes: usize, ttl: Duration, model_name: &str) -> Self {
+    fn new(
+        data: Vec<u8>,
+        size_bytes: usize,
+        ttl: Duration,
+        model_name: &str,
+        order: u64,
+    ) -> Self {
         let now = Instant::now();
         Self {
             data,
             size_bytes,
-            created_at: now,
-            last_accessed: now,
-            ttl,
+            expires_at: now.checked_add(ttl).unwrap_or(now),
             model_name: model_name.to_string(),
             hit_count: 0,
+            insert_order: order,
+            access_order: order,
         }
     }
 
     fn is_expired(&self) -> bool {
-        self.created_at.elapsed() > self.ttl
+        Instant::now() >= self.expires_at
     }
 
-    fn touch(&mut self) {
-        self.last_accessed = Instant::now();
+    fn touch(&mut self, access_order: u64) {
+        self.access_order = access_order;
         self.hit_count += 1;
+    }
+
+    fn lru_candidate(&self, key: &str) -> OrderCandidate {
+        OrderCandidate::new(self.access_order, key)
+    }
+
+    fn fifo_candidate(&self, key: &str) -> OrderCandidate {
+        OrderCandidate::new(self.insert_order, key)
+    }
+
+    fn ttl_candidate(&self, key: &str) -> TtlCandidate {
+        TtlCandidate::new(self.expires_at, self.insert_order, key)
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct OrderCandidate {
+    order: u64,
+    key: String,
+}
+
+impl OrderCandidate {
+    fn new(order: u64, key: &str) -> Self {
+        Self {
+            order,
+            key: key.to_string(),
+        }
+    }
+}
+
+impl Ord for OrderCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.order
+            .cmp(&other.order)
+            .then_with(|| self.key.cmp(&other.key))
+    }
+}
+
+impl PartialOrd for OrderCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct TtlCandidate {
+    expires_at: Instant,
+    order: u64,
+    key: String,
+}
+
+impl TtlCandidate {
+    fn new(expires_at: Instant, order: u64, key: &str) -> Self {
+        Self {
+            expires_at,
+            order,
+            key: key.to_string(),
+        }
+    }
+}
+
+impl Ord for TtlCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.expires_at
+            .cmp(&other.expires_at)
+            .then_with(|| self.order.cmp(&other.order))
+            .then_with(|| self.key.cmp(&other.key))
+    }
+}
+
+impl PartialOrd for TtlCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Default)]
+struct CacheStore {
+    entries: HashMap<String, CacheEntry>,
+    lru_heap: BinaryHeap<Reverse<OrderCandidate>>,
+    fifo_heap: BinaryHeap<Reverse<OrderCandidate>>,
+    ttl_heap: BinaryHeap<Reverse<TtlCandidate>>,
+}
+
+impl CacheStore {
+    fn insert(&mut self, key: String, entry: CacheEntry) -> Option<CacheEntry> {
+        self.lru_heap.push(Reverse(entry.lru_candidate(&key)));
+        self.fifo_heap.push(Reverse(entry.fifo_candidate(&key)));
+        self.ttl_heap.push(Reverse(entry.ttl_candidate(&key)));
+        self.entries.insert(key, entry)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru_heap.clear();
+        self.fifo_heap.clear();
+        self.ttl_heap.clear();
+    }
+
+    fn maybe_rebuild_indexes(&mut self) {
+        const INDEX_REBUILD_MULTIPLIER: usize = 4;
+        const INDEX_REBUILD_SLACK: usize = 64;
+
+        let entry_count = self.entries.len();
+        let threshold = entry_count
+            .saturating_mul(INDEX_REBUILD_MULTIPLIER)
+            .saturating_add(INDEX_REBUILD_SLACK);
+
+        if entry_count == 0
+            || self.lru_heap.len() > threshold
+            || self.fifo_heap.len() > threshold
+            || self.ttl_heap.len() > threshold
+        {
+            self.rebuild_indexes();
+        }
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.lru_heap.clear();
+        self.fifo_heap.clear();
+        self.ttl_heap.clear();
+
+        for (key, entry) in &self.entries {
+            self.lru_heap.push(Reverse(entry.lru_candidate(key)));
+            self.fifo_heap.push(Reverse(entry.fifo_candidate(key)));
+            self.ttl_heap.push(Reverse(entry.ttl_candidate(key)));
+        }
     }
 }
 
@@ -192,7 +326,9 @@ pub struct QueryCache {
     /// Fast path for checking whether caching is enabled.
     enabled: AtomicBool,
     /// The actual cache storage
-    cache: RwLock<HashMap<String, CacheEntry>>,
+    cache: RwLock<CacheStore>,
+    /// Monotonic sequence for eviction indexes.
+    order_counter: AtomicU64,
     /// Cache hit counter.
     hits: AtomicU64,
     /// Cache miss counter.
@@ -213,7 +349,8 @@ impl QueryCache {
         Self {
             config: RwLock::new(CacheConfig::default()),
             enabled: AtomicBool::new(false),
-            cache: RwLock::new(HashMap::new()),
+            cache: RwLock::new(CacheStore::default()),
+            order_counter: AtomicU64::new(1),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             entries: AtomicUsize::new(0),
@@ -229,7 +366,8 @@ impl QueryCache {
         Self {
             config: RwLock::new(config),
             enabled: AtomicBool::new(enabled),
-            cache: RwLock::new(HashMap::new()),
+            cache: RwLock::new(CacheStore::default()),
+            order_counter: AtomicU64::new(1),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             entries: AtomicUsize::new(0),
@@ -264,6 +402,10 @@ impl QueryCache {
 
     fn overwrite_size_bytes(&self, bytes: usize) {
         self.size_bytes.store(bytes, Ordering::Relaxed);
+    }
+
+    fn next_order(&self) -> u64 {
+        self.order_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Get or initialize the global query cache
@@ -362,10 +504,10 @@ impl QueryCache {
         {
             let cache = self.cache.read();
 
-            match cache.get(key) {
+            match cache.entries.get(key) {
                 Some(entry) if !entry.is_expired() && strategy != CacheStrategy::LRU => {
                     self.hits.fetch_add(1, Ordering::Relaxed);
-                    return serde_json::from_value(entry.data.clone()).ok();
+                    return serde_json::from_slice(&entry.data).ok();
                 }
                 Some(_) => {}
                 None => {
@@ -378,26 +520,33 @@ impl QueryCache {
         // Slow path: LRU hits need touch(), and expired entries need removal.
         let mut cache = self.cache.write();
 
-        match cache.get(key) {
+        match cache.entries.get(key) {
             Some(entry) if entry.is_expired() => {
-                if let Some(expired_entry) = cache.remove(key) {
-                    self.record_entries_len(cache.len());
+                if let Some(expired_entry) = cache.entries.remove(key) {
+                    cache.maybe_rebuild_indexes();
+                    self.record_entries_len(cache.entries.len());
                     self.subtract_size_bytes(expired_entry.size_bytes);
                 }
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 None
             }
             Some(_) if strategy == CacheStrategy::LRU => {
+                let access_order = self.next_order();
                 let entry = cache
+                    .entries
                     .get_mut(key)
                     .expect("entry must exist after successful immutable lookup");
-                entry.touch();
+                entry.touch(access_order);
+                let candidate = entry.lru_candidate(key);
+                let value = serde_json::from_slice(&entry.data).ok();
+                cache.lru_heap.push(Reverse(candidate));
+                cache.maybe_rebuild_indexes();
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                serde_json::from_value(entry.data.clone()).ok()
+                value
             }
             Some(entry) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                serde_json::from_value(entry.data.clone()).ok()
+                serde_json::from_slice(&entry.data).ok()
             }
             None => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
@@ -424,31 +573,37 @@ impl QueryCache {
         let max_entries = config.max_entries;
         drop(config);
 
-        let data = serde_json::to_value(value)
+        let data = serde_json::to_vec(value)
             .map_err(|e| Error::internal(format!("Failed to serialize cache value: {}", e)))?;
 
         // Check if we should cache empty results
-        if let serde_json::Value::Array(arr) = &data {
-            if arr.is_empty() {
-                let should_cache = self.config.read().cache_empty_results;
-                if !should_cache {
-                    return Ok(());
-                }
+        if data == b"[]" {
+            let should_cache = self.config.read().cache_empty_results;
+            if !should_cache {
+                return Ok(());
             }
         }
 
-        let entry_size = data.to_string().len();
-        let entry = CacheEntry::new(data, entry_size, ttl, model_name);
+        let entry_size = data.len();
+        if max_entries == 0 {
+            return Ok(());
+        }
+
+        let entry = CacheEntry::new(data, entry_size, ttl, model_name, self.next_order());
 
         let mut cache = self.cache.write();
+        let replacing_existing = cache.entries.contains_key(key);
 
         // Evict if necessary
-        while cache.len() >= max_entries {
-            self.evict_one(&mut cache);
+        while !replacing_existing && cache.entries.len() >= max_entries {
+            if !self.evict_one(&mut cache) {
+                break;
+            }
         }
 
         let replaced_entry = cache.insert(key.to_string(), entry);
-        self.record_entries_len(cache.len());
+        cache.maybe_rebuild_indexes();
+        self.record_entries_len(cache.entries.len());
 
         match replaced_entry {
             Some(previous) if previous.size_bytes >= entry_size => {
@@ -468,9 +623,10 @@ impl QueryCache {
     /// Remove a specific cache entry
     pub fn invalidate(&self, key: &str) -> bool {
         let mut cache = self.cache.write();
-        if let Some(removed) = cache.remove(key) {
+        if let Some(removed) = cache.entries.remove(key) {
+            cache.maybe_rebuild_indexes();
             self.invalidations.fetch_add(1, Ordering::Relaxed);
-            self.record_entries_len(cache.len());
+            self.record_entries_len(cache.entries.len());
             self.subtract_size_bytes(removed.size_bytes);
             true
         } else {
@@ -482,6 +638,7 @@ impl QueryCache {
     pub fn invalidate_model(&self, model_name: &str) {
         let mut cache = self.cache.write();
         let keys_to_remove: Vec<String> = cache
+            .entries
             .iter()
             .filter(|(_, entry)| entry.model_name == model_name)
             .map(|(key, _)| key.clone())
@@ -490,15 +647,16 @@ impl QueryCache {
         let count = keys_to_remove.len();
         let mut removed_size = 0;
         for key in keys_to_remove {
-            if let Some(entry) = cache.remove(&key) {
+            if let Some(entry) = cache.entries.remove(&key) {
                 removed_size += entry.size_bytes;
             }
         }
 
         if count > 0 {
+            cache.maybe_rebuild_indexes();
             self.invalidations
                 .fetch_add(count as u64, Ordering::Relaxed);
-            self.record_entries_len(cache.len());
+            self.record_entries_len(cache.entries.len());
             self.subtract_size_bytes(removed_size);
         }
     }
@@ -506,8 +664,12 @@ impl QueryCache {
     /// Clear the entire cache
     pub fn clear(&self) {
         let mut cache = self.cache.write();
-        let count = cache.len();
-        let removed_size = cache.values().map(|entry| entry.size_bytes).sum::<usize>();
+        let count = cache.entries.len();
+        let removed_size = cache
+            .entries
+            .values()
+            .map(|entry| entry.size_bytes)
+            .sum::<usize>();
         cache.clear();
 
         if count > 0 {
@@ -531,14 +693,15 @@ impl QueryCache {
         self.invalidations.store(0, Ordering::Relaxed);
 
         let cache = self.cache.read();
-        self.record_entries_len(cache.len());
-        self.overwrite_size_bytes(cache.values().map(|entry| entry.size_bytes).sum());
+        self.record_entries_len(cache.entries.len());
+        self.overwrite_size_bytes(cache.entries.values().map(|entry| entry.size_bytes).sum());
     }
 
     /// Evict expired entries
     pub fn evict_expired(&self) {
         let mut cache = self.cache.write();
         let keys_to_remove: Vec<String> = cache
+            .entries
             .iter()
             .filter(|(_, entry)| entry.is_expired())
             .map(|(key, _)| key.clone())
@@ -547,58 +710,92 @@ impl QueryCache {
         let count = keys_to_remove.len();
         let mut removed_size = 0;
         for key in keys_to_remove {
-            if let Some(entry) = cache.remove(&key) {
+            if let Some(entry) = cache.entries.remove(&key) {
                 removed_size += entry.size_bytes;
             }
         }
 
         if count > 0 {
+            cache.maybe_rebuild_indexes();
             self.evictions.fetch_add(count as u64, Ordering::Relaxed);
-            self.record_entries_len(cache.len());
+            self.record_entries_len(cache.entries.len());
             self.subtract_size_bytes(removed_size);
         }
     }
 
     /// Evict one entry based on the configured strategy
-    fn evict_one(&self, cache: &mut HashMap<String, CacheEntry>) {
+    fn evict_one(&self, cache: &mut CacheStore) -> bool {
         let strategy = self.config.read().strategy;
 
-        let key_to_remove = match strategy {
-            CacheStrategy::LRU => cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(key, _)| key.clone()),
-            CacheStrategy::FIFO => cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.created_at)
-                .map(|(key, _)| key.clone()),
-            CacheStrategy::TTL => {
-                // Evict the entry closest to expiration
-                cache
-                    .iter()
-                    .min_by_key(|(_, entry)| {
-                        entry
-                            .ttl
-                            .checked_sub(entry.created_at.elapsed())
-                            .unwrap_or(Duration::ZERO)
-                    })
-                    .map(|(key, _)| key.clone())
-            }
+        let removed = match strategy {
+            CacheStrategy::LRU => loop {
+                match cache.lru_heap.pop() {
+                    Some(Reverse(candidate)) => {
+                        let should_remove = cache
+                            .entries
+                            .get(&candidate.key)
+                            .map(|entry| entry.access_order == candidate.order)
+                            .unwrap_or(false);
+
+                        if should_remove {
+                            break cache.entries.remove(&candidate.key);
+                        }
+                    }
+                    None => break None,
+                }
+            },
+            CacheStrategy::FIFO => loop {
+                match cache.fifo_heap.pop() {
+                    Some(Reverse(candidate)) => {
+                        let should_remove = cache
+                            .entries
+                            .get(&candidate.key)
+                            .map(|entry| entry.insert_order == candidate.order)
+                            .unwrap_or(false);
+
+                        if should_remove {
+                            break cache.entries.remove(&candidate.key);
+                        }
+                    }
+                    None => break None,
+                }
+            },
+            CacheStrategy::TTL => loop {
+                match cache.ttl_heap.pop() {
+                    Some(Reverse(candidate)) => {
+                        let should_remove = cache
+                            .entries
+                            .get(&candidate.key)
+                            .map(|entry| {
+                                entry.insert_order == candidate.order
+                                    && entry.expires_at == candidate.expires_at
+                            })
+                            .unwrap_or(false);
+
+                        if should_remove {
+                            break cache.entries.remove(&candidate.key);
+                        }
+                    }
+                    None => break None,
+                }
+            },
         };
 
-        if let Some(key) = key_to_remove {
-            if let Some(entry) = cache.remove(&key) {
-                self.evictions.fetch_add(1, Ordering::Relaxed);
-                self.record_entries_len(cache.len());
-                self.subtract_size_bytes(entry.size_bytes);
-            }
+        if let Some(entry) = removed {
+            cache.maybe_rebuild_indexes();
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            self.record_entries_len(cache.entries.len());
+            self.subtract_size_bytes(entry.size_bytes);
+            return true;
         }
+
+        false
     }
 
     /// Check if a key exists in the cache (without updating access time)
     pub fn contains(&self, key: &str) -> bool {
         let cache = self.cache.read();
-        if let Some(entry) = cache.get(key) {
+        if let Some(entry) = cache.entries.get(key) {
             return !entry.is_expired();
         }
         false

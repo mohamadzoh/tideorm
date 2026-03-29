@@ -398,6 +398,23 @@ impl<M: Model> QueryBuilder<M> {
         count_query.limit_value = None;
         count_query.offset_value = None;
 
+        if count_query.unions.is_empty()
+            && count_query.ctes.is_empty()
+            && count_query.group_by.is_empty()
+            && count_query.having_conditions.is_empty()
+            && count_query.raw_select_expressions.is_empty()
+        {
+            let (where_sql, params) = count_query.build_where_clause_with_condition_for_db(db_type);
+            let mut sql = String::from("SELECT COUNT(*) AS count ");
+            count_query.append_from_and_join_sql(&mut sql, db_type);
+            if !where_sql.is_empty() {
+                sql.push_str(&format!("WHERE {}", where_sql));
+            } else {
+                sql.truncate(sql.trim_end().len());
+            }
+            return (sql, params);
+        }
+
         let (inner_sql, params) = count_query.build_select_sql_with_params_for_db(db_type);
         (
             format!(
@@ -427,6 +444,18 @@ impl<M: Model> QueryBuilder<M> {
             exists_query.raw_select_expressions = vec!["1".to_string()];
             exists_query.subquery_select_expressions.clear();
             exists_query.window_functions.clear();
+
+            if exists_query.ctes.is_empty() {
+                let (inner_sql, params) = exists_query.build_base_select_sql_with_params_for_db(db_type);
+                return (
+                    format!(
+                        "SELECT EXISTS({} LIMIT 1) AS {}",
+                        inner_sql,
+                        db_sql::quote_ident(db_type, "exists_result")
+                    ),
+                    params,
+                );
+            }
         }
 
         let (inner_sql, params) = exists_query.build_select_sql_with_params_for_db(db_type);

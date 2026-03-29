@@ -12,25 +12,13 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::OnceLock;
-use std::time::Duration;
 use tideorm::prelude::*;
-use tideorm::{Database, TideConfig};
-use tokio::runtime::Runtime;
+mod support;
 
-fn database_url() -> String {
-    let _ = dotenvy::dotenv();
-    std::env::var("POSTGRESQL_DATABASE_URL").unwrap()
-}
-
-// Global runtime for all benchmarks
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+use support::{init_postgres_database, runtime, truncate_table};
 
 // Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
-
-fn get_runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().unwrap())
-}
 
 // =============================================================================
 // BENCHMARK MODEL
@@ -53,22 +41,11 @@ pub struct BenchProduct {
 // =============================================================================
 
 fn init_database() {
-    DB_INITIALIZED.get_or_init(|| {
-        get_runtime().block_on(async {
-            TideConfig::init()
-                .database(&database_url())
-                .max_connections(50)
-                .min_connections(5)
-                .acquire_timeout(Duration::from_secs(30))
-                .connect()
-                .await
-                .expect("Failed to connect to database");
-
-            // Create benchmark table
-            let _ = Database::execute("DROP TABLE IF EXISTS bench_products CASCADE").await;
-
-            Database::execute(
-                r#"
+    init_postgres_database(
+        &DB_INITIALIZED,
+        &[
+            "DROP TABLE IF EXISTS bench_products CASCADE",
+            r#"
                 CREATE TABLE bench_products (
                     id BIGSERIAL PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
@@ -78,34 +55,19 @@ fn init_database() {
                     active BOOLEAN NOT NULL DEFAULT true
                 )
             "#,
-            )
-            .await
-            .expect("Failed to create table");
-
-            // Create indexes for query benchmarks
-            let _ = Database::execute(
-                "CREATE INDEX idx_bench_products_category ON bench_products(category)",
-            )
-            .await;
-            let _ =
-                Database::execute("CREATE INDEX idx_bench_products_price ON bench_products(price)")
-                    .await;
-            let _ = Database::execute(
-                "CREATE INDEX idx_bench_products_active ON bench_products(active)",
-            )
-            .await;
-        });
-    });
+            "CREATE INDEX idx_bench_products_category ON bench_products(category)",
+            "CREATE INDEX idx_bench_products_price ON bench_products(price)",
+            "CREATE INDEX idx_bench_products_active ON bench_products(active)",
+        ],
+    );
 }
 
 fn cleanup_data() {
-    get_runtime().block_on(async {
-        let _ = Database::execute("TRUNCATE TABLE bench_products RESTART IDENTITY CASCADE").await;
-    });
+    truncate_table("bench_products");
 }
 
 fn seed_data(count: usize) {
-    let rt = get_runtime();
+    let rt = runtime();
     let categories = ["Electronics", "Clothing", "Books", "Home", "Sports"];
 
     rt.block_on(async {
@@ -165,7 +127,7 @@ fn setup_benchmark_with_data(count: usize) {
 // =============================================================================
 
 fn bench_simple_where(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("simple_where");
 
@@ -210,7 +172,7 @@ fn bench_simple_where(c: &mut Criterion) {
 }
 
 fn bench_range_queries(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -258,7 +220,7 @@ fn bench_range_queries(c: &mut Criterion) {
 }
 
 fn bench_compound_queries(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -311,7 +273,7 @@ fn bench_compound_queries(c: &mut Criterion) {
 }
 
 fn bench_ordering(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -348,7 +310,7 @@ fn bench_ordering(c: &mut Criterion) {
 }
 
 fn bench_pagination(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -397,7 +359,7 @@ fn bench_pagination(c: &mut Criterion) {
 }
 
 fn bench_aggregations(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("aggregations");
     group.sample_size(20);
@@ -437,7 +399,7 @@ fn bench_aggregations(c: &mut Criterion) {
 }
 
 fn bench_where_in(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -465,7 +427,7 @@ fn bench_where_in(c: &mut Criterion) {
 }
 
 fn bench_like_queries(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -512,7 +474,7 @@ fn bench_like_queries(c: &mut Criterion) {
 }
 
 fn bench_first_query(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("first_query");
 
@@ -557,7 +519,7 @@ fn bench_first_query(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_subquery(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -636,7 +598,7 @@ fn bench_subquery(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_raw_expressions(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);
@@ -706,7 +668,7 @@ fn bench_raw_expressions(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_bulk_delete(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("bulk_delete");
     group.sample_size(10); // Fewer samples since we're modifying data
@@ -800,7 +762,7 @@ fn bench_bulk_delete(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_combined_features(c: &mut Criterion) {
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup with 10000 records
     setup_benchmark_with_data(10000);

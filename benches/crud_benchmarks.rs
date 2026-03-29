@@ -13,28 +13,16 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tideorm::prelude::*;
-use tideorm::{Database, TideConfig};
-use tokio::runtime::Runtime;
+mod support;
 
-fn database_url() -> String {
-    let _ = dotenvy::dotenv();
-    std::env::var("POSTGRESQL_DATABASE_URL").unwrap()
-}
+use support::{init_postgres_database, runtime, truncate_table};
 
 // Atomic counter for generating unique values
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// Global runtime for all benchmarks
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-
 // Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
-
-fn get_runtime() -> &'static Runtime {
-    RUNTIME.get_or_init(|| Runtime::new().unwrap())
-}
 
 // =============================================================================
 // BENCHMARK MODEL
@@ -78,22 +66,11 @@ impl BenchUser {
 // =============================================================================
 
 fn init_database() {
-    DB_INITIALIZED.get_or_init(|| {
-        get_runtime().block_on(async {
-            TideConfig::init()
-                .database(&database_url())
-                .max_connections(50)
-                .min_connections(5)
-                .acquire_timeout(Duration::from_secs(30))
-                .connect()
-                .await
-                .expect("Failed to connect to database");
-
-            // Create benchmark table
-            let _ = Database::execute("DROP TABLE IF EXISTS bench_users CASCADE").await;
-
-            Database::execute(
-                r#"
+    init_postgres_database(
+        &DB_INITIALIZED,
+        &[
+            "DROP TABLE IF EXISTS bench_users CASCADE",
+            r#"
                 CREATE TABLE bench_users (
                     id BIGSERIAL PRIMARY KEY,
                     email VARCHAR(255) NOT NULL,
@@ -102,17 +79,12 @@ fn init_database() {
                     active BOOLEAN NOT NULL DEFAULT true
                 )
             "#,
-            )
-            .await
-            .expect("Failed to create table");
-        });
-    });
+        ],
+    );
 }
 
 fn cleanup_data() {
-    get_runtime().block_on(async {
-        let _ = Database::execute("TRUNCATE TABLE bench_users RESTART IDENTITY CASCADE").await;
-    });
+    truncate_table("bench_users");
 }
 
 fn setup_benchmark() {
@@ -126,7 +98,7 @@ fn setup_benchmark() {
 
 fn bench_single_insert(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("single_insert");
     group.throughput(Throughput::Elements(1));
@@ -147,7 +119,7 @@ fn bench_single_insert(c: &mut Criterion) {
 
 fn bench_batch_insert(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("batch_insert");
     group.sample_size(20); // Reduced sample size for batch operations
@@ -186,7 +158,7 @@ fn bench_batch_insert(c: &mut Criterion) {
 
 fn bench_find_by_id(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup: Insert users and get their IDs
     let user_ids: Vec<i64> = rt.block_on(async {
@@ -217,7 +189,7 @@ fn bench_find_by_id(c: &mut Criterion) {
 
 fn bench_update(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     // Setup: Insert users
     let user_ids: Vec<i64> = rt.block_on(async {
@@ -254,7 +226,7 @@ fn bench_update(c: &mut Criterion) {
 
 fn bench_delete(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("delete");
     group.throughput(Throughput::Elements(1));
@@ -294,7 +266,7 @@ fn bench_delete(c: &mut Criterion) {
 
 fn bench_count(c: &mut Criterion) {
     setup_benchmark();
-    let rt = get_runtime();
+    let rt = runtime();
 
     let mut group = c.benchmark_group("count");
     group.sample_size(20);
