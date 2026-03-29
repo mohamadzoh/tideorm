@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-03-29
+
+### Changed
+
+- Centralized the current ORM engine behind TideORM-owned seams by routing macro-generated paths through the hidden `tideorm::orm` facade and internal runtime code through `crate::internal`, removing the legacy `tideorm::sea_orm` compatibility export.
+- Renamed internal engine-facing adapter types and helpers to TideORM-owned names such as `OrmConnection`, `OrmTransaction`, `OrmBackend`, and `OrmError`, and moved schema-sync/runtime backend handling onto TideORM's `Backend` abstraction.
+- Refreshed README, mdBook chapters, and macro-crate install snippets to use the 0.9.7 release version and TideORM-owned ORM terminology.
+
+### Internal
+
+- Updated relation compile-fail fixtures and generated macro error paths to match the new `tideorm::orm` and `crate::internal` seams.
+- Verified the release prep with `cargo test --lib --all-features`, `cargo test --test relation_serde_tests`, `cargo test --test relation_compile_fail`, `cargo clippy --workspace --all-targets -- -D warnings`, and `mdbook build`.
+
 ## [0.9.6] - 2026-03-28
 
 ### Fixed

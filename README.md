@@ -117,22 +117,22 @@ For tests and reconfiguration-heavy workflows, TideORM's global state is resetta
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.6", features = ["postgres"] }
+tideorm = { version = "0.9.7", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.6", features = ["mysql"] }
+tideorm = { version = "0.9.7", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.6", features = ["sqlite"] }
+tideorm = { version = "0.9.7", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.6", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.7", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.6", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.7", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.6", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.7", features = ["postgres", "fulltext"] }
 ```
 
 ### Feature Flags
