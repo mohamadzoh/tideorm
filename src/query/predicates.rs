@@ -3,6 +3,7 @@ use crate::model::Model;
 
 impl<M: Model> QueryBuilder<M> {
     /// Add a WHERE IN (subquery) condition.
+    #[must_use]
     pub fn where_in_subquery<N: Model>(mut self, column: &str, subquery: QueryBuilder<N>) -> Self {
         if let Err(err) = subquery.ensure_query_is_valid() {
             self.invalidate_query(format!("invalid subquery for where_in_subquery(): {}", err));
@@ -18,6 +19,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE NOT IN (subquery) condition.
+    #[must_use]
     pub fn where_not_in_subquery<N: Model>(
         mut self,
         column: &str,
@@ -40,6 +42,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE EXISTS (subquery) condition.
+    #[must_use]
     pub fn where_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
         if let Err(err) = subquery.ensure_query_is_valid() {
             self.invalidate_query(format!("invalid subquery for where_exists(): {}", err));
@@ -55,6 +58,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE NOT EXISTS (subquery) condition.
+    #[must_use]
     pub fn where_not_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
         if let Err(err) = subquery.ensure_query_is_valid() {
             self.invalidate_query(format!("invalid subquery for where_not_exists(): {}", err));
@@ -70,6 +74,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Check if related records exist matching a condition.
+    #[must_use]
     pub fn has_related(
         mut self,
         related_table: &str,
@@ -109,6 +114,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Check if related records do NOT exist matching a condition.
+    #[must_use]
     pub fn has_no_related(
         mut self,
         related_table: &str,
@@ -148,6 +154,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Check if any related records exist (without condition).
+    #[must_use]
     pub fn has_any_related(
         mut self,
         related_table: &str,
@@ -170,6 +177,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Check if no related records exist.
+    #[must_use]
     pub fn has_no_related_at_all(
         mut self,
         related_table: &str,
@@ -197,6 +205,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw WHERE condition.
+    #[must_use]
     pub fn where_raw(mut self, raw_sql: &str) -> Self {
         if let Err(reason) =
             crate::query::db_sql::validate_raw_sql_fragment("WHERE raw SQL", raw_sql)
@@ -213,6 +222,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw WHERE condition with a column comparison.
+    #[must_use]
     pub fn where_column_raw(mut self, column: &str, raw_expr: &str) -> Self {
         if let Err(reason) =
             crate::query::db_sql::validate_raw_sql_fragment("WHERE raw column expression", raw_expr)
@@ -229,6 +239,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw SELECT expression.
+    #[must_use]
     pub fn select_raw(mut self, raw_select: &str) -> Self {
         if let Err(reason) =
             crate::query::db_sql::validate_raw_sql_fragment("SELECT raw SQL", raw_select)
@@ -241,6 +252,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a scalar subquery as a SELECT expression.
+    #[must_use]
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
         if let Err(err) = subquery.ensure_query_is_valid() {
             self.invalidate_query(format!("invalid subquery for select_subquery(): {}", err));
@@ -257,6 +269,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where IS NULL condition.
+    #[must_use]
     pub fn where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -267,6 +280,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where IS NOT NULL condition.
+    #[must_use]
     pub fn where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -277,6 +291,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where BETWEEN condition.
+    #[must_use]
     pub fn where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -292,6 +307,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON contains condition (column @> value).
+    #[must_use]
     pub fn where_json_contains(
         mut self,
         column: &str,
@@ -306,6 +322,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON contained by condition (column <@ value).
+    #[must_use]
     pub fn where_json_contained_by(
         mut self,
         column: &str,
@@ -320,6 +337,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON key exists condition (column ? key).
+    #[must_use]
     pub fn where_json_key_exists(mut self, column: &str, key: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -330,6 +348,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON key does not exist condition.
+    #[must_use]
     pub fn where_json_key_not_exists(mut self, column: &str, key: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -340,6 +359,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON path exists condition.
+    #[must_use]
     pub fn where_json_path_exists(mut self, column: &str, path: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -350,6 +370,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a JSON path does not exist condition.
+    #[must_use]
     pub fn where_json_path_not_exists(mut self, column: &str, path: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -360,6 +381,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an array contains condition (column @> value).
+    #[must_use]
     pub fn where_array_contains<V: Into<serde_json::Value>>(
         mut self,
         column: &str,
@@ -374,6 +396,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an array contained by condition (column <@ value).
+    #[must_use]
     pub fn where_array_contained_by<V: Into<serde_json::Value>>(
         mut self,
         column: &str,
@@ -388,6 +411,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an array overlaps condition (column && value).
+    #[must_use]
     pub fn where_array_overlaps<V: Into<serde_json::Value>>(
         mut self,
         column: &str,
@@ -402,6 +426,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an array contains any element condition.
+    #[must_use]
     pub fn where_array_contains_any<V: Into<serde_json::Value>>(
         mut self,
         column: &str,
@@ -416,6 +441,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an array contains all elements condition.
+    #[must_use]
     pub fn where_array_contains_all<V: Into<serde_json::Value>>(
         mut self,
         column: &str,

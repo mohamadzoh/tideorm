@@ -5,6 +5,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a where equals condition
     ///
     /// Accepts either a string column name or a typed column reference.
+    #[must_use]
     pub fn where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -21,6 +22,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a where not equals condition
     ///
     /// Accepts either a string column name or a typed column reference.
+    #[must_use]
     pub fn where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -35,6 +37,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where greater than condition
+    #[must_use]
     pub fn where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -49,6 +52,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where greater than or equal condition
+    #[must_use]
     pub fn where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -63,6 +67,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where less than condition
+    #[must_use]
     pub fn where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -77,6 +82,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where less than or equal condition
+    #[must_use]
     pub fn where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -91,6 +97,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where LIKE condition
+    #[must_use]
     pub fn where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -105,6 +112,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where LIKE '%value%' condition using literal matching semantics.
+    #[must_use]
     pub fn where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -122,6 +130,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where LIKE 'value%' condition using literal matching semantics.
+    #[must_use]
     pub fn where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -139,6 +148,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where LIKE '%value' condition using literal matching semantics.
+    #[must_use]
     pub fn where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -156,6 +166,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where NOT LIKE condition
+    #[must_use]
     pub fn where_not_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -170,6 +181,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where IN condition
+    #[must_use]
     pub fn where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -184,6 +196,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a where NOT IN condition
+    #[must_use]
     pub fn where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,

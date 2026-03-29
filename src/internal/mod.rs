@@ -112,6 +112,41 @@ where
     OrmStatement::from_sql_and_values(backend.into_statement_backend(), sql, params)
 }
 
+pub(crate) fn json_to_db_value(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::String(None),
+        serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
+        serde_json::Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                Value::BigInt(Some(integer))
+            } else if let Some(float) = number.as_f64() {
+                Value::Double(Some(float))
+            } else {
+                Value::String(Some(number.to_string()))
+            }
+        }
+        serde_json::Value::String(text) => Value::String(Some(text.clone())),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Value::String(Some(value.to_string()))
+        }
+    }
+}
+
+pub(crate) fn push_param(
+    db_type: crate::config::DatabaseType,
+    params: &mut Vec<Value>,
+    value: Value,
+) -> String {
+    let placeholder = match db_type {
+        crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
+        crate::config::DatabaseType::MySQL
+        | crate::config::DatabaseType::MariaDB
+        | crate::config::DatabaseType::SQLite => "?".to_string(),
+    };
+    params.push(value);
+    placeholder
+}
+
 /// Internal trait that maps TideORM models to ORM engine entities.
 /// This is implemented by TideORM's model macros.
 #[doc(hidden)]

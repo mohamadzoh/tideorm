@@ -65,41 +65,6 @@ pub(crate) fn resolve_model_column_name<E: Model>(name: &str) -> Result<&'static
         })
 }
 
-pub(crate) fn json_to_db_value(value: &serde_json::Value) -> Value {
-    match value {
-        serde_json::Value::Null => Value::String(None),
-        serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
-        serde_json::Value::Number(number) => {
-            if let Some(integer) = number.as_i64() {
-                Value::BigInt(Some(integer))
-            } else if let Some(float) = number.as_f64() {
-                Value::Double(Some(float))
-            } else {
-                Value::String(Some(number.to_string()))
-            }
-        }
-        serde_json::Value::String(text) => Value::String(Some(text.clone())),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Value::String(Some(value.to_string()))
-        }
-    }
-}
-
-pub(crate) fn push_param(
-    db_type: crate::config::DatabaseType,
-    params: &mut Vec<Value>,
-    value: Value,
-) -> String {
-    let placeholder = match db_type {
-        crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
-        crate::config::DatabaseType::MySQL
-        | crate::config::DatabaseType::MariaDB
-        | crate::config::DatabaseType::SQLite => "?".to_string(),
-    };
-    params.push(value);
-    placeholder
-}
-
 pub(crate) fn scoped_column(
     db_type: crate::config::DatabaseType,
     scope: &str,
@@ -148,10 +113,15 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     let depth_alias = quote_ident(db_type, "depth");
 
     let mut params = Vec::with_capacity(2);
-    let parent_placeholder = push_param(db_type, &mut params, json_to_db_value(parent_pk));
+    let parent_placeholder = crate::internal::push_param(
+        db_type,
+        &mut params,
+        crate::internal::json_to_db_value(parent_pk),
+    );
     let max_depth = i64::try_from(max_depth)
         .map_err(|_| Error::query("Self-reference tree depth exceeds i64 range"))?;
-    let depth_placeholder = push_param(db_type, &mut params, Value::BigInt(Some(max_depth)));
+    let depth_placeholder =
+        crate::internal::push_param(db_type, &mut params, Value::BigInt(Some(max_depth)));
 
     let mut base_predicates = vec![format!(
         "{} = {}",

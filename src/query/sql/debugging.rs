@@ -67,6 +67,39 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn describe_having_clause(sql_template: &str, params: &[serde_json::Value]) -> String {
+        if params.is_empty() {
+            return sql_template.to_string();
+        }
+
+        let mut rendered = String::new();
+        let mut params_iter = params.iter();
+
+        for ch in sql_template.chars() {
+            if ch == '?' {
+                if let Some(value) = params_iter.next() {
+                    rendered.push_str(&match value {
+                        serde_json::Value::Null => "NULL".to_string(),
+                        serde_json::Value::Bool(boolean) => boolean.to_string(),
+                        serde_json::Value::Number(number) => number.to_string(),
+                        serde_json::Value::String(text) => {
+                            format!("'{}'", text.replace("'", "''"))
+                        }
+                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                            format!("'{}'", value.to_string().replace("'", "''"))
+                        }
+                    });
+                } else {
+                    rendered.push('?');
+                }
+            } else {
+                rendered.push(ch);
+            }
+        }
+
+        rendered
+    }
+
     fn describe_or_group(group: &OrGroup) -> String {
         let mut parts: Vec<String> = group
             .conditions
@@ -102,7 +135,15 @@ impl<M: Model> QueryBuilder<M> {
         conditions.extend(
             self.having_conditions
                 .iter()
-                .map(|having| format!("HAVING {}", having)),
+                .enumerate()
+                .map(|(index, having)| {
+                    let params = self
+                        .having_bindings
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    format!("HAVING {}", Self::describe_having_clause(having, params))
+                }),
         );
         conditions
     }
@@ -128,7 +169,21 @@ impl<M: Model> QueryBuilder<M> {
         );
 
         if !self.having_conditions.is_empty() {
-            parts.push(format!("HAVING {}", self.having_conditions.join(" AND ")));
+            let having = self
+                .having_conditions
+                .iter()
+                .enumerate()
+                .map(|(index, clause)| {
+                    let params = self
+                        .having_bindings
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    Self::describe_having_clause(clause, params)
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            parts.push(format!("HAVING {}", having));
         }
 
         if parts.is_empty() {

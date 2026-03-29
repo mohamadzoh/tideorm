@@ -2,26 +2,6 @@ use super::*;
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
-    fn json_to_sea_value(value: &serde_json::Value) -> Value {
-        match value {
-            serde_json::Value::Null => Value::String(None),
-            serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
-            serde_json::Value::Number(number) => {
-                if let Some(integer) = number.as_i64() {
-                    Value::BigInt(Some(integer))
-                } else if let Some(float) = number.as_f64() {
-                    Value::Double(Some(float))
-                } else {
-                    Value::String(Some(number.to_string()))
-                }
-            }
-            serde_json::Value::String(text) => Value::String(Some(text.clone())),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                Value::String(Some(value.to_string()))
-            }
-        }
-    }
-
     pub(crate) fn build_sea_condition(&self) -> Condition {
         self.build_sea_condition_for_db(self.db_type_for_sql())
     }
@@ -61,7 +41,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
-        values.iter().map(Self::json_to_sea_value).collect()
+        values.iter().map(crate::internal::json_to_db_value).collect()
     }
 
     fn json_text_value(text: String) -> Value {
@@ -348,7 +328,7 @@ impl<M: Model> QueryBuilder<M> {
         operator: ComparisonOperator,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        let value = Self::json_to_sea_value(value);
+        let value = crate::internal::json_to_db_value(value);
         match operator {
             ComparisonOperator::Eq => column_expr.eq(value),
             ComparisonOperator::NotEq => column_expr.ne(value),
@@ -503,7 +483,10 @@ impl<M: Model> QueryBuilder<M> {
         low: &serde_json::Value,
         high: &serde_json::Value,
     ) -> SimpleExpr {
-        column_expr.between(Self::json_to_sea_value(low), Self::json_to_sea_value(high))
+        column_expr.between(
+            crate::internal::json_to_db_value(low),
+            crate::internal::json_to_db_value(high),
+        )
     }
 
     pub(super) fn build_between_sql(
@@ -719,7 +702,19 @@ impl<M: Model> QueryBuilder<M> {
         match db_type {
             DatabaseType::Postgres => {
                 let _ = column_expr;
-                Expr::cust(self.build_array_sql(db_type, column_sql, operator, values))
+                let rendered = self.render_array_values(values);
+                let sql = match operator {
+                    ArrayOperator::Contains => {
+                        format!("{} @> ARRAY[{}]", column_sql, rendered.join(","))
+                    }
+                    ArrayOperator::ContainedBy => {
+                        format!("{} <@ ARRAY[{}]", column_sql, rendered.join(","))
+                    }
+                    ArrayOperator::Overlaps => {
+                        format!("{} && ARRAY[{}]", column_sql, rendered.join(","))
+                    }
+                };
+                Expr::cust(sql)
             }
             DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
                 ArrayOperator::Contains => self.build_custom_expression(
@@ -962,7 +957,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn format_preview_value(&self, value: &serde_json::Value) -> String {
+    pub(crate) fn format_preview_value(&self, value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::Null => "NULL".to_string(),
             serde_json::Value::Bool(boolean) => boolean.to_string(),

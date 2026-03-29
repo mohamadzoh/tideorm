@@ -57,6 +57,7 @@ pub struct QueryBuilder<M: Model> {
     invalid_query_reason: Option<String>,
     group_by: Vec<String>,
     having_conditions: Vec<String>,
+    having_bindings: Vec<Vec<serde_json::Value>>,
     unions: Vec<UnionClause>,
     window_functions: Vec<WindowFunction>,
     ctes: Vec<CTE>,
@@ -66,6 +67,7 @@ pub struct QueryBuilder<M: Model> {
 
 impl<M: Model> QueryBuilder<M> {
     /// Rebuild a query builder from a reusable fragment.
+    #[must_use]
     pub fn from_fragment(fragment: &QueryFragment<M>) -> Self {
         Self::new().apply(fragment)
     }

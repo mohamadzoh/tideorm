@@ -197,6 +197,16 @@ pub fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option
     sql_safety::format_identifier_reference(db_type, value)
 }
 
+/// Format a trusted column/expression slot for rendering paths that intentionally
+/// allow raw SQL expressions after higher-level validation.
+pub(crate) fn format_column_or_trusted_expression(
+    db_type: DatabaseType,
+    column_or_expression: &str,
+) -> String {
+    let trimmed = column_or_expression.trim();
+    format_identifier_reference(db_type, trimmed).unwrap_or_else(|| trimmed.to_string())
+}
+
 /// Generate JSON contains expression
 ///
 /// - PostgreSQL: `column @> 'value'`
@@ -454,9 +464,16 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
     }
 }
 
-/// Format a column identifier for the database
+/// Format a column identifier for the database.
+///
+/// This helper is intentionally strict: if the input is not a simple
+/// identifier reference like `column` or `table.column`, it is quoted as a
+/// single identifier instead of being passed through as raw SQL. Call
+/// `format_column_or_trusted_expression()` only from rendering paths that
+/// intentionally support validated raw expressions.
 pub fn format_column(db_type: DatabaseType, column: &str) -> String {
-    format_identifier_reference(db_type, column).unwrap_or_else(|| column.to_string())
+    let trimmed = column.trim();
+    format_identifier_reference(db_type, trimmed).unwrap_or_else(|| quote_ident(db_type, trimmed))
 }
 
 /// Generate aggregate function with proper casting for the database

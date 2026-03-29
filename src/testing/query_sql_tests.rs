@@ -1,5 +1,6 @@
 use crate::columns::ColumnLike;
 use crate::config::DatabaseType;
+use crate::internal::Value;
 use crate::model::Model as ModelTrait;
 use crate::query::OrGroup;
 
@@ -204,6 +205,21 @@ fn count_sql_preserves_group_by_and_having() {
     assert!(sql.contains("\"name\" FROM \"query_count_guard_users\""));
     assert!(sql.contains("GROUP BY \"name\""));
     assert!(sql.contains("HAVING COUNT(*) > 1"));
+    assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
+}
+
+#[test]
+fn count_sql_parameterizes_builtin_having_helpers() {
+    let (sql, params) = QueryCountGuardUser::query()
+        .select(vec!["name"])
+        .group_by("name")
+        .having_count_gt(1)
+        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert_eq!(params, vec![Value::BigInt(Some(1))]);
+    assert!(sql.starts_with("SELECT COUNT(*) AS count FROM (SELECT "));
+    assert!(sql.contains("GROUP BY \"name\""));
+    assert!(sql.contains("HAVING COUNT(*) > $1"));
     assert!(sql.ends_with(") AS \"tideorm_count_subquery\""));
 }
 

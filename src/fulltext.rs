@@ -527,7 +527,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_postgres_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let mut params = Vec::new();
-        let language_placeholder = self.push_param(
+        let language_placeholder = crate::internal::push_param(
             DatabaseType::Postgres,
             &mut params,
             Value::String(Some(
@@ -570,7 +570,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let mut params = Vec::new();
-        let language_placeholder = self.push_param(
+        let language_placeholder = crate::internal::push_param(
             DatabaseType::Postgres,
             &mut params,
             Value::String(Some(
@@ -592,7 +592,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
 
         if let Some(min_rank) = self.min_rank {
-            let min_rank_placeholder = self.push_param(
+            let min_rank_placeholder = crate::internal::push_param(
                 DatabaseType::Postgres,
                 &mut params,
                 Value::Double(Some(min_rank)),
@@ -613,7 +613,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
         let table = quote_ident(DatabaseType::Postgres, T::table_name());
         let mut params = Vec::new();
-        let language_placeholder = self.push_param(
+        let language_placeholder = crate::internal::push_param(
             DatabaseType::Postgres,
             &mut params,
             Value::String(Some(
@@ -660,7 +660,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     fn build_pg_tsquery_expr(&self, language_placeholder: &str, params: &mut Vec<Value>) -> String {
         match self.config.mode {
             SearchMode::Natural => {
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(self.query.clone())),
@@ -673,7 +673,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             SearchMode::Boolean => {
                 let tsquery = sanitize_postgres_tsquery(&self.query, false);
                 let use_plain = tsquery.is_empty();
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(if use_plain {
@@ -695,7 +695,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 }
             }
             SearchMode::Phrase => {
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(self.query.clone())),
@@ -708,7 +708,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             SearchMode::Prefix => {
                 let prefixed = sanitize_postgres_tsquery(&self.query, true);
                 let use_plain = prefixed.is_empty();
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(if use_plain {
@@ -730,7 +730,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 }
             }
             SearchMode::Fuzzy => {
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(self.query.clone())),
@@ -743,7 +743,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             SearchMode::Proximity(distance) => {
                 let proximity = sanitize_postgres_proximity_tsquery(&self.query, distance);
                 let use_plain = proximity.is_empty();
-                let placeholder = self.push_param(
+                let placeholder = crate::internal::push_param(
                     DatabaseType::Postgres,
                     params,
                     Value::String(Some(if use_plain {
@@ -789,7 +789,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let query_placeholder = self.push_param(
+        let query_placeholder = crate::internal::push_param(
             DatabaseType::MySQL,
             &mut params,
             Value::String(Some(self.query.clone())),
@@ -822,12 +822,12 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let rank_placeholder = self.push_param(
+        let rank_placeholder = crate::internal::push_param(
             DatabaseType::MySQL,
             &mut params,
             Value::String(Some(self.query.clone())),
         );
-        let where_placeholder = self.push_param(
+        let where_placeholder = crate::internal::push_param(
             DatabaseType::MySQL,
             &mut params,
             Value::String(Some(self.query.clone())),
@@ -845,12 +845,12 @@ impl<T: Model> FullTextSearchBuilder<T> {
         );
 
         if let Some(min_rank) = self.min_rank {
-            let min_rank_placeholder = self.push_param(
+            let min_rank_placeholder = crate::internal::push_param(
                 DatabaseType::MySQL,
                 &mut params,
                 Value::Double(Some(min_rank)),
             );
-            let against_placeholder = self.push_param(
+            let against_placeholder = crate::internal::push_param(
                 DatabaseType::MySQL,
                 &mut params,
                 Value::String(Some(self.query.clone())),
@@ -885,7 +885,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             _ => "",
         };
 
-        let query_placeholder = self.push_param(
+        let query_placeholder = crate::internal::push_param(
             DatabaseType::MySQL,
             &mut params,
             Value::String(Some(self.query.clone())),
@@ -909,7 +909,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
         let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
         let mut params = Vec::new();
-        let query_placeholder = self.push_param(
+        let query_placeholder = crate::internal::push_param(
             DatabaseType::SQLite,
             &mut params,
             Value::String(Some(escape_fts5_query(&self.query))),
@@ -935,7 +935,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
         let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
         let mut params = Vec::new();
-        let query_placeholder = self.push_param(
+        let query_placeholder = crate::internal::push_param(
             DatabaseType::SQLite,
             &mut params,
             Value::String(Some(escape_fts5_query(&self.query))),
@@ -950,7 +950,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         if let Some(min_rank) = self.min_rank {
             // Note: BM25 returns negative values, lower is better
-            let min_rank_placeholder = self.push_param(
+            let min_rank_placeholder = crate::internal::push_param(
                 DatabaseType::SQLite,
                 &mut params,
                 Value::Double(Some(-min_rank)),
@@ -975,7 +975,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
         let fts_table = quote_ident(DatabaseType::SQLite, &fts_table_name);
         let mut params = Vec::new();
-        let query_placeholder = self.push_param(
+        let query_placeholder = crate::internal::push_param(
             DatabaseType::SQLite,
             &mut params,
             Value::String(Some(escape_fts5_query(&self.query))),
@@ -992,15 +992,6 @@ impl<T: Model> FullTextSearchBuilder<T> {
         ))
     }
 
-    fn push_param(&self, db_type: DatabaseType, params: &mut Vec<Value>, value: Value) -> String {
-        let placeholder = match db_type {
-            DatabaseType::Postgres => format!("${}", params.len() + 1),
-            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?".to_string(),
-        };
-        params.push(value);
-        placeholder
-    }
-
     fn pg_weights_placeholder(&self, params: &mut Vec<Value>) -> String {
         let weights = self
             .config
@@ -1009,7 +1000,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .map(|w| w.to_pg_array().trim_matches('\'').to_string())
             .unwrap_or_else(|| "{0.1,0.2,0.4,1.0}".to_string());
 
-        self.push_param(DatabaseType::Postgres, params, Value::String(Some(weights)))
+        crate::internal::push_param(DatabaseType::Postgres, params, Value::String(Some(weights)))
     }
 
     fn append_limit_offset(
@@ -1021,13 +1012,18 @@ impl<T: Model> FullTextSearchBuilder<T> {
         if let Some(limit) = self.limit {
             let limit_value = i64::try_from(limit)
                 .map_err(|_| Error::query("Full-text search limit exceeds i64 range"))?;
-            let placeholder = self.push_param(db_type, params, Value::BigInt(Some(limit_value)));
+            let placeholder =
+                crate::internal::push_param(db_type, params, Value::BigInt(Some(limit_value)));
             sql.push_str(&format!(" LIMIT {}", placeholder));
         }
         if let Some(offset) = self.offset {
             let offset_value = i64::try_from(offset)
                 .map_err(|_| Error::query("Full-text search offset exceeds i64 range"))?;
-            let placeholder = self.push_param(db_type, params, Value::BigInt(Some(offset_value)));
+            let placeholder = crate::internal::push_param(
+                db_type,
+                params,
+                Value::BigInt(Some(offset_value)),
+            );
             sql.push_str(&format!(" OFFSET {}", placeholder));
         }
         Ok(())

@@ -210,9 +210,27 @@ fn test_format_column_dotted() {
 #[test]
 fn test_format_column_expression() {
     assert_eq!(
-        db_sql::format_column(DatabaseType::Postgres, "COUNT(*)"),
+        db_sql::format_column_or_trusted_expression(DatabaseType::Postgres, "COUNT(*)"),
         "COUNT(*)"
     );
+}
+
+#[test]
+fn test_format_column_quotes_non_identifier_input() {
+    assert_eq!(
+        db_sql::format_column(DatabaseType::Postgres, "COUNT(*)"),
+        "\"COUNT(*)\""
+    );
+    assert_eq!(
+        db_sql::format_column(DatabaseType::Postgres, "name\" OR 1=1 --"),
+        "\"name\"\" OR 1=1 --\""
+    );
+}
+
+#[test]
+fn test_json_contains_quotes_unsafe_column_input() {
+    let sql = db_sql::json_contains(DatabaseType::Postgres, "data\" OR 1=1 --", "value");
+    assert_eq!(sql, "\"data\"\" OR 1=1 --\" @> 'value'");
 }
 
 #[test]
@@ -445,6 +463,49 @@ async fn test_select_raw_rejects_unsafe_sql_before_db_lookup() {
         .unwrap_err();
 
     assert!(err.to_string().contains("unsafe SELECT raw SQL"));
+}
+
+#[tokio::test]
+async fn test_select_rejects_unsafe_expression_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .select(vec!["COUNT(*); DROP TABLE users"])
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe SELECT expression"));
+}
+
+#[tokio::test]
+async fn test_order_by_rejects_unsafe_expression_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .order_by("random(); DROP TABLE users", Order::Asc)
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe ORDER BY column"));
+}
+
+#[tokio::test]
+async fn test_group_by_rejects_unsafe_expression_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .group_by("DATE_TRUNC('day', created_at); DROP TABLE users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe GROUP BY column"));
+}
+
+#[test]
+fn test_query_validation_allows_safe_expression_slots() {
+    QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["COUNT(*) AS total"])
+        .group_by("DATE(created_at)")
+        .order_by("LOWER(name)", Order::Asc)
+        .ensure_query_is_valid()
+        .expect("safe select/group/order expressions should remain allowed");
 }
 
 #[tokio::test]

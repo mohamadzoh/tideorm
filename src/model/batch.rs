@@ -466,41 +466,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
-    fn json_to_db_value(value: &serde_json::Value) -> crate::internal::Value {
-        match value {
-            serde_json::Value::Null => crate::internal::Value::String(None),
-            serde_json::Value::Bool(boolean) => crate::internal::Value::Bool(Some(*boolean)),
-            serde_json::Value::Number(number) => {
-                if let Some(integer) = number.as_i64() {
-                    crate::internal::Value::BigInt(Some(integer))
-                } else if let Some(float) = number.as_f64() {
-                    crate::internal::Value::Double(Some(float))
-                } else {
-                    crate::internal::Value::String(Some(number.to_string()))
-                }
-            }
-            serde_json::Value::String(text) => crate::internal::Value::String(Some(text.clone())),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                crate::internal::Value::String(Some(value.to_string()))
-            }
-        }
-    }
-
-    fn push_param(
-        db_type: crate::config::DatabaseType,
-        params: &mut Vec<crate::internal::Value>,
-        value: crate::internal::Value,
-    ) -> String {
-        let placeholder = match db_type {
-            crate::config::DatabaseType::Postgres => format!("${}", params.len() + 1),
-            crate::config::DatabaseType::MySQL
-            | crate::config::DatabaseType::MariaDB
-            | crate::config::DatabaseType::SQLite => "?".to_string(),
-        };
-        params.push(value);
-        placeholder
-    }
-
     fn validate_update_column(column: &str) -> Result<()> {
         let is_safe_identifier = {
             let mut chars = column.chars();
@@ -784,32 +749,52 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         match value {
             UpdateValue::Value(value) => {
-                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::json_to_db_value(value),
+                );
                 Ok(format!("{} = {}", col, placeholder))
             }
             UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
             UpdateValue::Increment(by) => {
-                let placeholder =
-                    Self::push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::BigInt(Some(*by)),
+                );
                 Ok(format!("{} = {} + {}", col, col, placeholder))
             }
             UpdateValue::Decrement(by) => {
-                let placeholder =
-                    Self::push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::BigInt(Some(*by)),
+                );
                 Ok(format!("{} = {} - {}", col, col, placeholder))
             }
             UpdateValue::Multiply(by) => {
-                let placeholder =
-                    Self::push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::Double(Some(*by)),
+                );
                 Ok(format!("{} = {} * {}", col, col, placeholder))
             }
             UpdateValue::Divide(by) => {
-                let placeholder =
-                    Self::push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::Double(Some(*by)),
+                );
                 Ok(format!("{} = {} / {}", col, col, placeholder))
             }
             UpdateValue::ArrayAppend(value) => {
-                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::json_to_db_value(value),
+                );
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => {
                         format!("{} = array_append({}, {})", col, col, placeholder)
@@ -823,7 +808,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 })
             }
             UpdateValue::ArrayRemove(value) => {
-                let placeholder = Self::push_param(db_type, params, Self::json_to_db_value(value));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::json_to_db_value(value),
+                );
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => {
                         format!("{} = array_remove({}, {})", col, col, placeholder)
@@ -845,7 +834,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             UpdateValue::JsonSet(path, value) => {
                 let segments = Self::validate_json_path(path)?;
                 let path_placeholder = match db_type {
-                    crate::config::DatabaseType::Postgres => Self::push_param(
+                    crate::config::DatabaseType::Postgres => crate::internal::push_param(
                         db_type,
                         params,
                         crate::internal::Value::String(Some(Self::postgres_json_path_literal(
@@ -854,14 +843,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     ),
                     crate::config::DatabaseType::MySQL
                     | crate::config::DatabaseType::MariaDB
-                    | crate::config::DatabaseType::SQLite => Self::push_param(
+                    | crate::config::DatabaseType::SQLite => crate::internal::push_param(
                         db_type,
                         params,
                         crate::internal::Value::String(Some(path.clone())),
                     ),
                 };
                 let json_text = serde_json::to_string(value)?;
-                let value_placeholder = Self::push_param(
+                let value_placeholder = crate::internal::push_param(
                     db_type,
                     params,
                     crate::internal::Value::String(Some(json_text)),
@@ -887,8 +876,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 })
             }
             UpdateValue::Coalesce(default) => {
-                let placeholder =
-                    Self::push_param(db_type, params, Self::json_to_db_value(default));
+                let placeholder = crate::internal::push_param(
+                    db_type,
+                    params,
+                    crate::internal::json_to_db_value(default),
+                );
                 Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
             }
         }

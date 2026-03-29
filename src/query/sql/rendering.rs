@@ -7,7 +7,7 @@ impl<M: Model> QueryBuilder<M> {
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
         match parts.as_slice() {
-            [identifier] => db_sql::format_column(db_type, identifier),
+            [identifier] => db_sql::format_column_or_trusted_expression(db_type, identifier),
             [identifier, direction]
                 if direction.eq_ignore_ascii_case("asc")
                     || direction.eq_ignore_ascii_case("desc") =>
@@ -140,6 +140,76 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn render_having_preview_sql(&self, sql_template: &str, params: &[serde_json::Value]) -> String {
+        if params.is_empty() {
+            return sql_template.to_string();
+        }
+
+        let mut rendered = String::new();
+        let mut params_iter = params.iter();
+
+        for ch in sql_template.chars() {
+            if ch == '?' {
+                if let Some(value) = params_iter.next() {
+                    rendered.push_str(&self.format_preview_value(value));
+                } else {
+                    rendered.push('?');
+                }
+            } else {
+                rendered.push(ch);
+            }
+        }
+
+        rendered
+    }
+
+    fn render_having_parameterized_sql(
+        &self,
+        sql_template: &str,
+        params: &[serde_json::Value],
+        db_type: DatabaseType,
+        next_param_index: &mut usize,
+    ) -> String {
+        if params.is_empty() {
+            return sql_template.to_string();
+        }
+
+        if !matches!(db_type, DatabaseType::Postgres) {
+            return sql_template.to_string();
+        }
+
+        let mut rendered = String::new();
+        let mut replaced = 0usize;
+
+        for ch in sql_template.chars() {
+            if ch == '?' {
+                rendered.push_str(&format!("${}", *next_param_index));
+                *next_param_index += 1;
+                replaced += 1;
+            } else {
+                rendered.push(ch);
+            }
+        }
+
+        debug_assert_eq!(replaced, params.len());
+        rendered
+    }
+
+    pub(crate) fn materialized_having_conditions(&self) -> Vec<String> {
+        self.having_conditions
+            .iter()
+            .enumerate()
+            .map(|(index, sql_template)| {
+                let params = self
+                    .having_bindings
+                    .get(index)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                self.render_having_preview_sql(sql_template, params)
+            })
+            .collect()
+    }
+
     fn append_group_by_and_having_sql(&self, sql: &mut String, db_type: DatabaseType) {
         if !self.group_by.is_empty() {
             let columns: Vec<String> = self
@@ -151,7 +221,49 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         if !self.having_conditions.is_empty() {
-            sql.push_str(&format!("HAVING {} ", self.having_conditions.join(" AND ")));
+            sql.push_str(&format!("HAVING {} ", self.materialized_having_conditions().join(" AND ")));
+        }
+    }
+
+    fn append_group_by_and_having_sql_with_params(
+        &self,
+        sql: &mut String,
+        db_type: DatabaseType,
+        params: &mut Vec<Value>,
+    ) {
+        if !self.group_by.is_empty() {
+            let columns: Vec<String> = self
+                .group_by
+                .iter()
+                .map(|column| self.format_column_for_db(db_type, column))
+                .collect();
+            sql.push_str(&format!("GROUP BY {} ", columns.join(", ")));
+        }
+
+        if !self.having_conditions.is_empty() {
+            let mut next_param_index = params.len() + 1;
+            let rendered_having: Vec<String> = self
+                .having_conditions
+                .iter()
+                .enumerate()
+                .map(|(index, sql_template)| {
+                    let bindings = self
+                        .having_bindings
+                        .get(index)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]);
+                    let clause_sql = self.render_having_parameterized_sql(
+                        sql_template,
+                        bindings,
+                        db_type,
+                        &mut next_param_index,
+                    );
+                    params.extend(bindings.iter().map(crate::internal::json_to_db_value));
+                    clause_sql
+                })
+                .collect();
+
+            sql.push_str(&format!("HAVING {} ", rendered_having.join(" AND ")));
         }
     }
 
@@ -364,8 +476,18 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
-        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        (self.assemble_base_select_sql(db_type, &where_sql), params)
+        let (where_sql, mut params) = self.build_where_clause_with_condition_for_db(db_type);
+        let mut sql = String::new();
+
+        sql.push_str(&self.build_select_clause_sql(db_type));
+        self.append_from_and_join_sql(&mut sql, db_type);
+
+        if !where_sql.is_empty() {
+            sql.push_str(&format!("WHERE {} ", where_sql));
+        }
+
+        self.append_group_by_and_having_sql_with_params(&mut sql, db_type, &mut params);
+        (sql.trim().to_string(), params)
     }
 
     pub(crate) fn build_select_sql(&self) -> String {

@@ -114,6 +114,16 @@ fn hash_condition_value<H: std::hash::Hasher>(value: &ConditionValue, hasher: &m
     }
 }
 
+fn hash_having_clause<H: std::hash::Hasher>(sql: &str, params: &[serde_json::Value], hasher: &mut H) {
+    use std::hash::Hash;
+
+    sql.hash(hasher);
+    params.len().hash(hasher);
+    for value in params {
+        hash_json_value(value, hasher);
+    }
+}
+
 fn hash_where_condition<H: std::hash::Hasher>(condition: &WhereCondition, hasher: &mut H) {
     use std::hash::Hash;
 
@@ -271,22 +281,26 @@ fn hash_window_function<H: std::hash::Hasher>(window_function: &WindowFunction, 
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
+    #[must_use]
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {
         self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
         self
     }
 
+    #[must_use]
     pub fn cache_with_key(mut self, key: &str, ttl: std::time::Duration) -> Self {
         self.cache_key = Some(key.to_string());
         self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
         self
     }
 
+    #[must_use]
     pub fn cache_with_options(mut self, options: crate::cache::CacheOptions) -> Self {
         self.cache_options = Some(options);
         self
     }
 
+    #[must_use]
     pub fn no_cache(mut self) -> Self {
         self.cache_options = None;
         self.cache_key = None;
@@ -343,8 +357,13 @@ impl<M: Model> QueryBuilder<M> {
             column.hash(&mut hasher);
         }
 
-        for having in &self.having_conditions {
-            having.hash(&mut hasher);
+        for (index, having) in self.having_conditions.iter().enumerate() {
+            let bindings = self
+                .having_bindings
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            hash_having_clause(having, bindings, &mut hasher);
         }
 
         for union in &self.unions {

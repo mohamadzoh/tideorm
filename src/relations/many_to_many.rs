@@ -5,9 +5,7 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::{
-    cached_ref, ensure_relation_configured, preserve_cached_value, push_param, quote_ident,
-};
+use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value, quote_ident};
 use super::require_scalar_relation_key;
 
 #[derive(Debug, Clone)]
@@ -167,12 +165,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let pk = require_scalar_relation_key(pk, "HasManyThrough::attach")?;
 
         let mut params = Vec::new();
-        let parent_placeholder = push_param(
+        let parent_placeholder = crate::internal::push_param(
             db_type,
             &mut params,
             crate::internal::Value::from(pk.clone()),
         );
-        let related_placeholder = push_param(
+        let related_placeholder = crate::internal::push_param(
             db_type,
             &mut params,
             crate::internal::Value::from(related_id.into()),

@@ -3,6 +3,7 @@ use crate::model::Model;
 
 impl<M: Model> QueryBuilder<M> {
     /// Add an OR group to the query.
+    #[must_use]
     pub fn or_where<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
@@ -15,6 +16,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add an OR condition directly (simple shorthand).
+    #[must_use]
     pub fn or_where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -30,6 +32,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -45,6 +48,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -60,6 +64,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -75,6 +80,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -90,6 +96,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -105,6 +112,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -120,6 +128,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -138,6 +147,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -156,6 +166,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -174,6 +185,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -189,6 +201,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -204,6 +217,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         let mut group = OrGroup::new();
         group.conditions.push(WhereCondition {
@@ -215,6 +229,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         let mut group = OrGroup::new();
         group.conditions.push(WhereCondition {
@@ -226,6 +241,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -242,6 +258,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
         let mut group = OrGroup::new();
         group.conditions.push(WhereCondition {
@@ -362,6 +379,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE column = ANY(array) condition (PostgreSQL optimization).
+    #[must_use]
     pub fn eq_any<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -372,6 +390,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE column <> ALL(array) condition.
+    #[must_use]
     pub fn ne_all<V: Into<serde_json::Value>>(mut self, column: &str, values: Vec<V>) -> Self {
         self.conditions.push(WhereCondition {
             column: column.to_string(),
@@ -382,6 +401,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE condition using a strongly-typed column.
+    #[must_use]
     pub fn where_col(mut self, condition: crate::columns::ColumnCondition) -> Self {
         let operator = match condition.operator {
             crate::columns::ColumnOperator::Eq => Operator::Eq,

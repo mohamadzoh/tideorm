@@ -72,6 +72,39 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    fn validate_order_or_group_value(
+        kind: &str,
+        value: &str,
+    ) -> std::result::Result<(), String> {
+        if Self::simple_column_reference(value).is_some() {
+            Self::validate_model_column_reference(kind, value)
+        } else {
+            db_sql::validate_raw_sql_fragment(kind, value)
+        }
+    }
+
+    fn validate_select_value(value: &str) -> std::result::Result<(), String> {
+        let trimmed = value.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+
+        if let Some(index) = lowered.find(" as ") {
+            let expression = trimmed[..index].trim();
+            let alias = trimmed[index + 4..].trim();
+
+            if Self::simple_column_reference(expression).is_some() {
+                Self::validate_model_column_reference("SELECT column", expression)?;
+            } else {
+                db_sql::validate_raw_sql_fragment("SELECT expression", expression)?;
+            }
+
+            db_sql::validate_identifier("SELECT alias", alias)
+        } else if Self::simple_column_reference(trimmed).is_some() {
+            Self::validate_model_column_reference("SELECT column", trimmed)
+        } else {
+            db_sql::validate_raw_sql_fragment("SELECT expression", trimmed)
+        }
+    }
+
     fn validate_condition(condition: &WhereCondition) -> std::result::Result<(), String> {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => {
@@ -183,24 +216,31 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         for (column, _) in &self.order_by {
-            Self::validate_model_column_reference("ORDER BY column", column)
+            Self::validate_order_or_group_value("ORDER BY column", column)
                 .map_err(Error::invalid_query)?;
         }
 
         for column in &self.group_by {
-            Self::validate_model_column_reference("GROUP BY column", column)
+            Self::validate_order_or_group_value("GROUP BY column", column)
                 .map_err(Error::invalid_query)?;
         }
 
-        for having in &self.having_conditions {
-            db_sql::validate_having_sql_fragment("HAVING raw SQL", having)
-                .map_err(Error::invalid_query)?;
+        for (index, having) in self.having_conditions.iter().enumerate() {
+            let bindings = self
+                .having_bindings
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+
+            if bindings.is_empty() {
+                db_sql::validate_having_sql_fragment("HAVING raw SQL", having)
+                    .map_err(Error::invalid_query)?;
+            }
         }
 
         if let Some(columns) = &self.select_columns {
             for column in columns {
-                Self::validate_model_column_reference("SELECT column", column)
-                    .map_err(Error::invalid_query)?;
+                Self::validate_select_value(column).map_err(Error::invalid_query)?;
             }
         }
 
@@ -220,6 +260,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Create a new query builder
+    #[must_use]
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
@@ -238,6 +279,7 @@ impl<M: Model> QueryBuilder<M> {
             invalid_query_reason: None,
             group_by: Vec::new(),
             having_conditions: Vec::new(),
+            having_bindings: Vec::new(),
             unions: Vec::new(),
             window_functions: Vec::new(),
             ctes: Vec::new(),
@@ -246,6 +288,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    #[must_use]
     pub(crate) fn with_database(mut self, database: crate::database::Database) -> Self {
         self.database = Some(database);
         self
@@ -272,7 +315,7 @@ impl<M: Model> QueryBuilder<M> {
             raw_select_expressions: self.raw_select_expressions.clone(),
             subquery_select_expressions: self.subquery_select_expressions.clone(),
             group_by: self.group_by.clone(),
-            having_conditions: self.having_conditions.clone(),
+            having_conditions: self.materialized_having_conditions(),
             joins: self.joins.clone(),
             unions: self.unions.clone(),
             window_functions: self.window_functions.clone(),
@@ -286,6 +329,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Apply a reusable fragment to the current query builder.
+    #[must_use]
     pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
         self.conditions.extend(fragment.conditions.clone());
         self.or_groups.extend(fragment.or_groups.clone());
@@ -312,8 +356,13 @@ impl<M: Model> QueryBuilder<M> {
             .extend(fragment.subquery_select_expressions.clone());
 
         self.group_by.extend(fragment.group_by.clone());
-        self.having_conditions
-            .extend(fragment.having_conditions.clone());
+        self.having_conditions.extend(fragment.having_conditions.clone());
+        self.having_bindings.extend(
+            fragment
+                .having_conditions
+                .iter()
+                .map(|_| Vec::<serde_json::Value>::new()),
+        );
         self.joins.extend(fragment.joins.clone());
         self.unions.extend(fragment.unions.clone());
         self.window_functions

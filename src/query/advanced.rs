@@ -7,6 +7,7 @@ use crate::model::Model;
 
 impl<M: Model> QueryBuilder<M> {
     /// Add an ORDER BY clause.
+    #[must_use]
     pub fn order_by(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -18,21 +19,25 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Order by ascending
+    #[must_use]
     pub fn order_asc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Asc)
     }
 
     /// Order by descending
+    #[must_use]
     pub fn order_desc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Desc)
     }
 
     /// Order by latest (created_at DESC)
+    #[must_use]
     pub fn latest(self) -> Self {
         self.order_desc("created_at")
     }
 
     /// Order by oldest (created_at ASC)
+    #[must_use]
     pub fn oldest(self) -> Self {
         self.order_asc("created_at")
     }
@@ -42,18 +47,21 @@ impl<M: Model> QueryBuilder<M> {
     // =========================================================================
 
     /// Limit the number of results
+    #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
         self.limit_value = Some(n);
         self
     }
 
     /// Skip a number of results
+    #[must_use]
     pub fn offset(mut self, n: u64) -> Self {
         self.offset_value = Some(n);
         self
     }
 
     /// Paginate results using 1-based page numbers.
+    #[must_use]
     pub fn page(self, page: u64, per_page: u64) -> Self {
         let mut query = self;
 
@@ -74,11 +82,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Take only the first N records
+    #[must_use]
     pub fn take(self, n: u64) -> Self {
         self.limit(n)
     }
 
     /// Skip the first N records
+    #[must_use]
     pub fn skip(self, n: u64) -> Self {
         self.offset(n)
     }
@@ -88,6 +98,7 @@ impl<M: Model> QueryBuilder<M> {
     // =========================================================================
 
     /// Select specific columns
+    #[must_use]
     pub fn select(mut self, columns: Vec<&str>) -> Self {
         self.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
         self
@@ -97,6 +108,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Use this for partial model queries that need columns from a related
     /// table without loading the full related model.
+    #[must_use]
     pub fn select_with_linked(
         mut self,
         local_columns: Vec<&str>,
@@ -132,6 +144,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Select all columns from this table plus specific columns from a linked table
+    #[must_use]
     pub fn select_also_linked(
         mut self,
         linked_table: &str,
@@ -174,11 +187,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add an INNER JOIN clause
     ///
     /// Returns only rows with matches in both tables.
+    #[must_use]
     pub fn inner_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Inner, table, None, left_column, right_column)
     }
 
     /// Add an INNER JOIN clause with an alias
+    #[must_use]
     pub fn inner_join_as(
         self,
         table: &str,
@@ -198,11 +213,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a LEFT JOIN clause
     ///
     /// Returns all rows from the left table, and matched rows from the right.
+    #[must_use]
     pub fn left_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Left, table, None, left_column, right_column)
     }
 
     /// Add a LEFT JOIN clause with an alias
+    #[must_use]
     pub fn left_join_as(
         self,
         table: &str,
@@ -222,11 +239,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a RIGHT JOIN clause
     ///
     /// Returns all rows from the right table, and matched rows from the left.
+    #[must_use]
     pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Right, table, None, left_column, right_column)
     }
 
     /// Add a RIGHT JOIN clause with an alias
+    #[must_use]
     pub fn right_join_as(
         self,
         table: &str,
@@ -272,12 +291,14 @@ impl<M: Model> QueryBuilder<M> {
     // =========================================================================
 
     /// Add a GROUP BY clause
+    #[must_use]
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.group_by.push(column.column_name().to_string());
         self
     }
 
     /// Add multiple GROUP BY columns
+    #[must_use]
     pub fn group_by_columns(mut self, columns: Vec<&str>) -> Self {
         for col in columns {
             self.group_by.push(col.to_string());
@@ -286,6 +307,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a HAVING clause (raw SQL condition)
+    #[must_use]
     pub fn having(mut self, condition: &str) -> Self {
         if let Err(reason) =
             crate::query::db_sql::validate_having_sql_fragment("HAVING raw SQL", condition)
@@ -294,41 +316,58 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         self.having_conditions.push(condition.to_string());
+        self.having_bindings.push(Vec::new());
+        self
+    }
+
+    fn having_with_params(
+        mut self,
+        sql_template: String,
+        params: Vec<serde_json::Value>,
+    ) -> Self {
+        self.having_conditions.push(sql_template);
+        self.having_bindings.push(params);
         self
     }
 
     /// Add HAVING with COUNT condition
+    #[must_use]
     pub fn having_count_gt(self, value: i64) -> Self {
-        self.having(&format!("COUNT(*) > {}", value))
+        self.having_with_params("COUNT(*) > ?".to_string(), vec![value.into()])
     }
 
     /// Add HAVING with COUNT >= condition
+    #[must_use]
     pub fn having_count_gte(self, value: i64) -> Self {
-        self.having(&format!("COUNT(*) >= {}", value))
+        self.having_with_params("COUNT(*) >= ?".to_string(), vec![value.into()])
     }
 
     /// Add HAVING with COUNT < condition
+    #[must_use]
     pub fn having_count_lt(self, value: i64) -> Self {
-        self.having(&format!("COUNT(*) < {}", value))
+        self.having_with_params("COUNT(*) < ?".to_string(), vec![value.into()])
     }
 
     /// Add HAVING with COUNT <= condition
+    #[must_use]
     pub fn having_count_lte(self, value: i64) -> Self {
-        self.having(&format!("COUNT(*) <= {}", value))
+        self.having_with_params("COUNT(*) <= ?".to_string(), vec![value.into()])
     }
 
     /// Add HAVING with SUM condition
+    #[must_use]
     pub fn having_sum_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
         let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
-        self.having(&format!("SUM({}) > {}", col, value))
+        self.having_with_params(format!("SUM({}) > ?", col), vec![value.into()])
     }
 
     /// Add HAVING with AVG condition
+    #[must_use]
     pub fn having_avg_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
         let db_type = self.db_type_for_sql();
         let col = db_sql::quote_ident(db_type, column.column_name());
-        self.having(&format!("AVG({}) > {}", col, value))
+        self.having_with_params(format!("AVG({}) > ?", col), vec![value.into()])
     }
 
     /// Calculate SUM of a column
@@ -482,6 +521,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a UNION with another query
     ///
     /// UNION combines the results of two queries and removes duplicates.
+    #[must_use]
     pub fn union<N: Model>(mut self, other: QueryBuilder<N>) -> Self {
         self.unions.push(UnionClause {
             union_type: UnionType::Union,
@@ -493,6 +533,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a UNION ALL with another query
     ///
     /// UNION ALL combines all results including duplicates (faster than UNION).
+    #[must_use]
     pub fn union_all<N: Model>(mut self, other: QueryBuilder<N>) -> Self {
         self.unions.push(UnionClause {
             union_type: UnionType::UnionAll,
@@ -504,6 +545,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a raw UNION query
     ///
     /// Use when you need to union with a complex SQL query.
+    #[must_use]
     pub fn union_raw(mut self, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
             self.invalidate_query(format!("invalid subquery for union_raw(): {}", reason));
@@ -517,6 +559,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw UNION ALL query
+    #[must_use]
     pub fn union_all_raw(mut self, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
             self.invalidate_query(format!("invalid subquery for union_all_raw(): {}", reason));
@@ -534,6 +577,7 @@ impl<M: Model> QueryBuilder<M> {
     // =========================================================================
 
     /// Add a window function to the SELECT clause
+    #[must_use]
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
         if let Err(reason) = Self::validate_window_function(&window_fn) {
             self.invalidate_query(reason);
@@ -544,6 +588,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add ROW_NUMBER() window function
+    #[must_use]
     pub fn row_number(
         mut self,
         alias: &str,
@@ -561,6 +606,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add RANK() window function
+    #[must_use]
     pub fn rank(
         mut self,
         alias: &str,
@@ -579,6 +625,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add DENSE_RANK() window function
     ///
     /// Similar to RANK() but without gaps in ranking values.
+    #[must_use]
     pub fn dense_rank(
         mut self,
         alias: &str,
@@ -599,6 +646,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Access data from a previous row.
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn lag(
         mut self,
         alias: &str,
@@ -632,6 +680,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Access data from a following row.
     #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn lead(
         mut self,
         alias: &str,
@@ -662,6 +711,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add running SUM() window function
+    #[must_use]
     pub fn running_sum(mut self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
         let wf = WindowFunction::new(WindowFunctionType::Sum(column.to_string()), alias)
             .order_by(order_by, order)
@@ -675,6 +725,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add running AVG() window function
+    #[must_use]
     pub fn running_avg(mut self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
         let wf = WindowFunction::new(WindowFunctionType::Avg(column.to_string()), alias)
             .order_by(order_by, order)
@@ -690,6 +741,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add NTILE() window function
     ///
     /// Distribute rows into specified number of groups.
+    #[must_use]
     pub fn ntile(mut self, alias: &str, buckets: u32, order_by: &str, order: Order) -> Self {
         let wf = WindowFunction::new(WindowFunctionType::Ntile(buckets), alias)
             .order_by(order_by, order);
@@ -698,6 +750,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add FIRST_VALUE() window function
+    #[must_use]
     pub fn first_value(
         mut self,
         alias: &str,
@@ -715,6 +768,7 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add LAST_VALUE() window function
     /// Add LAST_VALUE() window function
+    #[must_use]
     pub fn last_value(
         mut self,
         alias: &str,
@@ -742,6 +796,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// CTEs allow you to define temporary named result sets that can be
     /// referenced within the main query.
+    #[must_use]
     pub fn with_cte(mut self, cte: CTE) -> Self {
         if let Err(reason) = Self::validate_cte_clause(&cte) {
             self.invalidate_query(format!("invalid CTE for with_cte(): {}", reason));
@@ -752,6 +807,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a CTE from another query builder
+    #[must_use]
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
             self.invalidate_query(reason);
@@ -767,6 +823,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a CTE with column aliases
+    #[must_use]
     pub fn with_cte_columns(mut self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
             self.invalidate_query(reason);
@@ -794,6 +851,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a recursive CTE
     ///
     /// Use recursive CTEs for hierarchical or tree-structured data.
+    #[must_use]
     pub fn with_recursive_cte(
         mut self,
         name: &str,
@@ -840,6 +898,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// By default, soft-deleted records (where `deleted_at` is not NULL) are excluded.
     /// Use this method to include them.
+    #[must_use]
     pub fn with_trashed(mut self) -> Self {
         self.include_trashed = true;
         self.only_trashed = false;
@@ -849,6 +908,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Only return soft-deleted records
     ///
     /// Returns only records where `deleted_at` is not NULL.
+    #[must_use]
     pub fn only_trashed(mut self) -> Self {
         self.only_trashed = true;
         self.include_trashed = false;
@@ -859,6 +919,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// This is the default, but can be used to explicitly exclude soft-deleted
     /// records after calling `with_trashed()`.
+    #[must_use]
     pub fn without_trashed(mut self) -> Self {
         self.include_trashed = false;
         self.only_trashed = false;
@@ -873,6 +934,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Scopes are reusable query fragments that can be applied to any query.
     /// Use scopes to define common query patterns once and reuse them.
+    #[must_use]
     pub fn scope<F>(self, f: F) -> Self
     where
         F: FnOnce(Self) -> Self,
@@ -883,6 +945,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Apply a conditional scope
     ///
     /// Only applies the scope function if the condition is true.
+    #[must_use]
     pub fn when<F>(self, condition: bool, f: F) -> Self
     where
         F: FnOnce(Self) -> Self,
@@ -894,6 +957,7 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// If the option is Some, applies the scope function with the value.
     /// If None, returns the query unchanged.
+    #[must_use]
     pub fn when_some<T, F>(self, option: Option<T>, f: F) -> Self
     where
         F: FnOnce(Self, T) -> Self,
