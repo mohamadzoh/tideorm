@@ -5,6 +5,8 @@ edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
 repository = "https://github.com/mohamadzoh/tideorm"
+homepage = "https://tideorm.com"
+readme = "README.md"
 rust-version = "1.85"
 
 [lib]
