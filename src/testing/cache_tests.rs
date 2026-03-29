@@ -214,6 +214,31 @@ fn test_prepared_statement_cache() {
 }
 
 #[test]
+fn test_prepared_statement_cache_reset_stats_preserves_cached_count() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+
+    let sql = "SELECT * FROM users WHERE id = $1";
+
+    let _ = cache.get_or_prepare(sql);
+    cache.record_execution(sql, 250);
+
+    let before_reset = cache.stats();
+    assert_eq!(before_reset.cached_count, 1);
+    assert_eq!(before_reset.misses, 1);
+    assert_eq!(before_reset.total_executions, 1);
+
+    cache.reset_stats();
+
+    let after_reset = cache.stats();
+    assert_eq!(after_reset.hits, 0);
+    assert_eq!(after_reset.misses, 0);
+    assert_eq!(after_reset.evictions, 0);
+    assert_eq!(after_reset.total_executions, 0);
+    assert_eq!(after_reset.cached_count, 1);
+}
+
+#[test]
 fn test_cache_key_builder() {
     let key = CacheKeyBuilder::new()
         .table("users")

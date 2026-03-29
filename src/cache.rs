@@ -918,8 +918,16 @@ pub struct PreparedStatementCache {
     enabled: AtomicBool,
     /// Cached statements keyed by SQL hash
     statements: RwLock<HashMap<u64, PreparedStatement>>,
-    /// Cache statistics
-    stats: RwLock<PreparedStatementStats>,
+    /// Cache hit counter.
+    hits: AtomicU64,
+    /// Cache miss counter.
+    misses: AtomicU64,
+    /// Current number of cached statements.
+    cached_count: AtomicUsize,
+    /// Total number of statement executions.
+    total_executions: AtomicU64,
+    /// Number of evictions.
+    evictions: AtomicU64,
 }
 
 impl PreparedStatementCache {
@@ -929,7 +937,11 @@ impl PreparedStatementCache {
             config: RwLock::new(PreparedStatementConfig::default()),
             enabled: AtomicBool::new(false),
             statements: RwLock::new(HashMap::new()),
-            stats: RwLock::new(PreparedStatementStats::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            cached_count: AtomicUsize::new(0),
+            total_executions: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -940,7 +952,21 @@ impl PreparedStatementCache {
             config: RwLock::new(config),
             enabled: AtomicBool::new(enabled),
             statements: RwLock::new(HashMap::new()),
-            stats: RwLock::new(PreparedStatementStats::default()),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            cached_count: AtomicUsize::new(0),
+            total_executions: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot_stats(&self) -> PreparedStatementStats {
+        PreparedStatementStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            cached_count: self.cached_count.load(Ordering::Relaxed),
+            total_executions: self.total_executions.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
         }
     }
 
@@ -1024,7 +1050,7 @@ impl PreparedStatementCache {
                 if stmt.prepared_at.elapsed() < max_age {
                     let sql = stmt.sql.clone();
                     drop(statements);
-                    self.stats.write().hits += 1;
+                    self.hits.fetch_add(1, Ordering::Relaxed);
                     return (sql, true);
                 }
             }
@@ -1037,7 +1063,7 @@ impl PreparedStatementCache {
                 if stmt.prepared_at.elapsed() < max_age {
                     let sql = stmt.sql.clone();
                     drop(statements);
-                    self.stats.write().hits += 1;
+                    self.hits.fetch_add(1, Ordering::Relaxed);
                     return (sql, true);
                 }
 
@@ -1048,7 +1074,7 @@ impl PreparedStatementCache {
         // Cache miss - prepare and cache
         self.cache_statement(sql);
 
-        self.stats.write().misses += 1;
+        self.misses.fetch_add(1, Ordering::Relaxed);
 
         (sql.to_string(), false)
     }
@@ -1068,13 +1094,13 @@ impl PreparedStatementCache {
 
             if let Some(key) = oldest_key {
                 statements.remove(&key);
-                self.stats.write().evictions += 1;
+                self.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         statements.insert(hash, PreparedStatement::new(sql.to_string()));
 
-        self.stats.write().cached_count = statements.len();
+        self.cached_count.store(statements.len(), Ordering::Relaxed);
     }
 
     /// Record execution of a statement
@@ -1092,7 +1118,7 @@ impl PreparedStatementCache {
             }
         }
 
-        self.stats.write().total_executions += 1;
+        self.total_executions.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Invalidate a specific statement
@@ -1101,7 +1127,7 @@ impl PreparedStatementCache {
         let mut statements = self.statements.write();
         let removed = statements.remove(&hash).is_some();
         if removed {
-            self.stats.write().cached_count = statements.len();
+            self.cached_count.store(statements.len(), Ordering::Relaxed);
         }
         removed
     }
@@ -1110,19 +1136,22 @@ impl PreparedStatementCache {
     pub fn clear(&self) {
         let mut statements = self.statements.write();
         statements.clear();
-        self.stats.write().cached_count = 0;
+        self.cached_count.store(0, Ordering::Relaxed);
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> PreparedStatementStats {
-        self.stats.read().clone()
+        self.snapshot_stats()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.write();
-        *stats = PreparedStatementStats::default();
-        stats.cached_count = self.statements.read().len();
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.total_executions.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+        self.cached_count
+            .store(self.statements.read().len(), Ordering::Relaxed);
     }
 
     /// Get the number of cached statements
