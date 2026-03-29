@@ -442,9 +442,11 @@ impl Seeder {
     async fn get_executed_seeds(&self) -> Result<Vec<String>> {
         let database = require_db()?;
 
-        use crate::internal::Statement;
+        use crate::internal::build_statement;
 
-        let backend = database.__internal_connection()?.get_database_backend();
+        let backend = crate::internal::Backend::from_sea_orm(
+            database.__internal_connection()?.get_database_backend(),
+        );
         let q = |id: &str| quote_ident_for_backend(backend, id);
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
@@ -452,7 +454,7 @@ impl Seeder {
             q("_seeds"),
             q("executed_at")
         );
-        let stmt = Statement::from_string(backend, sql);
+        let stmt = build_statement(backend, sql);
 
         let results = database
             .__internal_connection()?
@@ -474,7 +476,9 @@ impl Seeder {
     /// Record a seed as executed
     async fn record_seed(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = database.__internal_connection()?.get_database_backend();
+        let backend = crate::internal::Backend::from_sea_orm(
+            database.__internal_connection()?.get_database_backend(),
+        );
         let q = |id: &str| quote_ident_for_backend(backend, id);
 
         let sql = format!("INSERT INTO {} ({}) VALUES (?)", q("_seeds"), q("name"));
@@ -489,7 +493,9 @@ impl Seeder {
     /// Remove a seed record
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = database.__internal_connection()?.get_database_backend();
+        let backend = crate::internal::Backend::from_sea_orm(
+            database.__internal_connection()?.get_database_backend(),
+        );
         let q = |id: &str| quote_ident_for_backend(backend, id);
 
         let sql = format!("DELETE FROM {} WHERE {} = ?", q("_seeds"), q("name"));

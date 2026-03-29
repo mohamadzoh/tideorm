@@ -9,6 +9,7 @@
 //! 4. Query translation is centralized
 
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
 pub(crate) mod sql_safety;
@@ -24,11 +25,77 @@ pub use sea_orm::{
     LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
     Related, RelationDef, RelationTrait, Statement, TransactionTrait, TryGetable, Value,
     entity::prelude::*,
-    sea_query::{
-        Asterisk, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query,
-        SqliteQueryBuilder,
-    },
+    sea_query::{Asterisk, Expr, ExprTrait},
 };
+
+/// TideORM-owned runtime backend identifier.
+///
+/// This intentionally captures only the backend shape TideORM cares about at
+/// runtime. MariaDB and MySQL share the same wire/backend layer here and are
+/// distinguished later through TideORM configuration when needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    Postgres,
+    MySql,
+    Sqlite,
+}
+
+impl Backend {
+    pub(crate) fn from_sea_orm(backend: DbBackend) -> Self {
+        match backend {
+            DbBackend::Postgres => Self::Postgres,
+            DbBackend::MySql => Self::MySql,
+            DbBackend::Sqlite => Self::Sqlite,
+            _ => Self::Postgres,
+        }
+    }
+
+    pub(crate) fn as_sea_orm(self) -> DbBackend {
+        match self {
+            Self::Postgres => DbBackend::Postgres,
+            Self::MySql => DbBackend::MySql,
+            Self::Sqlite => DbBackend::Sqlite,
+        }
+    }
+
+    pub(crate) fn as_database_type(self) -> crate::config::DatabaseType {
+        match self {
+            Self::Postgres => crate::config::DatabaseType::Postgres,
+            Self::MySql => crate::config::DatabaseType::MySQL,
+            Self::Sqlite => crate::config::DatabaseType::SQLite,
+        }
+    }
+}
+
+pub(crate) trait StatementBackend {
+    fn as_statement_backend(self) -> DbBackend;
+}
+
+impl StatementBackend for Backend {
+    fn as_statement_backend(self) -> DbBackend {
+        self.as_sea_orm()
+    }
+}
+
+impl StatementBackend for DbBackend {
+    fn as_statement_backend(self) -> DbBackend {
+        self
+    }
+}
+
+pub(crate) fn build_statement<B>(backend: B, sql: impl Into<String>) -> Statement
+where
+    B: StatementBackend,
+{
+    Statement::from_string(backend.as_statement_backend(), sql.into())
+}
+
+pub(crate) fn build_statement_with_values<B>(backend: B, sql: &str, params: Vec<Value>) -> Statement
+where
+    B: StatementBackend,
+{
+    Statement::from_sql_and_values(backend.as_statement_backend(), sql, params)
+}
 
 /// Internal trait that maps TideORM models to SeaORM entities
 /// This is implemented by TideORM's model macros.
@@ -121,17 +188,17 @@ where
 
 fn supports_batch_insert_returning(
     configured_db_type: Option<crate::config::DatabaseType>,
-    backend: DbBackend,
+    backend: Backend,
 ) -> bool {
     if let Some(db_type) = configured_db_type {
         return match db_type {
-            crate::config::DatabaseType::Postgres => matches!(backend, DbBackend::Postgres),
-            crate::config::DatabaseType::MariaDB => matches!(backend, DbBackend::MySql),
+            crate::config::DatabaseType::Postgres => matches!(backend, Backend::Postgres),
+            crate::config::DatabaseType::MariaDB => matches!(backend, Backend::MySql),
             crate::config::DatabaseType::MySQL | crate::config::DatabaseType::SQLite => false,
         };
     }
 
-    matches!(backend, DbBackend::Postgres)
+    matches!(backend, Backend::Postgres)
 }
 
 pub(crate) fn count_to_u64(count: i64, context: &str) -> Result<u64> {
@@ -157,28 +224,24 @@ where
     select
 }
 
-fn build_exists_any_statement<M>(backend: DbBackend) -> Statement
+fn build_exists_any_statement<M>(backend: Backend) -> Statement
 where
     M: InternalModel + crate::model::Model,
 {
-    let mut probe_select = scoped_find::<M>();
-    let mut probe_query = QueryTrait::query(&mut probe_select).to_owned();
-    probe_query.clear_selects();
-    probe_query.expr(Expr::cust("1"));
-    probe_query.reset_limit();
-    probe_query.reset_offset();
-    probe_query.clear_order_by();
+    let table = quote_ident_for_backend(backend, M::table_name());
+    let mut sql = format!("SELECT EXISTS(SELECT 1 FROM {}", table);
 
-    let exists_query = Query::select().expr(Expr::exists(probe_query)).to_owned();
+    if matches!(
+        query_scope_for::<M>(false, false),
+        SoftDeleteScope::ActiveOnly
+    ) {
+        let deleted_at = quote_ident_for_backend(backend, M::deleted_at_column());
+        sql.push_str(&format!(" WHERE {}.{} IS NULL", table, deleted_at));
+    }
 
-    let sql = match backend {
-        DbBackend::Postgres => exists_query.to_string(PostgresQueryBuilder),
-        DbBackend::MySql => exists_query.to_string(MysqlQueryBuilder),
-        DbBackend::Sqlite => exists_query.to_string(SqliteQueryBuilder),
-        _ => exists_query.to_string(PostgresQueryBuilder),
-    };
+    sql.push(')');
 
-    Statement::from_string(backend, sql)
+    build_statement(backend, sql)
 }
 
 fn scoped_find<M>() -> Select<M::Entity>
@@ -292,7 +355,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let backend = conn.get_database_backend();
+        let backend = Backend::from_sea_orm(conn.get_database_backend());
         let statement = build_exists_any_statement::<M>(backend);
         let result = crate::profiling::__profile_future(conn.query_one_raw(statement))
             .await
@@ -302,7 +365,7 @@ impl QueryExecutor {
         match result {
             Some(row) => {
                 let exists = match backend {
-                    DbBackend::Postgres => row.try_get_by_index(0).unwrap_or(false),
+                    Backend::Postgres => row.try_get_by_index(0).unwrap_or(false),
                     _ => {
                         let value: i32 = row.try_get_by_index(0).unwrap_or(0);
                         value > 0
@@ -385,7 +448,7 @@ impl QueryExecutor {
         // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+).
         // SeaORM exposes both MySQL and MariaDB as DbBackend::MySql, so prefer
         // TideORM's configured database type when it is available.
-        let backend = conn.get_database_backend();
+        let backend = Backend::from_sea_orm(conn.get_database_backend());
         let supports_returning = supports_batch_insert_returning(
             crate::config::TideConfig::get_database_type(),
             backend,

@@ -155,18 +155,8 @@ impl Database {
             return db_type;
         }
 
-        use crate::internal::DbBackend;
         match self.__internal_backend() {
-            Ok(DbBackend::Postgres) => crate::config::DatabaseType::Postgres,
-            Ok(DbBackend::MySql) => crate::config::DatabaseType::MySQL,
-            Ok(DbBackend::Sqlite) => crate::config::DatabaseType::SQLite,
-            Ok(other) => {
-                tide_warn!(
-                    "Unknown database backend {:?}, defaulting to Postgres",
-                    other
-                );
-                crate::config::DatabaseType::Postgres
-            }
+            Ok(backend) => backend.as_database_type(),
             Err(err) => {
                 tide_warn!(
                     "Unable to inspect database backend for disconnected handle: {}. Defaulting to Postgres",
@@ -177,14 +167,18 @@ impl Database {
         }
     }
 
-    /// Get the raw SeaORM database backend (for internal use only)
+    /// Get TideORM's runtime backend identifier (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_backend(&self) -> Result<crate::internal::DbBackend> {
+    pub fn __internal_backend(&self) -> Result<crate::internal::Backend> {
         use crate::internal::ConnectionTrait;
 
         Ok(match self.current_handle()? {
-            DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
-            DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+            DatabaseHandle::Connection(inner) => {
+                crate::internal::Backend::from_sea_orm(inner.connection().get_database_backend())
+            }
+            DatabaseHandle::Transaction(tx) => {
+                crate::internal::Backend::from_sea_orm(tx.as_ref().get_database_backend())
+            }
             #[cfg(test)]
             DatabaseHandle::TestScope => {
                 unreachable!("test scope marker does not carry a database backend")

@@ -397,31 +397,12 @@ impl TideConfig {
     }
 
     async fn detect_server_version(db: &Database) -> Result<String> {
-        use crate::internal::{ConnectionTrait, DbBackend, Statement};
-
-        let conn = db.__internal_connection()?;
-        let backend = conn.get_database_backend();
-
-        if backend != DbBackend::MySql {
+        if !matches!(db.__internal_backend()?, crate::internal::Backend::MySql) {
             return Err(crate::error::Error::internal("Not a MySQL-type connection"));
         }
 
-        let stmt = Statement::from_string(backend, "SELECT VERSION() AS version".to_string());
-        let result = conn
-            .query_one_raw(stmt)
-            .await
-            .map_err(|e| crate::error::Error::query(e.to_string()))?;
-
-        match result {
-            Some(row) => {
-                let version: String = row
-                    .try_get("", "version")
-                    .map_err(|e| crate::error::Error::query(e.to_string()))?;
-                Ok(version)
-            }
-            None => Err(crate::error::Error::query(
-                "Could not retrieve server version",
-            )),
-        }
+        db.__query_scalar::<String>("SELECT VERSION() AS version", "version")
+            .await?
+            .ok_or_else(|| crate::error::Error::query("Could not retrieve server version"))
     }
 }

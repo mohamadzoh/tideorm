@@ -21,7 +21,7 @@ use crate::internal::sql_safety::{
     sanitize_postgres_proximity_tsquery_literals as sanitize_postgres_proximity_tsquery,
     sanitize_postgres_tsquery_literals as sanitize_postgres_tsquery,
 };
-use crate::internal::{ConnectionTrait, FromQueryResult, Statement, Value};
+use crate::internal::{ConnectionTrait, FromQueryResult, Value, build_statement_with_values};
 use crate::model::Model;
 
 // =============================================================================
@@ -396,7 +396,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let (sql, params) = self.build_sql(db_type)?;
 
         let backend = db.__internal_backend()?;
-        let statement = Statement::from_sql_and_values(backend, &sql, params);
+        let statement = build_statement_with_values(backend, &sql, params);
 
         let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
@@ -430,7 +430,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let (sql, params) = self.build_ranked_sql(db_type)?;
 
         let backend = db.__internal_backend()?;
-        let statement = Statement::from_sql_and_values(backend, &sql, params);
+        let statement = build_statement_with_values(backend, &sql, params);
 
         let results = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {
@@ -473,7 +473,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let (sql, params) = self.build_count_sql(db_type)?;
 
         let backend = db.__internal_backend()?;
-        let statement = Statement::from_sql_and_values(backend, &sql, params);
+        let statement = build_statement_with_values(backend, &sql, params);
 
         let result = match db.__get_connection()? {
             crate::database::ConnectionRef::Database(conn) => {

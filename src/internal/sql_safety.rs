@@ -1,5 +1,5 @@
 use crate::config::DatabaseType;
-use crate::internal::DbBackend;
+use crate::internal::Backend;
 
 pub(crate) fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
@@ -297,14 +297,8 @@ pub(crate) fn quote_ident(db_type: DatabaseType, name: &str) -> String {
     format!("{}{}{}", q, escaped, q)
 }
 
-pub(crate) fn quote_ident_for_backend(backend: DbBackend, name: &str) -> String {
-    let db_type = match backend {
-        DbBackend::Postgres => DatabaseType::Postgres,
-        DbBackend::MySql => DatabaseType::MySQL,
-        DbBackend::Sqlite => DatabaseType::SQLite,
-        _ => DatabaseType::Postgres,
-    };
-    quote_ident(db_type, name)
+pub(crate) fn quote_ident_for_backend(backend: Backend, name: &str) -> String {
+    quote_ident(backend.as_database_type(), name)
 }
 
 pub(crate) fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option<String> {

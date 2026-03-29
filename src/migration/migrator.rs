@@ -1,6 +1,6 @@
 use crate::database::require_db;
 use crate::error::{Error, Result};
-use crate::internal::{ConnectionTrait, Statement, Value};
+use crate::internal::{ConnectionTrait, Value, build_statement};
 
 use super::{
     DatabaseType, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
@@ -230,7 +230,7 @@ impl Migrator {
             quote("_migrations"),
             quote("version")
         );
-        let statement = Statement::from_string(backend, sql);
+        let statement = build_statement(backend, sql);
 
         let results = db
             .__internal_connection()?

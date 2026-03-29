@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use std::cell::RefCell;
 
 use crate::error::{Error, Result};
-use crate::internal::{DbBackend, InternalConnection};
+use crate::internal::{Backend, InternalConnection};
 
 use super::{ConnectionRef, Database};
 
@@ -197,12 +197,16 @@ pub fn __current_connection() -> Result<ConnectionRef> {
 }
 
 #[doc(hidden)]
-pub fn __current_backend() -> Result<DbBackend> {
+pub fn __current_backend() -> Result<Backend> {
     use crate::internal::ConnectionTrait;
 
     Ok(match current_scope_handle()? {
-        DatabaseHandle::Connection(inner) => inner.connection().get_database_backend(),
-        DatabaseHandle::Transaction(tx) => tx.as_ref().get_database_backend(),
+        DatabaseHandle::Connection(inner) => {
+            Backend::from_sea_orm(inner.connection().get_database_backend())
+        }
+        DatabaseHandle::Transaction(tx) => {
+            Backend::from_sea_orm(tx.as_ref().get_database_backend())
+        }
         #[cfg(test)]
         DatabaseHandle::TestScope => unreachable!("test scope marker does not carry a backend"),
     })

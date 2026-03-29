@@ -23,10 +23,10 @@ impl Database {
 
     /// Execute a raw SQL query and return all results
     pub async fn raw<T: crate::model::Model>(sql: &str) -> Result<Vec<T>> {
-        use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
+        use crate::internal::{ConnectionTrait, FromQueryResult, build_statement};
 
         let backend = crate::database::__current_backend()?;
-        let stmt = Statement::from_string(backend, sql.to_string());
+        let stmt = build_statement(backend, sql.to_string());
 
         let results = match crate::database::__current_connection()? {
             ConnectionRef::Database(conn) => {
@@ -65,11 +65,11 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<T>> {
-        use crate::internal::{ConnectionTrait, FromQueryResult, Statement};
+        use crate::internal::{ConnectionTrait, FromQueryResult, build_statement_with_values};
 
         let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(
+                let stmt = build_statement_with_values(
                     conn.connection().get_database_backend(),
                     sql,
                     params,
@@ -78,7 +78,7 @@ impl Database {
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
-                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
             }
         }
@@ -128,11 +128,11 @@ impl Database {
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<u64> {
-        use crate::internal::{ConnectionTrait, Statement};
+        use crate::internal::{ConnectionTrait, build_statement_with_values};
 
         let result = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(
+                let stmt = build_statement_with_values(
                     conn.connection().get_database_backend(),
                     sql,
                     params,
@@ -141,7 +141,7 @@ impl Database {
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
-                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().execute_raw(stmt)).await
             }
         }
@@ -152,10 +152,10 @@ impl Database {
 
     /// Execute a raw SQL query and return results as JSON
     pub async fn raw_json(sql: &str) -> Result<Vec<serde_json::Value>> {
-        use crate::internal::{ConnectionTrait, Statement};
+        use crate::internal::{ConnectionTrait, build_statement};
 
         let backend = crate::database::__current_backend()?;
-        let stmt = Statement::from_string(backend, sql.to_string());
+        let stmt = build_statement(backend, sql.to_string());
 
         let results = match crate::database::__current_connection()? {
             ConnectionRef::Database(conn) => {
@@ -181,16 +181,44 @@ impl Database {
     }
 
     #[doc(hidden)]
+    pub async fn __query_scalar<T>(&self, sql: &str, column: &str) -> Result<Option<T>>
+    where
+        T: crate::internal::TryGetable,
+    {
+        use crate::internal::{ConnectionTrait, build_statement};
+
+        let result = match self.__get_connection()? {
+            ConnectionRef::Database(conn) => {
+                let stmt = build_statement(conn.connection().get_database_backend(), sql.to_string());
+                crate::profiling::__profile_future(conn.connection().query_one_raw(stmt)).await
+            }
+            ConnectionRef::Transaction(tx) => {
+                let stmt = build_statement(tx.as_ref().get_database_backend(), sql.to_string());
+                crate::profiling::__profile_future(tx.as_ref().query_one_raw(stmt)).await
+            }
+        }
+        .map_err(|e| Error::query(e.to_string()))?;
+
+        match result {
+            Some(row) => row
+                .try_get("", column)
+                .map(Some)
+                .map_err(|e| Error::query(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    #[doc(hidden)]
     pub async fn __raw_json_with_params(
         &self,
         sql: &str,
         params: Vec<crate::internal::Value>,
     ) -> Result<Vec<serde_json::Value>> {
-        use crate::internal::{ConnectionTrait, Statement};
+        use crate::internal::{ConnectionTrait, build_statement_with_values};
 
         let results = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = Statement::from_sql_and_values(
+                let stmt = build_statement_with_values(
                     conn.connection().get_database_backend(),
                     sql,
                     params,
@@ -199,7 +227,7 @@ impl Database {
             }
             ConnectionRef::Transaction(tx) => {
                 let stmt =
-                    Statement::from_sql_and_values(tx.as_ref().get_database_backend(), sql, params);
+                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
                 crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
             }
         }

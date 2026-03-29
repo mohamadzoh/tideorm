@@ -3,7 +3,7 @@ use super::{
     supports_batch_insert_returning,
 };
 use crate::config::DatabaseType;
-use crate::internal::{ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
+use crate::internal::{Backend, ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
 
 #[tideorm::model(table = "internal_count_users")]
 struct InternalCountUser {
@@ -22,15 +22,15 @@ struct InternalSoftDeleteUser {
 
 #[test]
 fn batch_insert_returning_supports_postgres_backend_without_config() {
-    assert!(supports_batch_insert_returning(None, DbBackend::Postgres));
+    assert!(supports_batch_insert_returning(None, Backend::Postgres));
 }
 
 #[test]
 fn batch_insert_returning_rejects_mysql_backend_without_mariadb_config() {
-    assert!(!supports_batch_insert_returning(None, DbBackend::MySql));
+    assert!(!supports_batch_insert_returning(None, Backend::MySql));
     assert!(!supports_batch_insert_returning(
         Some(DatabaseType::MySQL),
-        DbBackend::MySql,
+        Backend::MySql,
     ));
 }
 
@@ -38,7 +38,7 @@ fn batch_insert_returning_rejects_mysql_backend_without_mariadb_config() {
 fn batch_insert_returning_accepts_mariadb_config_on_mysql_backend() {
     assert!(supports_batch_insert_returning(
         Some(DatabaseType::MariaDB),
-        DbBackend::MySql,
+        Backend::MySql,
     ));
 }
 
@@ -46,7 +46,7 @@ fn batch_insert_returning_accepts_mariadb_config_on_mysql_backend() {
 fn batch_insert_returning_rejects_sqlite_even_though_it_supports_returning() {
     assert!(!supports_batch_insert_returning(
         Some(DatabaseType::SQLite),
-        DbBackend::Sqlite,
+        Backend::Sqlite,
     ));
 }
 
@@ -54,11 +54,11 @@ fn batch_insert_returning_rejects_sqlite_even_though_it_supports_returning() {
 fn batch_insert_returning_rejects_config_backend_mismatches() {
     assert!(!supports_batch_insert_returning(
         Some(DatabaseType::Postgres),
-        DbBackend::MySql,
+        Backend::MySql,
     ));
     assert!(!supports_batch_insert_returning(
         Some(DatabaseType::MariaDB),
-        DbBackend::Postgres,
+        Backend::Postgres,
     ));
 }
 
@@ -74,7 +74,7 @@ fn count_select_omits_where_without_condition() {
 
 #[test]
 fn exists_any_statement_uses_select_exists_probe() {
-    let statement = build_exists_any_statement::<InternalCountUser>(DbBackend::Postgres);
+    let statement = build_exists_any_statement::<InternalCountUser>(Backend::Postgres);
 
     assert_eq!(
         statement.sql,
@@ -111,7 +111,7 @@ fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
 
 #[test]
 fn exists_any_statement_preserves_soft_delete_scope() {
-    let statement = build_exists_any_statement::<InternalSoftDeleteUser>(DbBackend::Postgres);
+    let statement = build_exists_any_statement::<InternalSoftDeleteUser>(Backend::Postgres);
 
     assert!(
         statement

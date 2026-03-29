@@ -612,13 +612,13 @@ impl SchemaWriter {
 
     /// Introspect PostgreSQL database
     async fn introspect_postgres() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend, Statement, TryGetable};
+        use sea_orm::{ConnectionTrait, DbBackend, TryGetable};
 
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(Statement::from_string(
+            .query_all_raw(crate::internal::build_statement(
                 DbBackend::Postgres,
                 "SELECT table_schema, table_name FROM information_schema.tables 
              WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
@@ -642,7 +642,7 @@ impl SchemaWriter {
 
             // Get columns
             let col_rows = conn
-                .query_all_raw(Statement::from_sql_and_values(
+                .query_all_raw(crate::internal::build_statement_with_values(
                     DbBackend::Postgres,
                     "SELECT column_name, data_type, is_nullable, column_default
                  FROM information_schema.columns
@@ -655,7 +655,7 @@ impl SchemaWriter {
 
             // Get primary key
             let pk_rows = conn
-                .query_all_raw(Statement::from_sql_and_values(
+                .query_all_raw(crate::internal::build_statement_with_values(
                     DbBackend::Postgres,
                     "SELECT c.column_name
                  FROM information_schema.table_constraints tc
@@ -679,7 +679,7 @@ impl SchemaWriter {
 
             // Get indexes
             let index_rows = conn
-                .query_all_raw(Statement::from_sql_and_values(
+                .query_all_raw(crate::internal::build_statement_with_values(
                     DbBackend::Postgres,
                     "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
                  FROM pg_class t
@@ -761,13 +761,13 @@ impl SchemaWriter {
 
     /// Introspect MySQL database
     async fn introspect_mysql() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        use sea_orm::{ConnectionTrait, DbBackend};
 
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get database name from connection (we'll use information_schema)
         let db_name_row = conn
-            .query_one_raw(Statement::from_string(
+            .query_one_raw(crate::internal::build_statement(
                 DbBackend::MySql,
                 "SELECT DATABASE() as db_name",
             ))
@@ -784,7 +784,7 @@ impl SchemaWriter {
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(Statement::from_sql_and_values(
+            .query_all_raw(crate::internal::build_statement_with_values(
                 DbBackend::MySql,
                 "SELECT table_name FROM information_schema.tables 
              WHERE table_schema = ? AND table_type = 'BASE TABLE'
@@ -803,7 +803,7 @@ impl SchemaWriter {
                 .map_err(|e| Error::query(e.to_string()))?;
 
             // Get columns
-            let col_rows = conn.query_all_raw(Statement::from_sql_and_values(
+            let col_rows = conn.query_all_raw(crate::internal::build_statement_with_values(
                 DbBackend::MySql,
                 "SELECT column_name, column_type, is_nullable, column_default, column_key, extra
                  FROM information_schema.columns
@@ -814,7 +814,7 @@ impl SchemaWriter {
 
             // Get indexes
             let index_rows = conn
-                .query_all_raw(Statement::from_sql_and_values(
+                .query_all_raw(crate::internal::build_statement_with_values(
                     DbBackend::MySql,
                     "SELECT index_name, non_unique, column_name
                  FROM information_schema.statistics
@@ -917,13 +917,13 @@ impl SchemaWriter {
 
     /// Introspect SQLite database
     async fn introspect_sqlite() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+        use sea_orm::{ConnectionTrait, DbBackend};
 
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(Statement::from_string(
+            .query_all_raw(crate::internal::build_statement(
                 DbBackend::Sqlite,
                 "SELECT name FROM sqlite_master 
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -942,7 +942,7 @@ impl SchemaWriter {
 
             // Get table info (columns)
             let col_rows = conn
-                .query_all_raw(Statement::from_string(
+                .query_all_raw(crate::internal::build_statement(
                     DbBackend::Sqlite,
                     format!("PRAGMA table_info({})", quoted_table_name),
                 ))
@@ -951,7 +951,7 @@ impl SchemaWriter {
 
             // Get indexes
             let index_list = conn
-                .query_all_raw(Statement::from_string(
+                .query_all_raw(crate::internal::build_statement(
                     DbBackend::Sqlite,
                     format!("PRAGMA index_list({})", quoted_table_name),
                 ))
@@ -971,7 +971,7 @@ impl SchemaWriter {
 
                 // Get columns for this index
                 let idx_info = conn
-                    .query_all_raw(Statement::from_string(
+                    .query_all_raw(crate::internal::build_statement(
                         DbBackend::Sqlite,
                         format!(
                             "PRAGMA index_info({})",
@@ -990,8 +990,6 @@ impl SchemaWriter {
                     indexes.push(IndexDefinition::new(idx_name, columns, is_unique == 1));
                 }
             }
-
-            // Build table schema
             let mut builder = TableSchemaBuilder::new(&table_name);
 
             for row in col_rows {
@@ -1019,7 +1017,6 @@ impl SchemaWriter {
                 if let Some(def) = default {
                     col = col.default(def);
                 }
-
                 builder = builder.column(col);
             }
 

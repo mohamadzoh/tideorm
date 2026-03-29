@@ -57,12 +57,13 @@ use std::sync::OnceLock;
 
 use crate::database::Database;
 use crate::error::{Error, Result};
+use crate::internal::{Backend, build_statement, build_statement_with_values};
 use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::{tide_debug, tide_info, tide_warn};
 
 // Use SeaORM schema management
 use sea_orm::{
-    ConnectionTrait, DbBackend, EntityTrait, Statement,
+    ConnectionTrait, DbBackend, EntityTrait,
     schema::{Schema, SchemaBuilder},
     sea_query::{
         Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, Index,
@@ -464,17 +465,18 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
         if force_sync && table_exists {
             // Drop existing table for force sync
-            let quoted_table = quote_ident_for_backend(backend, &model.table_name);
+            let runtime_backend = Backend::from_sea_orm(backend);
+            let quoted_table = quote_ident_for_backend(runtime_backend, &model.table_name);
             let drop_sql = match backend {
                 DbBackend::Postgres => format!(
                     "DROP TABLE IF EXISTS {}.{} CASCADE",
-                    quote_ident_for_backend(backend, &model.schema_name),
+                    quote_ident_for_backend(runtime_backend, &model.schema_name),
                     quoted_table
                 ),
                 _ => format!("DROP TABLE IF EXISTS {}", quoted_table),
             };
 
-            let drop_stmt = Statement::from_string(backend, drop_sql);
+            let drop_stmt = build_statement(backend, drop_sql);
             conn.execute_raw(drop_stmt)
                 .await
                 .map_err(|e| Error::query(e.to_string()))?;
@@ -502,17 +504,17 @@ async fn check_table_exists(
     backend: DbBackend,
 ) -> Result<bool> {
     let stmt = match backend {
-        DbBackend::Postgres => Statement::from_sql_and_values(
+        DbBackend::Postgres => build_statement_with_values(
             DbBackend::Postgres,
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)",
             vec![schema.into(), table.into()],
         ),
-        DbBackend::MySql => Statement::from_sql_and_values(
+        DbBackend::MySql => build_statement_with_values(
             DbBackend::MySql,
             "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
             vec![table.into()],
         ),
-        DbBackend::Sqlite => Statement::from_sql_and_values(
+        DbBackend::Sqlite => build_statement_with_values(
             DbBackend::Sqlite,
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
             vec![table.into()],
@@ -522,7 +524,7 @@ async fn check_table_exists(
                 "Unknown backend {:?} in check_table_exists, falling back to SQLite SQL",
                 other
             );
-            Statement::from_sql_and_values(
+            build_statement_with_values(
                 other,
                 "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
                 vec![table.into()],
@@ -605,7 +607,7 @@ async fn create_table_from_model_schema(
         _ => table.to_string(PostgresQueryBuilder),
     };
 
-    let create_stmt = Statement::from_string(backend, sql);
+    let create_stmt = build_statement(backend, sql);
     conn.execute_raw(create_stmt)
         .await
         .map_err(|e| Error::query(e.to_string()))?;
