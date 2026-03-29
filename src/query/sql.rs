@@ -1,13 +1,12 @@
 use super::*;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
-use crate::internal::{Condition, Expr, ExprTrait, Value};
+use crate::internal::{
+    Alias, Condition, Expr, ExprTrait, MysqlQueryBuilder, PgBinOper, PostgresQueryBuilder, Query,
+    SimpleExpr, SqliteQueryBuilder, Value,
+};
 use crate::model::Model;
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
-use sea_orm::sea_query::{
-    Alias, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr, SqliteQueryBuilder,
-    extension::postgres::PgBinOper,
-};
 
 pub(crate) mod condition_builders;
 pub(crate) mod debugging;

@@ -204,7 +204,7 @@ fn with_relations_initializes_supported_relation_wrappers() {
 #[test]
 fn generated_related_impls_expose_relation_defs() {
     use tideorm::internal::InternalModel;
-    use tideorm::sea_orm::{Related, RelationType};
+    use tideorm::orm::{Related, RelationType};
 
     let posts = <<User as InternalModel>::Entity as Related<<Post as InternalModel>::Entity>>::to();
     assert_eq!(posts.rel_type, RelationType::HasMany);

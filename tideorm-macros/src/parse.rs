@@ -129,55 +129,49 @@ impl ModelField {
         let base_type = canonical_schema_type(base_type);
 
         let column_type = match base_type.as_str() {
-            "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::sea_orm::ColumnType::SmallInteger),
-            "i32" | "u32" => quote!(::tideorm::sea_orm::ColumnType::Integer),
-            "i64" | "u64" => quote!(::tideorm::sea_orm::ColumnType::BigInteger),
-            "f32" => quote!(::tideorm::sea_orm::ColumnType::Float),
-            "f64" => quote!(::tideorm::sea_orm::ColumnType::Double),
-            "bool" => quote!(::tideorm::sea_orm::ColumnType::Boolean),
-            "String" | "&str" | "str" => quote!(::tideorm::sea_orm::ColumnType::Text),
-            "Uuid" | "uuid::Uuid" => quote!(::tideorm::sea_orm::ColumnType::Uuid),
+            "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
+            "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
+            "i64" | "u64" => quote!(::tideorm::orm::ColumnType::BigInteger),
+            "f32" => quote!(::tideorm::orm::ColumnType::Float),
+            "f64" => quote!(::tideorm::orm::ColumnType::Double),
+            "bool" => quote!(::tideorm::orm::ColumnType::Boolean),
+            "String" | "&str" | "str" => quote!(::tideorm::orm::ColumnType::Text),
+            "Uuid" | "uuid::Uuid" => quote!(::tideorm::orm::ColumnType::Uuid),
             s if s.contains("DateTime<Utc>")
                 || s.contains("DateTime<chrono::Utc>")
                 || s.contains("chrono::DateTime<Utc>")
                 || s.contains("chrono::DateTime<chrono::Utc>") =>
             {
-                quote!(::tideorm::sea_orm::ColumnType::TimestampWithTimeZone)
+                quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
             }
             "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => {
-                quote!(::tideorm::sea_orm::ColumnType::DateTime)
+                quote!(::tideorm::orm::ColumnType::DateTime)
             }
-            "NaiveDate" | "chrono::NaiveDate" => quote!(::tideorm::sea_orm::ColumnType::Date),
-            "NaiveTime" | "chrono::NaiveTime" => quote!(::tideorm::sea_orm::ColumnType::Time),
+            "NaiveDate" | "chrono::NaiveDate" => quote!(::tideorm::orm::ColumnType::Date),
+            "NaiveTime" | "chrono::NaiveTime" => quote!(::tideorm::orm::ColumnType::Time),
             "Decimal" | "rust_decimal::Decimal" => {
-                quote!(::tideorm::sea_orm::ColumnType::Decimal(None))
+                quote!(::tideorm::orm::ColumnType::Decimal(None))
             }
             "Json" | "JsonValue" | "Value" | "serde_json::Value" | "Jsonb" => {
-                quote!(::tideorm::sea_orm::ColumnType::Json)
+                quote!(::tideorm::orm::ColumnType::Json)
             }
-            "Vec<u8>" => quote!(::tideorm::sea_orm::ColumnType::Binary(
-                ::tideorm::sea_orm::sea_query::BlobSize::Blob(None)
+            "Vec<u8>" => quote!(::tideorm::orm::ColumnType::Binary(
+                ::tideorm::orm::sea_query::BlobSize::Blob(None)
             )),
-            "Vec<i32>" | "IntArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
-                ::tideorm::sea_orm::sea_query::RcOrArc::new(
-                    ::tideorm::sea_orm::ColumnType::Integer
-                )
+            "Vec<i32>" | "IntArray" => quote!(::tideorm::orm::ColumnType::Array(
+                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Integer)
             )),
-            "Vec<i64>" | "BigIntArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
-                ::tideorm::sea_orm::sea_query::RcOrArc::new(
-                    ::tideorm::sea_orm::ColumnType::BigInteger
-                )
+            "Vec<i64>" | "BigIntArray" => quote!(::tideorm::orm::ColumnType::Array(
+                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::BigInteger)
             )),
-            "Vec<String>" | "TextArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
-                ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Text)
+            "Vec<String>" | "TextArray" => quote!(::tideorm::orm::ColumnType::Array(
+                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Text)
             )),
-            "Vec<bool>" | "BoolArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
-                ::tideorm::sea_orm::sea_query::RcOrArc::new(
-                    ::tideorm::sea_orm::ColumnType::Boolean
-                )
+            "Vec<bool>" | "BoolArray" => quote!(::tideorm::orm::ColumnType::Array(
+                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Boolean)
             )),
-            "Vec<f64>" | "FloatArray" => quote!(::tideorm::sea_orm::ColumnType::Array(
-                ::tideorm::sea_orm::sea_query::RcOrArc::new(::tideorm::sea_orm::ColumnType::Double)
+            "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
+                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
             )),
             _ => {
                 let message = format!(
@@ -186,7 +180,7 @@ impl ModelField {
                 );
                 quote!({
                     ::core::compile_error!(#message);
-                    ::tideorm::sea_orm::ColumnType::Text
+                    ::tideorm::orm::ColumnType::Text
                 })
             }
         };

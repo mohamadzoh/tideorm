@@ -446,7 +446,8 @@ impl<M: Model> QueryBuilder<M> {
             exists_query.window_functions.clear();
 
             if exists_query.ctes.is_empty() {
-                let (inner_sql, params) = exists_query.build_base_select_sql_with_params_for_db(db_type);
+                let (inner_sql, params) =
+                    exists_query.build_base_select_sql_with_params_for_db(db_type);
                 return (
                     format!(
                         "SELECT EXISTS({} LIMIT 1) AS {}",

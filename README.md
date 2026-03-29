@@ -165,7 +165,7 @@ The docs now ship as an mdBook.
 
 Core chapters:
 - [Getting Started](docs/getting-started.md) - Configuration, type mappings, examples, and testing
-- [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and SeaORM 2.0-inspired helpers
+- [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and advanced TideORM helpers
 - [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
 - [Profiling](docs/profiling.md) - Global query timing, slow-query stats, manual reports, and query analysis
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers

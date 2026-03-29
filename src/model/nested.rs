@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
-use sea_orm::sea_query::OnConflict;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -9,7 +8,7 @@ use crate::callbacks::{
     AfterCreateDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeUpdateDispatch,
 };
 use crate::error::{Error, Result};
-use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, translate_error};
+use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, OnConflict, translate_error};
 
 use super::Model;
 
@@ -190,7 +189,7 @@ where
         .collect();
     let active_models: Vec<_> = related
         .into_iter()
-        .map(|model| model.to_sea_model().into_active_model())
+        .map(|model| model.to_entity_model().into_active_model())
         .collect();
 
     let on_conflict = if update_columns.is_empty() {

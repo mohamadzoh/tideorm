@@ -2,10 +2,10 @@ error[E0080]: evaluation panicked: relation 'author' references an unknown remot
   --> tests/ui/invalid_relation_remote_column.rs:10:1
    |
 10 | #[tideorm::model(table = "articles")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_article::Relation as tideorm::sea_orm::RelationTrait>::def::_` failed here
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_article::Relation as tideorm::internal::RelationTrait>::def::_` failed here
 
 error[E0080]: evaluation panicked: relation 'author' references an unknown remote column 'uuid'
   --> tests/ui/invalid_relation_remote_column.rs:10:1
    |
 10 | #[tideorm::model(table = "articles")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_article::Entity as tideorm::sea_orm::Related<<User as tideorm::internal::InternalModel>::Entity>>::to::_` failed here
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_article::Entity as tideorm::internal::Related<<User as tideorm::internal::InternalModel>::Entity>>::to::_` failed here

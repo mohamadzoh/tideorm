@@ -80,9 +80,9 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         #[allow(non_snake_case, dead_code, unused_imports, clippy::derivable_impls, clippy::enum_variant_names, clippy::redundant_closure)]
         mod #internal_entity_mod {
             use super::*;
-            use ::tideorm::sea_orm as sea_orm;
-            use ::tideorm::sea_orm::entity::prelude::*;
-            use ::tideorm::sea_orm::{ActiveValue, DeriveActiveModel, DeriveEntity, DeriveModel};
+            use ::tideorm::orm as sea_orm;
+            use ::tideorm::orm::entity::prelude::*;
+            use ::tideorm::orm::{ActiveValue, DeriveActiveModel, DeriveEntity, DeriveModel};
 
             #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
             pub struct Entity;
@@ -257,7 +257,7 @@ fn build_relation_defs(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
                             .to(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#foreign_key)
                                 .unwrap_or_else(|| unreachable!(#pivot_error)))
                             .into();
-                        relation.rel_type = ::tideorm::sea_orm::RelationType::HasMany;
+                        relation.rel_type = ::tideorm::orm::RelationType::HasMany;
                         relation
                     }
                 });
@@ -280,9 +280,9 @@ fn build_relation_defs(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
             };
             let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
             let relation_type = if field.has_many.is_some() {
-                quote!(::tideorm::sea_orm::RelationType::HasMany)
+                quote!(::tideorm::orm::RelationType::HasMany)
             } else {
-                quote!(::tideorm::sea_orm::RelationType::HasOne)
+                quote!(::tideorm::orm::RelationType::HasOne)
             };
             let remote_error = format!(
                 "relation '{}' references an unknown remote column '{}'",
@@ -350,7 +350,7 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
                 let pivot_foreign_assert = compile_time_column_assert(&pivot_ty, foreign_key, &pivot_foreign_error);
 
                 return Ok(quote! {
-                    impl ::tideorm::sea_orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
+                    impl ::tideorm::orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
                         fn to() -> RelationDef {
                             #pivot_related_assert
                             #related_column_assert
@@ -369,7 +369,7 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
                                 .to(<#pivot_ty as ::tideorm::internal::InternalModel>::column_from_str(#foreign_key)
                                     .unwrap_or_else(|| unreachable!(#pivot_foreign_error)))
                                 .into();
-                            relation.rel_type = ::tideorm::sea_orm::RelationType::HasMany;
+                            relation.rel_type = ::tideorm::orm::RelationType::HasMany;
                             Some(relation)
                         }
                     }
@@ -393,9 +393,9 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
             };
             let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
             let relation_type = if field.has_many.is_some() {
-                quote!(::tideorm::sea_orm::RelationType::HasMany)
+                quote!(::tideorm::orm::RelationType::HasMany)
             } else {
-                quote!(::tideorm::sea_orm::RelationType::HasOne)
+                quote!(::tideorm::orm::RelationType::HasOne)
             };
             let remote_error = format!(
                 "relation '{}' references an unknown remote column '{}'",
@@ -404,7 +404,7 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
             let remote_assert = compile_time_column_assert(&related_ty, remote_key, &remote_error);
 
             Ok(quote! {
-                impl ::tideorm::sea_orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
+                impl ::tideorm::orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
                     fn to() -> RelationDef {
                         #remote_assert
                         let mut relation: RelationDef = Entity::belongs_to(#related_entity)

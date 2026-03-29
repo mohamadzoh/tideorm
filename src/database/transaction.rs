@@ -70,18 +70,18 @@ impl Database {
 
 /// A database transaction handle
 pub struct Transaction {
-    pub(super) inner: Arc<crate::internal::DatabaseTransaction>,
+    pub(super) inner: Arc<crate::internal::OrmTransaction>,
 }
 
 impl Transaction {
     /// Get a reference to the underlying connection.
-    pub fn connection(&self) -> &crate::internal::DatabaseTransaction {
+    pub fn connection(&self) -> &crate::internal::OrmTransaction {
         self.inner.as_ref()
     }
 
     /// Get the raw internal transaction (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_transaction(&self) -> &crate::internal::DatabaseTransaction {
+    pub fn __internal_transaction(&self) -> &crate::internal::OrmTransaction {
         self.inner.as_ref()
     }
 }
@@ -97,7 +97,7 @@ pub trait Connection: Send + Sync {
 #[doc(hidden)]
 pub enum ConnectionRef {
     Database(Arc<crate::internal::InternalConnection>),
-    Transaction(Arc<crate::internal::DatabaseTransaction>),
+    Transaction(Arc<crate::internal::OrmTransaction>),
 }
 
 impl Connection for Database {

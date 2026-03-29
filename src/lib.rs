@@ -147,9 +147,9 @@ macro_rules! __doctest_tokenizable_user {
 #[doc(hidden)]
 pub mod internal;
 
-/// Re-export sea_orm for internal macro use only
+/// Hidden TideORM-owned ORM facade for macro-generated code.
 #[doc(hidden)]
-pub use sea_orm;
+pub mod orm;
 
 // ============================================================================
 // PUBLIC MODULES

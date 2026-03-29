@@ -98,7 +98,7 @@ impl DatabaseBuilder {
             opts.max_lifetime(lifetime);
         }
 
-        let conn = crate::internal::SeaDatabase::connect(opts)
+        let conn = crate::internal::OrmDatabase::connect(opts)
             .await
             .map_err(|e| Error::connection(e.to_string()))?;
 

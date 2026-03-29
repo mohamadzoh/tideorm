@@ -221,7 +221,7 @@ impl Migrator {
 
     async fn get_applied_migrations(&self) -> Result<Vec<String>> {
         let db = require_db()?;
-        let backend = db.__internal_connection()?.get_database_backend();
+        let backend = db.__internal_backend()?;
         let db_type = detect_database_type(&db);
         let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
         let sql = format!(

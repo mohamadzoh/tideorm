@@ -130,13 +130,7 @@ struct CacheEntry {
 }
 
 impl CacheEntry {
-    fn new(
-        data: Vec<u8>,
-        size_bytes: usize,
-        ttl: Duration,
-        model_name: &str,
-        order: u64,
-    ) -> Self {
+    fn new(data: Vec<u8>, size_bytes: usize, ttl: Duration, model_name: &str, order: u64) -> Self {
         let now = Instant::now();
         Self {
             data,

@@ -52,13 +52,25 @@ fn build_complex_debug_info() -> QueryDebugInfo {
 fn audit_event_schema() -> TableSchema {
     TableSchemaBuilder::new("audit_events")
         .schema("analytics")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key().auto_increment())
+        .column(
+            ColumnSchema::new("id", "BIGINT")
+                .primary_key()
+                .auto_increment(),
+        )
         .column(ColumnSchema::new("tenant_id", "BIGINT").not_null())
         .column(ColumnSchema::new("actor_id", "BIGINT").not_null())
         .column(ColumnSchema::new("status", "VARCHAR(32)").not_null())
         .column(ColumnSchema::new("severity", "VARCHAR(16)").not_null())
-        .column(ColumnSchema::new("attempts", "INTEGER").not_null().default("0"))
-        .column(ColumnSchema::new("archived", "BOOLEAN").not_null().default("false"))
+        .column(
+            ColumnSchema::new("attempts", "INTEGER")
+                .not_null()
+                .default("0"),
+        )
+        .column(
+            ColumnSchema::new("archived", "BOOLEAN")
+                .not_null()
+                .default("false"),
+        )
         .index(IndexDefinition::new(
             "idx_audit_events_tenant_status",
             vec!["tenant_id".to_string(), "status".to_string()],
@@ -80,8 +92,12 @@ fn audit_event_schema() -> TableSchema {
 fn bench_query_debug_snapshot(c: &mut Criterion) {
     let mut group = c.benchmark_group("query_debug_snapshot");
 
-    group.bench_function("simple", |b| b.iter(|| black_box(build_simple_debug_info())));
-    group.bench_function("complex", |b| b.iter(|| black_box(build_complex_debug_info())));
+    group.bench_function("simple", |b| {
+        b.iter(|| black_box(build_simple_debug_info()))
+    });
+    group.bench_function("complex", |b| {
+        b.iter(|| black_box(build_complex_debug_info()))
+    });
 
     group.finish();
 }
@@ -101,7 +117,11 @@ fn bench_schema_generation(c: &mut Criterion) {
     let table = audit_event_schema();
     let mut group = c.benchmark_group("schema_generation");
 
-    for db_type in [DatabaseType::Postgres, DatabaseType::MySQL, DatabaseType::SQLite] {
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::SQLite,
+    ] {
         group.bench_with_input(
             BenchmarkId::new("generate", format!("{db_type:?}")),
             &db_type,
@@ -129,7 +149,11 @@ fn bench_rust_type_mapping(c: &mut Criterion) {
     ];
     let mut group = c.benchmark_group("rust_type_to_sql");
 
-    for db_type in [DatabaseType::Postgres, DatabaseType::MySQL, DatabaseType::SQLite] {
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::SQLite,
+    ] {
         group.bench_with_input(
             BenchmarkId::new("map_five_types", format!("{db_type:?}")),
             &db_type,

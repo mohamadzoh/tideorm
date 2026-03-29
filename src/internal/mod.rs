@@ -1,8 +1,8 @@
-//! Internal SeaORM adapter layer
+//! Internal ORM adapter layer
 //!
 //!
-//! This module serves as the adapter between TideORM's public API and SeaORM's internals.
-//! All SeaORM interactions happen through this layer, ensuring:
+//! This module serves as the adapter between TideORM's public API and the
+//! current ORM engine.
 //!
 //! 2. We can swap the underlying ORM engine if needed
 //! 3. Error translation happens in one place
@@ -14,18 +14,25 @@ use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
 pub(crate) mod sql_safety;
 
-// Re-export SeaORM internally (but this module itself is #[doc(hidden)])
-// Allow unused_imports here: we re-export broadly so other modules can import selectively
+// Re-export the current ORM engine internally through TideORM's facade.
+// Allow unused_imports here: we re-export broadly so other modules can import selectively.
 #[allow(unused_imports)]
-pub use sea_orm::{
+pub use crate::orm::{
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
-    ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
-    DatabaseTransaction, DbBackend, DbErr, DeleteMany, DeriveEntityModel, DeriveRelation,
-    EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden, IntoActiveModel, Iterable,
-    LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
-    Related, RelationDef, RelationTrait, Statement, TransactionTrait, TryGetable, Value,
+    ConnectOptions, ConnectionTrait, Database as OrmDatabase, DatabaseConnection as OrmConnection,
+    DatabaseTransaction as OrmTransaction, DbBackend as OrmBackend, DbErr as OrmError, DeleteMany,
+    DeriveEntityModel, DeriveRelation, EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden,
+    IntoActiveModel, Iterable, LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait, Related, RelationDef, RelationTrait, Statement as OrmStatement,
+    TransactionTrait, TryGetable, Value,
     entity::prelude::*,
-    sea_query::{Asterisk, Expr, ExprTrait},
+    schema::{Schema, SchemaBuilder},
+    sea_query::{
+        Alias, Asterisk, ColumnDef as OrmColumnDef, ColumnType as OrmColumnType, Expr, ExprTrait,
+        Index, MysqlQueryBuilder, OnConflict, PostgresQueryBuilder, Query, SimpleExpr,
+        SqliteQueryBuilder, Table, extension::postgres::PgBinOper,
+    },
+    sqlx,
 };
 
 /// TideORM-owned runtime backend identifier.
@@ -41,23 +48,6 @@ pub enum Backend {
 }
 
 impl Backend {
-    pub(crate) fn from_sea_orm(backend: DbBackend) -> Self {
-        match backend {
-            DbBackend::Postgres => Self::Postgres,
-            DbBackend::MySql => Self::MySql,
-            DbBackend::Sqlite => Self::Sqlite,
-            _ => Self::Postgres,
-        }
-    }
-
-    pub(crate) fn as_sea_orm(self) -> DbBackend {
-        match self {
-            Self::Postgres => DbBackend::Postgres,
-            Self::MySql => DbBackend::MySql,
-            Self::Sqlite => DbBackend::Sqlite,
-        }
-    }
-
     pub(crate) fn as_database_type(self) -> crate::config::DatabaseType {
         match self {
             Self::Postgres => crate::config::DatabaseType::Postgres,
@@ -67,66 +57,91 @@ impl Backend {
     }
 }
 
-pub(crate) trait StatementBackend {
-    fn as_statement_backend(self) -> DbBackend;
-}
-
-impl StatementBackend for Backend {
-    fn as_statement_backend(self) -> DbBackend {
-        self.as_sea_orm()
+impl From<OrmBackend> for Backend {
+    fn from(backend: OrmBackend) -> Self {
+        match backend {
+            OrmBackend::Postgres => Self::Postgres,
+            OrmBackend::MySql => Self::MySql,
+            OrmBackend::Sqlite => Self::Sqlite,
+            _ => Self::Postgres,
+        }
     }
 }
 
-impl StatementBackend for DbBackend {
-    fn as_statement_backend(self) -> DbBackend {
+impl From<Backend> for OrmBackend {
+    fn from(backend: Backend) -> Self {
+        match backend {
+            Backend::Postgres => OrmBackend::Postgres,
+            Backend::MySql => OrmBackend::MySql,
+            Backend::Sqlite => OrmBackend::Sqlite,
+        }
+    }
+}
+
+pub(crate) trait StatementBackend {
+    fn into_statement_backend(self) -> OrmBackend;
+}
+
+impl StatementBackend for Backend {
+    fn into_statement_backend(self) -> OrmBackend {
+        self.into()
+    }
+}
+
+impl StatementBackend for OrmBackend {
+    fn into_statement_backend(self) -> OrmBackend {
         self
     }
 }
 
-pub(crate) fn build_statement<B>(backend: B, sql: impl Into<String>) -> Statement
+pub(crate) fn build_statement<B>(backend: B, sql: impl Into<String>) -> OrmStatement
 where
     B: StatementBackend,
 {
-    Statement::from_string(backend.as_statement_backend(), sql.into())
+    OrmStatement::from_string(backend.into_statement_backend(), sql.into())
 }
 
-pub(crate) fn build_statement_with_values<B>(backend: B, sql: &str, params: Vec<Value>) -> Statement
+pub(crate) fn build_statement_with_values<B>(
+    backend: B,
+    sql: &str,
+    params: Vec<Value>,
+) -> OrmStatement
 where
     B: StatementBackend,
 {
-    Statement::from_sql_and_values(backend.as_statement_backend(), sql, params)
+    OrmStatement::from_sql_and_values(backend.into_statement_backend(), sql, params)
 }
 
-/// Internal trait that maps TideORM models to SeaORM entities
+/// Internal trait that maps TideORM models to ORM engine entities.
 /// This is implemented by TideORM's model macros.
 #[doc(hidden)]
 pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     type Entity: EntityTrait;
     type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + ActiveModelBehavior + Send;
 
-    /// Convert TideORM model to SeaORM ActiveModel
+    /// Convert a TideORM model to the ORM engine's active model.
     fn into_active_model(self) -> Self::ActiveModel;
 
-    /// Convert SeaORM Model to TideORM model
-    fn from_sea_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
+    /// Convert the generated entity model to a TideORM model.
+    fn from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
 
-    /// Convert a TideORM model into its generated SeaORM model.
-    fn to_sea_model(&self) -> <Self::Entity as EntityTrait>::Model;
+    /// Convert a TideORM model into its generated entity model.
+    fn to_entity_model(&self) -> <Self::Entity as EntityTrait>::Model;
 
-    /// Resolve a SeaORM column enum from either a field name or column name.
+    /// Resolve an entity column enum from either a field name or column name.
     fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column>;
 
-    /// Get SeaORM primary key columns.
+    /// Get entity primary key columns.
     fn primary_key_columns() -> Vec<<Self::Entity as EntityTrait>::Column> {
         Vec::new()
     }
 
-    /// Get the SeaORM condition for an exact primary key match.
+    /// Get the ORM condition for an exact primary key match.
     fn primary_key_condition(
         primary_key: &<Self as crate::model::ModelMeta>::PrimaryKey,
     ) -> Condition;
 
-    /// Get SeaORM primary key column (optional, for single-column operations)
+    /// Get the primary key column (optional, for single-column operations).
     fn primary_key_column() -> Option<<Self::Entity as EntityTrait>::Column> {
         Self::primary_key_columns().into_iter().next()
     }
@@ -143,36 +158,36 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
 /// Internal connection wrapper
 #[doc(hidden)]
 pub struct InternalConnection {
-    pub(crate) conn: DatabaseConnection,
+    pub(crate) conn: OrmConnection,
 }
 
 impl InternalConnection {
     pub async fn connect(url: &str) -> Result<Self> {
-        let conn = SeaDatabase::connect(url)
+        let conn = OrmDatabase::connect(url)
             .await
             .map_err(|e| Error::connection(e.to_string()))?;
         Ok(Self { conn })
     }
 
-    pub fn connection(&self) -> &DatabaseConnection {
+    pub fn connection(&self) -> &OrmConnection {
         &self.conn
     }
 }
 
-/// Translate SeaORM DbErr to TideORM Error
-pub(crate) fn translate_error(err: DbErr) -> Error {
+/// Translate ORM engine errors to TideORM errors.
+pub(crate) fn translate_error(err: OrmError) -> Error {
     match err {
-        DbErr::RecordNotFound(msg) => Error::not_found(msg),
-        DbErr::ConnectionAcquire(e) => Error::connection(e.to_string()),
-        DbErr::Conn(e) => Error::connection(e.to_string()),
-        DbErr::Exec(e) => Error::query(e.to_string()),
-        DbErr::Query(e) => Error::query(e.to_string()),
-        DbErr::ConvertFromU64(msg) => Error::conversion(msg),
-        DbErr::UnpackInsertId => Error::query("Failed to get insert ID".to_string()),
-        DbErr::UpdateGetPrimaryKey => {
+        OrmError::RecordNotFound(msg) => Error::not_found(msg),
+        OrmError::ConnectionAcquire(e) => Error::connection(e.to_string()),
+        OrmError::Conn(e) => Error::connection(e.to_string()),
+        OrmError::Exec(e) => Error::query(e.to_string()),
+        OrmError::Query(e) => Error::query(e.to_string()),
+        OrmError::ConvertFromU64(msg) => Error::conversion(msg),
+        OrmError::UnpackInsertId => Error::query("Failed to get insert ID".to_string()),
+        OrmError::UpdateGetPrimaryKey => {
             Error::query("Failed to get primary key after update".to_string())
         }
-        DbErr::Custom(msg) => Error::internal(msg),
+        OrmError::Custom(msg) => Error::internal(msg),
         _ => Error::internal(err.to_string()),
     }
 }
@@ -224,7 +239,7 @@ where
     select
 }
 
-fn build_exists_any_statement<M>(backend: Backend) -> Statement
+fn build_exists_any_statement<M>(backend: Backend) -> OrmStatement
 where
     M: InternalModel + crate::model::Model,
 {
@@ -278,7 +293,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("find_all()")))?;
 
-        Ok(results.into_iter().map(M::from_sea_model).collect())
+        Ok(results.into_iter().map(M::from_entity_model).collect())
     }
 
     /// Get first record
@@ -293,7 +308,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("first()")))?;
 
-        Ok(result.map(M::from_sea_model))
+        Ok(result.map(M::from_entity_model))
     }
 
     /// Get last record (by primary key descending)
@@ -321,7 +336,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>(query_label)))?;
 
-        Ok(result.map(M::from_sea_model))
+        Ok(result.map(M::from_entity_model))
     }
 
     /// Count records
@@ -355,7 +370,7 @@ impl QueryExecutor {
         M: InternalModel + crate::model::Model,
         C: ConnectionTrait,
     {
-        let backend = Backend::from_sea_orm(conn.get_database_backend());
+        let backend = Backend::from(conn.get_database_backend());
         let statement = build_exists_any_statement::<M>(backend);
         let result = crate::profiling::__profile_future(conn.query_one_raw(statement))
             .await
@@ -394,7 +409,7 @@ impl QueryExecutor {
                 )))
             })?;
 
-        Ok(results.into_iter().map(M::from_sea_model).collect())
+        Ok(results.into_iter().map(M::from_entity_model).collect())
     }
 
     /// Delete a record
@@ -442,20 +457,20 @@ impl QueryExecutor {
                     .await
                     .map_err(translate_error)
                     .map_err(|err| err.with_context(error_context.clone()))?;
-            return Ok(vec![M::from_sea_model(result)]);
+            return Ok(vec![M::from_entity_model(result)]);
         }
 
         // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+).
-        // SeaORM exposes both MySQL and MariaDB as DbBackend::MySql, so prefer
+        // The current ORM engine exposes both MySQL and MariaDB as OrmBackend::MySql, so prefer
         // TideORM's configured database type when it is available.
-        let backend = Backend::from_sea_orm(conn.get_database_backend());
+        let backend = Backend::from(conn.get_database_backend());
         let supports_returning = supports_batch_insert_returning(
             crate::config::TideConfig::get_database_type(),
             backend,
         );
 
         if supports_returning {
-            // Build batch insert using SeaORM's insert_many with RETURNING
+            // Build batch insert using the ORM engine's insert_many with RETURNING
             let active_models: Vec<_> = models.into_iter().map(|m| m.into_active_model()).collect();
 
             let results = M::Entity::insert_many(active_models).exec_with_returning(conn);
@@ -464,7 +479,7 @@ impl QueryExecutor {
                 .map_err(translate_error)
                 .map_err(|err| err.with_context(error_context.clone()))?;
 
-            Ok(results.into_iter().map(M::from_sea_model).collect())
+            Ok(results.into_iter().map(M::from_entity_model).collect())
         } else {
             // MySQL/SQLite: fall back to individual inserts
             // MySQL doesn't support multi-row INSERT ... RETURNING
@@ -476,7 +491,7 @@ impl QueryExecutor {
                         .await
                         .map_err(translate_error)
                         .map_err(|err| err.with_context(error_context.clone()))?;
-                results.push(M::from_sea_model(result));
+                results.push(M::from_entity_model(result));
             }
             Ok(results)
         }

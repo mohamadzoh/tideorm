@@ -444,7 +444,7 @@ impl Seeder {
 
         use crate::internal::build_statement;
 
-        let backend = crate::internal::Backend::from_sea_orm(
+        let backend = crate::internal::Backend::from(
             database.__internal_connection()?.get_database_backend(),
         );
         let q = |id: &str| quote_ident_for_backend(backend, id);
@@ -476,7 +476,7 @@ impl Seeder {
     /// Record a seed as executed
     async fn record_seed(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = crate::internal::Backend::from_sea_orm(
+        let backend = crate::internal::Backend::from(
             database.__internal_connection()?.get_database_backend(),
         );
         let q = |id: &str| quote_ident_for_backend(backend, id);
@@ -493,7 +493,7 @@ impl Seeder {
     /// Remove a seed record
     async fn remove_seed_record(&self, name: &str) -> Result<()> {
         let database = require_db()?;
-        let backend = crate::internal::Backend::from_sea_orm(
+        let backend = crate::internal::Backend::from(
             database.__internal_connection()?.get_database_backend(),
         );
         let q = |id: &str| quote_ident_for_backend(backend, id);

@@ -16,6 +16,9 @@ use std::path::Path;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::{format_identifier_reference, quote_ident};
+use crate::internal::{
+    Backend, ConnectionTrait, TryGetable, build_statement, build_statement_with_values,
+};
 use crate::model::IndexDefinition;
 
 // Global schema registry for auto-generation
@@ -612,14 +615,12 @@ impl SchemaWriter {
 
     /// Introspect PostgreSQL database
     async fn introspect_postgres() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend, TryGetable};
-
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(crate::internal::build_statement(
-                DbBackend::Postgres,
+            .query_all_raw(build_statement(
+                Backend::Postgres,
                 "SELECT table_schema, table_name FROM information_schema.tables 
              WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
              AND table_schema NOT LIKE 'pg_toast%'
@@ -642,8 +643,8 @@ impl SchemaWriter {
 
             // Get columns
             let col_rows = conn
-                .query_all_raw(crate::internal::build_statement_with_values(
-                    DbBackend::Postgres,
+                .query_all_raw(build_statement_with_values(
+                    Backend::Postgres,
                     "SELECT column_name, data_type, is_nullable, column_default
                  FROM information_schema.columns
                  WHERE table_schema = $1 AND table_name = $2
@@ -655,8 +656,8 @@ impl SchemaWriter {
 
             // Get primary key
             let pk_rows = conn
-                .query_all_raw(crate::internal::build_statement_with_values(
-                    DbBackend::Postgres,
+                .query_all_raw(build_statement_with_values(
+                    Backend::Postgres,
                     "SELECT c.column_name
                  FROM information_schema.table_constraints tc
                  JOIN information_schema.constraint_column_usage AS ccu 
@@ -679,8 +680,8 @@ impl SchemaWriter {
 
             // Get indexes
             let index_rows = conn
-                .query_all_raw(crate::internal::build_statement_with_values(
-                    DbBackend::Postgres,
+                .query_all_raw(build_statement_with_values(
+                    Backend::Postgres,
                     "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
                  FROM pg_class t
                       JOIN pg_namespace ns ON ns.oid = t.relnamespace
@@ -761,14 +762,12 @@ impl SchemaWriter {
 
     /// Introspect MySQL database
     async fn introspect_mysql() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend};
-
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get database name from connection (we'll use information_schema)
         let db_name_row = conn
-            .query_one_raw(crate::internal::build_statement(
-                DbBackend::MySql,
+            .query_one_raw(build_statement(
+                Backend::MySql,
                 "SELECT DATABASE() as db_name",
             ))
             .await
@@ -784,8 +783,8 @@ impl SchemaWriter {
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(crate::internal::build_statement_with_values(
-                DbBackend::MySql,
+            .query_all_raw(build_statement_with_values(
+                Backend::MySql,
                 "SELECT table_name FROM information_schema.tables 
              WHERE table_schema = ? AND table_type = 'BASE TABLE'
              ORDER BY table_name",
@@ -803,8 +802,8 @@ impl SchemaWriter {
                 .map_err(|e| Error::query(e.to_string()))?;
 
             // Get columns
-            let col_rows = conn.query_all_raw(crate::internal::build_statement_with_values(
-                DbBackend::MySql,
+            let col_rows = conn.query_all_raw(build_statement_with_values(
+                Backend::MySql,
                 "SELECT column_name, column_type, is_nullable, column_default, column_key, extra
                  FROM information_schema.columns
                  WHERE table_schema = ? AND table_name = ?
@@ -814,8 +813,8 @@ impl SchemaWriter {
 
             // Get indexes
             let index_rows = conn
-                .query_all_raw(crate::internal::build_statement_with_values(
-                    DbBackend::MySql,
+                .query_all_raw(build_statement_with_values(
+                    Backend::MySql,
                     "SELECT index_name, non_unique, column_name
                  FROM information_schema.statistics
                  WHERE table_schema = ? AND table_name = ?
@@ -917,14 +916,12 @@ impl SchemaWriter {
 
     /// Introspect SQLite database
     async fn introspect_sqlite() -> Result<Vec<TableSchema>> {
-        use sea_orm::{ConnectionTrait, DbBackend};
-
         let conn = crate::require_db()?.__internal_connection()?;
 
         // Get all tables
         let table_rows = conn
-            .query_all_raw(crate::internal::build_statement(
-                DbBackend::Sqlite,
+            .query_all_raw(build_statement(
+                Backend::Sqlite,
                 "SELECT name FROM sqlite_master 
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
              ORDER BY name",
@@ -942,8 +939,8 @@ impl SchemaWriter {
 
             // Get table info (columns)
             let col_rows = conn
-                .query_all_raw(crate::internal::build_statement(
-                    DbBackend::Sqlite,
+                .query_all_raw(build_statement(
+                    Backend::Sqlite,
                     format!("PRAGMA table_info({})", quoted_table_name),
                 ))
                 .await
@@ -951,8 +948,8 @@ impl SchemaWriter {
 
             // Get indexes
             let index_list = conn
-                .query_all_raw(crate::internal::build_statement(
-                    DbBackend::Sqlite,
+                .query_all_raw(build_statement(
+                    Backend::Sqlite,
                     format!("PRAGMA index_list({})", quoted_table_name),
                 ))
                 .await
@@ -971,8 +968,8 @@ impl SchemaWriter {
 
                 // Get columns for this index
                 let idx_info = conn
-                    .query_all_raw(crate::internal::build_statement(
-                        DbBackend::Sqlite,
+                    .query_all_raw(build_statement(
+                        Backend::Sqlite,
                         format!(
                             "PRAGMA index_info({})",
                             quote_ident(DatabaseType::SQLite, &idx_name)

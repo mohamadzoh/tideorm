@@ -745,9 +745,9 @@ TokenConfig::set_encryption_key(
 
 ---
 
-## SeaORM 2.0 Features
+## Advanced ORM Features
 
-TideORM includes all major features from SeaORM 2.0:
+TideORM includes a broad set of advanced model and query helpers through its own API surface:
 
 ### Strongly-Typed Columns
 
@@ -990,7 +990,7 @@ let results = User::query()
     .await?;
 ```
 
-### Additional SeaORM 2.0 Features
+### Additional Advanced Features
 
 ```rust
 // has_related() - EXISTS subqueries

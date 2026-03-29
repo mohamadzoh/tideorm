@@ -16,8 +16,8 @@ use thiserror::Error;
 
 // ── From impls for common external error types ─────────────────────
 
-impl From<sea_orm::DbErr> for Error {
-    fn from(err: sea_orm::DbErr) -> Self {
+impl From<crate::internal::OrmError> for Error {
+    fn from(err: crate::internal::OrmError) -> Self {
         crate::internal::translate_error(err)
     }
 }

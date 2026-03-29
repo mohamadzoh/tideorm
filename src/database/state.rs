@@ -30,7 +30,7 @@ thread_local! {
 #[derive(Clone)]
 pub(crate) enum DatabaseHandle {
     Connection(Arc<InternalConnection>),
-    Transaction(Arc<crate::internal::DatabaseTransaction>),
+    Transaction(Arc<crate::internal::OrmTransaction>),
     #[cfg(test)]
     #[allow(dead_code)]
     TestScope,
@@ -202,11 +202,9 @@ pub fn __current_backend() -> Result<Backend> {
 
     Ok(match current_scope_handle()? {
         DatabaseHandle::Connection(inner) => {
-            Backend::from_sea_orm(inner.connection().get_database_backend())
+            Backend::from(inner.connection().get_database_backend())
         }
-        DatabaseHandle::Transaction(tx) => {
-            Backend::from_sea_orm(tx.as_ref().get_database_backend())
-        }
+        DatabaseHandle::Transaction(tx) => Backend::from(tx.as_ref().get_database_backend()),
         #[cfg(test)]
         DatabaseHandle::TestScope => unreachable!("test scope marker does not carry a backend"),
     })

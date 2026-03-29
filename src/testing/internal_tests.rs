@@ -3,7 +3,7 @@ use super::{
     supports_batch_insert_returning,
 };
 use crate::config::DatabaseType;
-use crate::internal::{Backend, ColumnTrait, Condition, DbBackend, InternalModel, QueryTrait};
+use crate::internal::{Backend, ColumnTrait, Condition, InternalModel, OrmBackend, QueryTrait};
 
 #[tideorm::model(table = "internal_count_users")]
 struct InternalCountUser {
@@ -64,7 +64,7 @@ fn batch_insert_returning_rejects_config_backend_mismatches() {
 
 #[test]
 fn count_select_omits_where_without_condition() {
-    let statement = build_count_select::<InternalCountUser>(None).build(DbBackend::Postgres);
+    let statement = build_count_select::<InternalCountUser>(None).build(OrmBackend::Postgres);
 
     assert_eq!(
         statement.sql,
@@ -85,7 +85,7 @@ fn exists_any_statement_uses_select_exists_probe() {
 
 #[test]
 fn scoped_find_has_no_soft_delete_filter_for_regular_models() {
-    let statement = scoped_find::<InternalCountUser>().build(DbBackend::Postgres);
+    let statement = scoped_find::<InternalCountUser>().build(OrmBackend::Postgres);
 
     assert_eq!(
         statement.sql,
@@ -95,7 +95,7 @@ fn scoped_find_has_no_soft_delete_filter_for_regular_models() {
 
 #[test]
 fn scoped_find_applies_soft_delete_filter_for_soft_delete_models() {
-    let statement = scoped_find::<InternalSoftDeleteUser>().build(DbBackend::Postgres);
+    let statement = scoped_find::<InternalSoftDeleteUser>().build(OrmBackend::Postgres);
 
     assert!(
         statement
@@ -134,7 +134,7 @@ fn count_select_applies_optional_condition() {
             .eq("alice"),
     );
     let statement =
-        build_count_select::<InternalCountUser>(Some(condition)).build(DbBackend::Postgres);
+        build_count_select::<InternalCountUser>(Some(condition)).build(OrmBackend::Postgres);
 
     assert!(
         statement

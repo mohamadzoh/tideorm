@@ -105,7 +105,9 @@ fn bench_tokenizable_helpers(c: &mut Criterion) {
     init_tokenization();
 
     let model = TokenBenchModel { id: 4242 };
-    let token = model.tokenize().expect("Failed to build token for helper bench");
+    let token = model
+        .tokenize()
+        .expect("Failed to build token for helper bench");
 
     let mut group = c.benchmark_group("tokenizable_helpers");
 
@@ -121,7 +123,9 @@ fn bench_tokenizable_helpers(c: &mut Criterion) {
 
     group.bench_function("decode_token", |b| {
         b.iter(|| {
-            black_box(TokenBenchModel::decode_token(black_box(&token)).expect("decode_token failed"))
+            black_box(
+                TokenBenchModel::decode_token(black_box(&token)).expect("decode_token failed"),
+            )
         })
     });
 
@@ -142,7 +146,10 @@ fn bench_invalid_token_handling(c: &mut Criterion) {
 
     for (name, token) in [
         ("empty", String::new()),
-        ("truncated", valid_token[..valid_token.len() / 2].to_string()),
+        (
+            "truncated",
+            valid_token[..valid_token.len() / 2].to_string(),
+        ),
         ("tampered", tampered_token),
         ("invalid_base64", "***not-a-token***".to_string()),
     ] {

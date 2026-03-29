@@ -43,7 +43,7 @@ impl Database {
             let model =
                 <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
                     .map_err(|e| Error::query(e.to_string()))?;
-            models.push(T::from_sea_model(model));
+            models.push(T::from_entity_model(model));
         }
 
         Ok(models)
@@ -89,7 +89,7 @@ impl Database {
             let model =
                 <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
                     .map_err(|e| Error::query(e.to_string()))?;
-            models.push(T::from_sea_model(model));
+            models.push(T::from_entity_model(model));
         }
 
         Ok(models)
@@ -189,7 +189,8 @@ impl Database {
 
         let result = match self.__get_connection()? {
             ConnectionRef::Database(conn) => {
-                let stmt = build_statement(conn.connection().get_database_backend(), sql.to_string());
+                let stmt =
+                    build_statement(conn.connection().get_database_backend(), sql.to_string());
                 crate::profiling::__profile_future(conn.connection().query_one_raw(stmt)).await
             }
             ConnectionRef::Transaction(tx) => {
@@ -451,10 +452,10 @@ impl Database {
         decoder_for_type: F,
     ) -> serde_json::Value
     where
-        R: sea_orm::sqlx::Row,
+        R: crate::internal::sqlx::Row,
         F: Fn(&crate::internal::QueryResult, usize, &str) -> serde_json::Value,
     {
-        use sea_orm::sqlx::{Column, TypeInfo};
+        use crate::internal::sqlx::{Column, TypeInfo};
 
         let mut obj = serde_json::Map::new();
         for (index, column) in row.columns().iter().enumerate() {

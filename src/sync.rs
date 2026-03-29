@@ -15,12 +15,12 @@
 //! Register TideORM models through `TideConfig::models::<(... )>()` and enable
 //! synchronization with `sync(true)`.
 //!
-//! ### 2. SeaORM Entities
+//! ### 2. ORM Entities
 //!
-//! SeaORM entities can be registered through
+//! ORM entities can be registered through
 //! `SyncRegistry::register_entity::<E>()`.
 //!
-//! Register SeaORM entities with `SyncRegistry::register_entity::<Entity>()`.
+//! Register entity types with `SyncRegistry::register_entity::<Entity>()`.
 //!
 //! When sync fails, inspect the reported SQL/backend error first. Common causes
 //! are unsupported type changes, existing tables with incompatible columns, or a
@@ -39,7 +39,7 @@
 //!
 //! ### Force Sync (`force_sync(true)`)
 //!
-//! - For SeaORM entities: uses `apply` mode and fails if tables already exist
+//! - For registered entities: uses `apply` mode and fails if tables already exist
 //! - For TideORM models: drops and recreates tables
 //!
 //! ## ⚠️ Warning
@@ -57,19 +57,13 @@ use std::sync::OnceLock;
 
 use crate::database::Database;
 use crate::error::{Error, Result};
-use crate::internal::{Backend, build_statement, build_statement_with_values};
 use crate::internal::sql_safety::quote_ident_for_backend;
-use crate::{tide_debug, tide_info, tide_warn};
-
-// Use SeaORM schema management
-use sea_orm::{
-    ConnectionTrait, DbBackend, EntityTrait,
-    schema::{Schema, SchemaBuilder},
-    sea_query::{
-        Alias, ColumnDef as SeaColumnDef, ColumnType as SeaColumnType, Expr, Index,
-        MysqlQueryBuilder, PostgresQueryBuilder, SqliteQueryBuilder, Table,
-    },
+use crate::internal::{
+    Alias, Backend, ConnectionTrait, EntityTrait, Expr, Index, MysqlQueryBuilder, OrmColumnDef,
+    OrmColumnType, OrmConnection, PostgresQueryBuilder, Schema, SchemaBuilder, SqliteQueryBuilder,
+    Table, build_statement, build_statement_with_values,
 };
+use crate::{tide_debug, tide_info, tide_warn};
 
 /// Type alias for entity registration functions that register with SchemaBuilder
 pub type EntityRegistrationFn = Box<dyn Fn(SchemaBuilder) -> SchemaBuilder + Send + Sync>;
@@ -94,7 +88,7 @@ fn get_model_schemas() -> &'static RwLock<Vec<ModelSchema>> {
 /// Models that implement this trait can be registered for schema synchronization.
 ///
 /// For TideORM models, this uses `ModelSchema` to define the table structure.
-/// For SeaORM entities, you can use `SyncRegistry::register_entity::<E>()` directly.
+/// For entity types, you can use `SyncRegistry::register_entity::<E>()` directly.
 pub trait SyncModel {
     /// Get the schema for this model
     fn sync_schema() -> ModelSchema;
@@ -159,11 +153,11 @@ impl_register_models_tuples!(
     T194, T195, T196, T197, T198, T199, T200
 );
 
-/// Registry for models to be synchronized using SeaORM  SchemaBuilder
+/// Registry for models to be synchronized using the ORM schema builder.
 pub struct SyncRegistry;
 
 impl SyncRegistry {
-    /// Register an entity type for synchronization using SeaORM
+    /// Register an entity type for synchronization using the ORM schema builder.
     ///
     /// This stores a registration function that will call SchemaBuilder.register()
     /// when sync is performed.
@@ -180,12 +174,12 @@ impl SyncRegistry {
 
     /// Build a SchemaBuilder with all registered entities
     ///
-    /// Uses SeaORM  native SchemaBuilder.register() for each entity.
-    pub fn build_schema_builder(backend: DbBackend) -> SchemaBuilder {
+    /// Uses the current ORM engine's native SchemaBuilder.register() for each entity.
+    pub fn build_schema_builder(backend: Backend) -> SchemaBuilder {
         let registry = get_entity_registry();
         let fns = registry.read();
 
-        let schema = Schema::new(backend);
+        let schema = Schema::new(backend.into());
         let mut builder = schema.builder();
 
         for register_fn in fns.iter() {
@@ -344,12 +338,12 @@ impl ModelSchema {
 }
 
 // ============================================================================
-// Main sync functions using SeaORM  SchemaBuilder
+// Main sync functions using the ORM schema builder
 // ============================================================================
 
-/// Synchronize all registered models with the database using SeaORM
+/// Synchronize all registered models with the database.
 ///
-/// This uses SeaORM's built-in `SchemaBuilder.sync()` to:
+/// This uses the ORM engine's built-in schema sync to:
 /// 1. Create missing tables
 /// 2. Add missing columns to existing tables
 /// 3. Create indexes and foreign keys
@@ -373,7 +367,7 @@ pub async fn sync_database(db: &Database) -> Result<()> {
 
 /// Synchronize all registered models with force_sync option
 ///
-/// This uses SeaORM  schema management with additional options.
+/// This uses ORM schema management with additional options.
 ///
 /// # Arguments
 ///
@@ -390,7 +384,7 @@ pub async fn sync_database(db: &Database) -> Result<()> {
 /// When `force_sync` is enabled, apply mode is used which expects tables to not exist.
 pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Result<()> {
     if force_sync {
-        tide_warn!("Database FORCE sync mode is ENABLED - using SeaORM apply mode!");
+        tide_warn!("Database FORCE sync mode is ENABLED - using schema apply mode!");
     } else {
         tide_warn!("Database sync mode is ENABLED - DO NOT use in production!");
     }
@@ -408,7 +402,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
     }
 
     tide_info!(
-        "Syncing {} model(s) using SeaORM SchemaBuilder...",
+        "Syncing {} model(s) using the ORM schema builder...",
         total_count
     );
     tide_debug!("  - {} entity-based models", entity_count);
@@ -416,18 +410,18 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
 
     // Build SchemaBuilder with all registered entities
     if entity_count > 0 {
-        let schema_builder = SyncRegistry::build_schema_builder(backend);
+        let schema_builder = SyncRegistry::build_schema_builder(Backend::from(backend));
 
         #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-        // Use SeaORM  sync or apply based on force_sync option
+        // Use the ORM engine's sync/apply based on force_sync.
         if force_sync {
-            tide_debug!("  Using SeaORM SchemaBuilder.apply() - fresh schema creation");
+            tide_debug!("  Using SchemaBuilder.apply() - fresh schema creation");
             schema_builder
                 .apply(&conn)
                 .await
                 .map_err(|e| Error::query(format!("Schema apply failed: {}", e)))?;
         } else {
-            tide_debug!("  Using SeaORM SchemaBuilder.sync() - incremental sync");
+            tide_debug!("  Using SchemaBuilder.sync() - incremental sync");
             schema_builder
                 .sync(&conn)
                 .await
@@ -449,7 +443,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         sync_model_schemas(db, force_sync).await?;
     }
 
-    tide_info!("Database sync completed using SeaORM");
+    tide_info!("Database sync completed");
     Ok(())
 }
 
@@ -457,7 +451,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
 async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
     let models = SyncRegistry::get_all_schemas();
     let conn = db.__internal_connection()?;
-    let backend = conn.get_database_backend();
+    let backend = Backend::from(conn.get_database_backend());
 
     for model in models {
         let table_exists =
@@ -465,12 +459,11 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
         if force_sync && table_exists {
             // Drop existing table for force sync
-            let runtime_backend = Backend::from_sea_orm(backend);
-            let quoted_table = quote_ident_for_backend(runtime_backend, &model.table_name);
+            let quoted_table = quote_ident_for_backend(backend, &model.table_name);
             let drop_sql = match backend {
-                DbBackend::Postgres => format!(
+                Backend::Postgres => format!(
                     "DROP TABLE IF EXISTS {}.{} CASCADE",
-                    quote_ident_for_backend(runtime_backend, &model.schema_name),
+                    quote_ident_for_backend(backend, &model.schema_name),
                     quoted_table
                 ),
                 _ => format!("DROP TABLE IF EXISTS {}", quoted_table),
@@ -498,38 +491,27 @@ async fn sync_model_schemas(db: &Database, force_sync: bool) -> Result<()> {
 
 /// Check if a table exists in the database
 async fn check_table_exists(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &OrmConnection,
     schema: &str,
     table: &str,
-    backend: DbBackend,
+    backend: Backend,
 ) -> Result<bool> {
     let stmt = match backend {
-        DbBackend::Postgres => build_statement_with_values(
-            DbBackend::Postgres,
+        Backend::Postgres => build_statement_with_values(
+            Backend::Postgres,
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)",
             vec![schema.into(), table.into()],
         ),
-        DbBackend::MySql => build_statement_with_values(
-            DbBackend::MySql,
+        Backend::MySql => build_statement_with_values(
+            Backend::MySql,
             "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
             vec![table.into()],
         ),
-        DbBackend::Sqlite => build_statement_with_values(
-            DbBackend::Sqlite,
+        Backend::Sqlite => build_statement_with_values(
+            Backend::Sqlite,
             "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
             vec![table.into()],
         ),
-        other => {
-            tide_warn!(
-                "Unknown backend {:?} in check_table_exists, falling back to SQLite SQL",
-                other
-            );
-            build_statement_with_values(
-                other,
-                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                vec![table.into()],
-            )
-        }
     };
 
     let result = conn
@@ -540,7 +522,7 @@ async fn check_table_exists(
     match result {
         Some(row) => {
             let exists: bool = match backend {
-                DbBackend::Postgres => row.try_get_by_index(0).unwrap_or(false),
+                Backend::Postgres => row.try_get_by_index(0).unwrap_or(false),
                 _ => {
                     let val: i32 = row.try_get_by_index(0).unwrap_or(0);
                     val > 0
@@ -554,17 +536,17 @@ async fn check_table_exists(
 
 /// Create a table from a TideORM ModelSchema definition
 async fn create_table_from_model_schema(
-    conn: &sea_orm::DatabaseConnection,
+    conn: &OrmConnection,
     model: &ModelSchema,
-    backend: DbBackend,
+    backend: Backend,
 ) -> Result<()> {
     let mut table = Table::create();
     table.table(Alias::new(&model.table_name));
     let composite_primary_key = model.primary_keys.len() > 1;
 
-    // Add columns using SeaORM's column definitions
+    // Add columns using the ORM query builder's column definitions
     for col in &model.columns {
-        let mut column = SeaColumnDef::new(Alias::new(&col.name));
+        let mut column = OrmColumnDef::new(Alias::new(&col.name));
 
         // Set column type based on Rust type
         apply_column_type(&mut column, &col.col_type, col.auto_increment, backend);
@@ -601,10 +583,9 @@ async fn create_table_from_model_schema(
 
     // Build the SQL using backend-specific query builder
     let sql = match backend {
-        DbBackend::Postgres => table.to_string(PostgresQueryBuilder),
-        DbBackend::MySql => table.to_string(MysqlQueryBuilder),
-        DbBackend::Sqlite => table.to_string(SqliteQueryBuilder),
-        _ => table.to_string(PostgresQueryBuilder),
+        Backend::Postgres => table.to_string(PostgresQueryBuilder),
+        Backend::MySql => table.to_string(MysqlQueryBuilder),
+        Backend::Sqlite => table.to_string(SqliteQueryBuilder),
     };
 
     let create_stmt = build_statement(backend, sql);
@@ -617,10 +598,10 @@ async fn create_table_from_model_schema(
 
 /// Apply column type based on Rust type string
 fn apply_column_type(
-    column: &mut sea_orm::sea_query::ColumnDef,
+    column: &mut OrmColumnDef,
     rust_type: &str,
     _auto_increment: bool,
-    _backend: DbBackend,
+    _backend: Backend,
 ) {
     // Normalize type (remove whitespace from stringify!)
     let normalized = normalize_rust_type(rust_type);
@@ -632,7 +613,7 @@ fn apply_column_type(
         .unwrap_or(&normalized);
     let inner_type = canonical_schema_type(inner_type);
 
-    // Map Rust types to SeaORM column types
+    // Map Rust types to ORM column types
     match inner_type.as_str() {
         "i8" | "u8" | "i16" | "u16" => {
             column.small_integer();
@@ -687,19 +668,19 @@ fn apply_column_type(
         }
         // Array types (PostgreSQL specific)
         "Vec<i32>" | "IntArray" => {
-            column.array(SeaColumnType::Integer);
+            column.array(OrmColumnType::Integer);
         }
         "Vec<i64>" | "BigIntArray" => {
-            column.array(SeaColumnType::BigInteger);
+            column.array(OrmColumnType::BigInteger);
         }
         "Vec<String>" | "TextArray" => {
-            column.array(SeaColumnType::Text);
+            column.array(OrmColumnType::Text);
         }
         "Vec<bool>" | "BoolArray" => {
-            column.array(SeaColumnType::Boolean);
+            column.array(OrmColumnType::Boolean);
         }
         "Vec<f64>" | "FloatArray" => {
-            column.array(SeaColumnType::Double);
+            column.array(OrmColumnType::Double);
         }
         unknown_type => {
             tide_warn!(

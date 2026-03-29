@@ -38,7 +38,9 @@ fn test_query_cache_respects_empty_results_toggle_for_empty_vectors() {
     cache.enable();
     cache.set_cache_empty_results(false);
 
-    cache.set("empty_vec", &Vec::<i32>::new(), None, "test_model").unwrap();
+    cache
+        .set("empty_vec", &Vec::<i32>::new(), None, "test_model")
+        .unwrap();
 
     let result: Option<Vec<i32>> = cache.get("empty_vec");
     assert!(result.is_none());

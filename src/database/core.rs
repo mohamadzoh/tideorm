@@ -145,7 +145,7 @@ impl Database {
 
     /// Get the raw internal connection (for internal use only)
     #[doc(hidden)]
-    pub fn __internal_connection(&self) -> Result<crate::internal::DatabaseConnection> {
+    pub fn __internal_connection(&self) -> Result<crate::internal::OrmConnection> {
         Ok(self.current_inner()?.connection().clone())
     }
 
@@ -174,10 +174,10 @@ impl Database {
 
         Ok(match self.current_handle()? {
             DatabaseHandle::Connection(inner) => {
-                crate::internal::Backend::from_sea_orm(inner.connection().get_database_backend())
+                crate::internal::Backend::from(inner.connection().get_database_backend())
             }
             DatabaseHandle::Transaction(tx) => {
-                crate::internal::Backend::from_sea_orm(tx.as_ref().get_database_backend())
+                crate::internal::Backend::from(tx.as_ref().get_database_backend())
             }
             #[cfg(test)]
             DatabaseHandle::TestScope => {

@@ -238,13 +238,11 @@ fn relation_ext_get_field_value_falls_back_to_serialized_relation_fields() {
     }
     .with_relations();
 
-    parent.child.set_cached(Some(
-        RelationExtChildModel {
-            id: 7,
-            parent_id: 42,
-            label: "child".to_string(),
-        }
-    ));
+    parent.child.set_cached(Some(RelationExtChildModel {
+        id: 7,
+        parent_id: 42,
+        label: "child".to_string(),
+    }));
 
     assert_eq!(
         parent.get_field_value("child").unwrap(),

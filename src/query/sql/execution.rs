@@ -1,9 +1,6 @@
 use super::*;
 
-fn hash_json_value<H: std::hash::Hasher>(
-    value: &serde_json::Value,
-    hasher: &mut H,
-) {
+fn hash_json_value<H: std::hash::Hasher>(value: &serde_json::Value, hasher: &mut H) {
     use std::hash::Hash;
 
     match value {
@@ -713,9 +710,9 @@ mod tests {
         let query_one = CacheKeyTestUser::query()
             .where_in("status", vec!["active", "pending"])
             .or_where(|group| {
-                group.where_eq("role", "admin").nested_and(|inner| {
-                    inner.where_gt("score", 10).where_lt("score", 20)
-                })
+                group
+                    .where_eq("role", "admin")
+                    .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
             })
             .window(
                 WindowFunction::new(
@@ -735,9 +732,9 @@ mod tests {
         let query_two = CacheKeyTestUser::query()
             .where_in("status", vec!["active", "pending"])
             .or_where(|group| {
-                group.where_eq("role", "admin").nested_and(|inner| {
-                    inner.where_gt("score", 10).where_lt("score", 20)
-                })
+                group
+                    .where_eq("role", "admin")
+                    .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
             })
             .window(
                 WindowFunction::new(
@@ -754,13 +751,17 @@ mod tests {
             )
             .limit(10);
 
-        assert_eq!(query_one.generate_cache_key(), query_two.generate_cache_key());
+        assert_eq!(
+            query_one.generate_cache_key(),
+            query_two.generate_cache_key()
+        );
     }
 
     #[test]
     fn test_generate_cache_key_changes_when_window_definition_changes() {
         let baseline = CacheKeyTestUser::query().window(
-            WindowFunction::new(WindowFunctionType::Rank, "rank_alias").order_by("score", Order::Desc),
+            WindowFunction::new(WindowFunctionType::Rank, "rank_alias")
+                .order_by("score", Order::Desc),
         );
         let changed = CacheKeyTestUser::query().window(
             WindowFunction::new(WindowFunctionType::DenseRank, "rank_alias")
