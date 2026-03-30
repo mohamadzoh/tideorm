@@ -391,5 +391,5 @@ impl<T> AfterDeleteDispatch<T> for &&T {
 }
 
 #[cfg(test)]
-#[path = "testing/callbacks_tests.rs"]
+#[path = "../tests/unit/callbacks_tests.rs"]
 mod tests;

@@ -102,5 +102,5 @@ impl<M: Model> Default for QueryBuilder<M> {
 }
 
 #[cfg(test)]
-#[path = "../testing/query_sql_tests.rs"]
+#[path = "../../tests/unit/query_sql_tests.rs"]
 mod tests;

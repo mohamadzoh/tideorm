@@ -26,5 +26,5 @@ pub use meta::{IndexDefinition, ModelMeta};
 pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
 
 #[cfg(test)]
-#[path = "../testing/model_tests.rs"]
+#[path = "../../tests/unit/model_tests.rs"]
 mod tests;

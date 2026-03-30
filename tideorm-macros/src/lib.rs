@@ -122,5 +122,5 @@ fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<Tok
 }
 
 #[cfg(test)]
-#[path = "testing/lib_tests.rs"]
+#[path = "../tests/unit/lib_tests.rs"]
 mod tests;

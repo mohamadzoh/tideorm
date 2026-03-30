@@ -41,5 +41,5 @@ pub use transaction::ConnectionRef;
 pub(crate) use state::DatabaseHandle;
 
 #[cfg(test)]
-#[path = "../testing/database_tests.rs"]
+#[path = "../../tests/unit/database_tests.rs"]
 mod tests;

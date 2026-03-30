@@ -645,5 +645,5 @@ fn log_seed_rollback(name: &str) {
 // ============================================================================
 
 #[cfg(test)]
-#[path = "testing/seeding_tests.rs"]
+#[path = "../tests/unit/seeding_tests.rs"]
 mod tests;

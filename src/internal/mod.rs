@@ -534,5 +534,5 @@ impl QueryExecutor {
 }
 
 #[cfg(test)]
-#[path = "../testing/internal_tests.rs"]
+#[path = "../../tests/unit/internal_tests.rs"]
 mod tests;

@@ -11,7 +11,7 @@ keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
 rust-version = "1.85"
-exclude = [".cargo/**", ".github/**", ".env.example", "book.toml", "docs/CNAME"]
+exclude = [".cargo/**", ".github/**", ".env.example", "book.toml", "docs/CNAME", "tests/**", "wip/**"]
 
 [workspace]
 members = [".", "tideorm-macros"]

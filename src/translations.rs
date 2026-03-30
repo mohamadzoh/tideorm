@@ -555,5 +555,5 @@ impl From<TranslationError> for crate::Error {
 }
 
 #[cfg(test)]
-#[path = "testing/translations_tests.rs"]
+#[path = "../tests/unit/translations_tests.rs"]
 mod tests;

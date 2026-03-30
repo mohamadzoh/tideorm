@@ -636,5 +636,5 @@ impl ColumnNullable for Column<Option<bool>> {
 }
 
 #[cfg(test)]
-#[path = "testing/columns_tests.rs"]
+#[path = "../tests/unit/columns_tests.rs"]
 mod tests;

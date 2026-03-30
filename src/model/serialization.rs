@@ -492,5 +492,5 @@ where
 }
 
 #[cfg(test)]
-#[path = "../testing/model_serialization_tests.rs"]
+#[path = "../../tests/unit/model_serialization_tests.rs"]
 mod tests;

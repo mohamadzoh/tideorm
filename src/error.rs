@@ -667,5 +667,5 @@ impl Error {
 }
 
 #[cfg(test)]
-#[path = "testing/error_tests.rs"]
+#[path = "../tests/unit/error_tests.rs"]
 mod tests;

@@ -114,7 +114,11 @@ fn hash_condition_value<H: std::hash::Hasher>(value: &ConditionValue, hasher: &m
     }
 }
 
-fn hash_having_clause<H: std::hash::Hasher>(sql: &str, params: &[serde_json::Value], hasher: &mut H) {
+fn hash_having_clause<H: std::hash::Hasher>(
+    sql: &str,
+    params: &[serde_json::Value],
+    hasher: &mut H,
+) {
     use std::hash::Hash;
 
     sql.hash(hasher);

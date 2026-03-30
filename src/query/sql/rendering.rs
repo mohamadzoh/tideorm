@@ -140,7 +140,11 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn render_having_preview_sql(&self, sql_template: &str, params: &[serde_json::Value]) -> String {
+    fn render_having_preview_sql(
+        &self,
+        sql_template: &str,
+        params: &[serde_json::Value],
+    ) -> String {
         if params.is_empty() {
             return sql_template.to_string();
         }
@@ -221,7 +225,10 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         if !self.having_conditions.is_empty() {
-            sql.push_str(&format!("HAVING {} ", self.materialized_having_conditions().join(" AND ")));
+            sql.push_str(&format!(
+                "HAVING {} ",
+                self.materialized_having_conditions().join(" AND ")
+            ));
         }
     }
 

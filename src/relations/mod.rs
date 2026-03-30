@@ -57,7 +57,7 @@ pub use polymorphic::{MorphMany, MorphOne, MorphResult, MorphResult3, MorphResul
 pub use self_referencing::{SelfRef, SelfRefMany};
 
 #[cfg(test)]
-#[path = "../testing/relations_tests.rs"]
+#[path = "../../tests/unit/relations_tests.rs"]
 mod tests;
 
 pub(crate) fn require_scalar_relation_key<'a>(

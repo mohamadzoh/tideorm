@@ -23,8 +23,10 @@ impl FilesData {
     pub fn from_json(value: &serde_json::Value) -> Self {
         match value {
             serde_json::Value::Object(map) => {
-                let data: HashMap<String, serde_json::Value> =
-                    map.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+                let data: HashMap<String, serde_json::Value> = map
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
                 Self { data }
             }
             _ => Self::new(),

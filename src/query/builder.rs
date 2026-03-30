@@ -72,10 +72,7 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn validate_order_or_group_value(
-        kind: &str,
-        value: &str,
-    ) -> std::result::Result<(), String> {
+    fn validate_order_or_group_value(kind: &str, value: &str) -> std::result::Result<(), String> {
         if Self::simple_column_reference(value).is_some() {
             Self::validate_model_column_reference(kind, value)
         } else {
@@ -356,7 +353,8 @@ impl<M: Model> QueryBuilder<M> {
             .extend(fragment.subquery_select_expressions.clone());
 
         self.group_by.extend(fragment.group_by.clone());
-        self.having_conditions.extend(fragment.having_conditions.clone());
+        self.having_conditions
+            .extend(fragment.having_conditions.clone());
         self.having_bindings.extend(
             fragment
                 .having_conditions

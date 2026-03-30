@@ -219,7 +219,10 @@ impl SchemaWriter {
         let conn = crate::require_db()?.__internal_connection()?;
 
         let db_name_row = conn
-            .query_one_raw(build_statement(Backend::MySql, "SELECT DATABASE() as db_name"))
+            .query_one_raw(build_statement(
+                Backend::MySql,
+                "SELECT DATABASE() as db_name",
+            ))
             .await
             .map_err(|e| Error::query(e.to_string()))?;
 

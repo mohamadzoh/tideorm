@@ -788,7 +788,7 @@ fn format_error(entry: &QueryLogEntry) -> String {
 }
 
 #[cfg(test)]
-#[path = "testing/logging_tests.rs"]
+#[path = "../tests/unit/logging_tests.rs"]
 mod tests;
 
 // ============================================================================

@@ -468,5 +468,5 @@ pub trait Tokenizable: Sized + Send + Sync {
 // =============================================================================
 
 #[cfg(test)]
-#[path = "testing/tokenization_tests.rs"]
+#[path = "../tests/unit/tokenization_tests.rs"]
 mod tests;

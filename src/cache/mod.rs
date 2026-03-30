@@ -50,5 +50,5 @@ static GLOBAL_QUERY_CACHE: OnceLock<QueryCache> = OnceLock::new();
 static GLOBAL_STMT_CACHE: OnceLock<PreparedStatementCache> = OnceLock::new();
 
 #[cfg(test)]
-#[path = "../testing/cache_tests.rs"]
+#[path = "../../tests/unit/cache_tests.rs"]
 mod tests;

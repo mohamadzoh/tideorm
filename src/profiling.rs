@@ -817,5 +817,5 @@ fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
-#[path = "testing/profiling_tests.rs"]
+#[path = "../tests/unit/profiling_tests.rs"]
 mod tests;

@@ -1030,5 +1030,5 @@ impl<M: Model> Default for BatchUpdateBuilder<M> {
 }
 
 #[cfg(test)]
-#[path = "../testing/model_batch_tests.rs"]
+#[path = "../../tests/unit/model_batch_tests.rs"]
 mod tests;

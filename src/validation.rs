@@ -664,5 +664,5 @@ impl ValidationBuilder {
 }
 
 #[cfg(test)]
-#[path = "testing/validation_tests.rs"]
+#[path = "../tests/unit/validation_tests.rs"]
 mod tests;

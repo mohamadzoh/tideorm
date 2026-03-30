@@ -72,5 +72,5 @@ pub(super) fn log_migration_rollback(version: &str, name: &str) {
 }
 
 #[cfg(test)]
-#[path = "../testing/migration_tests.rs"]
+#[path = "../../tests/unit/migration_tests.rs"]
 mod tests;

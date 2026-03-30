@@ -479,5 +479,5 @@ impl<M: Model> NestedSaveBuilder<M> {
 }
 
 #[cfg(all(test, feature = "sqlite"))]
-#[path = "../testing/model_nested_tests.rs"]
+#[path = "../../tests/unit/model_nested_tests.rs"]
 mod tests;

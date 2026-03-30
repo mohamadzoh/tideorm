@@ -31,5 +31,5 @@ pub(crate) use database::rewrite_driver_url;
 use std::time::Duration;
 
 #[cfg(test)]
-#[path = "../testing/config_tests.rs"]
+#[path = "../../tests/unit/config_tests.rs"]
 mod tests;

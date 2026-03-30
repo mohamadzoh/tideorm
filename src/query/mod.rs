@@ -74,5 +74,5 @@ impl<M: Model> QueryBuilder<M> {
 }
 
 #[cfg(test)]
-#[path = "../testing/query_tests.rs"]
+#[path = "../../tests/unit/query_tests.rs"]
 mod tests;

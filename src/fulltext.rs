@@ -1019,11 +1019,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
         if let Some(offset) = self.offset {
             let offset_value = i64::try_from(offset)
                 .map_err(|_| Error::query("Full-text search offset exceeds i64 range"))?;
-            let placeholder = crate::internal::push_param(
-                db_type,
-                params,
-                Value::BigInt(Some(offset_value)),
-            );
+            let placeholder =
+                crate::internal::push_param(db_type, params, Value::BigInt(Some(offset_value)));
             sql.push_str(&format!(" OFFSET {}", placeholder));
         }
         Ok(())
@@ -1353,5 +1350,5 @@ fn escape_string(s: &str) -> String {
 // =============================================================================
 
 #[cfg(test)]
-#[path = "testing/fulltext_tests.rs"]
+#[path = "../tests/unit/fulltext_tests.rs"]
 mod tests;

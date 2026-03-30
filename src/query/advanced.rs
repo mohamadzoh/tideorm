@@ -320,11 +320,7 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    fn having_with_params(
-        mut self,
-        sql_template: String,
-        params: Vec<serde_json::Value>,
-    ) -> Self {
+    fn having_with_params(mut self, sql_template: String, params: Vec<serde_json::Value>) -> Self {
         self.having_conditions.push(sql_template);
         self.having_bindings.push(params);
         self

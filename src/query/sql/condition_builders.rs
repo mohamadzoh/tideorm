@@ -41,7 +41,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
-        values.iter().map(crate::internal::json_to_db_value).collect()
+        values
+            .iter()
+            .map(crate::internal::json_to_db_value)
+            .collect()
     }
 
     fn json_text_value(text: String) -> Value {

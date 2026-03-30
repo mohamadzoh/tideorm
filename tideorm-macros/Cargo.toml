@@ -8,6 +8,7 @@ repository = "https://github.com/mohamadzoh/tideorm"
 homepage = "https://tideorm.com"
 readme = "README.md"
 rust-version = "1.85"
+exclude = ["tests/**"]
 
 [lib]
 proc-macro = true

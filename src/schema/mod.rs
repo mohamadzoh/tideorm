@@ -21,14 +21,12 @@ use crate::config::DatabaseType;
 use crate::model::IndexDefinition;
 
 pub use generator::SchemaGenerator;
-pub use types::{
-    ColumnSchema, TableSchema, TableSchemaBuilder, rust_type_to_sql,
-};
+pub use types::{ColumnSchema, TableSchema, TableSchemaBuilder, rust_type_to_sql};
 pub use writer::SchemaWriter;
 
 pub(super) static SCHEMA_REGISTRY: RwLock<Vec<TableSchema>> = RwLock::new(Vec::new());
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
-#[path = "../testing/schema_tests.rs"]
+#[path = "../../tests/unit/schema_tests.rs"]
 mod tests;

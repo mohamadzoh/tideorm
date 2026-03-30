@@ -38,5 +38,5 @@ pub use files_data::FilesData;
 pub use has_attachments::HasAttachments;
 
 #[cfg(test)]
-#[path = "../testing/attachments_tests.rs"]
+#[path = "../../tests/unit/attachments_tests.rs"]
 mod tests;

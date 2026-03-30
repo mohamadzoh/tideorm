@@ -39,5 +39,5 @@ pub use timestamps::{UnixTimestamp, UnixTimestampMillis};
 pub(crate) use encrypted::encrypted_field_missing_key_error;
 
 #[cfg(test)]
-#[path = "../testing/types_tests.rs"]
+#[path = "../../tests/unit/types_tests.rs"]
 mod tests;
