@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-03-30
+
+### Changed
+
+- Split the remaining large `cache`, `schema`, and `attachments` modules into focused submodules while preserving the public TideORM API surface.
+- Moved crate unit-test source files out of `src/testing/` and into top-level `tests/unit/` directories for both the main crate and `tideorm-macros`, keeping private-module coverage without shipping test code inside library source trees.
+- Refreshed README, mdBook chapters, and macro-crate install snippets to use the 0.9.8 release version.
+
+### Internal
+
+- Excluded `tests/**` from published crate artifacts and kept `wip/**` out of the main crate package so release tarballs only contain runtime and documentation sources.
+- Verified the release prep with `cargo test --lib --all-features`, `cargo test -p tideorm-macros --lib`, and `cargo package --list` checks for both crates.
+
 ## [0.9.7] - 2026-03-29
 
 ### Changed
