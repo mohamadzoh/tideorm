@@ -1,5 +1,6 @@
 use super::*;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 fn test_cache_config_default() {
