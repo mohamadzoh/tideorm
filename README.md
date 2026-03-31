@@ -17,6 +17,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
 - **Profiling & Logging** - Built-in query logging plus execution counters and slow-query stats
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
+- **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles
 - **Optional Modules** - Attachments, translations, and full-text search are available behind feature flags
 - **Tokenization** - Secure record ID encoding/decoding helpers
 
@@ -112,6 +113,8 @@ For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-ins
 
 For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
 
+For aggregate workflows with an explicit persistence context, enable the `entity-manager` feature and see [docs/entity-manager.md](docs/entity-manager.md).
+
 ## Installation
 
 ```toml
@@ -133,6 +136,9 @@ tideorm = { version = "0.9.8", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
 tideorm = { version = "0.9.8", features = ["postgres", "fulltext"] }
+
+# Enable the entity manager explicitly
+tideorm = { version = "0.9.8", features = ["postgres", "entity-manager"] }
 ```
 
 ### Feature Flags
@@ -147,12 +153,15 @@ tideorm = { version = "0.9.8", features = ["postgres", "fulltext"] }
 | `attachments` | Compile-time-only feature gate for the attachments API and attachment-specific benchmarks/tests; adds no extra dependencies |
 | `translations` | Compile-time-only feature gate for the translations API and translation-specific benchmarks/tests; adds no extra dependencies |
 | `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
+| `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), plus `save_with_entity_manager`, `find_in_entity_manager`, entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
 
 Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
 Translations are opt-in. Enable the `translations` feature when you want to use `tideorm::translations`, `HasTranslations`, or `ApplyTranslations`. This is a compile-time API gate only; it does not pull in additional crates.
 
 Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers. This is a compile-time API gate only; it does not pull in additional crates.
+
+The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. The compatibility entry points `find_in_entity_manager`, `load_in_entity_manager`, and `save_with_entity_manager()` remain available too. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
 
 ## Documentation
 
@@ -169,6 +178,7 @@ Core chapters:
 - [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
 - [Profiling](docs/profiling.md) - Global query timing, slow-query stats, manual reports, and query analysis
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
+- [Entity Manager](docs/entity-manager.md) - Persistence-context identity map, aggregate synchronization helpers, and managed entity lifecycle operations
 - [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
 
 ## Ecosystem

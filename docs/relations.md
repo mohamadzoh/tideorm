@@ -122,6 +122,16 @@ let profile = user.profile.load_with(|query| {
 }).await?;
 ```
 
+### Entity Manager Workflows
+
+If you enable the `entity-manager` feature, TideORM adds an explicit persistence context plus entity-manager-aware relation loading and aggregate synchronization.
+
+Use `entity_manager.find::<Model>(...)` to load the root model, `entity_manager.load(&mut relation)` to load `HasOne<T>`, `HasMany<T>`, `BelongsTo<T>`, or `HasManyThrough<T, P>` relations inside the same context, and `entity_manager.save(&model)` or `entity_manager.flush()` to persist loaded aggregate-side changes.
+
+`find_in_entity_manager(...)`, `load_in_entity_manager(...)`, and `save_with_entity_manager(...)` remain available as lower-level compatibility entry points.
+
+See [Entity Manager](entity-manager.md) for the full workflow and primary-key support details.
+
 ### Many-to-Many Relations
 
 ```rust

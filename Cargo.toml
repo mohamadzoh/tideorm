@@ -29,6 +29,7 @@ runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 attachments = []
 translations = []
 fulltext = []
+entity-manager = []
 
 [dependencies]
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }

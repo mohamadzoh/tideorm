@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added documentation for the opt-in `entity-manager` feature, including the higher-level `EntityManager` facade plus managed lifecycle operations (`persist`, `merge`, `remove`, `detach`, `flush`), README install notes, mdBook coverage for compatibility helpers such as `find_in_entity_manager`, `load_in_entity_manager(...)`, and `save_with_entity_manager`, and relation-chapter cross-links for aggregate workflows across `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relation helpers.
+
 ## [0.9.8] - 2026-03-30
 
 ### Changed

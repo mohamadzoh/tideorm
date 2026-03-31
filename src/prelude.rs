@@ -156,6 +156,13 @@ pub use crate::columns::{
     ColumnOrd, IntoColumnName,
 };
 
+// JPA-style entity manager / persistence context
+#[cfg(feature = "entity-manager")]
+pub use crate::entity_manager::{
+    save_with_entity_manager, EntityManager, EntityManagerLoad, EntityState, Managed,
+    TideEntityManagerMeta,
+};
+
 // Derive macro
 pub use tideorm_macros::Model;
 

@@ -9,6 +9,7 @@ Use the chapter list on the left to move through the main parts of the library:
 - Queries
 - Profiling
 - Relations
+- Entity Manager
 - Migrations
 
 If you were previously using DOCUMENTATION.md directly, it now points here as a lightweight index.

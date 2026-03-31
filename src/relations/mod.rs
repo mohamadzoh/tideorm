@@ -46,7 +46,13 @@ pub(crate) use crate::internal::Value;
 #[cfg(test)]
 pub(crate) use helpers::build_self_ref_tree_sql;
 
-pub use direct::{BelongsTo, HasMany, HasOne};
+pub use direct::{BelongsTo, HasOne};
+#[cfg(not(feature = "entity-manager"))]
+pub use direct::HasMany;
+#[cfg(feature = "entity-manager")]
+pub use crate::entity_manager::TrackedHasMany as HasMany;
+#[cfg(feature = "entity-manager")]
+pub(crate) use direct::HasMany as DirectHasMany;
 pub use eager::{
     EagerLoadExt, EagerLoadModel, EagerQueryBuilder, RelationConstraints, RelationExt,
     RelationLoader, RelationPath, RelationTree, WithRelations,

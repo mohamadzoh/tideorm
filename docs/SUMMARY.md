@@ -6,4 +6,5 @@
 - [Queries](queries.md)
 - [Profiling](profiling.md)
 - [Relations](relations.md)
+- [Entity Manager](entity-manager.md)
 - [Migrations](migrations.md)

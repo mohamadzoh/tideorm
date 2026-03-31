@@ -28,6 +28,8 @@ mod raw;
 mod state;
 mod transaction;
 
+use std::future::Future;
+
 pub use builder::DatabaseBuilder;
 pub use core::Database;
 pub use state::{
@@ -39,6 +41,14 @@ pub use transaction::{Connection, Transaction};
 pub use transaction::ConnectionRef;
 
 pub(crate) use state::DatabaseHandle;
+
+pub(crate) async fn __in_db_scope<F, T>(db: &Database, future: F) -> crate::error::Result<T>
+where
+    F: Future<Output = crate::error::Result<T>>,
+{
+    let handle = db.current_handle()?;
+    state::with_connection_override(handle, future).await
+}
 
 #[cfg(test)]
 #[path = "../../tests/unit/database_tests.rs"]

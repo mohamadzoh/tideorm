@@ -3,7 +3,7 @@ use quote::quote;
 use syn::Ident;
 
 use crate::context::BuildContext;
-use crate::parse::{ModelField, relation_wrapper_name};
+use crate::parse::{ModelField, relation_generic_types, relation_wrapper_name};
 
 pub(crate) fn build_relation_field_inits(
     ctx: &BuildContext,
@@ -48,10 +48,35 @@ fn build_relation_field_init(
         let fk = field.foreign_key.as_deref().unwrap_or("id");
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type"))?;
         return Ok(quote! {
             let previous = self.#ident.clone();
-            self.#ident = ::tideorm::relations::HasOne::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasOne::new(#fk, #lk)
+                        .with_metadata(
+                            stringify!(#ident),
+                            <Self as ::tideorm::model::ModelMeta>::table_name(),
+                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                        )
+                        .with_owner_key(
+                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                                &<Self as ::tideorm::model::Model>::primary_key(&self),
+                            )
+                            .expect("entity manager owner primary key should serialize"),
+                        )
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasOne::new(#fk, #lk)
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous)
         });
     }
@@ -60,10 +85,35 @@ fn build_relation_field_init(
         let fk = field.foreign_key.as_deref().unwrap_or("id");
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many relation requires a related model type"))?;
         return Ok(quote! {
             let previous = self.#ident.clone();
-            self.#ident = ::tideorm::relations::HasMany::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasMany::new(#fk, #lk)
+                        .with_metadata(
+                            stringify!(#ident),
+                            <Self as ::tideorm::model::ModelMeta>::table_name(),
+                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                        )
+                        .with_owner_key(
+                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                                &<Self as ::tideorm::model::Model>::primary_key(&self),
+                            )
+                            .expect("entity manager owner primary key should serialize"),
+                        )
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasMany::new(#fk, #lk)
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous)
         });
     }
@@ -87,16 +137,47 @@ fn build_relation_field_init(
         let related_local_key = field.owner_key.as_deref().unwrap_or("id");
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         let pivot_table = field.pivot.as_deref().unwrap_or("");
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many_through relation requires a related model type"))?;
         return Ok(quote! {
             let previous = self.#ident.clone();
-            self.#ident = ::tideorm::relations::HasManyThrough::new(
-                #fk,
-                #related_key,
-                #local_key,
-                #related_local_key,
-                #pivot_table,
-            )
-            .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasManyThrough::new(
+                        #fk,
+                        #related_key,
+                        #local_key,
+                        #related_local_key,
+                        #pivot_table,
+                    )
+                    .with_metadata(
+                        stringify!(#ident),
+                        <Self as ::tideorm::model::ModelMeta>::table_name(),
+                        <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                    )
+                    .with_owner_key(
+                        ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                            &<Self as ::tideorm::model::Model>::primary_key(&self),
+                        )
+                        .expect("entity manager owner primary key should serialize"),
+                    )
+                    .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasManyThrough::new(
+                        #fk,
+                        #related_key,
+                        #local_key,
+                        #related_local_key,
+                        #pivot_table,
+                    )
+                    .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous)
         });
     }
@@ -188,9 +269,34 @@ fn build_relation_state_refresh(
         let fk = field.foreign_key.as_deref().unwrap_or("id");
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type"))?;
         return Ok(quote! {
-            self.#ident = ::tideorm::relations::HasOne::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasOne::new(#fk, #lk)
+                        .with_metadata(
+                            stringify!(#ident),
+                            <Self as ::tideorm::model::ModelMeta>::table_name(),
+                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                        )
+                        .with_owner_key(
+                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                                &<Self as ::tideorm::model::Model>::primary_key(&self),
+                            )
+                            .expect("entity manager owner primary key should serialize"),
+                        )
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasOne::new(#fk, #lk)
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous.#ident);
         });
     }
@@ -199,9 +305,34 @@ fn build_relation_state_refresh(
         let fk = field.foreign_key.as_deref().unwrap_or("id");
         let lk = field.local_key.as_deref().unwrap_or("id");
         let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many relation requires a related model type"))?;
         return Ok(quote! {
-            self.#ident = ::tideorm::relations::HasMany::new(#fk, #lk)
-                .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasMany::new(#fk, #lk)
+                        .with_metadata(
+                            stringify!(#ident),
+                            <Self as ::tideorm::model::ModelMeta>::table_name(),
+                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                        )
+                        .with_owner_key(
+                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                                &<Self as ::tideorm::model::Model>::primary_key(&self),
+                            )
+                            .expect("entity manager owner primary key should serialize"),
+                        )
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasMany::new(#fk, #lk)
+                        .with_parent_pk(::serde_json::json!(self.#lk_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous.#ident);
         });
     }
@@ -224,15 +355,46 @@ fn build_relation_state_refresh(
         let related_local_key = field.owner_key.as_deref().unwrap_or("id");
         let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
         let pivot_table = field.pivot.as_deref().unwrap_or("");
+        let related_ty = relation_generic_types(&field.ty)
+            .into_iter()
+            .next()
+            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many_through relation requires a related model type"))?;
         return Ok(quote! {
-            self.#ident = ::tideorm::relations::HasManyThrough::new(
-                #fk,
-                #related_key,
-                #local_key,
-                #related_local_key,
-                #pivot_table,
-            )
-            .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()));
+            self.#ident = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    ::tideorm::relations::HasManyThrough::new(
+                        #fk,
+                        #related_key,
+                        #local_key,
+                        #related_local_key,
+                        #pivot_table,
+                    )
+                    .with_metadata(
+                        stringify!(#ident),
+                        <Self as ::tideorm::model::ModelMeta>::table_name(),
+                        <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
+                    )
+                    .with_owner_key(
+                        ::tideorm::entity_manager::__pk_to_entity_manager_key(
+                            &<Self as ::tideorm::model::Model>::primary_key(&self),
+                        )
+                        .expect("entity manager owner primary key should serialize"),
+                    )
+                    .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    ::tideorm::relations::HasManyThrough::new(
+                        #fk,
+                        #related_key,
+                        #local_key,
+                        #related_local_key,
+                        #pivot_table,
+                    )
+                    .with_parent_pk(::serde_json::json!(self.#local_key_ident.clone()))
+                }
+            };
             self.#ident.preserve_runtime_state_from(&previous.#ident);
         });
     }
