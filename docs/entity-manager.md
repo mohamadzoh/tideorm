@@ -8,7 +8,7 @@ An `EntityManager` owns a database handle, caches loaded models by primary key, 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.8", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.9.9", features = ["postgres", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql`, or `sqlite`) alongside `entity-manager`.

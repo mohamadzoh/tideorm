@@ -1,14 +1,14 @@
 use std::sync::{Arc, OnceLock};
 
-use tideorm::prelude::*;
 use tideorm::Database;
+use tideorm::prelude::*;
 
 #[path = "support/postgres_test_config.rs"]
 mod test_config;
 use test_config::test_database_url;
 
 #[cfg(feature = "entity-manager")]
-use tideorm::entity_manager::{save_with_entity_manager, EntityManager};
+use tideorm::entity_manager::{EntityManager, save_with_entity_manager};
 
 static ENTITY_MANAGER_TEST_MUTEX: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 
@@ -37,7 +37,11 @@ struct EntityManagerCodeUser {
     code: String,
     name: String,
 
-    #[tideorm(has_many = "EntityManagerCodePost", foreign_key = "user_code", local_key = "code")]
+    #[tideorm(
+        has_many = "EntityManagerCodePost",
+        foreign_key = "user_code",
+        local_key = "code"
+    )]
     posts: HasMany<EntityManagerCodePost>,
 }
 
@@ -349,7 +353,9 @@ async fn setup_database() -> tideorm::Result<Arc<Database>> {
     Ok(db)
 }
 
-async fn seed_user_with_posts(count: usize) -> tideorm::Result<(EntityManagerUser, Vec<EntityManagerPost>)> {
+async fn seed_user_with_posts(
+    count: usize,
+) -> tideorm::Result<(EntityManagerUser, Vec<EntityManagerPost>)> {
     let user = EntityManagerUser {
         id: 0,
         name: "Alice".to_string(),
@@ -384,7 +390,8 @@ async fn tracked_deletion_emits_delete() -> tideorm::Result<()> {
     let mut user = EntityManagerUser::find_in_entity_manager(saved_user.id, &entity_manager)
         .await?
         .expect("entity_manager user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     let removed_id = posts[1].id;
     user.posts
@@ -399,7 +406,11 @@ async fn tracked_deletion_emits_delete() -> tideorm::Result<()> {
         .count()
         .await?;
     assert_eq!(remaining, 2);
-    assert!(EntityManagerPost::find_with(removed_id, db.as_ref()).await?.is_none());
+    assert!(
+        EntityManagerPost::find_with(removed_id, db.as_ref())
+            .await?
+            .is_none()
+    );
 
     Ok(())
 }
@@ -450,8 +461,16 @@ async fn entity_managers_are_isolated() -> tideorm::Result<()> {
         .await?
         .expect("entity_manager B user should exist");
 
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user_a.posts, &entity_manager_a).await?;
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user_b.posts, &entity_manager_b).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(
+        &mut user_a.posts,
+        &entity_manager_a,
+    )
+    .await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(
+        &mut user_b.posts,
+        &entity_manager_b,
+    )
+    .await?;
 
     let remove_from_a = posts[2].id;
     let remove_from_b = posts[0].id;
@@ -493,7 +512,8 @@ async fn repeated_save_with_same_new_child_does_not_duplicate() -> tideorm::Resu
     let mut user = EntityManagerUser::find_in_entity_manager(saved_user.id, &entity_manager)
         .await?
         .expect("entity_manager user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     user.posts
         .as_mut()
@@ -557,12 +577,11 @@ async fn edited_existing_child_is_saved() -> tideorm::Result<()> {
     let mut user = EntityManagerUser::find_in_entity_manager(saved_user.id, &entity_manager)
         .await?
         .expect("entity_manager user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
-    user.posts
-        .as_mut()
-        .expect("loaded posts should be mutable")[0]
-        .title = "edited-title".to_string();
+    user.posts.as_mut().expect("loaded posts should be mutable")[0].title =
+        "edited-title".to_string();
 
     let user = save_with_entity_manager(&user, &entity_manager).await?;
     let cached_posts = user.posts.get_cached().expect("posts should stay loaded");
@@ -587,7 +606,8 @@ async fn identical_new_children_are_persisted_separately() -> tideorm::Result<()
     let mut user = EntityManagerUser::find_in_entity_manager(saved_user.id, &entity_manager)
         .await?
         .expect("entity_manager user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     let posts = user.posts.as_mut().expect("loaded posts should be mutable");
     posts.push(EntityManagerPost {
@@ -672,7 +692,8 @@ async fn string_local_key_is_used_for_new_children() -> tideorm::Result<()> {
     let mut user = EntityManagerCodeUser::find_in_entity_manager(created.id, &entity_manager)
         .await?
         .expect("code user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     user.posts
         .as_mut()
@@ -733,7 +754,8 @@ async fn natural_key_child_delete_uses_model_primary_key() -> tideorm::Result<()
     let mut user = EntityManagerSlugUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("slug user should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     user.posts
         .as_mut()
@@ -814,12 +836,18 @@ async fn composite_key_root_uses_entity_manager_identity_map() -> tideorm::Resul
     GlobalProfiler::set_slow_threshold(0);
 
     let entity_manager = EntityManager::new(db);
-    let first = EntityManagerTeamMembership::find_in_entity_manager((created.team_id, created.member_id), &entity_manager)
-        .await?
-        .expect("composite-key model should exist");
-    let second = EntityManagerTeamMembership::find_in_entity_manager((created.team_id, created.member_id), &entity_manager)
-        .await?
-        .expect("composite-key model should exist on second lookup");
+    let first = EntityManagerTeamMembership::find_in_entity_manager(
+        (created.team_id, created.member_id),
+        &entity_manager,
+    )
+    .await?
+    .expect("composite-key model should exist");
+    let second = EntityManagerTeamMembership::find_in_entity_manager(
+        (created.team_id, created.member_id),
+        &entity_manager,
+    )
+    .await?
+    .expect("composite-key model should exist on second lookup");
 
     let stats = GlobalProfiler::stats();
     assert_eq!(stats.total_queries, 1);
@@ -865,7 +893,8 @@ async fn composite_key_child_delete_uses_model_primary_key() -> tideorm::Result<
     let mut user = EntityManagerCompositeUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("composite parent should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     user.posts
         .as_mut()
@@ -909,7 +938,8 @@ async fn composite_key_child_insert_is_saved() -> tideorm::Result<()> {
     let mut user = EntityManagerCompositeUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("composite parent should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     user.posts
         .as_mut()
@@ -927,9 +957,10 @@ async fn composite_key_child_insert_is_saved() -> tideorm::Result<()> {
     assert_eq!(cached_posts[0].slug, "slug-insert");
     assert_eq!(cached_posts[0].title, "Inserted");
 
-    let saved = EntityManagerCompositePost::find_with((user.id, "slug-insert".to_string()), db.as_ref())
-        .await?
-        .expect("inserted composite child should exist");
+    let saved =
+        EntityManagerCompositePost::find_with((user.id, "slug-insert".to_string()), db.as_ref())
+            .await?
+            .expect("inserted composite child should exist");
     assert_eq!(saved.title, "Inserted");
 
     Ok(())
@@ -961,7 +992,8 @@ async fn composite_key_child_update_is_saved() -> tideorm::Result<()> {
     let mut user = EntityManagerCompositeUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("composite parent should exist");
-    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager).await?;
+    tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
+        .await?;
 
     let posts = user.posts.as_mut().expect("loaded posts should be mutable");
     assert_eq!(posts.len(), 1);
@@ -971,9 +1003,10 @@ async fn composite_key_child_update_is_saved() -> tideorm::Result<()> {
     let cached_posts = user.posts.get_cached().expect("posts should stay loaded");
     assert_eq!(cached_posts[0].title, "After");
 
-    let saved = EntityManagerCompositePost::find_with((user.id, "slug-update".to_string()), db.as_ref())
-        .await?
-        .expect("updated composite child should exist");
+    let saved =
+        EntityManagerCompositePost::find_with((user.id, "slug-update".to_string()), db.as_ref())
+            .await?
+            .expect("updated composite child should exist");
     assert_eq!(saved.title, "After");
 
     Ok(())
@@ -1008,7 +1041,10 @@ async fn hasone_insert_update_delete_is_synced() -> tideorm::Result<()> {
     }));
 
     let mut user = save_with_entity_manager(&user, &entity_manager).await?;
-    let profile = user.profile.get_cached().expect("profile should be inserted");
+    let profile = user
+        .profile
+        .get_cached()
+        .expect("profile should be inserted");
     assert!(profile.id > 0);
     assert_eq!(profile.user_id, user.id);
     assert_eq!(profile.bio, "Bio One");
@@ -1058,6 +1094,64 @@ async fn hasone_insert_update_delete_is_synced() -> tideorm::Result<()> {
 
 #[cfg(feature = "entity-manager")]
 #[tokio::test]
+async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideorm::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    let db = setup_database().await?;
+
+    let created = EntityManagerAggregateUser {
+        id: 0,
+        name: "Aggregate User".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    let original_profile = EntityManagerAggregateProfile {
+        id: 0,
+        user_id: created.id,
+        bio: "Existing Bio".to_string(),
+    }
+    .save()
+    .await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let mut user = EntityManagerAggregateUser::find_in_entity_manager(created.id, &entity_manager)
+        .await?
+        .expect("aggregate user should exist");
+    user.profile.load_in_entity_manager(&entity_manager).await?;
+
+    user.name = "Rolled Back Name".to_string();
+    user.profile.set_cached(Some(EntityManagerAggregateProfile {
+        id: 0,
+        user_id: 0,
+        bio: "Conflicting Bio".to_string(),
+    }));
+
+    assert!(
+        save_with_entity_manager(&user, &entity_manager)
+            .await
+            .is_err()
+    );
+
+    let persisted_user = EntityManagerAggregateUser::find_with(created.id, db.as_ref())
+        .await?
+        .expect("aggregate user should still exist");
+    assert_eq!(persisted_user.name, "Aggregate User");
+
+    let profiles = EntityManagerAggregateProfile::query_with(db.as_ref())
+        .where_eq("user_id", created.id)
+        .order_by("id", Order::Asc)
+        .get()
+        .await?;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].id, original_profile.id);
+    assert_eq!(profiles[0].bio, "Existing Bio");
+
+    Ok(())
+}
+
+#[cfg(feature = "entity-manager")]
+#[tokio::test]
 async fn belongs_to_load_in_entity_manager_reuses_cached_parent() -> tideorm::Result<()> {
     let _guard = test_lock().lock_owned().await;
     let db = setup_database().await?;
@@ -1093,12 +1187,14 @@ async fn belongs_to_load_in_entity_manager_reuses_cached_parent() -> tideorm::Re
     let _cached_user = EntityManagerAggregateUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("cached parent should exist");
-    let mut first = EntityManagerAggregatePost::find_in_entity_manager(first_post.id, &entity_manager)
-        .await?
-        .expect("first post should exist");
-    let mut second = EntityManagerAggregatePost::find_in_entity_manager(second_post.id, &entity_manager)
-        .await?
-        .expect("second post should exist");
+    let mut first =
+        EntityManagerAggregatePost::find_in_entity_manager(first_post.id, &entity_manager)
+            .await?
+            .expect("first post should exist");
+    let mut second =
+        EntityManagerAggregatePost::find_in_entity_manager(second_post.id, &entity_manager)
+            .await?
+            .expect("second post should exist");
 
     GlobalProfiler::enable();
     GlobalProfiler::reset();
@@ -1170,7 +1266,10 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
 
     let posts = user.posts.as_mut().expect("posts should be loaded");
     assert_eq!(posts.len(), 1);
-    posts[0].tags.load_in_entity_manager(&entity_manager).await?;
+    posts[0]
+        .tags
+        .load_in_entity_manager(&entity_manager)
+        .await?;
 
     let tags = posts[0].tags.as_mut().expect("tags should be loaded");
     assert_eq!(tags.len(), 1);
@@ -1183,7 +1282,10 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
 
     let user = save_with_entity_manager(&user, &entity_manager).await?;
     let saved_post = &user.posts.get_cached().expect("posts should remain loaded")[0];
-    let saved_tags = saved_post.tags.get_cached().expect("tags should remain loaded");
+    let saved_tags = saved_post
+        .tags
+        .get_cached()
+        .expect("tags should remain loaded");
     assert_eq!(saved_tags.len(), 1);
     assert_eq!(saved_tags[0].name, "new-tag");
     assert!(saved_tags[0].id > 0);
@@ -1214,7 +1316,8 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
 
 #[cfg(feature = "entity-manager")]
 #[tokio::test]
-async fn entity_manager_facade_find_load_and_save_supports_all_relation_helpers() -> tideorm::Result<()> {
+async fn entity_manager_facade_find_load_and_save_supports_all_relation_helpers()
+-> tideorm::Result<()> {
     let _guard = test_lock().lock_owned().await;
     let db = setup_database().await?;
 
@@ -1290,10 +1393,7 @@ async fn entity_manager_facade_find_load_and_save_supports_all_relation_helpers(
             .collect();
         assert_eq!(tag_names, vec!["old-tag".to_string()]);
 
-        post.tags
-            .as_mut()
-            .expect("tags should be loaded")
-            .clear();
+        post.tags.as_mut().expect("tags should be loaded").clear();
         post.tags
             .as_mut()
             .expect("tags should stay loaded")
@@ -1303,19 +1403,21 @@ async fn entity_manager_facade_find_load_and_save_supports_all_relation_helpers(
             });
     }
 
-    user.profile
-        .as_mut()
-        .expect("profile should be loaded")
-        .bio = "Updated Bio".to_string();
+    user.profile.as_mut().expect("profile should be loaded").bio = "Updated Bio".to_string();
 
     let user = entity_manager.save(&user).await?;
     assert_eq!(
-        user.profile.get_cached().map(|profile| profile.bio.as_str()),
+        user.profile
+            .get_cached()
+            .map(|profile| profile.bio.as_str()),
         Some("Updated Bio")
     );
 
     let saved_post = &user.posts.get_cached().expect("posts should stay loaded")[0];
-    let saved_tags = saved_post.tags.get_cached().expect("tags should stay loaded");
+    let saved_tags = saved_post
+        .tags
+        .get_cached()
+        .expect("tags should stay loaded");
     assert_eq!(saved_tags.len(), 1);
     assert_eq!(saved_tags[0].name, "new-tag");
     assert!(saved_tags[0].id > 0);
@@ -1438,6 +1540,53 @@ async fn entity_manager_merge_and_flush_updates_existing_root() -> tideorm::Resu
 
 #[cfg(feature = "entity-manager")]
 #[tokio::test]
+async fn entity_manager_flush_rolls_back_all_managed_writes_on_error() -> tideorm::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    let db = setup_database().await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let first = entity_manager.persist(EntityManagerCodeUser {
+        id: 0,
+        code: "duplicate".to_string(),
+        name: "First".to_string(),
+        posts: Default::default(),
+    });
+    let second = entity_manager.persist(EntityManagerCodeUser {
+        id: 0,
+        code: "duplicate".to_string(),
+        name: "Second".to_string(),
+        posts: Default::default(),
+    });
+
+    assert!(entity_manager.flush().await.is_err());
+    assert_eq!(
+        EntityManagerCodeUser::query_with(db.as_ref())
+            .count()
+            .await?,
+        0
+    );
+    assert_eq!(first.state(), EntityState::New);
+    assert_eq!(second.state(), EntityState::New);
+    assert_eq!(first.get().id, 0);
+    assert_eq!(second.get().id, 0);
+
+    second.edit(|user| user.code = "unique".to_string());
+    entity_manager.flush().await?;
+
+    assert!(first.get().id > 0);
+    assert!(second.get().id > 0);
+    assert_eq!(
+        EntityManagerCodeUser::query_with(db.as_ref())
+            .count()
+            .await?,
+        2
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "entity-manager")]
+#[tokio::test]
 async fn entity_manager_remove_and_detach_control_flush_lifecycle() -> tideorm::Result<()> {
     let _guard = test_lock().lock_owned().await;
     let db = setup_database().await?;
@@ -1473,7 +1622,11 @@ async fn entity_manager_remove_and_detach_control_flush_lifecycle() -> tideorm::
 
     entity_manager.flush().await?;
 
-    assert!(EntityManagerUser::find_with(removable.id, db.as_ref()).await?.is_none());
+    assert!(
+        EntityManagerUser::find_with(removable.id, db.as_ref())
+            .await?
+            .is_none()
+    );
 
     let unchanged = EntityManagerUser::find_with(detachable.id, db.as_ref())
         .await?

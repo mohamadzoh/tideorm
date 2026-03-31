@@ -23,7 +23,9 @@ pub trait TideEntityManagerFieldWriter {
 }
 
 #[doc(hidden)]
-pub trait TideEntityManagerSync: TideEntityManagerMeta + Model + Clone + Send + Sync + 'static {
+pub trait TideEntityManagerSync:
+    TideEntityManagerMeta + Model + Clone + Send + Sync + 'static
+{
     fn tide_sync_entity_manager_relations<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,

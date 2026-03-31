@@ -109,8 +109,8 @@ async fn seed_relations(
 }
 
 #[tokio::test]
-async fn has_many_through_load_queries_with_attached_entity_manager_without_global_db(
-) -> crate::error::Result<()> {
+async fn has_many_through_load_queries_with_attached_entity_manager_without_global_db()
+-> crate::error::Result<()> {
     let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 

@@ -99,6 +99,36 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         self
     }
 
+    #[cfg(feature = "entity-manager")]
+    fn scoped_database(&self) -> Result<crate::database::Database> {
+        if let Some(entity_manager) = &self.entity_manager {
+            if matches!(
+                crate::database::__current_connection(),
+                Ok(crate::database::ConnectionRef::Transaction(_))
+            ) {
+                return crate::database::__current_db();
+            }
+
+            return Ok(entity_manager.database().clone());
+        }
+
+        crate::database::require_db()
+    }
+
+    #[cfg(feature = "entity-manager")]
+    fn scoped_database_for_entity_manager(
+        entity_manager: &Arc<crate::entity_manager::EntityManager>,
+    ) -> Result<crate::database::Database> {
+        if matches!(
+            crate::database::__current_connection(),
+            Ok(crate::database::ConnectionRef::Transaction(_))
+        ) {
+            return crate::database::__current_db();
+        }
+
+        Ok(entity_manager.database().clone())
+    }
+
     #[doc(hidden)]
     pub fn set_cached(&mut self, models: Vec<Related>) {
         self.cached = Some(models);
@@ -161,11 +191,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    Related::query_with(entity_manager.database())
-                } else {
-                    Related::query()
-                }
+                let db = self.scoped_database()?;
+                Related::query_with(&db)
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -204,26 +231,23 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    Related::query_with(entity_manager.database())
-                } else {
-                    Related::query()
-                }
+                let db = self.scoped_database()?;
+                Related::query_with(&db)
             }
             #[cfg(not(feature = "entity-manager"))]
             {
                 Related::query()
             }
         }
-            .inner_join(
-                self.pivot_table,
-                &pivot_related_column,
-                &related_local_column,
-            )
-            .where_eq(
-                format!("{}.{}", self.pivot_table, self.foreign_key),
-                pk.clone(),
-            );
+        .inner_join(
+            self.pivot_table,
+            &pivot_related_column,
+            &related_local_column,
+        )
+        .where_eq(
+            format!("{}.{}", self.pivot_table, self.foreign_key),
+            pk.clone(),
+        );
 
         constraint_fn(query).get().await
     }
@@ -240,11 +264,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    Pivot::query_with(entity_manager.database())
-                } else {
-                    Pivot::query()
-                }
+                let db = self.scoped_database()?;
+                Pivot::query_with(&db)
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -267,11 +288,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let db = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    entity_manager.database().clone()
-                } else {
-                    crate::database::require_db()?
-                }
+                self.scoped_database()?
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -323,11 +340,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    Pivot::query_with(entity_manager.database())
-                } else {
-                    Pivot::query()
-                }
+                let db = self.scoped_database()?;
+                Pivot::query_with(&db)
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -354,11 +368,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    Pivot::query_with(entity_manager.database())
-                } else {
-                    Pivot::query()
-                }
+                let db = self.scoped_database()?;
+                Pivot::query_with(&db)
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -457,7 +468,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let pivot_related_column = format!("{}.{}", self.pivot_table, self.related_key);
         let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
-        let loaded = Related::query_with(entity_manager.database())
+        let db = Self::scoped_database_for_entity_manager(entity_manager)?;
+        let loaded = Related::query_with(&db)
             .inner_join(
                 self.pivot_table,
                 &pivot_related_column,
@@ -558,9 +570,8 @@ where
     fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
+    {
         Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
     }
 }

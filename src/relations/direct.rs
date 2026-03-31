@@ -174,10 +174,7 @@ impl<E: Model> HasOne<E> {
                     }
                 };
 
-                return query
-                    .where_eq(self.foreign_key, pk.clone())
-                    .first()
-                    .await;
+                return query.where_eq(self.foreign_key, pk.clone()).first().await;
             }
         }
 
@@ -253,10 +250,7 @@ impl<E: Model> HasOne<E> {
             }
         };
 
-        query
-            .where_eq(self.foreign_key, pk.clone())
-            .exists()
-            .await
+        query.where_eq(self.foreign_key, pk.clone()).exists().await
     }
 
     pub fn as_mut(&mut self) -> Option<&mut E> {
@@ -333,14 +327,15 @@ impl<E: Model> HasOne<E> {
             ))
         })?;
 
-        let loaded = if let Some(cached) = entity_manager.find_by_field::<E>(self.foreign_key, pk_value)? {
-            Some(cached)
-        } else {
-            E::query_with(entity_manager.database())
-                .where_eq(self.foreign_key, pk_value.clone())
-                .first()
-                .await?
-        };
+        let loaded =
+            if let Some(cached) = entity_manager.find_by_field::<E>(self.foreign_key, pk_value)? {
+                Some(cached)
+            } else {
+                E::query_with(entity_manager.database())
+                    .where_eq(self.foreign_key, pk_value.clone())
+                    .first()
+                    .await?
+            };
 
         self.cached = match loaded {
             Some(entity) => Some(Box::new(entity_manager.register(entity).await)),
@@ -424,9 +419,8 @@ where
     fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
+    {
         Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
     }
 }
@@ -698,10 +692,7 @@ impl<E: Model> BelongsTo<E> {
                     }
                 };
 
-                return query
-                    .where_eq(self.owner_key, fk.clone())
-                    .first()
-                    .await;
+                return query.where_eq(self.owner_key, fk.clone()).first().await;
             }
         }
 
@@ -777,10 +768,7 @@ impl<E: Model> BelongsTo<E> {
             }
         };
 
-        query
-            .where_eq(self.owner_key, fk.clone())
-            .exists()
-            .await
+        query.where_eq(self.owner_key, fk.clone()).exists().await
     }
 
     pub fn as_mut(&mut self) -> Option<&mut E> {
@@ -907,9 +895,8 @@ where
     fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
+    {
         Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
     }
 }

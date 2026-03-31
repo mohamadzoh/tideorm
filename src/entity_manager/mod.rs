@@ -27,7 +27,7 @@ pub use meta::{
     pk_to_entity_manager_key as __pk_to_entity_manager_key,
 };
 #[doc(hidden)]
-pub use save::__with_entity_manager_db;
+pub use save::{__save_with_entity_manager_in_scope, __with_entity_manager_db};
 
 type IdentityKey = (TypeId, String);
 type SnapshotKey = (&'static str, TypeId, String, &'static str);
@@ -36,7 +36,10 @@ impl std::fmt::Debug for EntityManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EntityManager")
             .field("identity_map_len", &self.identity_map.read().len())
-            .field("managed_identity_map_len", &self.managed_identity_map.read().len())
+            .field(
+                "managed_identity_map_len",
+                &self.managed_identity_map.read().len(),
+            )
             .field("managed_entries_len", &self.managed_entries.read().len())
             .field("snapshots_len", &self.snapshots.read().len())
             .finish()
@@ -132,10 +135,7 @@ impl EntityManager {
             + Sync
             + 'static,
     {
-        if let Some(existing) = self
-            .get_managed_by_model(&entity)
-            .unwrap_or(None)
-        {
+        if let Some(existing) = self.get_managed_by_model(&entity).unwrap_or(None) {
             existing.entry.replace(entity);
             return existing;
         }
@@ -203,6 +203,42 @@ impl EntityManager {
     }
 
     pub async fn flush(self: &Arc<Self>) -> crate::error::Result<()> {
+        if save::in_entity_manager_transaction_scope() {
+            return self.flush_in_scope().await;
+        }
+
+        let entries = self.managed_entries.read().clone();
+        let checkpoints = entries
+            .iter()
+            .map(|entry| entry.clone().checkpoint())
+            .collect::<Vec<_>>();
+        let snapshots = self.snapshots.read().clone();
+        let entity_manager = self.clone();
+        let result = self
+            .db
+            .transaction(move |_| {
+                let entity_manager = entity_manager.clone();
+                Box::pin(async move {
+                    save::with_entity_manager_transaction_scope(entity_manager.flush_in_scope())
+                        .await
+                })
+            })
+            .await;
+
+        if let Err(error) = result {
+            for checkpoint in checkpoints {
+                checkpoint.rollback(self.as_ref());
+            }
+
+            self.identity_map.write().clear();
+            *self.snapshots.write() = snapshots;
+            return Err(error);
+        }
+
+        Ok(())
+    }
+
+    async fn flush_in_scope(self: &Arc<Self>) -> crate::error::Result<()> {
         let entries = self.managed_entries.read().clone();
         for entry in entries {
             entry.clone().flush(self).await?;
@@ -246,7 +282,7 @@ impl EntityManager {
             + Sync
             + 'static,
     {
-        save::save_with_entity_manager_impl(entity, self).await
+        save::save_with_entity_manager(entity, self).await
     }
 
     #[doc(hidden)]
@@ -311,7 +347,12 @@ impl EntityManager {
         relation: &'static str,
         ids: &[String],
     ) {
-        let key = (owner_table, TypeId::of::<T>(), owner_key.to_string(), relation);
+        let key = (
+            owner_table,
+            TypeId::of::<T>(),
+            owner_key.to_string(),
+            relation,
+        );
         let mut snapshots = self.snapshots.write();
         snapshots.insert(key, ids.iter().cloned().collect());
     }
@@ -323,7 +364,12 @@ impl EntityManager {
         relation: &'static str,
         current_ids: &[String],
     ) -> Vec<String> {
-        let key = (owner_table, TypeId::of::<T>(), owner_key.to_string(), relation);
+        let key = (
+            owner_table,
+            TypeId::of::<T>(),
+            owner_key.to_string(),
+            relation,
+        );
         let current: HashSet<_> = current_ids.iter().cloned().collect();
         let snapshots = self.snapshots.read();
         let Some(previous) = snapshots.get(&key) else {
@@ -345,7 +391,12 @@ impl EntityManager {
         relation: &'static str,
         current_ids: &[String],
     ) -> Vec<String> {
-        let key = (owner_table, TypeId::of::<T>(), owner_key.to_string(), relation);
+        let key = (
+            owner_table,
+            TypeId::of::<T>(),
+            owner_key.to_string(),
+            relation,
+        );
         let current: HashSet<_> = current_ids.iter().cloned().collect();
         let snapshots = self.snapshots.read();
         let Some(previous) = snapshots.get(&key) else {
@@ -359,7 +410,10 @@ impl EntityManager {
     }
 
     #[doc(hidden)]
-    pub fn get<T>(&self, pk: &<T as crate::model::ModelMeta>::PrimaryKey) -> crate::error::Result<Option<T>>
+    pub fn get<T>(
+        &self,
+        pk: &<T as crate::model::ModelMeta>::PrimaryKey,
+    ) -> crate::error::Result<Option<T>>
     where
         T: crate::model::ModelMeta + Clone + Send + Sync + 'static,
     {
@@ -390,8 +444,7 @@ impl EntityManager {
                 continue;
             };
 
-            if <T as crate::internal::InternalModel>::field_json_value(model, field)?
-                .as_ref()
+            if <T as crate::internal::InternalModel>::field_json_value(model, field)?.as_ref()
                 == Some(value)
             {
                 return Ok(Some(model.clone()));
@@ -431,7 +484,10 @@ impl EntityManager {
         Some(Managed::from_entry(entry))
     }
 
-    pub(crate) fn get_managed_by_model<T>(&self, entity: &T) -> crate::error::Result<Option<Managed<T>>>
+    pub(crate) fn get_managed_by_model<T>(
+        &self,
+        entity: &T,
+    ) -> crate::error::Result<Option<Managed<T>>>
     where
         T: crate::model::Model + crate::model::ModelMeta + Send + Sync + 'static,
     {
@@ -479,6 +535,8 @@ impl EntityManager {
         T: Clone + Send + Sync + 'static,
     {
         let map = self.identity_map.read();
-        map.get(key).and_then(|value| value.downcast_ref::<T>()).cloned()
+        map.get(key)
+            .and_then(|value| value.downcast_ref::<T>())
+            .cloned()
     }
 }

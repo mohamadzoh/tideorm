@@ -1,9 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
-use tideorm::entity_manager::{save_with_entity_manager, EntityManager};
+use tideorm::Database;
+use tideorm::entity_manager::{EntityManager, save_with_entity_manager};
 use tideorm::prelude::*;
 use tideorm::profiling::GlobalProfiler;
-use tideorm::Database;
 
 use super::backend;
 
@@ -34,7 +34,11 @@ struct BackendEntityManagerCodeUser {
     code: String,
     name: String,
 
-    #[tideorm(has_many = "BackendEntityManagerCodePost", foreign_key = "user_code", local_key = "code")]
+    #[tideorm(
+        has_many = "BackendEntityManagerCodePost",
+        foreign_key = "user_code",
+        local_key = "code"
+    )]
     posts: HasMany<BackendEntityManagerCodePost>,
 }
 
@@ -52,10 +56,16 @@ struct BackendEntityManagerAggregateUser {
     id: i64,
     name: String,
 
-    #[tideorm(has_one = "BackendEntityManagerAggregateProfile", foreign_key = "user_id")]
+    #[tideorm(
+        has_one = "BackendEntityManagerAggregateProfile",
+        foreign_key = "user_id"
+    )]
     profile: HasOne<BackendEntityManagerAggregateProfile>,
 
-    #[tideorm(has_many = "BackendEntityManagerAggregatePost", foreign_key = "user_id")]
+    #[tideorm(
+        has_many = "BackendEntityManagerAggregatePost",
+        foreign_key = "user_id"
+    )]
     posts: HasMany<BackendEntityManagerAggregatePost>,
 }
 
@@ -74,7 +84,10 @@ struct BackendEntityManagerAggregatePost {
     user_id: i64,
     title: String,
 
-    #[tideorm(belongs_to = "BackendEntityManagerAggregateUser", foreign_key = "user_id")]
+    #[tideorm(
+        belongs_to = "BackendEntityManagerAggregateUser",
+        foreign_key = "user_id"
+    )]
     author: BelongsTo<BackendEntityManagerAggregateUser>,
 
     #[tideorm(
@@ -113,7 +126,13 @@ async fn setup_database() -> tideorm::Result<Option<Arc<Database>>> {
 
 async fn seed_user_with_posts(
     count: usize,
-) -> tideorm::Result<Option<(BackendEntityManagerUser, Vec<BackendEntityManagerPost>, Arc<Database>)>> {
+) -> tideorm::Result<
+    Option<(
+        BackendEntityManagerUser,
+        Vec<BackendEntityManagerPost>,
+        Arc<Database>,
+    )>,
+> {
     let Some(db) = setup_database().await? else {
         return Ok(None);
     };
@@ -141,8 +160,7 @@ async fn seed_user_with_posts(
     Ok(Some((user, posts, db)))
 }
 
-async fn seed_aggregate_graph(
-) -> tideorm::Result<
+async fn seed_aggregate_graph() -> tideorm::Result<
     Option<(
         BackendEntityManagerAggregateUser,
         BackendEntityManagerAggregatePost,
@@ -244,9 +262,11 @@ async fn tracked_deletion_emits_delete() -> tideorm::Result<()> {
         .count()
         .await?;
     assert_eq!(remaining, 2);
-    assert!(BackendEntityManagerPost::find_with(removed_id, db.as_ref())
-        .await?
-        .is_none());
+    assert!(
+        BackendEntityManagerPost::find_with(removed_id, db.as_ref())
+            .await?
+            .is_none()
+    );
 
     Ok(())
 }
@@ -268,9 +288,10 @@ async fn string_local_key_is_used_for_new_children() -> tideorm::Result<()> {
     .await?;
 
     let entity_manager = EntityManager::new(db.clone());
-    let mut user = BackendEntityManagerCodeUser::find_in_entity_manager(created.id, &entity_manager)
-        .await?
-        .expect("code user should exist");
+    let mut user =
+        BackendEntityManagerCodeUser::find_in_entity_manager(created.id, &entity_manager)
+            .await?
+            .expect("code user should exist");
     tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
         .await?;
 
@@ -308,19 +329,24 @@ async fn hasone_insert_update_delete_is_synced() -> tideorm::Result<()> {
     };
 
     let entity_manager = EntityManager::new(db.clone());
-    let mut user = BackendEntityManagerAggregateUser::find_in_entity_manager(created.id, &entity_manager)
-        .await?
-        .expect("aggregate user should exist");
+    let mut user =
+        BackendEntityManagerAggregateUser::find_in_entity_manager(created.id, &entity_manager)
+            .await?
+            .expect("aggregate user should exist");
     user.profile.load_in_entity_manager(&entity_manager).await?;
 
-    user.profile.set_cached(Some(BackendEntityManagerAggregateProfile {
-        id: 0,
-        user_id: 0,
-        bio: "Bio One".to_string(),
-    }));
+    user.profile
+        .set_cached(Some(BackendEntityManagerAggregateProfile {
+            id: 0,
+            user_id: 0,
+            bio: "Bio One".to_string(),
+        }));
 
     let mut user = save_with_entity_manager(&user, &entity_manager).await?;
-    let profile = user.profile.get_cached().expect("profile should be inserted");
+    let profile = user
+        .profile
+        .get_cached()
+        .expect("profile should be inserted");
     assert!(profile.id > 0);
     assert_eq!(profile.user_id, user.id);
     assert_eq!(profile.bio, "Bio One");
@@ -371,15 +397,18 @@ async fn belongs_to_load_in_entity_manager_reuses_cached_parent() -> tideorm::Re
     .await?;
 
     let entity_manager = EntityManager::new(db);
-    let _cached_user = BackendEntityManagerAggregateUser::find_in_entity_manager(user.id, &entity_manager)
-        .await?
-        .expect("cached parent should exist");
-    let mut first = BackendEntityManagerAggregatePost::find_in_entity_manager(first_post.id, &entity_manager)
-        .await?
-        .expect("first post should exist");
-    let mut second = BackendEntityManagerAggregatePost::find_in_entity_manager(second_post.id, &entity_manager)
-        .await?
-        .expect("second post should exist");
+    let _cached_user =
+        BackendEntityManagerAggregateUser::find_in_entity_manager(user.id, &entity_manager)
+            .await?
+            .expect("cached parent should exist");
+    let mut first =
+        BackendEntityManagerAggregatePost::find_in_entity_manager(first_post.id, &entity_manager)
+            .await?
+            .expect("first post should exist");
+    let mut second =
+        BackendEntityManagerAggregatePost::find_in_entity_manager(second_post.id, &entity_manager)
+            .await?
+            .expect("second post should exist");
 
     GlobalProfiler::enable();
     GlobalProfiler::reset();
@@ -414,9 +443,10 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
     };
 
     let entity_manager = EntityManager::new(db.clone());
-    let mut user = BackendEntityManagerAggregateUser::find_in_entity_manager(user.id, &entity_manager)
-        .await?
-        .expect("graph user should exist");
+    let mut user =
+        BackendEntityManagerAggregateUser::find_in_entity_manager(user.id, &entity_manager)
+            .await?
+            .expect("graph user should exist");
     user.posts.load_in_entity_manager(&entity_manager).await?;
 
     let posts = user.posts.as_mut().expect("posts should be loaded");
@@ -424,7 +454,10 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
         .iter_mut()
         .find(|candidate| candidate.id == post.id)
         .expect("seeded post should be present");
-    target_post.tags.load_in_entity_manager(&entity_manager).await?;
+    target_post
+        .tags
+        .load_in_entity_manager(&entity_manager)
+        .await?;
 
     let tags = target_post.tags.as_mut().expect("tags should be loaded");
     assert_eq!(tags.len(), 1);
@@ -443,7 +476,10 @@ async fn nested_has_many_through_changes_are_synced_from_root_save() -> tideorm:
         .iter()
         .find(|candidate| candidate.id == post.id)
         .expect("saved post should remain loaded");
-    let saved_tags = saved_post.tags.get_cached().expect("tags should remain loaded");
+    let saved_tags = saved_post
+        .tags
+        .get_cached()
+        .expect("tags should remain loaded");
     assert_eq!(saved_tags.len(), 1);
     assert_eq!(saved_tags[0].name, "new-tag");
     assert!(saved_tags[0].id > 0);

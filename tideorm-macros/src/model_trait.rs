@@ -106,7 +106,9 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
         .iter()
         .filter(|field_ident| {
             let field_name = field_ident.to_string();
-            !relation_field_names.iter().any(|relation_name| relation_name == &field_name)
+            !relation_field_names
+                .iter()
+                .any(|relation_name| relation_name == &field_name)
         })
         .map(|field_ident| {
             quote! {
@@ -216,7 +218,7 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
                                     continue;
                                 }
 
-                                let saved = ::tideorm::entity_manager::save_with_entity_manager(item, entity_manager).await?;
+                                let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
 
                                 if let Some(saved_key) = ::tideorm::entity_manager::__model_entity_manager_key(&saved)? {
                                     updated_keys.push(saved_key);
@@ -277,7 +279,7 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
                                 <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;
                                 entity_manager.put(item.clone());
                             } else {
-                                let saved = ::tideorm::entity_manager::save_with_entity_manager(item, entity_manager).await?;
+                                let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
 
                                 if let Some(saved_key) = ::tideorm::entity_manager::__model_entity_manager_key(&saved)? {
                                     updated_keys.push(saved_key);
@@ -346,7 +348,7 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
                                     <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;
                                     entity_manager.put(item.clone());
                                 } else {
-                                    let saved = ::tideorm::entity_manager::save_with_entity_manager(item, entity_manager).await?;
+                                    let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
                                     *item = saved.clone();
                                     entity_manager.put(saved);
                                 }

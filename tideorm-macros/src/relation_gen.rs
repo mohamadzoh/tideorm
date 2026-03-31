@@ -51,7 +51,9 @@ fn build_relation_field_init(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type")
+            })?;
         return Ok(quote! {
             let previous = self.#ident.clone();
             self.#ident = {
@@ -88,7 +90,12 @@ fn build_relation_field_init(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &field.ty,
+                    "has_many relation requires a related model type",
+                )
+            })?;
         return Ok(quote! {
             let previous = self.#ident.clone();
             self.#ident = {
@@ -140,7 +147,12 @@ fn build_relation_field_init(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many_through relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &field.ty,
+                    "has_many_through relation requires a related model type",
+                )
+            })?;
         return Ok(quote! {
             let previous = self.#ident.clone();
             self.#ident = {
@@ -272,7 +284,9 @@ fn build_relation_state_refresh(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type")
+            })?;
         return Ok(quote! {
             self.#ident = {
                 #[cfg(feature = "entity-manager")]
@@ -308,7 +322,12 @@ fn build_relation_state_refresh(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &field.ty,
+                    "has_many relation requires a related model type",
+                )
+            })?;
         return Ok(quote! {
             self.#ident = {
                 #[cfg(feature = "entity-manager")]
@@ -358,7 +377,12 @@ fn build_relation_state_refresh(
         let related_ty = relation_generic_types(&field.ty)
             .into_iter()
             .next()
-            .ok_or_else(|| syn::Error::new_spanned(&field.ty, "has_many_through relation requires a related model type"))?;
+            .ok_or_else(|| {
+                syn::Error::new_spanned(
+                    &field.ty,
+                    "has_many_through relation requires a related model type",
+                )
+            })?;
         return Ok(quote! {
             self.#ident = {
                 #[cfg(feature = "entity-manager")]

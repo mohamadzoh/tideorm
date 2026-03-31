@@ -9,8 +9,8 @@ use parking_lot::RwLock;
 use crate::model::Model;
 
 use super::{
-    save::save_with_entity_manager_impl, EntityManager, TideEntityManagerMergePersisted,
-    TideEntityManagerMeta, TideEntityManagerSync,
+    EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
+    save::save_with_entity_manager_impl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +54,15 @@ impl<T> Managed<T> {
 pub(crate) trait ManagedOps: Send + Sync {
     fn current_state(&self) -> EntityState;
     fn detach_from_context(&self, entity_manager: &EntityManager);
+    fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint>;
     fn flush<'a>(
         self: Arc<Self>,
         entity_manager: &'a Arc<EntityManager>,
     ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>>;
+}
+
+pub(crate) trait ManagedCheckpoint: Send {
+    fn rollback(self: Box<Self>, entity_manager: &EntityManager);
 }
 
 pub(crate) struct ManagedEntry<T> {
@@ -161,6 +166,16 @@ where
         self.mark_detached();
     }
 
+    fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint> {
+        Box::new(ManagedEntryCheckpoint {
+            entry: self.clone(),
+            current: self.current.read().clone(),
+            snapshot: self.snapshot.read().clone(),
+            state: self.state(),
+            persisted_key: self.persisted_key.read().clone(),
+        })
+    }
+
     fn flush<'a>(
         self: Arc<Self>,
         entity_manager: &'a Arc<EntityManager>,
@@ -194,7 +209,9 @@ where
                     let current = self.current.read().clone();
                     let snapshot = self.snapshot.read().clone();
                     let should_flush = match snapshot {
-                        Some(snapshot) => serde_json::to_value(&snapshot)? != serde_json::to_value(&current)?,
+                        Some(snapshot) => {
+                            serde_json::to_value(&snapshot)? != serde_json::to_value(&current)?
+                        }
                         None => true,
                     };
 
@@ -225,5 +242,33 @@ where
                 }
             }
         })
+    }
+}
+
+struct ManagedEntryCheckpoint<T> {
+    entry: Arc<ManagedEntry<T>>,
+    current: T,
+    snapshot: Option<T>,
+    state: EntityState,
+    persisted_key: Option<String>,
+}
+
+impl<T> ManagedCheckpoint for ManagedEntryCheckpoint<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn rollback(self: Box<Self>, entity_manager: &EntityManager) {
+        if let Some(current_key) = self.entry.persisted_key.read().clone() {
+            entity_manager.remove_managed_entry::<T>(&current_key);
+        }
+
+        if let Some(previous_key) = self.persisted_key.as_deref() {
+            entity_manager.put_managed_entry::<T>(previous_key, self.entry.clone());
+        }
+
+        *self.entry.current.write() = self.current;
+        *self.entry.snapshot.write() = self.snapshot;
+        *self.entry.state.write() = self.state;
+        *self.entry.persisted_key.write() = self.persisted_key;
     }
 }

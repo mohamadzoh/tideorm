@@ -1,4 +1,8 @@
-#![cfg(all(feature = "sqlite", feature = "runtime-tokio", feature = "entity-manager"))]
+#![cfg(all(
+    feature = "sqlite",
+    feature = "runtime-tokio",
+    feature = "entity-manager"
+))]
 
 #[path = "support/sqlite_test_config.rs"]
 mod test_config;
@@ -29,7 +33,8 @@ mod backend {
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_users").await?;
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_code_posts").await?;
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_code_users").await?;
-        Database::execute("DROP TABLE IF EXISTS entity_manager_backend_aggregate_post_tags").await?;
+        Database::execute("DROP TABLE IF EXISTS entity_manager_backend_aggregate_post_tags")
+            .await?;
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_aggregate_tags").await?;
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_aggregate_profiles").await?;
         Database::execute("DROP TABLE IF EXISTS entity_manager_backend_aggregate_posts").await?;

@@ -185,7 +185,7 @@ pub mod schema;
 /// Model relations (belongs_to, has_one, has_many)
 pub mod relations;
 
-/// Opt-in JPA-style entity manager and persistence-context support
+/// Opt-in JPA-like entity manager and persistence-context support
 #[cfg(feature = "entity-manager")]
 pub mod entity_manager;
 

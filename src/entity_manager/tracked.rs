@@ -2,8 +2,8 @@
 
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -214,7 +214,10 @@ impl<T: Model> TrackedHasMany<T> {
             .snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids)
             .await;
 
-        Ok(self.cached.as_ref().expect("relation cache should exist after load"))
+        Ok(self
+            .cached
+            .as_ref()
+            .expect("relation cache should exist after load"))
     }
 
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<T>>

@@ -111,8 +111,8 @@ async fn seed_relations(
 }
 
 #[tokio::test]
-async fn hasone_load_queries_with_attached_entity_manager_without_global_db(
-) -> crate::error::Result<()> {
+async fn hasone_load_queries_with_attached_entity_manager_without_global_db()
+-> crate::error::Result<()> {
     let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 
@@ -147,8 +147,8 @@ async fn hasone_load_queries_with_attached_entity_manager_without_global_db(
 }
 
 #[tokio::test]
-async fn belongsto_load_queries_with_attached_entity_manager_without_global_db(
-) -> crate::error::Result<()> {
+async fn belongsto_load_queries_with_attached_entity_manager_without_global_db()
+-> crate::error::Result<()> {
     let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 

@@ -156,11 +156,11 @@ pub use crate::columns::{
     ColumnOrd, IntoColumnName,
 };
 
-// JPA-style entity manager / persistence context
+// JPA-like entity manager / persistence context
 #[cfg(feature = "entity-manager")]
 pub use crate::entity_manager::{
-    save_with_entity_manager, EntityManager, EntityManagerLoad, EntityState, Managed,
-    TideEntityManagerMeta,
+    EntityManager, EntityManagerLoad, EntityState, Managed, TideEntityManagerMeta,
+    save_with_entity_manager,
 };
 
 // Derive macro
