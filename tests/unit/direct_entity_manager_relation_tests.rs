@@ -21,6 +21,11 @@ struct DirectEntityManagerRelationUser {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     name: String,
+    #[tideorm(
+        has_one = "DirectEntityManagerRelationProfile",
+        foreign_key = "user_id"
+    )]
+    profile: tideorm::relations::HasOne<DirectEntityManagerRelationProfile>,
 }
 
 #[tideorm::model(table = "direct_entity_manager_relation_test_profiles")]
@@ -37,43 +42,11 @@ struct DirectEntityManagerRelationPost {
     id: i64,
     user_id: i64,
     title: String,
-}
-
-#[tideorm::model(table = "direct_entity_manager_relation_test_users")]
-struct DirectEntityManagerHasOneUser {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    name: String,
-    #[tideorm(has_one = "DirectEntityManagerHasOneProfile", foreign_key = "user_id")]
-    profile: tideorm::relations::HasOne<DirectEntityManagerHasOneProfile>,
-}
-
-#[tideorm::model(table = "direct_entity_manager_relation_test_profiles")]
-struct DirectEntityManagerHasOneProfile {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    user_id: i64,
-    name: String,
-}
-
-#[tideorm::model(table = "direct_entity_manager_relation_test_users")]
-struct DirectEntityManagerBelongsToUser {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    name: String,
-}
-
-#[tideorm::model(table = "direct_entity_manager_relation_test_posts")]
-struct DirectEntityManagerBelongsToPost {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    user_id: i64,
-    title: String,
     #[tideorm(
-        belongs_to = "DirectEntityManagerBelongsToUser",
+        belongs_to = "DirectEntityManagerRelationUser",
         foreign_key = "user_id"
     )]
-    user: tideorm::relations::BelongsTo<DirectEntityManagerBelongsToUser>,
+    user: tideorm::relations::BelongsTo<DirectEntityManagerRelationUser>,
 }
 
 fn test_lock() -> Arc<tokio::sync::Mutex<()>> {
@@ -121,6 +94,7 @@ async fn seed_relations(
         let user = DirectEntityManagerRelationUser {
             id: 0,
             name: "Alice".to_string(),
+            profile: Default::default(),
         }
         .save()
         .await?;
@@ -137,6 +111,7 @@ async fn seed_relations(
             id: 0,
             user_id: user.id,
             title: "Alice Post".to_string(),
+            user: Default::default(),
         }
         .save()
         .await?;
@@ -218,7 +193,7 @@ async fn hasone_helpers_query_via_parent_entity_manager_database_without_global_
     let (user, profile, _) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let user = DirectEntityManagerHasOneUser::find_in_entity_manager(user.id, &entity_manager)
+    let user = DirectEntityManagerRelationUser::find_in_entity_manager(user.id, &entity_manager)
         .await?
         .expect("entity-manager user should exist");
 
@@ -247,7 +222,7 @@ async fn belongsto_helpers_query_via_parent_entity_manager_database_without_glob
     let (user, _, post) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let post = DirectEntityManagerBelongsToPost::find_in_entity_manager(post.id, &entity_manager)
+    let post = DirectEntityManagerRelationPost::find_in_entity_manager(post.id, &entity_manager)
         .await?
         .expect("entity-manager post should exist");
 

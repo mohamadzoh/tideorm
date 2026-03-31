@@ -21,6 +21,16 @@ struct ManyToManyEntityManagerPost {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     title: String,
+    #[tideorm(
+        has_many_through = "ManyToManyEntityManagerTag",
+        pivot = "many_to_many_entity_manager_test_post_tags",
+        foreign_key = "post_id",
+        related_key = "tag_id"
+    )]
+    tags: tideorm::relations::HasManyThrough<
+        ManyToManyEntityManagerTag,
+        ManyToManyEntityManagerPostTag,
+    >,
 }
 
 #[tideorm::model(table = "many_to_many_entity_manager_test_tags")]
@@ -32,38 +42,6 @@ struct ManyToManyEntityManagerTag {
 
 #[tideorm::model(table = "many_to_many_entity_manager_test_post_tags")]
 struct ManyToManyEntityManagerPostTag {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    post_id: i64,
-    tag_id: i64,
-}
-
-#[tideorm::model(table = "many_to_many_entity_manager_test_posts")]
-struct ManyToManyEntityManagerAggregatePost {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    title: String,
-    #[tideorm(
-        has_many_through = "ManyToManyEntityManagerAggregateTag",
-        pivot = "many_to_many_entity_manager_test_post_tags",
-        foreign_key = "post_id",
-        related_key = "tag_id"
-    )]
-    tags: tideorm::relations::HasManyThrough<
-        ManyToManyEntityManagerAggregateTag,
-        ManyToManyEntityManagerAggregatePostTag,
-    >,
-}
-
-#[tideorm::model(table = "many_to_many_entity_manager_test_tags")]
-struct ManyToManyEntityManagerAggregateTag {
-    #[tideorm(primary_key, auto_increment)]
-    id: i64,
-    name: String,
-}
-
-#[tideorm::model(table = "many_to_many_entity_manager_test_post_tags")]
-struct ManyToManyEntityManagerAggregatePostTag {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     post_id: i64,
@@ -115,6 +93,7 @@ async fn seed_relations(
         let post = ManyToManyEntityManagerPost {
             id: 0,
             title: "Graph Post".to_string(),
+            tags: Default::default(),
         }
         .save()
         .await?;
@@ -182,10 +161,9 @@ async fn has_many_through_helpers_query_via_parent_entity_manager_database_witho
     let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let post =
-        ManyToManyEntityManagerAggregatePost::find_in_entity_manager(post.id, &entity_manager)
-            .await?
-            .expect("entity-manager post should exist");
+    let post = ManyToManyEntityManagerPost::find_in_entity_manager(post.id, &entity_manager)
+        .await?
+        .expect("entity-manager post should exist");
 
     assert_eq!(post.tags.count().await?, 1);
 
