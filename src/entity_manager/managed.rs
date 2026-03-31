@@ -10,7 +10,7 @@ use crate::model::Model;
 
 use super::{
     EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-    save::save_with_entity_manager_impl,
+    save::{save_with_entity_manager_impl, sync_entity_manager_relations_only_impl},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +153,8 @@ where
         + Send
         + Sync
         + 'static,
+    <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
 {
     fn current_state(&self) -> EntityState {
         self.state()
@@ -208,19 +210,17 @@ where
                 EntityState::New | EntityState::Managed => {
                     let current = self.current.read().clone();
                     let snapshot = self.snapshot.read().clone();
-                    let should_flush = match snapshot {
-                        Some(snapshot) => {
-                            serde_json::to_value(&snapshot)? != serde_json::to_value(&current)?
-                        }
+                    let columns_changed = match snapshot.as_ref() {
+                        Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),
                         None => true,
                     };
 
-                    if !should_flush {
-                        return Ok(());
-                    }
-
                     let previous_key = self.persisted_key.read().clone();
-                    let saved = save_with_entity_manager_impl(&current, entity_manager).await?;
+                    let saved = if columns_changed {
+                        save_with_entity_manager_impl(&current, entity_manager).await?
+                    } else {
+                        sync_entity_manager_relations_only_impl(&current, entity_manager).await?
+                    };
                     let next_key = Some(saved.tide_pk_key());
 
                     if let Some(previous_key) = previous_key.as_deref() {

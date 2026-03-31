@@ -1098,6 +1098,13 @@ async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideo
     let _guard = test_lock().lock_owned().await;
     let db = setup_database().await?;
 
+    let cached_user = EntityManagerUser {
+        id: 0,
+        name: "Cached User".to_string(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
     let created = EntityManagerAggregateUser {
         id: 0,
         name: "Aggregate User".to_string(),
@@ -1115,6 +1122,10 @@ async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideo
     .await?;
 
     let entity_manager = EntityManager::new(db.clone());
+    let _cached_user = entity_manager
+        .find::<EntityManagerUser>(cached_user.id)
+        .await?
+        .expect("cached user should load into the identity map");
     let mut user = EntityManagerAggregateUser::find_in_entity_manager(created.id, &entity_manager)
         .await?
         .expect("aggregate user should exist");
@@ -1146,6 +1157,22 @@ async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideo
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].id, original_profile.id);
     assert_eq!(profiles[0].bio, "Existing Bio");
+
+    GlobalProfiler::enable();
+    GlobalProfiler::reset();
+    GlobalProfiler::set_slow_threshold(0);
+
+    let cached_again = entity_manager
+        .find::<EntityManagerUser>(cached_user.id)
+        .await?
+        .expect("cached user should remain in the identity map after rollback");
+    let stats = GlobalProfiler::stats();
+
+    assert_eq!(cached_again.name, "Cached User");
+    assert_eq!(stats.total_queries, 0);
+
+    GlobalProfiler::disable();
+    GlobalProfiler::reset();
 
     Ok(())
 }
@@ -1507,6 +1534,73 @@ async fn entity_manager_find_managed_and_flush_updates_existing_root() -> tideor
 
 #[cfg(feature = "entity-manager")]
 #[tokio::test]
+async fn entity_manager_flush_persists_relation_only_changes_without_root_update()
+-> tideorm::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    let db = setup_database().await?;
+
+    let saved_user = EntityManagerAggregateUser {
+        id: 0,
+        name: "Managed Aggregate".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    EntityManagerAggregateProfile {
+        id: 0,
+        user_id: saved_user.id,
+        bio: "Before Relation Flush".to_string(),
+    }
+    .save()
+    .await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let managed = entity_manager
+        .find_managed::<EntityManagerAggregateUser>(saved_user.id)
+        .await?
+        .expect("managed aggregate should load");
+
+    let mut aggregate = managed.get();
+    aggregate
+        .profile
+        .load_in_entity_manager(&entity_manager)
+        .await?;
+    managed.replace(aggregate);
+    managed.edit(|user| {
+        user.profile.as_mut().expect("profile should be loaded").bio =
+            "After Relation Flush".to_string();
+    });
+
+    GlobalProfiler::enable();
+    GlobalProfiler::reset();
+    GlobalProfiler::set_slow_threshold(0);
+
+    entity_manager.flush().await?;
+
+    let stats = GlobalProfiler::stats();
+    assert_eq!(stats.total_queries, 1);
+
+    GlobalProfiler::disable();
+    GlobalProfiler::reset();
+
+    let refreshed_user = EntityManagerAggregateUser::find_with(saved_user.id, db.as_ref())
+        .await?
+        .expect("aggregate user should still exist");
+    assert_eq!(refreshed_user.name, "Managed Aggregate");
+
+    let refreshed_profile = EntityManagerAggregateProfile::query_with(db.as_ref())
+        .where_eq("user_id", saved_user.id)
+        .first()
+        .await?
+        .expect("profile should still exist");
+    assert_eq!(refreshed_profile.bio, "After Relation Flush");
+
+    Ok(())
+}
+
+#[cfg(feature = "entity-manager")]
+#[tokio::test]
 async fn entity_manager_merge_and_flush_updates_existing_root() -> tideorm::Result<()> {
     let _guard = test_lock().lock_owned().await;
     let db = setup_database().await?;
@@ -1545,6 +1639,17 @@ async fn entity_manager_flush_rolls_back_all_managed_writes_on_error() -> tideor
     let db = setup_database().await?;
 
     let entity_manager = EntityManager::new(db.clone());
+    let cached_user = EntityManagerUser {
+        id: 0,
+        name: "Cached User".to_string(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    let _cached_user = entity_manager
+        .find::<EntityManagerUser>(cached_user.id)
+        .await?
+        .expect("cached user should load into the identity map");
     let first = entity_manager.persist(EntityManagerCodeUser {
         id: 0,
         code: "duplicate".to_string(),
@@ -1569,6 +1674,22 @@ async fn entity_manager_flush_rolls_back_all_managed_writes_on_error() -> tideor
     assert_eq!(second.state(), EntityState::New);
     assert_eq!(first.get().id, 0);
     assert_eq!(second.get().id, 0);
+
+    GlobalProfiler::enable();
+    GlobalProfiler::reset();
+    GlobalProfiler::set_slow_threshold(0);
+
+    let cached_again = entity_manager
+        .find::<EntityManagerUser>(cached_user.id)
+        .await?
+        .expect("cached user should remain in the identity map after failed flush");
+    let stats = GlobalProfiler::stats();
+
+    assert_eq!(cached_again.name, "Cached User");
+    assert_eq!(stats.total_queries, 0);
+
+    GlobalProfiler::disable();
+    GlobalProfiler::reset();
 
     second.edit(|user| user.code = "unique".to_string());
     entity_manager.flush().await?;

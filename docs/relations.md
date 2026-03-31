@@ -128,6 +128,8 @@ If you enable the `entity-manager` feature, TideORM adds an explicit persistence
 
 Use `entity_manager.find::<Model>(...)` to load the root model, `entity_manager.load(&mut relation)` to load `HasOne<T>`, `HasMany<T>`, `BelongsTo<T>`, or `HasManyThrough<T, P>` relations inside the same context, and `entity_manager.save(&model)` or `entity_manager.flush()` to persist loaded aggregate-side changes.
 
+If the root model itself came from the entity manager, plain relation read helpers such as `load()`, `load_with(...)`, `count()`, and `exists()` stay on that same database handle even when no global database is configured. Use `entity_manager.load(&mut relation)` when the relation should also become tracked for aggregate synchronization.
+
 `find_in_entity_manager(...)`, `load_in_entity_manager(...)`, and `save_with_entity_manager(...)` remain available as lower-level compatibility entry points.
 
 See [Entity Manager](entity-manager.md) for the full workflow and primary-key support details.

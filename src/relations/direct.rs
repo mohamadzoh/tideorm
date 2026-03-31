@@ -31,6 +31,8 @@ pub struct HasOne<E: Model> {
     owner_key: Option<String>,
     #[cfg(feature = "entity-manager")]
     entity_manager: Option<Arc<crate::entity_manager::EntityManager>>,
+    #[cfg(feature = "entity-manager")]
+    query_db: Option<crate::database::Database>,
     _marker: PhantomData<E>,
 }
 
@@ -56,6 +58,8 @@ impl<E: Model> HasOne<E> {
             owner_key: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -82,6 +86,23 @@ impl<E: Model> HasOne<E> {
     pub fn with_owner_key(mut self, owner_key: String) -> Self {
         self.owner_key = Some(owner_key);
         self
+    }
+
+    #[cfg(feature = "entity-manager")]
+    fn query_builder(&self) -> QueryBuilder<E> {
+        if let Some(entity_manager) = &self.entity_manager {
+            E::query_with(entity_manager.database())
+        } else if let Some(db) = &self.query_db {
+            E::query_with(db)
+        } else {
+            E::query()
+        }
+    }
+
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.query_db = Some(database.clone());
     }
 
     #[doc(hidden)]
@@ -130,6 +151,9 @@ impl<E: Model> HasOne<E> {
             if self.entity_manager.is_none() {
                 self.entity_manager = previous.entity_manager.clone();
             }
+            if self.query_db.is_none() {
+                self.query_db = previous.query_db.clone();
+            }
         }
 
         #[cfg(not(feature = "entity-manager"))]
@@ -147,7 +171,7 @@ impl<E: Model> HasOne<E> {
         let can_query = {
             #[cfg(feature = "entity-manager")]
             {
-                has_active_database() || self.entity_manager.is_some()
+                has_active_database() || self.entity_manager.is_some() || self.query_db.is_some()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -162,11 +186,7 @@ impl<E: Model> HasOne<E> {
                 let query = {
                     #[cfg(feature = "entity-manager")]
                     {
-                        if let Some(entity_manager) = &self.entity_manager {
-                            E::query_with(entity_manager.database())
-                        } else {
-                            E::query()
-                        }
+                        self.query_builder()
                     }
                     #[cfg(not(feature = "entity-manager"))]
                     {
@@ -190,10 +210,18 @@ impl<E: Model> HasOne<E> {
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasOne::load")?;
 
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .first()
-            .await
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        };
+
+        query.where_eq(self.foreign_key, pk.clone()).first().await
     }
 
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
@@ -211,11 +239,7 @@ impl<E: Model> HasOne<E> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    E::query_with(entity_manager.database())
-                } else {
-                    E::query()
-                }
+                self.query_builder()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -238,11 +262,7 @@ impl<E: Model> HasOne<E> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    E::query_with(entity_manager.database())
-                } else {
-                    E::query()
-                }
+                self.query_builder()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -371,6 +391,8 @@ impl<E: Model> Default for HasOne<E> {
             owner_key: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -432,6 +454,8 @@ pub struct HasMany<E: Model> {
     pub local_key: &'static str,
     cached: Option<Vec<E>>,
     parent_pk: Option<serde_json::Value>,
+    #[cfg(feature = "entity-manager")]
+    query_db: Option<crate::database::Database>,
     _marker: PhantomData<E>,
 }
 
@@ -447,6 +471,8 @@ impl<E: Model> HasMany<E> {
             local_key,
             cached: None,
             parent_pk: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -471,17 +497,60 @@ impl<E: Model> HasMany<E> {
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk,
         );
+
+        #[cfg(feature = "entity-manager")]
+        if self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.parent_pk == previous.parent_pk
+            && self.query_db.is_none()
+        {
+            self.query_db = previous.query_db.clone();
+        }
+    }
+
+    #[cfg(feature = "entity-manager")]
+    fn query_builder(&self) -> QueryBuilder<E> {
+        if let Some(db) = &self.query_db {
+            E::query_with(db)
+        } else {
+            E::query()
+        }
+    }
+
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.query_db = Some(database.clone());
     }
 
     pub async fn load(&self) -> Result<Vec<E>> {
-        if has_active_database() && self.ensure_configured().is_ok() {
+        let can_query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_db.is_some() || has_active_database()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                has_active_database()
+            }
+        };
+
+        if can_query && self.ensure_configured().is_ok() {
             if let Some(pk) = self.parent_pk.as_ref() {
                 let pk = require_scalar_relation_key(pk, "HasMany::load")?;
 
-                return E::query()
-                    .where_eq(self.foreign_key, pk.clone())
-                    .get()
-                    .await;
+                let query = {
+                    #[cfg(feature = "entity-manager")]
+                    {
+                        self.query_builder()
+                    }
+                    #[cfg(not(feature = "entity-manager"))]
+                    {
+                        E::query()
+                    }
+                };
+
+                return query.where_eq(self.foreign_key, pk.clone()).get().await;
             }
         }
 
@@ -497,10 +566,18 @@ impl<E: Model> HasMany<E> {
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasMany::load")?;
 
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .get()
-            .await
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        };
+
+        query.where_eq(self.foreign_key, pk.clone()).get().await
     }
 
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<E>>
@@ -515,7 +592,17 @@ impl<E: Model> HasMany<E> {
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasMany::load_with")?;
 
-        let query = E::query().where_eq(self.foreign_key, pk.clone());
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        }
+        .where_eq(self.foreign_key, pk.clone());
         constraint_fn(query).get().await
     }
 
@@ -528,10 +615,18 @@ impl<E: Model> HasMany<E> {
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasMany::count")?;
 
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .count()
-            .await
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        };
+
+        query.where_eq(self.foreign_key, pk.clone()).count().await
     }
 
     pub async fn exists(&self) -> Result<bool> {
@@ -543,10 +638,18 @@ impl<E: Model> HasMany<E> {
             .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
         let pk = require_scalar_relation_key(pk, "HasMany::exists")?;
 
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .exists()
-            .await
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        };
+
+        query.where_eq(self.foreign_key, pk.clone()).exists().await
     }
 
     pub fn get_cached(&self) -> Option<&[E]> {
@@ -561,6 +664,8 @@ impl<E: Model> Default for HasMany<E> {
             local_key: "",
             cached: None,
             parent_pk: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -597,6 +702,8 @@ pub struct BelongsTo<E: Model> {
     fk_value: Option<serde_json::Value>,
     #[cfg(feature = "entity-manager")]
     entity_manager: Option<Arc<crate::entity_manager::EntityManager>>,
+    #[cfg(feature = "entity-manager")]
+    query_db: Option<crate::database::Database>,
     _marker: PhantomData<E>,
 }
 
@@ -614,6 +721,8 @@ impl<E: Model> BelongsTo<E> {
             fk_value: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -621,6 +730,23 @@ impl<E: Model> BelongsTo<E> {
     pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
         self.fk_value = Some(fk);
         self
+    }
+
+    #[cfg(feature = "entity-manager")]
+    fn query_builder(&self) -> QueryBuilder<E> {
+        if let Some(entity_manager) = &self.entity_manager {
+            E::query_with(entity_manager.database())
+        } else if let Some(db) = &self.query_db {
+            E::query_with(db)
+        } else {
+            E::query()
+        }
+    }
+
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.query_db = Some(database.clone());
     }
 
     #[doc(hidden)]
@@ -647,8 +773,13 @@ impl<E: Model> BelongsTo<E> {
         }
 
         #[cfg(feature = "entity-manager")]
-        if same_relation && self.entity_manager.is_none() {
-            self.entity_manager = previous.entity_manager.clone();
+        if same_relation {
+            if self.entity_manager.is_none() {
+                self.entity_manager = previous.entity_manager.clone();
+            }
+            if self.query_db.is_none() {
+                self.query_db = previous.query_db.clone();
+            }
         }
 
         if same_relation && !self.loaded {
@@ -665,7 +796,7 @@ impl<E: Model> BelongsTo<E> {
         let can_query = {
             #[cfg(feature = "entity-manager")]
             {
-                has_active_database() || self.entity_manager.is_some()
+                has_active_database() || self.entity_manager.is_some() || self.query_db.is_some()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -680,11 +811,7 @@ impl<E: Model> BelongsTo<E> {
                 let query = {
                     #[cfg(feature = "entity-manager")]
                     {
-                        if let Some(entity_manager) = &self.entity_manager {
-                            E::query_with(entity_manager.database())
-                        } else {
-                            E::query()
-                        }
+                        self.query_builder()
                     }
                     #[cfg(not(feature = "entity-manager"))]
                     {
@@ -708,10 +835,18 @@ impl<E: Model> BelongsTo<E> {
             .ok_or_else(|| Error::query(String::from("Foreign key value not set for relation")))?;
         let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
 
-        E::query()
-            .where_eq(self.owner_key, fk.clone())
-            .first()
-            .await
+        let query = {
+            #[cfg(feature = "entity-manager")]
+            {
+                self.query_builder()
+            }
+            #[cfg(not(feature = "entity-manager"))]
+            {
+                E::query()
+            }
+        };
+
+        query.where_eq(self.owner_key, fk.clone()).first().await
     }
 
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Option<E>>
@@ -729,11 +864,7 @@ impl<E: Model> BelongsTo<E> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    E::query_with(entity_manager.database())
-                } else {
-                    E::query()
-                }
+                self.query_builder()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -756,11 +887,7 @@ impl<E: Model> BelongsTo<E> {
         let query = {
             #[cfg(feature = "entity-manager")]
             {
-                if let Some(entity_manager) = &self.entity_manager {
-                    E::query_with(entity_manager.database())
-                } else {
-                    E::query()
-                }
+                self.query_builder()
             }
             #[cfg(not(feature = "entity-manager"))]
             {
@@ -843,6 +970,8 @@ impl<E: Model> Default for BelongsTo<E> {
             fk_value: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }

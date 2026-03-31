@@ -3,7 +3,6 @@ use crate::database::{__in_db_scope, Database};
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
 use serde_json::json;
-use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 #[path = "../support/postgres_test_config.rs"]
@@ -38,6 +37,43 @@ struct DirectEntityManagerRelationPost {
     id: i64,
     user_id: i64,
     title: String,
+}
+
+#[tideorm::model(table = "direct_entity_manager_relation_test_users")]
+struct DirectEntityManagerHasOneUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    #[tideorm(has_one = "DirectEntityManagerHasOneProfile", foreign_key = "user_id")]
+    profile: tideorm::relations::HasOne<DirectEntityManagerHasOneProfile>,
+}
+
+#[tideorm::model(table = "direct_entity_manager_relation_test_profiles")]
+struct DirectEntityManagerHasOneProfile {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    user_id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "direct_entity_manager_relation_test_users")]
+struct DirectEntityManagerBelongsToUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "direct_entity_manager_relation_test_posts")]
+struct DirectEntityManagerBelongsToPost {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    user_id: i64,
+    title: String,
+    #[tideorm(
+        belongs_to = "DirectEntityManagerBelongsToUser",
+        foreign_key = "user_id"
+    )]
+    user: tideorm::relations::BelongsTo<DirectEntityManagerBelongsToUser>,
 }
 
 fn test_lock() -> Arc<tokio::sync::Mutex<()>> {
@@ -126,12 +162,9 @@ async fn hasone_load_queries_with_attached_entity_manager_without_global_db()
         relation_name: "profile",
         owner_table: USER_TABLE,
         child_table: PROFILE_TABLE,
-        cached: None,
-        loaded: false,
         parent_pk: Some(json!(user.id)),
-        owner_key: None,
         entity_manager: Some(entity_manager.clone()),
-        _marker: PhantomData,
+        ..Default::default()
     };
 
     let loaded = relation
@@ -159,17 +192,72 @@ async fn belongsto_load_queries_with_attached_entity_manager_without_global_db()
     let relation = BelongsTo::<DirectEntityManagerRelationUser> {
         foreign_key: "user_id",
         owner_key: "id",
-        cached: None,
-        loaded: false,
         fk_value: Some(json!(post.user_id)),
         entity_manager: Some(entity_manager.clone()),
-        _marker: PhantomData,
+        ..Default::default()
     };
 
     let loaded = relation
         .load()
         .await?
         .expect("belongs_to relation should query via the attached entity manager");
+
+    assert_eq!(loaded.id, user.id);
+    assert_eq!(loaded.name, user.name);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn hasone_helpers_query_via_parent_entity_manager_database_without_global_db()
+-> crate::error::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    Database::reset_global();
+
+    let db = setup_database().await?;
+    let (user, profile, _) = seed_relations(db.as_ref()).await?;
+    let entity_manager = EntityManager::new(db.clone());
+
+    let user = DirectEntityManagerHasOneUser::find_in_entity_manager(user.id, &entity_manager)
+        .await?
+        .expect("entity-manager user should exist");
+
+    assert!(user.profile.exists().await?);
+
+    let loaded = user
+        .profile
+        .load()
+        .await?
+        .expect("has_one relation should query via the parent entity manager database");
+
+    assert_eq!(loaded.id, profile.id);
+    assert_eq!(loaded.user_id, user.id);
+    assert_eq!(loaded.name, profile.name);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn belongsto_helpers_query_via_parent_entity_manager_database_without_global_db()
+-> crate::error::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    Database::reset_global();
+
+    let db = setup_database().await?;
+    let (user, _, post) = seed_relations(db.as_ref()).await?;
+    let entity_manager = EntityManager::new(db.clone());
+
+    let post = DirectEntityManagerBelongsToPost::find_in_entity_manager(post.id, &entity_manager)
+        .await?
+        .expect("entity-manager post should exist");
+
+    assert!(post.user.exists().await?);
+
+    let loaded = post
+        .user
+        .load_with(|query| query)
+        .await?
+        .expect("belongs_to relation should query via the parent entity manager database");
 
     assert_eq!(loaded.id, user.id);
     assert_eq!(loaded.name, user.name);

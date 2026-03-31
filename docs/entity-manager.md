@@ -120,6 +120,10 @@ tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &
     .await?;
 ```
 
+When a model itself was loaded through `EntityManager::find(...)` or `find_in_entity_manager(...)`, plain relation read helpers such as `load()`, `load_with(...)`, `count()`, and `exists()` continue to query through that same entity-manager database handle even if no global database is configured.
+
+Use `entity_manager.load(&mut relation)` or `relation.load_in_entity_manager(&entity_manager)` when the relation should become tracked for aggregate synchronization on `save()` or `flush()`.
+
 ## What Aggregate Saves Synchronize
 
 - Root saves use the entity manager's database handle.

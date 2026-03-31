@@ -29,6 +29,8 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
     owner_key: Option<String>,
     #[cfg(feature = "entity-manager")]
     entity_manager: Option<Arc<crate::entity_manager::EntityManager>>,
+    #[cfg(feature = "entity-manager")]
+    query_db: Option<crate::database::Database>,
     _marker: PhantomData<(Related, Pivot)>,
 }
 
@@ -71,6 +73,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             owner_key: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }
@@ -100,16 +104,26 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     }
 
     #[cfg(feature = "entity-manager")]
-    fn scoped_database(&self) -> Result<crate::database::Database> {
-        if let Some(entity_manager) = &self.entity_manager {
-            if matches!(
-                crate::database::__current_connection(),
-                Ok(crate::database::ConnectionRef::Transaction(_))
-            ) {
-                return crate::database::__current_db();
-            }
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.query_db = Some(database.clone());
+    }
 
+    #[cfg(feature = "entity-manager")]
+    fn scoped_database(&self) -> Result<crate::database::Database> {
+        if matches!(
+            crate::database::__current_connection(),
+            Ok(crate::database::ConnectionRef::Transaction(_))
+        ) {
+            return crate::database::__current_db();
+        }
+
+        if let Some(entity_manager) = &self.entity_manager {
             return Ok(entity_manager.database().clone());
+        }
+
+        if let Some(db) = &self.query_db {
+            return Ok(db.clone());
         }
 
         crate::database::require_db()
@@ -169,6 +183,9 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             }
             if self.entity_manager.is_none() {
                 self.entity_manager = previous.entity_manager.clone();
+            }
+            if self.query_db.is_none() {
+                self.query_db = previous.query_db.clone();
             }
         }
     }
@@ -519,6 +536,8 @@ impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
             owner_key: None,
             #[cfg(feature = "entity-manager")]
             entity_manager: None,
+            #[cfg(feature = "entity-manager")]
+            query_db: None,
             _marker: PhantomData,
         }
     }

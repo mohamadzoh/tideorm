@@ -3,7 +3,6 @@ use crate::database::{__in_db_scope, Database};
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
 use serde_json::json;
-use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 #[path = "../support/postgres_test_config.rs"]
@@ -33,6 +32,38 @@ struct ManyToManyEntityManagerTag {
 
 #[tideorm::model(table = "many_to_many_entity_manager_test_post_tags")]
 struct ManyToManyEntityManagerPostTag {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    post_id: i64,
+    tag_id: i64,
+}
+
+#[tideorm::model(table = "many_to_many_entity_manager_test_posts")]
+struct ManyToManyEntityManagerAggregatePost {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    title: String,
+    #[tideorm(
+        has_many_through = "ManyToManyEntityManagerAggregateTag",
+        pivot = "many_to_many_entity_manager_test_post_tags",
+        foreign_key = "post_id",
+        related_key = "tag_id"
+    )]
+    tags: tideorm::relations::HasManyThrough<
+        ManyToManyEntityManagerAggregateTag,
+        ManyToManyEntityManagerAggregatePostTag,
+    >,
+}
+
+#[tideorm::model(table = "many_to_many_entity_manager_test_tags")]
+struct ManyToManyEntityManagerAggregateTag {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "many_to_many_entity_manager_test_post_tags")]
+struct ManyToManyEntityManagerAggregatePostTag {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
     post_id: i64,
@@ -127,14 +158,38 @@ async fn has_many_through_load_queries_with_attached_entity_manager_without_glob
         relation_name: "tags",
         owner_table: POST_TABLE,
         related_table: TAG_TABLE,
-        cached: None,
         parent_pk: Some(json!(post.id)),
-        owner_key: None,
         entity_manager: Some(entity_manager.clone()),
-        _marker: PhantomData,
+        ..Default::default()
     };
 
     let loaded = relation.load().await?;
+
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, tag.id);
+    assert_eq!(loaded[0].name, tag.name);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn has_many_through_helpers_query_via_parent_entity_manager_database_without_global_db()
+-> crate::error::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    Database::reset_global();
+
+    let db = setup_database().await?;
+    let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
+    let entity_manager = EntityManager::new(db.clone());
+
+    let post =
+        ManyToManyEntityManagerAggregatePost::find_in_entity_manager(post.id, &entity_manager)
+            .await?
+            .expect("entity-manager post should exist");
+
+    assert_eq!(post.tags.count().await?, 1);
+
+    let loaded = post.tags.load().await?;
 
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, tag.id);

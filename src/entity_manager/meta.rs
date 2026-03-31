@@ -15,6 +15,8 @@ pub trait TideEntityManagerMeta {
         Self: Sized;
 
     fn tide_pk_key(&self) -> String;
+
+    fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
 }
 
 #[doc(hidden)]

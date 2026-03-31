@@ -153,6 +153,11 @@ impl<T: Model> TrackedHasMany<T> {
         Ok(keys)
     }
 
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.plain.attach_query_database(database);
+    }
+
     pub async fn load_in_entity_manager(
         &mut self,
         entity_manager: &Arc<EntityManager>,
@@ -167,6 +172,7 @@ impl<T: Model> TrackedHasMany<T> {
                 }
             }
 
+            self.plain.attach_query_database(entity_manager.database());
             self.entity_manager = Some(entity_manager.clone());
             let owner_key = self.owner_key.as_deref().ok_or_else(|| {
                 Error::query(format!(
@@ -205,6 +211,7 @@ impl<T: Model> TrackedHasMany<T> {
             registered.push(entity_manager.register(entity).await);
         }
 
+        self.plain.attach_query_database(entity_manager.database());
         self.plain.set_cached(registered.clone());
         self.cached = Some(registered);
         self.entity_manager = Some(entity_manager.clone());
@@ -224,61 +231,64 @@ impl<T: Model> TrackedHasMany<T> {
     where
         F: FnOnce(crate::query::QueryBuilder<T>) -> crate::query::QueryBuilder<T> + Send,
     {
-        self.ensure_configured()?;
+        if let Some(entity_manager) = &self.entity_manager {
+            self.ensure_configured()?;
 
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::load_with")?;
+            let pk = self.parent_pk.as_ref().ok_or_else(|| {
+                Error::query(String::from("Parent primary key not set for relation"))
+            })?;
+            let pk = require_scalar_relation_key(pk, "HasMany::load_with")?;
 
-        let query = if let Some(entity_manager) = &self.entity_manager {
-            T::query_with(entity_manager.db.as_ref())
-        } else {
-            T::query()
-        };
-
-        constraint_fn(query.where_eq(self.foreign_key, pk.clone()))
+            return constraint_fn(
+                T::query_with(entity_manager.database()).where_eq(self.foreign_key, pk.clone()),
+            )
             .get()
-            .await
+            .await;
+        }
+
+        self.plain.load_with(constraint_fn).await
     }
 
     pub async fn count(&self) -> Result<u64> {
-        self.ensure_configured()?;
+        if let Some(entity_manager) = &self.entity_manager {
+            self.ensure_configured()?;
 
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::count")?;
+            let pk = self.parent_pk.as_ref().ok_or_else(|| {
+                Error::query(String::from("Parent primary key not set for relation"))
+            })?;
+            let pk = require_scalar_relation_key(pk, "HasMany::count")?;
 
-        let query = if let Some(entity_manager) = &self.entity_manager {
-            T::query_with(entity_manager.db.as_ref())
-        } else {
-            T::query()
-        };
+            return T::query_with(entity_manager.database())
+                .where_eq(self.foreign_key, pk.clone())
+                .count()
+                .await;
+        }
 
-        query.where_eq(self.foreign_key, pk.clone()).count().await
+        self.plain.count().await
     }
 
     pub async fn exists(&self) -> Result<bool> {
-        self.ensure_configured()?;
+        if let Some(entity_manager) = &self.entity_manager {
+            self.ensure_configured()?;
 
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::exists")?;
+            let pk = self.parent_pk.as_ref().ok_or_else(|| {
+                Error::query(String::from("Parent primary key not set for relation"))
+            })?;
+            let pk = require_scalar_relation_key(pk, "HasMany::exists")?;
 
-        let query = if let Some(entity_manager) = &self.entity_manager {
-            T::query_with(entity_manager.db.as_ref())
-        } else {
-            T::query()
-        };
+            return T::query_with(entity_manager.database())
+                .where_eq(self.foreign_key, pk.clone())
+                .exists()
+                .await;
+        }
 
-        query.where_eq(self.foreign_key, pk.clone()).exists().await
+        self.plain.exists().await
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/tracked_entity_manager_relation_tests.rs"]
+mod tests;
 
 pub trait TrackedHasManyEntityManagerExt<T: Model> {
     fn load<'a>(

@@ -92,6 +92,8 @@ impl EntityManager {
             + Send
             + Sync
             + 'static,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
     {
         let key = meta::pk_to_entity_manager_key(&pk)?;
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
@@ -134,7 +136,12 @@ impl EntityManager {
             + Send
             + Sync
             + 'static,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
     {
+        let mut entity = entity;
+        entity.tide_attach_entity_manager_database(self.database());
+
         if let Some(existing) = self.get_managed_by_model(&entity).unwrap_or(None) {
             existing.entry.replace(entity);
             return existing;
@@ -161,7 +168,12 @@ impl EntityManager {
             + Send
             + Sync
             + 'static,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
     {
+        let mut entity = entity;
+        entity.tide_attach_entity_manager_database(self.database());
+
         let Some(key) = meta::model_entity_manager_key(&entity)? else {
             return Ok(self.persist(entity));
         };
@@ -200,6 +212,7 @@ impl EntityManager {
         }
 
         managed.entry.mark_detached_public();
+        self.remove_managed_ops_entry(managed);
     }
 
     pub async fn flush(self: &Arc<Self>) -> crate::error::Result<()> {
@@ -208,29 +221,39 @@ impl EntityManager {
         }
 
         let entries = self.managed_entries.read().clone();
-        let checkpoints = entries
-            .iter()
-            .map(|entry| entry.clone().checkpoint())
-            .collect::<Vec<_>>();
+        let managed_identity_map = self.managed_identity_map.read().clone();
+        let checkpoints = Arc::new(parking_lot::Mutex::new(Vec::<
+            Box<dyn managed::ManagedCheckpoint>,
+        >::new()));
         let snapshots = self.snapshots.read().clone();
+        let identity_rollback = save::new_identity_rollback_log();
         let entity_manager = self.clone();
+        let transaction_checkpoints = checkpoints.clone();
+        let transaction_identity_rollback = identity_rollback.clone();
         let result = self
             .db
             .transaction(move |_| {
                 let entity_manager = entity_manager.clone();
+                let checkpoints = transaction_checkpoints.clone();
+                let identity_rollback = transaction_identity_rollback.clone();
                 Box::pin(async move {
-                    save::with_entity_manager_transaction_scope(entity_manager.flush_in_scope())
-                        .await
+                    save::with_entity_manager_transaction_scope(
+                        identity_rollback,
+                        entity_manager.flush_in_scope_with_checkpoints(Some(&checkpoints)),
+                    )
+                    .await
                 })
             })
             .await;
 
         if let Err(error) = result {
-            for checkpoint in checkpoints {
+            for checkpoint in std::mem::take(&mut *checkpoints.lock()) {
                 checkpoint.rollback(self.as_ref());
             }
 
-            self.identity_map.write().clear();
+            *self.managed_entries.write() = entries;
+            *self.managed_identity_map.write() = managed_identity_map;
+            save::rollback_identity_map(self.as_ref(), &identity_rollback);
             *self.snapshots.write() = snapshots;
             return Err(error);
         }
@@ -239,9 +262,33 @@ impl EntityManager {
     }
 
     async fn flush_in_scope(self: &Arc<Self>) -> crate::error::Result<()> {
-        let entries = self.managed_entries.read().clone();
-        for entry in entries {
-            entry.clone().flush(self).await?;
+        self.flush_in_scope_with_checkpoints(None).await
+    }
+
+    async fn flush_in_scope_with_checkpoints(
+        self: &Arc<Self>,
+        checkpoints: Option<&Arc<parking_lot::Mutex<Vec<Box<dyn managed::ManagedCheckpoint>>>>>,
+    ) -> crate::error::Result<()> {
+        let mut processed = 0;
+        let mut checkpointed = HashSet::<usize>::new();
+        loop {
+            let entries = self.managed_entries.read().clone();
+            if processed >= entries.len() {
+                break;
+            }
+
+            for entry in entries.iter().skip(processed).cloned() {
+                if let Some(checkpoints) = checkpoints {
+                    let entry_ptr = Arc::as_ptr(&entry).cast::<()>() as usize;
+                    if checkpointed.insert(entry_ptr) {
+                        checkpoints.lock().push(entry.clone().checkpoint());
+                    }
+                }
+
+                entry.flush(self).await?;
+            }
+
+            processed = entries.len();
         }
 
         let mut managed_entries = self.managed_entries.write();
@@ -301,7 +348,12 @@ impl EntityManager {
             + Send
             + Sync
             + 'static,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
     {
+        let mut entity = entity;
+        entity.tide_attach_entity_manager_database(self.database());
+
         let key = entity.tide_pk_key();
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
             existing.entry.overwrite_clean(entity.clone(), Some(key));
@@ -325,6 +377,9 @@ impl EntityManager {
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
     {
+        let mut entity = entity;
+        entity.tide_attach_entity_manager_database(self.database());
+
         let key = (TypeId::of::<T>(), entity.tide_pk_key());
 
         if let Some(existing) = self.get_by_key::<T>(&key) {
@@ -459,7 +514,11 @@ impl EntityManager {
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
     {
+        let mut entity = entity;
+        entity.tide_attach_entity_manager_database(self.database());
+
         let key = (TypeId::of::<T>(), entity.tide_pk_key());
+        save::record_identity_map_rollback::<T>(self, &key);
         let mut map = self.identity_map.write();
         map.insert(key, Box::new(entity));
     }
@@ -467,9 +526,10 @@ impl EntityManager {
     #[doc(hidden)]
     pub fn remove_by_entity_manager_key<T>(&self, key: &str)
     where
-        T: Send + Sync + 'static,
+        T: Clone + Send + Sync + 'static,
     {
         let key = (TypeId::of::<T>(), key.to_string());
+        save::record_identity_map_rollback::<T>(self, &key);
         let mut map = self.identity_map.write();
         map.remove(&key);
     }
@@ -515,6 +575,13 @@ impl EntityManager {
         map.remove(&(TypeId::of::<T>(), key.to_string()));
     }
 
+    fn remove_managed_ops_entry<T>(&self, managed: &Managed<T>) {
+        let target = Arc::as_ptr(&managed.entry).cast::<()>();
+        self.managed_entries
+            .write()
+            .retain(|entry| Arc::as_ptr(entry).cast::<()>() != target);
+    }
+
     fn register_managed_entry<T>(&self, entry: Arc<managed::ManagedEntry<T>>)
     where
         T: crate::model::Model
@@ -525,6 +592,8 @@ impl EntityManager {
             + Send
             + Sync
             + 'static,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
     {
         let ops: Arc<dyn managed::ManagedOps> = entry;
         self.managed_entries.write().push(ops);
@@ -540,3 +609,7 @@ impl EntityManager {
             .cloned()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/entity_manager_mod_tests.rs"]
+mod tests;

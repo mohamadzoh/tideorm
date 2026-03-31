@@ -145,6 +145,24 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
             }
         }
     };
+    let relation_database_attach_blocks: Vec<_> = ctx
+        .relation_fields
+        .iter()
+        .filter_map(|field| {
+            let ident = field.ident.as_ref()?;
+            if field.has_one.is_some()
+                || field.has_many.is_some()
+                || field.belongs_to.is_some()
+                || field.has_many_through.is_some()
+            {
+                return Some(quote! {
+                    self.#ident.attach_query_database(database);
+                });
+            }
+
+            None
+        })
+        .collect();
     let relation_sync_blocks: Vec<_> = ctx
         .relation_fields
         .iter()
@@ -424,6 +442,13 @@ fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
                     &<Self as ::tideorm::model::Model>::primary_key(self),
                 )
                 .expect("entity manager primary key should serialize")
+            }
+
+            fn tide_attach_entity_manager_database(
+                &mut self,
+                database: &::tideorm::database::Database,
+            ) {
+                #(#relation_database_attach_blocks)*
             }
         }
 
