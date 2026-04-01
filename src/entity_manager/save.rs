@@ -278,17 +278,18 @@ where
         })
         .await;
 
-    if let Err(error) = result {
-        rollback_entity_manager_state(
-            entity_manager.as_ref(),
-            checkpoints,
-            rollback_state,
-            &identity_rollback,
-        );
-        return Err(error);
+    match result {
+        Ok(saved) => Ok(saved),
+        Err(error) => {
+            rollback_entity_manager_state(
+                entity_manager.as_ref(),
+                checkpoints,
+                rollback_state,
+                &identity_rollback,
+            );
+            Err(error)
+        }
     }
-
-    result
 }
 
 pub(crate) async fn save_with_entity_manager_impl<T>(
