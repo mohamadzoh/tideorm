@@ -7,13 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-04-01
+
 ### Added
 
-- Added documentation for the opt-in `entity-manager` feature, including the higher-level `EntityManager` facade plus managed lifecycle operations (`persist`, `merge`, `remove`, `detach`, `flush`), README install notes, mdBook coverage for compatibility helpers such as `find_in_entity_manager`, `load_in_entity_manager(...)`, and `save_with_entity_manager`, and relation-chapter cross-links for aggregate workflows across `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relation helpers.
+- Added the opt-in `entity-manager` feature, including the `EntityManager` persistence-context facade, managed lifecycle operations (`persist`, `merge`, `remove`, `detach`, `flush`), aggregate saves through `entity_manager.save(...)` and `save_with_entity_manager`, compatibility helpers such as `find_in_entity_manager` and `load_in_entity_manager(...)`, and tracked aggregate workflows across `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relation helpers.
+- Added dedicated README and mdBook documentation for `entity-manager`, including install guidance, aggregate and managed-lifecycle walkthroughs, and relation-chapter cross-links.
+
+### Fixed
+
+- Kept entity-manager relation helper reads on the parent context's database handle instead of falling back to the global connection, covering tracked and direct `HasMany`, `HasOne`, `BelongsTo`, and `HasManyThrough` helpers in multi-database setups.
+- Hardened entity-manager save and flush behavior so scoped transactions restore managed state on rollback, late-added managed entries are checkpointed and processed correctly, detached `Managed<T>` handles cannot silently resurrect into untracked state, runaway flush growth fails after 16 passes instead of looping indefinitely, and relation-only sync refreshes runtime relation wrappers before syncing.
 
 ### Changed
 
-- Bumped the crate release version, macro-crate dependency version, and all release-facing install snippets from `0.9.8` to `0.9.9` so the documented `entity-manager` feature matches the first published package that actually exposes it.
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, and release-facing dependency snippets to use `0.9.9`, matching the first published TideORM release that exposes the optional `entity-manager` feature.
+
+### Internal
+
+- Added backend parity coverage plus focused unit regressions for entity-manager relation helpers, rollback checkpoints, detached-handle lifecycle behavior, runtime relation refresh, and flush cycle guards.
 
 ## [0.9.8] - 2026-03-30
 
@@ -797,7 +809,9 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.9...HEAD
+[0.9.9]: https://github.com/mohamadzoh/tideorm/compare/v.9.8...v0.9.9
+[0.9.8]: https://github.com/mohamadzoh/tideorm/compare/v0.9.7...v.9.8
 [0.9.3]: https://github.com/mohamadzoh/tideorm/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mohamadzoh/tideorm/compare/v0.9.1...v0.9.2
 [0.9.0]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...v0.9.0
