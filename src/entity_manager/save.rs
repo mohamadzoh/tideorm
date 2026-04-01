@@ -1,8 +1,9 @@
 #![allow(missing_docs)]
 
+use std::any::Any;
 #[cfg(not(feature = "runtime-tokio"))]
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 #[cfg(not(feature = "runtime-tokio"))]
 use std::{
@@ -20,6 +21,13 @@ use super::{
 };
 
 pub(super) type IdentityRollbackLog = HashMap<super::IdentityKey, Box<dyn IdentityMapRollback>>;
+pub(super) type ManagedCheckpoints = Vec<Box<dyn super::managed::ManagedCheckpoint>>;
+
+pub(super) struct EntityManagerRollbackState {
+    managed_entries: Vec<Arc<dyn super::managed::ManagedOps>>,
+    managed_identity_map: HashMap<super::IdentityKey, Arc<dyn Any + Send + Sync>>,
+    snapshots: HashMap<super::SnapshotKey, HashSet<String>>,
+}
 
 pub(super) trait IdentityMapRollback: Send {
     fn restore(self: Box<Self>, entity_manager: &EntityManager);
@@ -194,6 +202,42 @@ pub(super) fn rollback_identity_map(
     }
 }
 
+pub(super) fn capture_entity_manager_rollback_state(
+    entity_manager: &EntityManager,
+) -> EntityManagerRollbackState {
+    EntityManagerRollbackState {
+        managed_entries: entity_manager.managed_entries.read().clone(),
+        managed_identity_map: entity_manager.managed_identity_map.read().clone(),
+        snapshots: entity_manager.snapshots.read().clone(),
+    }
+}
+
+pub(super) fn capture_managed_checkpoints(entity_manager: &EntityManager) -> ManagedCheckpoints {
+    entity_manager
+        .managed_entries
+        .read()
+        .iter()
+        .cloned()
+        .map(|entry| entry.checkpoint())
+        .collect()
+}
+
+pub(super) fn rollback_entity_manager_state(
+    entity_manager: &EntityManager,
+    checkpoints: ManagedCheckpoints,
+    rollback_state: EntityManagerRollbackState,
+    identity_rollback: &Arc<Mutex<IdentityRollbackLog>>,
+) {
+    for checkpoint in checkpoints {
+        checkpoint.rollback(entity_manager);
+    }
+
+    *entity_manager.managed_entries.write() = rollback_state.managed_entries;
+    *entity_manager.managed_identity_map.write() = rollback_state.managed_identity_map;
+    rollback_identity_map(entity_manager, identity_rollback);
+    *entity_manager.snapshots.write() = rollback_state.snapshots;
+}
+
 pub async fn save_with_entity_manager<T>(
     entity: &T,
     entity_manager: &Arc<EntityManager>,
@@ -212,7 +256,8 @@ where
         return save_with_entity_manager_impl(entity, entity_manager).await;
     }
 
-    let snapshots = entity_manager.snapshots.read().clone();
+    let rollback_state = capture_entity_manager_rollback_state(entity_manager.as_ref());
+    let checkpoints = capture_managed_checkpoints(entity_manager.as_ref());
     let identity_rollback = new_identity_rollback_log();
     let db = entity_manager.db.clone();
     let entity_manager = entity_manager.clone();
@@ -233,9 +278,14 @@ where
         })
         .await;
 
-    if result.is_err() {
-        rollback_identity_map(entity_manager.as_ref(), &identity_rollback);
-        *entity_manager.snapshots.write() = snapshots;
+    if let Err(error) = result {
+        rollback_entity_manager_state(
+            entity_manager.as_ref(),
+            checkpoints,
+            rollback_state,
+            &identity_rollback,
+        );
+        return Err(error);
     }
 
     result
@@ -289,6 +339,11 @@ where
         + 'static,
 {
     let mut aggregate = entity.clone();
+    let previous = aggregate.clone();
+    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(
+        &mut aggregate,
+        &previous,
+    );
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;

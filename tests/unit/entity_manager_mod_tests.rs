@@ -1,6 +1,7 @@
-use super::{EntityManager, EntityState, managed};
+use super::{EntityManager, EntityState, managed, save};
 use crate::database::Database;
 use crate::error::Error;
+use crate::model::{Model, ModelMeta, OnConflictBuilder};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -107,6 +108,233 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RefreshAwareSyncOnlyModel {
+    id: i64,
+    name: String,
+    runtime_state: String,
+}
+
+impl ModelMeta for RefreshAwareSyncOnlyModel {
+    type PrimaryKey = i64;
+
+    fn table_name() -> &'static str {
+        <EntityManagerModTestUser as ModelMeta>::table_name()
+    }
+
+    fn primary_key_names() -> &'static [&'static str] {
+        <EntityManagerModTestUser as ModelMeta>::primary_key_names()
+    }
+
+    fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
+        primary_key.to_string()
+    }
+
+    fn primary_key_is_new(primary_key: &Self::PrimaryKey) -> bool {
+        *primary_key == 0
+    }
+
+    fn column_names() -> &'static [&'static str] {
+        <EntityManagerModTestUser as ModelMeta>::column_names()
+    }
+
+    fn field_names() -> &'static [&'static str] {
+        <EntityManagerModTestUser as ModelMeta>::field_names()
+    }
+}
+
+impl crate::internal::InternalModel for RefreshAwareSyncOnlyModel {
+    type Entity = <EntityManagerModTestUser as crate::internal::InternalModel>::Entity;
+    type ActiveModel = <EntityManagerModTestUser as crate::internal::InternalModel>::ActiveModel;
+
+    fn into_active_model(self) -> Self::ActiveModel {
+        EntityManagerModTestUser {
+            id: self.id,
+            name: self.name,
+        }
+        .into_active_model()
+    }
+
+    fn from_entity_model(model: <Self::Entity as crate::internal::EntityTrait>::Model) -> Self {
+        Self {
+            id: model.id,
+            name: model.name,
+            runtime_state: "from-entity".to_string(),
+        }
+    }
+
+    fn to_entity_model(&self) -> <Self::Entity as crate::internal::EntityTrait>::Model {
+        EntityManagerModTestUser {
+            id: self.id,
+            name: self.name.clone(),
+        }
+        .to_entity_model()
+    }
+
+    fn column_from_str(
+        name: &str,
+    ) -> Option<<Self::Entity as crate::internal::EntityTrait>::Column> {
+        <EntityManagerModTestUser as crate::internal::InternalModel>::column_from_str(name)
+    }
+
+    fn primary_key_columns() -> Vec<<Self::Entity as crate::internal::EntityTrait>::Column> {
+        <EntityManagerModTestUser as crate::internal::InternalModel>::primary_key_columns()
+    }
+
+    fn primary_key_condition(
+        primary_key: &<Self as ModelMeta>::PrimaryKey,
+    ) -> crate::internal::Condition {
+        <EntityManagerModTestUser as crate::internal::InternalModel>::primary_key_condition(
+            primary_key,
+        )
+    }
+
+    fn refresh_runtime_relations_from(&mut self, previous: &Self) {
+        self.runtime_state = format!("refreshed:{}", previous.runtime_state);
+    }
+}
+
+#[crate::async_trait::async_trait]
+impl Model for RefreshAwareSyncOnlyModel {
+    fn primary_key(&self) -> Self::PrimaryKey {
+        self.id
+    }
+
+    async fn insert_or_update(
+        model: Self,
+        _conflict_columns: Vec<&str>,
+    ) -> crate::error::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(model)
+    }
+
+    async fn find(_id: Self::PrimaryKey) -> crate::error::Result<Option<Self>>
+    where
+        Self: Sized,
+    {
+        Ok(None)
+    }
+
+    async fn find_with(
+        _id: Self::PrimaryKey,
+        _db: &crate::database::Database,
+    ) -> crate::error::Result<Option<Self>>
+    where
+        Self: Sized,
+    {
+        Ok(None)
+    }
+
+    async fn create(model: Self) -> crate::error::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(model)
+    }
+
+    async fn destroy(_id: Self::PrimaryKey) -> crate::error::Result<u64>
+    where
+        Self: Sized,
+    {
+        Ok(0)
+    }
+
+    async fn save(self) -> crate::error::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(self)
+    }
+
+    async fn update(self) -> crate::error::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(self)
+    }
+
+    async fn delete(self) -> crate::error::Result<u64>
+    where
+        Self: Sized,
+    {
+        Ok(0)
+    }
+
+    async fn __insert_with_conflict(
+        model: Self,
+        _builder: OnConflictBuilder<Self>,
+    ) -> crate::error::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(model)
+    }
+}
+
+impl super::TideEntityManagerMeta for RefreshAwareSyncOnlyModel {
+    fn tide_table_name() -> &'static str
+    where
+        Self: Sized,
+    {
+        Self::table_name()
+    }
+
+    fn tide_pk_key(&self) -> String {
+        self.id.to_string()
+    }
+}
+
+impl super::TideEntityManagerMergePersisted for RefreshAwareSyncOnlyModel {
+    fn tide_merge_persisted(&mut self, persisted: Self) {
+        self.id = persisted.id;
+        self.name = persisted.name;
+    }
+}
+
+impl super::TideEntityManagerSync for RefreshAwareSyncOnlyModel {
+    fn tide_sync_entity_manager_relations<'a>(
+        &'a mut self,
+        _entity_manager: &'a Arc<EntityManager>,
+    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.runtime_state = format!("synced:{}", self.runtime_state);
+            Ok(())
+        })
+    }
+}
+
+struct RunawayManagedEntry {
+    flush_count: Arc<AtomicUsize>,
+}
+
+impl managed::ManagedOps for RunawayManagedEntry {
+    fn current_state(&self) -> EntityState {
+        EntityState::Managed
+    }
+
+    fn detach_from_context(&self, _entity_manager: &EntityManager) {}
+
+    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
+        Box::new(NoopCheckpoint)
+    }
+
+    fn flush<'a>(
+        self: Arc<Self>,
+        entity_manager: &'a Arc<EntityManager>,
+    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.flush_count.fetch_add(1, Ordering::SeqCst);
+            let next: Arc<dyn managed::ManagedOps> = Arc::new(RunawayManagedEntry {
+                flush_count: self.flush_count.clone(),
+            });
+            entity_manager.managed_entries.write().push(next);
+            Ok(())
+        })
+    }
+}
+
 #[tokio::test]
 async fn flush_in_scope_processes_entries_added_during_flush() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
@@ -134,6 +362,44 @@ async fn flush_in_scope_processes_entries_added_during_flush() -> crate::error::
     Ok(())
 }
 
+#[tokio::test]
+async fn sync_entity_manager_relations_only_refreshes_runtime_relations_before_sync()
+-> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+    let result = save::sync_entity_manager_relations_only_impl(
+        &RefreshAwareSyncOnlyModel {
+            id: 42,
+            name: "Refresh Aware".to_string(),
+            runtime_state: "initial".to_string(),
+        },
+        &entity_manager,
+    )
+    .await?;
+
+    assert_eq!(result.runtime_state, "synced:refreshed:initial");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn flush_in_scope_rejects_runaway_managed_entry_growth() {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+    let flush_count = Arc::new(AtomicUsize::new(0));
+    let runaway: Arc<dyn managed::ManagedOps> = Arc::new(RunawayManagedEntry {
+        flush_count: flush_count.clone(),
+    });
+
+    entity_manager.managed_entries.write().push(runaway);
+
+    let error = entity_manager
+        .flush_in_scope_with_checkpoints(None)
+        .await
+        .expect_err("runaway flush growth should fail once the pass guard is exceeded");
+
+    assert!(error.to_string().contains("flush exceeded 16 passes"));
+    assert_eq!(flush_count.load(Ordering::SeqCst), 16);
+}
+
 #[test]
 fn detach_removes_managed_entry_immediately_without_flush() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
@@ -156,11 +422,83 @@ fn detach_removes_managed_entry_immediately_without_flush() -> crate::error::Res
     assert_eq!(entity_manager.managed_entries.read().len(), 1);
     assert_eq!(entity_manager.managed_identity_map.read().len(), 1);
 
+    new_managed.replace(EntityManagerModTestUser {
+        id: 0,
+        name: "Detached Replacement".to_string(),
+    });
+
+    assert_eq!(new_managed.state(), EntityState::Detached);
+    assert_eq!(new_managed.get().name, "Detached Replacement");
+    assert_eq!(entity_manager.managed_entries.read().len(), 1);
+    assert_eq!(entity_manager.managed_identity_map.read().len(), 1);
+
     entity_manager.detach(&merged_managed);
 
     assert_eq!(merged_managed.state(), EntityState::Detached);
     assert!(entity_manager.managed_entries.read().is_empty());
     assert!(entity_manager.managed_identity_map.read().is_empty());
+
+    merged_managed.replace(EntityManagerModTestUser {
+        id: 42,
+        name: "Detached Merge Replacement".to_string(),
+    });
+
+    assert_eq!(merged_managed.state(), EntityState::Detached);
+    assert_eq!(merged_managed.get().name, "Detached Merge Replacement");
+    assert!(entity_manager.managed_entries.read().is_empty());
+    assert!(entity_manager.managed_identity_map.read().is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollback_entity_manager_state_restores_managed_entries_and_checkpoints()
+-> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+    let managed = entity_manager.merge(EntityManagerModTestUser {
+        id: 42,
+        name: "Before".to_string(),
+    })?;
+
+    let rollback_state = save::capture_entity_manager_rollback_state(entity_manager.as_ref());
+    let checkpoints = save::capture_managed_checkpoints(entity_manager.as_ref());
+
+    managed.edit(|user| user.name = "After".to_string());
+    let _orphan = entity_manager.merge(EntityManagerModTestUser {
+        id: 84,
+        name: "Orphan".to_string(),
+    })?;
+    entity_manager
+        .snapshot::<EntityManagerModTestUser>(
+            "entity_manager_mod_test_users",
+            "42",
+            "posts",
+            &["84".to_string()],
+        )
+        .await;
+
+    let identity_rollback = save::new_identity_rollback_log();
+    save::rollback_entity_manager_state(
+        entity_manager.as_ref(),
+        checkpoints,
+        rollback_state,
+        &identity_rollback,
+    );
+
+    assert_eq!(managed.get().name, "Before");
+    assert_eq!(entity_manager.managed_entries.read().len(), 1);
+    assert_eq!(entity_manager.managed_identity_map.read().len(), 1);
+    assert!(
+        entity_manager
+            .get_managed_by_key::<EntityManagerModTestUser>("42")
+            .is_some()
+    );
+    assert!(
+        entity_manager
+            .get_managed_by_key::<EntityManagerModTestUser>("84")
+            .is_none()
+    );
+    assert!(entity_manager.snapshots.read().is_empty());
 
     Ok(())
 }

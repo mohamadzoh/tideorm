@@ -105,9 +105,6 @@ impl<T> ManagedEntry<T> {
 
     pub(crate) fn replace(&self, entity: T) {
         *self.current.write() = entity;
-        if self.state() == EntityState::Detached {
-            *self.state.write() = EntityState::Managed;
-        }
     }
 
     pub(crate) fn overwrite_clean(&self, entity: T, persisted_key: Option<String>)

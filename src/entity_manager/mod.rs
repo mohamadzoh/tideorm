@@ -31,6 +31,7 @@ pub use save::{__save_with_entity_manager_in_scope, __with_entity_manager_db};
 
 type IdentityKey = (TypeId, String);
 type SnapshotKey = (&'static str, TypeId, String, &'static str);
+const MAX_FLUSH_PASSES: usize = 16;
 
 impl std::fmt::Debug for EntityManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -220,12 +221,10 @@ impl EntityManager {
             return self.flush_in_scope().await;
         }
 
-        let entries = self.managed_entries.read().clone();
-        let managed_identity_map = self.managed_identity_map.read().clone();
+        let rollback_state = save::capture_entity_manager_rollback_state(self.as_ref());
         let checkpoints = Arc::new(parking_lot::Mutex::new(Vec::<
             Box<dyn managed::ManagedCheckpoint>,
         >::new()));
-        let snapshots = self.snapshots.read().clone();
         let identity_rollback = save::new_identity_rollback_log();
         let entity_manager = self.clone();
         let transaction_checkpoints = checkpoints.clone();
@@ -247,14 +246,13 @@ impl EntityManager {
             .await;
 
         if let Err(error) = result {
-            for checkpoint in std::mem::take(&mut *checkpoints.lock()) {
-                checkpoint.rollback(self.as_ref());
-            }
-
-            *self.managed_entries.write() = entries;
-            *self.managed_identity_map.write() = managed_identity_map;
-            save::rollback_identity_map(self.as_ref(), &identity_rollback);
-            *self.snapshots.write() = snapshots;
+            let checkpoints = std::mem::take(&mut *checkpoints.lock());
+            save::rollback_entity_manager_state(
+                self.as_ref(),
+                checkpoints,
+                rollback_state,
+                &identity_rollback,
+            );
             return Err(error);
         }
 
@@ -270,12 +268,20 @@ impl EntityManager {
         checkpoints: Option<&Arc<parking_lot::Mutex<Vec<Box<dyn managed::ManagedCheckpoint>>>>>,
     ) -> crate::error::Result<()> {
         let mut processed = 0;
+        let mut passes = 0;
         let mut checkpointed = HashSet::<usize>::new();
         loop {
             let entries = self.managed_entries.read().clone();
             if processed >= entries.len() {
                 break;
             }
+
+            if passes >= MAX_FLUSH_PASSES {
+                return Err(crate::error::Error::invalid_query(format!(
+                    "entity manager flush exceeded {MAX_FLUSH_PASSES} passes while new managed entries kept being registered; check relation sync for cycles"
+                )));
+            }
+            passes += 1;
 
             for entry in entries.iter().skip(processed).cloned() {
                 if let Some(checkpoints) = checkpoints {

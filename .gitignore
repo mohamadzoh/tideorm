@@ -1,6 +1,7 @@
 /target
 /site
 demo.db
+test_tide_orm.db
 # Environment variables (contains local database credentials)
 .env
 *.sql
