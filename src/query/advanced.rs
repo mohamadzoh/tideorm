@@ -540,7 +540,8 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add a raw UNION query
     ///
-    /// Use when you need to union with a complex SQL query.
+    /// Trusted SQL only. Do not pass user-controlled input; prefer `union()` with a
+    /// `QueryBuilder` whenever possible.
     #[must_use]
     pub fn union_raw(mut self, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
@@ -555,6 +556,9 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a raw UNION ALL query
+    ///
+    /// Trusted SQL only. Do not pass user-controlled input; prefer `union_all()` with a
+    /// `QueryBuilder` whenever possible.
     #[must_use]
     pub fn union_all_raw(mut self, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
@@ -819,6 +823,9 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a CTE with column aliases
+    ///
+    /// Trusted SQL only. Do not pass user-controlled input; prefer `with_query()` when the
+    /// subquery can be expressed with `QueryBuilder`.
     #[must_use]
     pub fn with_cte_columns(mut self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {

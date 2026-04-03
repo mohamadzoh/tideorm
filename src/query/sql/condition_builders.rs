@@ -65,30 +65,6 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
-    fn json_parameter(value: &serde_json::Value) -> Value {
-        Value::Json(Some(Box::new(value.clone())))
-    }
-
-    fn sqlite_json_compare_value(value: &serde_json::Value) -> Value {
-        match value {
-            serde_json::Value::String(text) => Value::String(Some(text.clone())),
-            serde_json::Value::Null => Value::String(Some("null".to_string())),
-            serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
-            serde_json::Value::Number(number) => {
-                if let Some(integer) = number.as_i64() {
-                    Value::BigInt(Some(integer))
-                } else if let Some(float) = number.as_f64() {
-                    Value::Double(Some(float))
-                } else {
-                    Value::String(Some(number.to_string()))
-                }
-            }
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                Value::String(Some(value.to_string()))
-            }
-        }
-    }
-
     fn placeholder_list(count: usize) -> String {
         std::iter::repeat_n("?", count)
             .collect::<Vec<_>>()
@@ -273,10 +249,10 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn preview_values(&self, values: &[serde_json::Value]) -> Vec<String> {
+    fn preview_values(&self, db_type: DatabaseType, values: &[serde_json::Value]) -> Vec<String> {
         values
             .iter()
-            .map(|value| self.format_preview_value(value))
+            .map(|value| self.format_preview_value(db_type, value))
             .collect()
     }
 
@@ -344,6 +320,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(super) fn build_compare_sql(
         &self,
+        db_type: DatabaseType,
         column: &str,
         operator: ComparisonOperator,
         value: &serde_json::Value,
@@ -352,7 +329,7 @@ impl<M: Model> QueryBuilder<M> {
             "{} {} {}",
             column,
             Self::comparison_sql(operator),
-            self.format_preview_value(value)
+            self.format_preview_value(db_type, value)
         )
     }
 
@@ -404,7 +381,7 @@ impl<M: Model> QueryBuilder<M> {
             "{} {}LIKE {}",
             column,
             if negated { "NOT " } else { "" },
-            self.format_preview_value(value)
+            self.format_preview_value(db_type, value)
         );
         if escaped {
             sql.push_str(match db_type {
@@ -459,7 +436,7 @@ impl<M: Model> QueryBuilder<M> {
         operator: ListOperator,
         values: &[serde_json::Value],
     ) -> String {
-        let rendered = self.preview_values(values);
+        let rendered = self.preview_values(db_type, values);
         match operator {
             ListOperator::In => format!("{} IN ({})", column, rendered.join(", ")),
             ListOperator::NotIn => format!("{} NOT IN ({})", column, rendered.join(", ")),
@@ -494,6 +471,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(super) fn build_between_sql(
         &self,
+        db_type: DatabaseType,
         column: &str,
         low: &serde_json::Value,
         high: &serde_json::Value,
@@ -501,8 +479,8 @@ impl<M: Model> QueryBuilder<M> {
         format!(
             "{} BETWEEN {} AND {}",
             column,
-            self.format_preview_value(low),
-            self.format_preview_value(high)
+            self.format_preview_value(db_type, low),
+            self.format_preview_value(db_type, high)
         )
     }
 
@@ -515,10 +493,10 @@ impl<M: Model> QueryBuilder<M> {
     ) -> String {
         match operator {
             JsonValueOperator::Contains => {
-                db_sql::json_contains(db_type, column, &value.to_string())
+                db_sql::preview_json_contains(db_type, column, &value.to_string())
             }
             JsonValueOperator::ContainedBy => {
-                db_sql::json_contained_by(db_type, column, &value.to_string())
+                db_sql::preview_json_contained_by(db_type, column, &value.to_string())
             }
         }
     }
@@ -526,47 +504,18 @@ impl<M: Model> QueryBuilder<M> {
     fn build_json_value_expression(
         &self,
         db_type: DatabaseType,
-        column_expr: SimpleExpr,
         column_sql: &str,
         operator: JsonValueOperator,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        match db_type {
-            DatabaseType::Postgres => {
-                match operator {
-                    JsonValueOperator::Contains => column_expr
-                        .binary(PgBinOper::Contains, Expr::val(Self::json_parameter(value))),
-                    JsonValueOperator::ContainedBy => column_expr
-                        .binary(PgBinOper::Contained, Expr::val(Self::json_parameter(value))),
-                }
+        let bound = match operator {
+            JsonValueOperator::Contains => db_sql::json_contains_bound(db_type, column_sql, value),
+            JsonValueOperator::ContainedBy => {
+                db_sql::json_contained_by_bound(db_type, column_sql, value)
             }
-            DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
-                JsonValueOperator::Contains => self.build_custom_expression(
-                    format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
-                    vec![Self::json_scalar_parameter(value)],
-                ),
-                JsonValueOperator::ContainedBy => self.build_custom_expression(
-                    format!("JSON_CONTAINS(CAST(? AS JSON), {})", column_sql),
-                    vec![Self::json_scalar_parameter(value)],
-                ),
-            },
-            DatabaseType::SQLite => match operator {
-                JsonValueOperator::Contains => self.build_custom_expression(
-                    format!(
-                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
-                        column_sql
-                    ),
-                    vec![Self::sqlite_json_compare_value(value)],
-                ),
-                JsonValueOperator::ContainedBy => self.build_custom_expression(
-                    format!(
-                        "json_type({}) IS NOT NULL AND ? LIKE '%' || {} || '%'",
-                        column_sql, column_sql
-                    ),
-                    vec![Self::json_scalar_parameter(value)],
-                ),
-            },
-        }
+        };
+
+        self.build_custom_expression(bound.sql, bound.values)
     }
 
     pub(super) fn build_json_string_sql(
@@ -577,10 +526,18 @@ impl<M: Model> QueryBuilder<M> {
         value: &str,
     ) -> String {
         match operator {
-            JsonStringOperator::KeyPresent => db_sql::json_key_exists(db_type, column, value),
-            JsonStringOperator::KeyAbsent => db_sql::json_key_not_exists(db_type, column, value),
-            JsonStringOperator::PathPresent => db_sql::json_path_exists(db_type, column, value),
-            JsonStringOperator::PathAbsent => db_sql::json_path_not_exists(db_type, column, value),
+            JsonStringOperator::KeyPresent => {
+                db_sql::preview_json_key_exists(db_type, column, value)
+            }
+            JsonStringOperator::KeyAbsent => {
+                db_sql::preview_json_key_not_exists(db_type, column, value)
+            }
+            JsonStringOperator::PathPresent => {
+                db_sql::preview_json_path_exists(db_type, column, value)
+            }
+            JsonStringOperator::PathAbsent => {
+                db_sql::preview_json_path_not_exists(db_type, column, value)
+            }
         }
     }
 
@@ -591,92 +548,29 @@ impl<M: Model> QueryBuilder<M> {
         operator: JsonStringOperator,
         value: &str,
     ) -> SimpleExpr {
-        match operator {
-            JsonStringOperator::KeyPresent => match db_type {
-                DatabaseType::Postgres => self.build_custom_expression(
-                    format!("{} ? $1", column_sql),
-                    vec![Value::String(Some(value.to_string()))],
-                ),
-                DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
-                    format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(
-                        value,
-                    )))],
-                ),
-                DatabaseType::SQLite => self.build_custom_expression(
-                    format!("json_extract({}, ?) IS NOT NULL", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(
-                        value,
-                    )))],
-                ),
-            },
-            JsonStringOperator::KeyAbsent => match db_type {
-                DatabaseType::Postgres => self.build_custom_expression(
-                    format!("NOT ({} ? $1)", column_sql),
-                    vec![Value::String(Some(value.to_string()))],
-                ),
-                DatabaseType::MySQL | DatabaseType::MariaDB => self.build_custom_expression(
-                    format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(
-                        value,
-                    )))],
-                ),
-                DatabaseType::SQLite => self.build_custom_expression(
-                    format!("json_extract({}, ?) IS NULL", column_sql),
-                    vec![Value::String(Some(db_sql::canonical_json_member_path(
-                        value,
-                    )))],
-                ),
-            },
-            JsonStringOperator::PathPresent => match db_type {
-                DatabaseType::Postgres => self.build_custom_expression(
-                    format!("{} @? ($1::jsonpath)", column_sql),
-                    vec![Value::String(Some(value.to_string()))],
-                ),
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
-                        return Expr::cust(db_sql::invalid_json_path_predicate(true));
-                    };
-                    self.build_custom_expression(
-                        format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                        vec![Value::String(Some(path))],
-                    )
-                }
-                DatabaseType::SQLite => {
-                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
-                        return Expr::cust(db_sql::invalid_json_path_predicate(true));
-                    };
-                    self.build_custom_expression(
-                        format!("json_extract({}, ?) IS NOT NULL", column_sql),
-                        vec![Value::String(Some(path))],
-                    )
-                }
-            },
-            JsonStringOperator::PathAbsent => match db_type {
-                DatabaseType::Postgres => self.build_custom_expression(
-                    format!("NOT ({} @? ($1::jsonpath))", column_sql),
-                    vec![Value::String(Some(value.to_string()))],
-                ),
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
-                        return Expr::cust(db_sql::invalid_json_path_predicate(false));
-                    };
-                    self.build_custom_expression(
-                        format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                        vec![Value::String(Some(path))],
-                    )
-                }
-                DatabaseType::SQLite => {
-                    let Some(path) = db_sql::normalize_mysql_sqlite_json_path(value) else {
-                        return Expr::cust(db_sql::invalid_json_path_predicate(false));
-                    };
-                    self.build_custom_expression(
-                        format!("json_extract({}, ?) IS NULL", column_sql),
-                        vec![Value::String(Some(path))],
-                    )
-                }
-            },
-        }
+        let maybe_bound = match operator {
+            JsonStringOperator::KeyPresent => {
+                Some(db_sql::json_key_exists_bound(db_type, column_sql, value))
+            }
+            JsonStringOperator::KeyAbsent => Some(db_sql::json_key_not_exists_bound(
+                db_type, column_sql, value,
+            )),
+            JsonStringOperator::PathPresent => {
+                db_sql::json_path_exists_bound(db_type, column_sql, value)
+            }
+            JsonStringOperator::PathAbsent => {
+                db_sql::json_path_not_exists_bound(db_type, column_sql, value)
+            }
+        };
+
+        let Some(bound) = maybe_bound else {
+            return Expr::cust(db_sql::invalid_json_path_predicate(matches!(
+                operator,
+                JsonStringOperator::PathPresent
+            )));
+        };
+
+        self.build_custom_expression(bound.sql, bound.values)
     }
 
     pub(super) fn build_array_sql(
@@ -875,13 +769,9 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Between { low, high } => {
                 Some(self.build_between_expression(column_expr, low, high))
             }
-            ConditionSpec::JsonValue { operator, value } => Some(self.build_json_value_expression(
-                db_type,
-                column_expr,
-                &column_sql,
-                operator,
-                value,
-            )),
+            ConditionSpec::JsonValue { operator, value } => {
+                Some(self.build_json_value_expression(db_type, &column_sql, operator, value))
+            }
             ConditionSpec::JsonString { operator, value } => {
                 Some(self.build_json_string_expression(db_type, &column_sql, operator, value))
             }
@@ -960,7 +850,11 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    pub(crate) fn format_preview_value(&self, value: &serde_json::Value) -> String {
+    pub(crate) fn format_preview_value(
+        &self,
+        db_type: DatabaseType,
+        value: &serde_json::Value,
+    ) -> String {
         match value {
             serde_json::Value::Null => "NULL".to_string(),
             serde_json::Value::Bool(boolean) => boolean.to_string(),
@@ -968,9 +862,18 @@ impl<M: Model> QueryBuilder<M> {
             // This is only for the non-executable debug preview path. It renders
             // approximate inline literals for humans and must never be reused for
             // executable SQL; real query paths stay parameterized instead.
-            serde_json::Value::String(text) => format!("'{}'", text.replace("'", "''")),
+            serde_json::Value::String(text) => format!(
+                "'{}'",
+                crate::internal::sql_safety::escape_sql_literal_for_db(db_type, text)
+            ),
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                format!("'{}'", value.to_string().replace("'", "''"))
+                format!(
+                    "'{}'",
+                    crate::internal::sql_safety::escape_sql_literal_for_db(
+                        db_type,
+                        &value.to_string(),
+                    )
+                )
             }
         }
     }

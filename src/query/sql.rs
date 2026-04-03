@@ -2,8 +2,8 @@ use super::*;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::{
-    Alias, Condition, Expr, ExprTrait, MysqlQueryBuilder, PgBinOper, PostgresQueryBuilder, Query,
-    SimpleExpr, SqliteQueryBuilder, Value,
+    Alias, Condition, Expr, ExprTrait, MysqlQueryBuilder, PostgresQueryBuilder, Query, SimpleExpr,
+    SqliteQueryBuilder, Value,
 };
 use crate::model::Model;
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};

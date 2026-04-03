@@ -67,28 +67,19 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn describe_having_clause(sql_template: &str, params: &[serde_json::Value]) -> String {
+    fn describe_having_clause(&self, sql_template: &str, params: &[serde_json::Value]) -> String {
         if params.is_empty() {
             return sql_template.to_string();
         }
 
         let mut rendered = String::new();
         let mut params_iter = params.iter();
+        let db_type = self.db_type_for_sql();
 
         for ch in sql_template.chars() {
             if ch == '?' {
                 if let Some(value) = params_iter.next() {
-                    rendered.push_str(&match value {
-                        serde_json::Value::Null => "NULL".to_string(),
-                        serde_json::Value::Bool(boolean) => boolean.to_string(),
-                        serde_json::Value::Number(number) => number.to_string(),
-                        serde_json::Value::String(text) => {
-                            format!("'{}'", text.replace("'", "''"))
-                        }
-                        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                            format!("'{}'", value.to_string().replace("'", "''"))
-                        }
-                    });
+                    rendered.push_str(&self.format_preview_value(db_type, value));
                 } else {
                     rendered.push('?');
                 }
@@ -142,7 +133,7 @@ impl<M: Model> QueryBuilder<M> {
                         .get(index)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    format!("HAVING {}", Self::describe_having_clause(having, params))
+                    format!("HAVING {}", self.describe_having_clause(having, params))
                 }),
         );
         conditions
@@ -179,7 +170,7 @@ impl<M: Model> QueryBuilder<M> {
                         .get(index)
                         .map(Vec::as_slice)
                         .unwrap_or(&[]);
-                    Self::describe_having_clause(clause, params)
+                    self.describe_having_clause(clause, params)
                 })
                 .collect::<Vec<_>>()
                 .join(" AND ");

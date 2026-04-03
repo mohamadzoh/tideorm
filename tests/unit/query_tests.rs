@@ -56,49 +56,51 @@ fn test_quote_ident() {
 
 #[test]
 fn test_json_contains_postgres() {
-    let sql = db_sql::json_contains(DatabaseType::Postgres, "metadata", r#"{"key": "value"}"#);
+    let sql =
+        db_sql::preview_json_contains(DatabaseType::Postgres, "metadata", r#"{"key": "value"}"#);
     assert!(sql.contains("@>"));
     assert!(sql.contains("\"metadata\""));
 }
 
 #[test]
 fn test_json_contains_mysql() {
-    let sql = db_sql::json_contains(DatabaseType::MySQL, "metadata", r#"{"key": "value"}"#);
+    let sql = db_sql::preview_json_contains(DatabaseType::MySQL, "metadata", r#"{"key": "value"}"#);
     assert!(sql.contains("JSON_CONTAINS"));
     assert!(sql.contains("`metadata`"));
 
-    let sql = db_sql::json_contains(DatabaseType::MariaDB, "metadata", r#"{"key": "value"}"#);
+    let sql =
+        db_sql::preview_json_contains(DatabaseType::MariaDB, "metadata", r#"{"key": "value"}"#);
     assert!(sql.contains("JSON_CONTAINS"));
     assert!(sql.contains("`metadata`"));
 }
 
 #[test]
 fn test_json_contains_sqlite() {
-    let sql = db_sql::json_contains(DatabaseType::SQLite, "metadata", "test_value");
+    let sql = db_sql::preview_json_contains(DatabaseType::SQLite, "metadata", "test_value");
     assert!(sql.contains("json_each"));
     assert!(sql.contains("\"metadata\""));
 }
 
 #[test]
 fn test_json_key_exists_postgres() {
-    let sql = db_sql::json_key_exists(DatabaseType::Postgres, "data", "email");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::Postgres, "data", "email");
     assert_eq!(sql, "\"data\" ? 'email'");
 }
 
 #[test]
 fn test_json_key_exists_mysql() {
-    let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "email");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::MySQL, "data", "email");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
     assert!(sql.contains("$.\"email\""));
 
-    let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "email");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::MariaDB, "data", "email");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
     assert!(sql.contains("$.\"email\""));
 }
 
 #[test]
 fn test_json_key_exists_sqlite() {
-    let sql = db_sql::json_key_exists(DatabaseType::SQLite, "data", "email");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::SQLite, "data", "email");
     assert!(sql.contains("json_extract"));
     assert!(sql.contains("$.\"email\""));
     assert!(sql.contains("IS NOT NULL"));
@@ -106,26 +108,76 @@ fn test_json_key_exists_sqlite() {
 
 #[test]
 fn test_json_path_exists_postgres() {
-    let sql = db_sql::json_path_exists(DatabaseType::Postgres, "data", "$.user.name");
+    let sql = db_sql::preview_json_path_exists(DatabaseType::Postgres, "data", "$.user.name");
     assert!(sql.contains("@?"));
 }
 
 #[test]
 fn test_json_path_exists_mysql() {
-    let sql = db_sql::json_path_exists(DatabaseType::MySQL, "data", "$.user.name");
+    let sql = db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", "$.user.name");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
     assert!(sql.contains("$.\"user\".\"name\""));
 
-    let sql = db_sql::json_path_exists(DatabaseType::MariaDB, "data", "$.user.name");
+    let sql = db_sql::preview_json_path_exists(DatabaseType::MariaDB, "data", "$.user.name");
     assert!(sql.contains("JSON_CONTAINS_PATH"));
     assert!(sql.contains("$.\"user\".\"name\""));
 }
 
 #[test]
 fn test_json_path_exists_sqlite() {
-    let sql = db_sql::json_path_exists(DatabaseType::SQLite, "data", "$.user.name");
+    let sql = db_sql::preview_json_path_exists(DatabaseType::SQLite, "data", "$.user.name");
     assert!(sql.contains("json_extract"));
     assert!(sql.contains("$.\"user\".\"name\""));
+}
+
+#[test]
+fn test_json_contains_bound_mysql_uses_parameterized_json() {
+    let bound = db_sql::json_contains_bound(
+        DatabaseType::MySQL,
+        "`data`",
+        &serde_json::json!({"role": "admin'"}),
+    );
+
+    assert_eq!(bound.sql, "JSON_CONTAINS(`data`, CAST(? AS JSON))");
+    assert!(matches!(
+        bound.values.as_slice(),
+        [Value::String(Some(json))] if json == "{\"role\":\"admin'\"}"
+    ));
+}
+
+#[test]
+fn test_json_contains_bound_postgres_uses_postgres_placeholder() {
+    let bound = db_sql::json_contains_bound(
+        DatabaseType::Postgres,
+        "\"data\"",
+        &serde_json::json!({"role": "admin'"}),
+    );
+
+    assert_eq!(bound.sql, "\"data\" @> $1");
+    assert!(matches!(bound.values.as_slice(), [Value::Json(Some(_))]));
+}
+
+#[test]
+fn test_json_key_exists_bound_mysql_uses_parameterized_path() {
+    let bound = db_sql::json_key_exists_bound(DatabaseType::MySQL, "`data`", "unsafe'key");
+
+    assert_eq!(bound.sql, "JSON_CONTAINS_PATH(`data`, 'one', ?)");
+    assert!(matches!(
+        bound.values.as_slice(),
+        [Value::String(Some(path))] if path == "$.\"unsafe'key\""
+    ));
+}
+
+#[test]
+fn test_json_path_exists_bound_postgres_uses_jsonpath_placeholder() {
+    let bound = db_sql::json_path_exists_bound(DatabaseType::Postgres, "\"data\"", "$.user.name")
+        .expect("postgres jsonpath helper should always bind valid paths");
+
+    assert_eq!(bound.sql, "\"data\" @? ($1::jsonpath)");
+    assert!(matches!(
+        bound.values.as_slice(),
+        [Value::String(Some(path))] if path == "$.user.name"
+    ));
 }
 
 #[test]
@@ -229,7 +281,7 @@ fn test_format_column_quotes_non_identifier_input() {
 
 #[test]
 fn test_json_contains_quotes_unsafe_column_input() {
-    let sql = db_sql::json_contains(DatabaseType::Postgres, "data\" OR 1=1 --", "value");
+    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data\" OR 1=1 --", "value");
     assert_eq!(sql, "\"data\"\" OR 1=1 --\" @> 'value'");
 }
 
@@ -267,20 +319,37 @@ fn test_cast_to_float() {
 
 #[test]
 fn test_sql_injection_prevention() {
-    let sql = db_sql::json_contains(DatabaseType::Postgres, "data", "O'Brien");
+    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data", "O'Brien");
     assert!(sql.contains("O''Brien"));
 
-    let sql = db_sql::json_key_exists(DatabaseType::MySQL, "data", "key'; DROP TABLE--");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::MySQL, "data", "key'; DROP TABLE--");
     assert_eq!(
         sql,
         "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
     );
 
-    let sql = db_sql::json_key_exists(DatabaseType::MariaDB, "data", "key'; DROP TABLE--");
+    let sql = db_sql::preview_json_key_exists(DatabaseType::MariaDB, "data", "key'; DROP TABLE--");
     assert_eq!(
         sql,
         "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
     );
+}
+
+#[test]
+fn test_mysql_json_literals_escape_backslash_quote_pairs() {
+    let payload = r#"\' OR 1=1 --"#;
+
+    let sql = db_sql::preview_json_contains(DatabaseType::MySQL, "data", payload);
+    assert_eq!(sql, "JSON_CONTAINS(`data`, '\\\\'' OR 1=1 --')");
+
+    let sql = db_sql::preview_json_contains(DatabaseType::MariaDB, "data", payload);
+    assert_eq!(sql, "JSON_CONTAINS(`data`, '\\\\'' OR 1=1 --')");
+}
+
+#[test]
+fn test_postgres_json_literals_preserve_literal_backslashes() {
+    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data", r#"C:\temp"#);
+    assert_eq!(sql, "\"data\" @> 'C:\\temp'");
 }
 
 #[test]
@@ -288,26 +357,27 @@ fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
     let path = "$.user') OR 1=1 --";
 
     assert_eq!(
-        db_sql::json_path_exists(DatabaseType::MySQL, "data", path),
+        db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", path),
         "0 = 1"
     );
     assert_eq!(
-        db_sql::json_path_not_exists(DatabaseType::MySQL, "data", path),
+        db_sql::preview_json_path_not_exists(DatabaseType::MySQL, "data", path),
         "0 = 1"
     );
     assert_eq!(
-        db_sql::json_path_exists(DatabaseType::SQLite, "data", path),
+        db_sql::preview_json_path_exists(DatabaseType::SQLite, "data", path),
         "0 = 1"
     );
     assert_eq!(
-        db_sql::json_path_not_exists(DatabaseType::SQLite, "data", path),
+        db_sql::preview_json_path_not_exists(DatabaseType::SQLite, "data", path),
         "0 = 1"
     );
 }
 
 #[test]
 fn test_json_path_special_keys_are_quoted_safely() {
-    let sql = db_sql::json_path_exists(DatabaseType::MySQL, "data", "$['weird.key'][0].name");
+    let sql =
+        db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", "$['weird.key'][0].name");
     assert_eq!(
         sql,
         "JSON_CONTAINS_PATH(`data`, 'one', '$.\"weird.key\"[0].\"name\"')"
@@ -321,13 +391,13 @@ fn test_mysql_array_literals_are_json_encoded() {
     let contains_sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
     assert_eq!(
         contains_sql,
-        "JSON_CONTAINS(`roles`, '[\"ad\\\"min\",\"slash\\\\user\"]')"
+        "JSON_CONTAINS(`roles`, '[\"ad\\\\\"min\",\"slash\\\\\\\\user\"]')"
     );
 
     let overlaps_sql = db_sql::array_overlaps(DatabaseType::MySQL, "roles", &values);
     assert_eq!(
         overlaps_sql,
-        "(JSON_CONTAINS(`roles`, '\"ad\\\"min\"') OR JSON_CONTAINS(`roles`, '\"slash\\\\user\"'))"
+        "(JSON_CONTAINS(`roles`, '\"ad\\\\\"min\"') OR JSON_CONTAINS(`roles`, '\"slash\\\\\\\\user\"'))"
     );
 }
 
@@ -404,6 +474,20 @@ fn test_having_validation_allows_custom_functions_and_from_based_expressions() {
 fn test_subquery_validation_rejects_non_select_sql() {
     let err = db_sql::validate_subquery_sql("DELETE FROM users").unwrap_err();
     assert!(err.contains("unsafe subquery"));
+}
+
+#[test]
+fn test_subquery_validation_rejects_top_level_compound_queries() {
+    let err =
+        db_sql::validate_subquery_sql("SELECT id FROM users UNION SELECT password FROM users")
+            .unwrap_err();
+    assert!(err.contains("top-level 'union' queries are not allowed here"));
+}
+
+#[test]
+fn test_compound_subquery_validation_allows_recursive_cte_shape() {
+    db_sql::validate_compound_subquery_sql("SELECT 1 UNION ALL SELECT 2")
+        .expect("recursive CTE bodies should allow top-level UNION ALL");
 }
 
 #[tokio::test]
@@ -583,6 +667,21 @@ async fn test_union_raw_rejects_invalid_subquery_before_db_lookup() {
 }
 
 #[tokio::test]
+async fn test_union_raw_rejects_top_level_compound_subquery_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .union_raw("SELECT id FROM query_test_users UNION SELECT password FROM users")
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("invalid subquery for union_raw()"));
+    assert!(
+        err.to_string()
+            .contains("top-level 'union' queries are not allowed here")
+    );
+}
+
+#[tokio::test]
 async fn test_union_all_raw_rejects_invalid_subquery_before_db_lookup() {
     let err = QueryTestUser::query()
         .union_all_raw("DELETE FROM users")
@@ -641,6 +740,17 @@ async fn test_with_recursive_cte_rejects_non_select_sql_before_db_lookup() {
         err.to_string()
             .contains("invalid subquery for with_recursive_cte() recursive query")
     );
+}
+
+#[tokio::test]
+async fn test_recursive_cte_accepts_compound_query_body_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .with_cte(CTE::new("user_tree", "SELECT 1 UNION ALL SELECT 2".to_string()).recursive())
+        .count()
+        .await
+        .unwrap_err();
+
+    assert!(!err.to_string().contains("invalid CTE for with_cte()"));
 }
 
 #[tokio::test]

@@ -114,7 +114,7 @@ impl<M: Model> QueryBuilder<M> {
             }
             (Operator::SubqueryIn, ConditionValue::Subquery(query_sql))
             | (Operator::SubqueryNotIn, ConditionValue::Subquery(query_sql)) => {
-                db_sql::validate_subquery_sql(query_sql)
+                db_sql::validate_compound_subquery_sql(query_sql)
             }
             _ => Ok(()),
         }?;
@@ -200,7 +200,11 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
-        db_sql::validate_subquery_sql(&cte.query_sql)
+        if cte.recursive {
+            db_sql::validate_compound_subquery_sql(&cte.query_sql)
+        } else {
+            db_sql::validate_subquery_sql(&cte.query_sql)
+        }
     }
 
     fn validate_query_fragments(&self) -> Result<()> {
@@ -312,7 +316,7 @@ impl<M: Model> QueryBuilder<M> {
             raw_select_expressions: self.raw_select_expressions.clone(),
             subquery_select_expressions: self.subquery_select_expressions.clone(),
             group_by: self.group_by.clone(),
-            having_conditions: self.materialized_having_conditions(),
+            having_conditions: self.materialized_having_conditions(self.db_type_for_sql()),
             joins: self.joins.clone(),
             unions: self.unions.clone(),
             window_functions: self.window_functions.clone(),

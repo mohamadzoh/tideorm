@@ -329,6 +329,15 @@ fn sql_preview_marks_escaped_literal_like_helpers() {
 }
 
 #[test]
+fn mysql_sql_preview_escapes_backslash_quote_pairs() {
+    let preview = QueryCountGuardUser::query()
+        .where_eq("name", r#"\' OR 1=1 --"#)
+        .build_sql_preview_for_db(DatabaseType::MySQL);
+
+    assert!(preview.contains("WHERE `name` = '\\\\'' OR 1=1 --'"));
+}
+
+#[test]
 fn postgres_parameterized_sql_uses_single_character_like_escape() {
     let name = crate::columns::Column::<String>::new("name");
     let (sql, params) = QueryCountGuardUser::query()

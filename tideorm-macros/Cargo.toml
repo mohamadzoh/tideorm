@@ -1,6 +1,6 @@
 [package]
 name = "tideorm-macros"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"

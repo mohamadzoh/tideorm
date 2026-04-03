@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.10] - 2026-04-03
+
+### Fixed
+
+- Hardened backend-specific SQL preview escaping so MySQL and MariaDB preview paths now escape backslash-plus-quote payloads correctly, and HAVING/debug preview rendering now uses the active backend's literal rules instead of assuming PostgreSQL-style quote escaping everywhere.
+- Split JSON predicate SQL generation into explicit preview-only renderers and executable bound-SQL helpers, keeping `QueryBuilder` JSON contains/key/path predicates parameterized across PostgreSQL, MySQL, MariaDB, and SQLite while preserving backend-native PostgreSQL placeholder forms in the shared helper layer.
+- Tightened raw subquery validation from a prefix check into a top-level SQL shape scan, rejecting top-level `UNION`/`INTERSECT`/`EXCEPT` in raw union/CTE operands while still allowing builder-generated compound subqueries and recursive CTE bodies.
+- Added `#[must_use]` coverage to the `OrGroup`, `OrBranch`, `OrBranchBuilder`, and `BatchUpdateBuilder` fluent builders, including `OrBranchBuilder::end_or()`, so dropped builder chains now warn at compile time instead of silently losing filters or updates.
+
+### Changed
+
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, and release-facing dependency snippets to use `0.9.10`.
+
+### Internal
+
+- Added focused regressions for backend-specific SQL preview escaping, parameterized JSON predicate helper SQL, and stricter raw subquery validation across the query layer.
+- Verified the release prep with `cargo test --lib`, `cargo test --all-features --lib`, and `cargo test -p tideorm-macros --lib`.
+
 ## [0.9.9] - 2026-04-01
 
 ### Added
@@ -809,9 +827,10 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.9...HEAD
-[0.9.9]: https://github.com/mohamadzoh/tideorm/compare/v.9.8...v0.9.9
-[0.9.8]: https://github.com/mohamadzoh/tideorm/compare/v0.9.7...v.9.8
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.10...HEAD
+[0.9.10]: https://github.com/mohamadzoh/tideorm/compare/v0.9.9...v0.9.10
+[0.9.9]: https://github.com/mohamadzoh/tideorm/compare/v0.9.8...v0.9.9
+[0.9.8]: https://github.com/mohamadzoh/tideorm/compare/v0.9.7...v0.9.8
 [0.9.3]: https://github.com/mohamadzoh/tideorm/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/mohamadzoh/tideorm/compare/v0.9.1...v0.9.2
 [0.9.0]: https://github.com/mohamadzoh/tideorm/compare/v0.8.9...v0.9.0

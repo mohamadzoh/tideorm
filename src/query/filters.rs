@@ -101,6 +101,7 @@ pub struct OrGroup {
 }
 
 impl OrGroup {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             conditions: Vec::new(),
@@ -109,6 +110,7 @@ impl OrGroup {
         }
     }
 
+    #[must_use]
     pub fn where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -122,6 +124,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -135,6 +138,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -148,6 +152,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -161,6 +166,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -174,6 +180,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -187,6 +194,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -200,6 +208,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -216,6 +225,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -232,6 +242,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -248,6 +259,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_not_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -261,6 +273,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -274,6 +287,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -287,6 +301,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -296,6 +311,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -305,6 +321,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -319,6 +336,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn where_raw(mut self, raw_sql: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: String::new(),
@@ -328,6 +346,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn nested_or<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
@@ -337,6 +356,7 @@ impl OrGroup {
         self
     }
 
+    #[must_use]
     pub fn nested_and<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
@@ -371,12 +391,14 @@ pub struct OrBranch {
 }
 
 impl OrBranch {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             conditions: Vec::new(),
         }
     }
 
+    #[must_use]
     pub fn where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -390,6 +412,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -403,6 +426,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -416,6 +440,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -429,6 +454,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -442,6 +468,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -455,6 +482,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -468,6 +496,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -484,6 +513,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -500,6 +530,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -516,6 +547,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_not_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -529,6 +561,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -542,6 +575,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -555,6 +589,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -564,6 +599,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.conditions.push(WhereCondition {
             column: column.column_name().to_string(),
@@ -573,6 +609,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -587,6 +624,7 @@ impl OrBranch {
         self
     }
 
+    #[must_use]
     pub fn where_raw(mut self, raw_sql: &str) -> Self {
         self.conditions.push(WhereCondition {
             column: String::new(),
@@ -620,6 +658,7 @@ pub struct OrBranchBuilder<M: Model> {
 }
 
 impl<M: Model> OrBranchBuilder<M> {
+    #[must_use]
     pub fn new(query: QueryBuilder<M>) -> Self {
         Self {
             query,
@@ -628,6 +667,7 @@ impl<M: Model> OrBranchBuilder<M> {
         }
     }
 
+    #[must_use]
     pub fn or_where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -640,6 +680,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -652,6 +693,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -664,6 +706,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -676,6 +719,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -688,6 +732,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -700,6 +745,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -712,6 +758,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -724,6 +771,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -736,6 +784,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -748,6 +797,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -760,6 +810,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -772,6 +823,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         if !self.current_branch.is_empty() {
             self.branches.push(self.current_branch);
@@ -780,6 +832,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         if !self.current_branch.is_empty() {
             self.branches.push(self.current_branch);
@@ -788,6 +841,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -801,6 +855,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
         if !self.current_branch.is_empty() {
             self.branches.push(self.current_branch);
@@ -809,6 +864,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_eq(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -818,6 +874,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_not(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -827,6 +884,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_gt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -836,6 +894,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_gte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -845,6 +904,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_lt(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -854,6 +914,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_lte(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -863,6 +924,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -872,6 +934,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_contains(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -881,6 +944,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_starts_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -890,6 +954,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_ends_with(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -899,6 +964,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_not_like(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -908,6 +974,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -917,6 +984,7 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_not_in<V: Into<serde_json::Value>>(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -926,16 +994,19 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.current_branch = self.current_branch.where_null(column);
         self
     }
 
+    #[must_use]
     pub fn and_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.current_branch = self.current_branch.where_not_null(column);
         self
     }
 
+    #[must_use]
     pub fn and_where_between(
         mut self,
         column: impl crate::columns::IntoColumnName,
@@ -946,11 +1017,13 @@ impl<M: Model> OrBranchBuilder<M> {
         self
     }
 
+    #[must_use]
     pub fn and_where_raw(mut self, raw_sql: &str) -> Self {
         self.current_branch = self.current_branch.where_raw(raw_sql);
         self
     }
 
+    #[must_use]
     pub fn end_or(mut self) -> QueryBuilder<M> {
         if !self.current_branch.is_empty() {
             self.branches.push(self.current_branch);

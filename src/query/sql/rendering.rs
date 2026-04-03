@@ -142,6 +142,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn render_having_preview_sql(
         &self,
+        db_type: DatabaseType,
         sql_template: &str,
         params: &[serde_json::Value],
     ) -> String {
@@ -155,7 +156,7 @@ impl<M: Model> QueryBuilder<M> {
         for ch in sql_template.chars() {
             if ch == '?' {
                 if let Some(value) = params_iter.next() {
-                    rendered.push_str(&self.format_preview_value(value));
+                    rendered.push_str(&self.format_preview_value(db_type, value));
                 } else {
                     rendered.push('?');
                 }
@@ -199,7 +200,7 @@ impl<M: Model> QueryBuilder<M> {
         rendered
     }
 
-    pub(crate) fn materialized_having_conditions(&self) -> Vec<String> {
+    pub(crate) fn materialized_having_conditions(&self, db_type: DatabaseType) -> Vec<String> {
         self.having_conditions
             .iter()
             .enumerate()
@@ -209,7 +210,7 @@ impl<M: Model> QueryBuilder<M> {
                     .get(index)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                self.render_having_preview_sql(sql_template, params)
+                self.render_having_preview_sql(db_type, sql_template, params)
             })
             .collect()
     }
@@ -227,7 +228,7 @@ impl<M: Model> QueryBuilder<M> {
         if !self.having_conditions.is_empty() {
             sql.push_str(&format!(
                 "HAVING {} ",
-                self.materialized_having_conditions().join(" AND ")
+                self.materialized_having_conditions(db_type).join(" AND ")
             ));
         }
     }
@@ -379,7 +380,7 @@ impl<M: Model> QueryBuilder<M> {
         match spec {
             ConditionSpec::Raw { .. } => None,
             ConditionSpec::Compare { operator, value } => {
-                Some(self.build_compare_sql(&column, operator, value))
+                Some(self.build_compare_sql(db_type, &column, operator, value))
             }
             ConditionSpec::Pattern {
                 negated,
@@ -393,7 +394,7 @@ impl<M: Model> QueryBuilder<M> {
                 Some(self.build_null_check_sql(&column, negated))
             }
             ConditionSpec::Between { low, high } => {
-                Some(self.build_between_sql(&column, low, high))
+                Some(self.build_between_sql(db_type, &column, low, high))
             }
             ConditionSpec::JsonValue { operator, value } => {
                 Some(self.build_json_value_sql(db_type, &condition.column, operator, value))
