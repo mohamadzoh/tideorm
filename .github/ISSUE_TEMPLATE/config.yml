@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security Vulnerability Report
+    url: https://github.com/mohamadzoh/tideorm/blob/master/SECURITY.md
+    about: Please report suspected vulnerabilities privately using the repository security policy.
+  - name: Support and Troubleshooting
+    url: https://github.com/mohamadzoh/tideorm/blob/master/SUPPORT.md
+    about: Review the support policy and the information to include when asking for usage help.
+  - name: Contributing Guidelines
+    url: https://github.com/mohamadzoh/tideorm/blob/master/CONTRIBUTING.md
+    about: Review the contribution workflow, testing guidance, and project conventions before submitting changes.

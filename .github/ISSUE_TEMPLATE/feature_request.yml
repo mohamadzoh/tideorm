@@ -1,0 +1,70 @@
+name: Feature request
+description: Suggest an API, runtime, or tooling improvement for TideORM.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for new capabilities, ergonomics improvements, or API design proposals.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial checks
+      options:
+        - label: I searched existing issues and did not find the same request.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Query builder
+        - Models and CRUD
+        - Relations
+        - Entity manager
+        - Macros and code generation
+        - Migrations or schema generation
+        - Docs or examples
+        - Performance
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What limitation, pain point, or missing capability are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the API shape, workflow, or behavior you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or other approaches you evaluated.
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example usage
+      description: Pseudocode or sample API usage is helpful for design discussions.
+      render: rust
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility or migration impact
+      description: Note whether the request could introduce a breaking change or feature-gated behavior.

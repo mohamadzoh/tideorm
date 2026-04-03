@@ -218,6 +218,18 @@ See [docs/getting-started.md](docs/getting-started.md#testing) for more.
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+Please review the [Contributing Guidelines](CONTRIBUTING.md) before opening a pull request.
+
+Please review the [Code of Conduct](CODE_OF_CONDUCT.md) before participating in project discussions or reviews.
+
+## Support
+
+If you need usage help or troubleshooting guidance, please review [SUPPORT.md](SUPPORT.md) and open the appropriate issue type.
+
+## Security
+
+If you need to report a suspected vulnerability, please use the private reporting process described in the [Security Policy](SECURITY.md) instead of opening a public issue.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

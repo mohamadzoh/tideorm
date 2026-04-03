@@ -1,0 +1,86 @@
+name: Question / support
+description: Ask for usage help, troubleshooting guidance, or integration advice.
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for usage questions, troubleshooting, migration help, or design clarifications.
+
+        If you are reporting a security issue, do not post it publicly. Follow the private process in SECURITY.md.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial checks
+      options:
+        - label: I reviewed the README, docs, and existing issues before opening this question.
+          required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Question type
+      options:
+        - Usage help
+        - Troubleshooting
+        - Upgrade or migration
+        - API design clarification
+        - Integration advice
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: TideORM version, commit, or branch you are using.
+      placeholder: "Example: 0.9.10 or master"
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Database backend
+      options:
+        - PostgreSQL
+        - MySQL
+        - MariaDB
+        - SQLite
+        - Not backend-specific
+        - Unsure
+
+  - type: input
+    id: features
+    attributes:
+      label: Enabled feature flags
+      placeholder: 'Example: postgres runtime-tokio entity-manager'
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or problem
+      description: Describe what you are trying to do and where you are blocked.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include commands, configuration, or approaches you already tested.
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Minimal example, error output, or logs
+      description: Paste a reduced sample or the most relevant output.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any details that would help maintainers reproduce or answer the question faster.

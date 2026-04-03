@@ -1,0 +1,103 @@
+name: Bug report
+description: Report a bug or regression in TideORM.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+
+        If this is a security vulnerability, do not file it publicly. Use the private reporting process described in SECURITY.md.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial checks
+      options:
+        - label: I searched existing issues and did not find a matching report.
+          required: true
+        - label: I reproduced this on the latest release or current master.
+          required: false
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Affected crate
+      options:
+        - tideorm
+        - tideorm-macros
+        - both
+        - unsure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: TideORM version, commit, or branch where the issue occurs.
+      placeholder: "Example: 0.9.10 or master"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Database backend
+      options:
+        - PostgreSQL
+        - MySQL
+        - MariaDB
+        - SQLite
+        - Not backend-specific
+        - Unsure
+    validations:
+      required: true
+
+  - type: input
+    id: features
+    attributes:
+      label: Enabled feature flags
+      description: Include runtime and optional features if relevant.
+      placeholder: 'Example: postgres runtime-tokio entity-manager'
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Provide a minimal, deterministic reproduction when possible.
+      placeholder: |
+        1. Configure TideORM with ...
+        2. Run query/model operation ...
+        3. Observe failure ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output, SQL preview, or logs
+      description: Paste any relevant panic output, error messages, or query debug output.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include links to related issues, reduced code samples, or notes about environment-specific behavior.

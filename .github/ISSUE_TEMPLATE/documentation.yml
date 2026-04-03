@@ -1,0 +1,44 @@
+name: Documentation issue
+description: Report missing, incorrect, or unclear documentation.
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Initial checks
+      options:
+        - label: I searched existing issues and did not find the same documentation report.
+          required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Affected page or file
+      description: Link the README section, docs page, or file path if known.
+      placeholder: "Example: docs/queries.md or README.md"
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing?
+      description: Describe the confusing, outdated, or incorrect content.
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Explain how the docs should be updated.
+    validations:
+      required: true
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example text, code, or links
+      description: Include code snippets, commands, or external references if they help clarify the change.
