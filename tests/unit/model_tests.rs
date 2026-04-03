@@ -4,9 +4,11 @@ use crate::tokenization::Tokenizable as _;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::{Database, QueryCache, TideConfig};
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::time::Duration;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use tokio::sync::Mutex;
 
 #[tideorm::model(table = "model_test_users")]
 struct AutoIncrementModel {
@@ -90,11 +92,28 @@ fn model_cache_test_guard() -> &'static Mutex<()> {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_model_cache_test_db() -> Database {
+fn prepare_model_cache_test_state() {
     Database::reset_global();
     TideConfig::reset();
-    QueryCache::global().clear();
-    QueryCache::global().enable();
+
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.enable();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn cleanup_model_cache_test_state() {
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.disable();
+
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_model_cache_test_db() -> Database {
+    prepare_model_cache_test_state();
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -418,9 +437,7 @@ fn test_is_new_treats_defaulted_composite_primary_key_component_as_unsaved() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn save_invalidates_cached_queries_after_insert() {
-    let _guard = model_cache_test_guard()
-        .lock()
-        .expect("model cache test guard should not be poisoned");
+    let _guard = model_cache_test_guard().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let cached_before = AutoIncrementModel::query()
@@ -452,18 +469,13 @@ async fn save_invalidates_cached_queries_after_insert() {
     assert_eq!(fresh.len(), 1);
     assert_eq!(fresh[0].name, "Alice");
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_model_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn update_invalidates_cached_queries() {
-    let _guard = model_cache_test_guard()
-        .lock()
-        .expect("model cache test guard should not be poisoned");
+    let _guard = model_cache_test_guard().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -504,18 +516,13 @@ async fn update_invalidates_cached_queries() {
     assert_eq!(fresh.len(), 1);
     assert_eq!(fresh[0].name, "Bob");
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_model_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn delete_invalidates_cached_queries() {
-    let _guard = model_cache_test_guard()
-        .lock()
-        .expect("model cache test guard should not be poisoned");
+    let _guard = model_cache_test_guard().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -548,18 +555,13 @@ async fn delete_invalidates_cached_queries() {
         .expect("fresh cached query should succeed after delete");
     assert!(fresh.is_empty());
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_model_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn destroy_invalidates_cached_queries() {
-    let _guard = model_cache_test_guard()
-        .lock()
-        .expect("model cache test guard should not be poisoned");
+    let _guard = model_cache_test_guard().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -594,10 +596,7 @@ async fn destroy_invalidates_cached_queries() {
         .expect("fresh cached query should succeed after destroy");
     assert!(fresh.is_empty());
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_model_cache_test_state();
 }
 
 #[cfg(feature = "translations")]

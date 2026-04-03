@@ -5,7 +5,6 @@ use syn::{Attribute, GenericArgument, Ident, Meta, PathArguments, Type};
 
 #[derive(Debug, Clone, FromField)]
 #[darling(attributes(tideorm), forward_attrs(validate))]
-#[allow(dead_code)]
 pub(crate) struct ModelField {
     pub(crate) ident: Option<Ident>,
     pub(crate) ty: Type,
@@ -631,16 +630,19 @@ pub(crate) fn extract_value(input: &str, key: &str) -> Option<String> {
             return Some(input[pos + 1..].trim().to_string());
         }
     }
-    if input.starts_with(key) && input.contains('(') && input.ends_with(')') {
-        let start = input.find('(').unwrap() + 1;
-        return Some(input[start..input.len() - 1].trim().to_string());
+    if let Some(inner) = input
+        .strip_prefix(key)
+        .map(str::trim_start)
+        .and_then(|value| value.strip_prefix('('))
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Some(inner.trim().to_string());
     }
     None
 }
 
 #[derive(Debug, FromDeriveInput)]
 #[darling(attributes(tideorm), supports(struct_named))]
-#[allow(dead_code)]
 pub(crate) struct ModelInput {
     pub(crate) ident: Ident,
     pub(crate) data: Data<(), ModelField>,
@@ -681,16 +683,22 @@ pub(crate) struct ModelInput {
     #[darling(default)]
     pub(crate) skip_derives: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_derives: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_debug: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_clone: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_default: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_serialize: bool,
     #[darling(default)]
+    #[allow(dead_code)]
     pub(crate) auto_deserialize: bool,
     #[darling(default)]
     pub(crate) tokenize: bool,

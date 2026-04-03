@@ -7,7 +7,11 @@ use crate::model::Model as _;
 use serde_json::json;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Mutex, OnceLock};
+use crate::Database;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use std::sync::OnceLock;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use tokio::sync::Mutex;
 
 #[tideorm::model(table = "relation_test_nodes")]
 struct RelationTestNode {
@@ -82,6 +86,23 @@ struct RelationExtChildModel {
 fn direct_relation_db_guard() -> &'static Mutex<()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn cleanup_direct_relation_test_db() {
+    Database::reset_global();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_direct_relation_test_db() -> Database {
+    cleanup_direct_relation_test_db();
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    db
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -468,15 +489,9 @@ fn advanced_relations_deserialize_cached_payloads() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn direct_relation_load_refreshes_stale_cached_values() {
-    let _guard = direct_relation_db_guard()
-        .lock()
-        .expect("relation test database guard should not be poisoned");
+    let _guard = direct_relation_db_guard().lock().await;
 
-    crate::Database::reset_global();
-    let db = crate::Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    crate::Database::set_global(db.clone()).expect("setting global database should succeed");
+    let db = setup_direct_relation_test_db().await;
 
     db.__execute_with_params(
         "CREATE TABLE relation_test_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
@@ -595,21 +610,16 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
             .len(),
         1
     );
-    crate::Database::reset_global();
+
+    cleanup_direct_relation_test_db();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn has_many_through_attach_uses_backend_specific_placeholders() {
-    let _guard = direct_relation_db_guard()
-        .lock()
-        .expect("relation test database guard should not be poisoned");
+    let _guard = direct_relation_db_guard().lock().await;
 
-    crate::Database::reset_global();
-    let db = crate::Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    crate::Database::set_global(db.clone()).expect("setting global database should succeed");
+    let db = setup_direct_relation_test_db().await;
 
     db.__execute_with_params(
         "CREATE TABLE relation_test_pivots (id INTEGER PRIMARY KEY, left_id INTEGER NOT NULL, right_id INTEGER NOT NULL)",
@@ -639,21 +649,15 @@ async fn has_many_through_attach_uses_backend_specific_placeholders() {
     assert_eq!(pivots[0].left_id, 1);
     assert_eq!(pivots[0].right_id, 2);
 
-    crate::Database::reset_global();
+    cleanup_direct_relation_test_db();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn direct_relation_load_preserves_cached_payloads_without_query_context() {
-    let _guard = direct_relation_db_guard()
-        .lock()
-        .expect("relation test database guard should not be poisoned");
+    let _guard = direct_relation_db_guard().lock().await;
 
-    crate::Database::reset_global();
-    let db = crate::Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    crate::Database::set_global(db).expect("setting global database should succeed");
+    let _db = setup_direct_relation_test_db().await;
 
     let has_one: HasOne<DirectRelationProfile> = serde_json::from_value(json!({
         "id": 10,
@@ -700,5 +704,5 @@ async fn direct_relation_load_preserves_cached_payloads_without_query_context() 
         "Cached User"
     );
 
-    crate::Database::reset_global();
+    cleanup_direct_relation_test_db();
 }

@@ -11,7 +11,7 @@ use super::state::{global_connection_slot, global_db_handle, panic_missing_globa
 enum DatabaseInner {
     Global,
     Handle(DatabaseHandle),
-    #[allow(dead_code)]
+    #[cfg(test)]
     Disconnected,
 }
 
@@ -30,7 +30,7 @@ pub struct Database {
 }
 
 impl Database {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn disconnected() -> Self {
         Self {
             inner: DatabaseInner::Disconnected,
@@ -66,6 +66,7 @@ impl Database {
                             .to_string(),
                     )
                 }),
+            #[cfg(test)]
             DatabaseInner::Disconnected => Err(Error::connection(
                 "Global database connection not initialized. \
                  Call Database::init() or Database::set_global() before using models."
@@ -92,6 +93,7 @@ impl Database {
         match &self.inner {
             DatabaseInner::Handle(_) => true,
             DatabaseInner::Global => global_connection_slot().load_full().is_some(),
+            #[cfg(test)]
             DatabaseInner::Disconnected => false,
         }
     }

@@ -31,6 +31,7 @@ pub use save::{__save_with_entity_manager_in_scope, __with_entity_manager_db};
 
 type IdentityKey = (TypeId, String);
 type SnapshotKey = (&'static str, TypeId, String, &'static str);
+type SharedManagedCheckpoints = Arc<parking_lot::Mutex<save::ManagedCheckpoints>>;
 const MAX_FLUSH_PASSES: usize = 16;
 
 impl std::fmt::Debug for EntityManager {
@@ -265,7 +266,7 @@ impl EntityManager {
 
     async fn flush_in_scope_with_checkpoints(
         self: &Arc<Self>,
-        checkpoints: Option<&Arc<parking_lot::Mutex<Vec<Box<dyn managed::ManagedCheckpoint>>>>>,
+        checkpoints: Option<&SharedManagedCheckpoints>,
     ) -> crate::error::Result<()> {
         let mut processed = 0;
         let mut passes = 0;

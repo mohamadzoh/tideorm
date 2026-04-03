@@ -5,7 +5,7 @@ use syn::{DeriveInput, Type, parse_quote};
 
 use crate::context::BuildContext;
 use crate::meta_support::detect_existing_derives;
-use crate::parse::ModelInput;
+use crate::parse::{ModelInput, extract_value};
 use crate::serde_gen::generate_trait_impls;
 
 use crate::parse::ModelField;
@@ -300,4 +300,26 @@ fn validation_allows_string_rules_on_fully_qualified_optional_string_fields() {
         .expect("fully qualified optional string validation rules should be accepted");
 
     assert_eq!(ctx.validation_rules.len(), 1);
+}
+
+#[test]
+fn extract_value_parses_assignment_rules() {
+    assert_eq!(
+        extract_value("min_length = 3", "min_length"),
+        Some("3".to_string())
+    );
+}
+
+#[test]
+fn extract_value_parses_function_rules_with_optional_whitespace() {
+    assert_eq!(
+        extract_value("range ( 1 , 10 )", "range"),
+        Some("1 , 10".to_string())
+    );
+}
+
+#[test]
+fn extract_value_rejects_incomplete_or_mismatched_function_rules() {
+    assert_eq!(extract_value("range(1, 10", "range"), None);
+    assert_eq!(extract_value("length(1, 10)", "range"), None);
 }

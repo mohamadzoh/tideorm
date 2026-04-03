@@ -7,9 +7,11 @@ use crate::query::OrGroup;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::{Database, QueryCache, TideConfig};
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::time::Duration;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use tokio::sync::Mutex;
 
 #[tideorm::model(table = "query_mutation_guard_users")]
 struct MutationGuardUser {
@@ -33,11 +35,28 @@ fn query_mutation_cache_test_guard() -> &'static Mutex<()> {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_query_mutation_cache_test_db() -> Database {
+fn prepare_query_mutation_cache_test_state() {
     Database::reset_global();
     TideConfig::reset();
-    QueryCache::global().clear();
-    QueryCache::global().enable();
+
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.enable();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn cleanup_query_mutation_cache_test_state() {
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.disable();
+
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_query_mutation_cache_test_db() -> Database {
+    prepare_query_mutation_cache_test_state();
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -367,9 +386,7 @@ fn debug_output_includes_preview_banner_and_parameterized_sql() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_delete_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard()
-        .lock()
-        .expect("query mutation cache test guard should not be poisoned");
+    let _guard = query_mutation_cache_test_guard().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = MutationGuardUser {
@@ -397,14 +414,14 @@ async fn query_delete_invalidates_cached_queries() {
 
     assert_eq!(rows_affected, 1);
     assert_eq!(QueryCache::global().stats().entries, 0);
+
+    cleanup_query_mutation_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_delete_all_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard()
-        .lock()
-        .expect("query mutation cache test guard should not be poisoned");
+    let _guard = query_mutation_cache_test_guard().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     MutationGuardUser {
@@ -431,14 +448,14 @@ async fn query_delete_all_invalidates_cached_queries() {
 
     assert_eq!(rows_affected, 1);
     assert_eq!(QueryCache::global().stats().entries, 0);
+
+    cleanup_query_mutation_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn soft_delete_and_restore_invalidate_cached_queries() {
-    let _guard = query_mutation_cache_test_guard()
-        .lock()
-        .expect("query mutation cache test guard should not be poisoned");
+    let _guard = query_mutation_cache_test_guard().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = SoftDeleteMutationGuardUser {
@@ -487,14 +504,14 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
 
     assert_eq!(restored, 1);
     assert_eq!(QueryCache::global().stats().entries, 0);
+
+    cleanup_query_mutation_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn force_delete_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard()
-        .lock()
-        .expect("query mutation cache test guard should not be poisoned");
+    let _guard = query_mutation_cache_test_guard().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = SoftDeleteMutationGuardUser {
@@ -531,4 +548,6 @@ async fn force_delete_invalidates_cached_queries() {
 
     assert_eq!(rows_affected, 1);
     assert_eq!(QueryCache::global().stats().entries, 0);
+
+    cleanup_query_mutation_cache_test_state();
 }

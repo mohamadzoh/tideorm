@@ -381,8 +381,8 @@ pub(crate) fn validate_join_column(value: &str) -> std::result::Result<(), Strin
 }
 
 /// Get the identifier quote character for the database
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn quote_char(db_type: DatabaseType) -> char {
+#[cfg(test)]
+pub(crate) fn quote_char(db_type: DatabaseType) -> char {
     sql_safety::quote_char(db_type)
 }
 

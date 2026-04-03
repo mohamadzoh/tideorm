@@ -4,9 +4,11 @@ use crate::model::Model as ModelTrait;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::{Database, QueryCache, TideConfig};
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::time::Duration;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use tokio::sync::Mutex;
 
 #[tideorm::model(table = "batch_update_guard_users")]
 struct BatchUpdateGuardUser {
@@ -22,11 +24,28 @@ fn batch_cache_test_guard() -> &'static Mutex<()> {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-async fn setup_batch_cache_test_db() -> Database {
+fn prepare_batch_cache_test_state() {
     Database::reset_global();
     TideConfig::reset();
-    QueryCache::global().clear();
-    QueryCache::global().enable();
+
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.enable();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn cleanup_batch_cache_test_state() {
+    let query_cache = QueryCache::global();
+    query_cache.clear();
+    query_cache.disable();
+
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_batch_cache_test_db() -> Database {
+    prepare_batch_cache_test_state();
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -232,9 +251,7 @@ fn batch_execute_returning_uses_backend_returning_capability() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_invalidates_cached_queries() {
-    let _guard = batch_cache_test_guard()
-        .lock()
-        .expect("batch cache test guard should not be poisoned");
+    let _guard = batch_cache_test_guard().lock().await;
     let _db = setup_batch_cache_test_db().await;
 
     let saved = BatchUpdateGuardUser {
@@ -272,18 +289,13 @@ async fn batch_execute_invalidates_cached_queries() {
         .expect("fresh query should succeed after batch execute");
     assert_eq!(fresh[0].name, "Bob");
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_batch_cache_test_state();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_returning_invalidates_cached_queries() {
-    let _guard = batch_cache_test_guard()
-        .lock()
-        .expect("batch cache test guard should not be poisoned");
+    let _guard = batch_cache_test_guard().lock().await;
     let _db = setup_batch_cache_test_db().await;
 
     let saved = BatchUpdateGuardUser {
@@ -322,8 +334,5 @@ async fn batch_execute_returning_invalidates_cached_queries() {
         .expect("fresh query should succeed after batch execute_returning");
     assert_eq!(fresh[0].name, "Bob");
 
-    QueryCache::global().clear();
-    QueryCache::global().disable();
-    Database::reset_global();
-    TideConfig::reset();
+    cleanup_batch_cache_test_state();
 }

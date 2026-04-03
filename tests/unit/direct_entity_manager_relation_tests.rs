@@ -2,12 +2,9 @@ use super::{BelongsTo, HasOne};
 use crate::database::{__in_db_scope, Database};
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
+use crate::postgres_test_config::test_database_url;
 use serde_json::json;
 use std::sync::{Arc, OnceLock};
-
-#[path = "../support/postgres_test_config.rs"]
-mod test_config;
-use test_config::test_database_url;
 
 const USER_TABLE: &str = "direct_entity_manager_relation_test_users";
 const PROFILE_TABLE: &str = "direct_entity_manager_relation_test_profiles";

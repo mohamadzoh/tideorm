@@ -27,6 +27,5 @@ pub use writer::SchemaWriter;
 pub(super) static SCHEMA_REGISTRY: RwLock<Vec<TableSchema>> = RwLock::new(Vec::new());
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
 #[path = "../../tests/unit/schema_tests.rs"]
 mod tests;

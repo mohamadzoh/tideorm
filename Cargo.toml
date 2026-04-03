@@ -35,7 +35,7 @@ entity-manager = []
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
 
 # Async runtime
-tokio = { version = "1.50.0", features = ["full"], optional = true }
+tokio = { version = "1.51.0", features = ["full"], optional = true }
 async-trait = "0.1.89"
 
 # Serialization

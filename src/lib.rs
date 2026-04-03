@@ -191,6 +191,10 @@ pub mod entity_manager;
 
 extern crate self as tideorm;
 
+#[cfg(all(test, feature = "entity-manager"))]
+#[path = "../tests/support/postgres_test_config.rs"]
+pub(crate) mod postgres_test_config;
+
 /// File attachments system (attach, detach, sync)
 #[cfg(feature = "attachments")]
 pub mod attachments;
