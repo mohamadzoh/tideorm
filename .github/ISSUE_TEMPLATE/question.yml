@@ -38,7 +38,7 @@ body:
     attributes:
       label: Version
       description: TideORM version, commit, or branch you are using.
-      placeholder: "Example: 0.9.10 or master"
+      placeholder: "Example: 0.9.11 or master"
 
   - type: dropdown
     id: backend
