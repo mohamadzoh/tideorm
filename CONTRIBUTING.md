@@ -94,6 +94,25 @@ If your change touches docs, also build the book:
 mdbook build
 ```
 
+## Benchmarking
+
+If you are working on a performance change, benchmark the smallest relevant target instead of running the full bench set first.
+
+Common commands:
+
+```bash
+cargo bench --bench query_benchmarks
+cargo bench --bench crud_benchmarks
+cargo bench --bench or_clause_benchmarks
+cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
+cargo bench --bench fulltext_benchmarks --features fulltext
+cargo bench --no-run --features "attachments translations fulltext"
+```
+
+The PostgreSQL-backed benches use `POSTGRESQL_DATABASE_URL` and fall back to `postgres://postgres:postgres@localhost:5432/test_tide_orm` when it is unset.
+
+For the full benchmark matrix and Criterion baseline workflow, see [docs/benchmarking.md](docs/benchmarking.md).
+
 ## Documentation
 
 - Update `README.md` when quick-start behavior or public-facing features change.

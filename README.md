@@ -177,6 +177,7 @@ Core chapters:
 - [Models](docs/models.md) - Model definition, CRUD behavior, lifecycle hooks, validation, tokenization, and advanced TideORM helpers
 - [Queries](docs/queries.md) - Query builder, full-text search, multi-database behavior, raw SQL, logging, and errors
 - [Profiling](docs/profiling.md) - Global query timing, slow-query stats, manual reports, and query analysis
+- [Benchmarking](docs/benchmarking.md) - Benchmark target matrix, PostgreSQL setup, feature-gated bench commands, and Criterion baseline workflow
 - [Relations](docs/relations.md) - Field-declared relations, attachments, translations, and runtime relation wrappers
 - [Entity Manager](docs/entity-manager.md) - Persistence-context identity map, aggregate synchronization helpers, and managed entity lifecycle operations
 - [Migrations](docs/migrations.md) - Schema builder column types, migration authoring, and schema sync guidance
@@ -213,6 +214,23 @@ cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-de
 ```
 
 See [docs/getting-started.md](docs/getting-started.md#testing) for more.
+
+## Benchmarking
+
+Use focused Criterion targets rather than `cargo bench` alone when you are chasing a bottleneck. PostgreSQL-backed benchmarks default to `postgres://postgres:postgres@localhost:5432/test_tide_orm` and respect `POSTGRESQL_DATABASE_URL`.
+
+Common local commands:
+
+```bash
+cargo bench --bench query_benchmarks
+cargo bench --bench crud_benchmarks
+cargo bench --bench or_clause_benchmarks
+cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
+cargo bench --bench fulltext_benchmarks --features fulltext
+cargo bench --no-run --features "attachments translations fulltext"
+```
+
+See [docs/benchmarking.md](docs/benchmarking.md) for the full benchmark matrix and Criterion baseline workflow.
 
 ## Contributing
 

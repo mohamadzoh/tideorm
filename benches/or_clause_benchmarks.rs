@@ -73,6 +73,16 @@ fn cleanup_data() {
     truncate_table("or_bench_users");
 }
 
+fn reset_data(count: usize) {
+    cleanup_data();
+    seed_data(count);
+}
+
+fn setup_benchmark_with_data(count: usize) {
+    init_database();
+    reset_data(count);
+}
+
 fn seed_data(count: usize) {
     let rt = runtime();
     let statuses = ["active", "pending", "inactive", "banned"];
@@ -145,9 +155,7 @@ fn bench_or_group_construction(c: &mut Criterion) {
 }
 
 fn bench_query_builder_with_or(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(100);
+    setup_benchmark_with_data(100);
 
     let mut group = c.benchmark_group("query_builder_or_methods");
 
@@ -189,9 +197,7 @@ fn bench_query_builder_with_or(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_or_clause_query_execution(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(1000);
+    setup_benchmark_with_data(1000);
 
     let rt = runtime();
     let mut group = c.benchmark_group("or_clause_execution");
@@ -283,9 +289,7 @@ fn bench_or_clause_query_execution(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_or_vs_in_comparison(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(1000);
+    setup_benchmark_with_data(1000);
 
     let rt = runtime();
     let mut group = c.benchmark_group("or_vs_in_comparison");
@@ -355,8 +359,7 @@ fn bench_or_clause_scaling(c: &mut Criterion) {
     for data_size in [100, 500, 1000, 5000].iter() {
         group.throughput(Throughput::Elements(*data_size as u64));
 
-        cleanup_data();
-        seed_data(*data_size);
+        reset_data(*data_size);
 
         group.bench_with_input(
             BenchmarkId::new("or_query_with_dataset", data_size),
@@ -387,9 +390,7 @@ fn bench_or_clause_scaling(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_or_conditions_count(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(1000);
+    setup_benchmark_with_data(1000);
 
     let rt = runtime();
     let mut group = c.benchmark_group("or_conditions_count");
@@ -511,9 +512,7 @@ fn bench_fluent_or_branch_construction(c: &mut Criterion) {
 }
 
 fn bench_fluent_or_builder_api(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(100);
+    setup_benchmark_with_data(100);
 
     let mut group = c.benchmark_group("fluent_or_builder_api");
 
@@ -582,9 +581,7 @@ fn bench_fluent_or_builder_api(c: &mut Criterion) {
 }
 
 fn bench_fluent_or_execution(c: &mut Criterion) {
-    init_database();
-    cleanup_data();
-    seed_data(1000);
+    setup_benchmark_with_data(1000);
 
     let rt = runtime();
     let mut group = c.benchmark_group("fluent_or_execution");

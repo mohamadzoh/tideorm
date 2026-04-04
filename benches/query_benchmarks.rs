@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use tideorm::prelude::*;
 mod support;
 
-use support::{init_postgres_database, runtime, truncate_table};
+use support::{for_each_batch, init_postgres_database, runtime, truncate_table};
 
 // Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
@@ -70,50 +70,25 @@ fn seed_data(count: usize) {
     let rt = runtime();
     let categories = ["Electronics", "Clothing", "Books", "Home", "Sports"];
 
-    rt.block_on(async {
-        // Insert in batches
-        let batch_size = 500;
-        let batches = count / batch_size;
-        let remainder = count % batch_size;
-
-        for batch in 0..batches {
-            let products: Vec<BenchProduct> = (0..batch_size)
-                .map(|i| {
-                    let global_i = batch * batch_size + i;
-                    BenchProduct {
-                        id: 0,
-                        name: format!("Product {global_i}"),
-                        category: categories[global_i % categories.len()].to_string(),
-                        price: 100 + (global_i % 10000) as i32,
-                        stock: (global_i % 1000) as i32,
-                        active: global_i % 3 != 0, // ~66% active
-                    }
-                })
-                .collect();
-            BenchProduct::insert_all(products)
-                .await
-                .expect("Batch insert failed");
-        }
-
-        if remainder > 0 {
-            let products: Vec<BenchProduct> = (0..remainder)
-                .map(|i| {
-                    let global_i = batches * batch_size + i;
-                    BenchProduct {
-                        id: 0,
-                        name: format!("Product {global_i}"),
-                        category: categories[global_i % categories.len()].to_string(),
-                        price: 100 + (global_i % 10000) as i32,
-                        stock: (global_i % 1000) as i32,
-                        active: global_i % 3 != 0,
-                    }
-                })
-                .collect();
-            BenchProduct::insert_all(products)
-                .await
-                .expect("Batch insert failed");
-        }
-    });
+    for_each_batch(
+        count,
+        500,
+        |global_i| BenchProduct {
+            id: 0,
+            name: format!("Product {global_i}"),
+            category: categories[global_i % categories.len()].to_string(),
+            price: 100 + (global_i % 10000) as i32,
+            stock: (global_i % 1000) as i32,
+            active: global_i % 3 != 0, // ~66% active
+        },
+        |products| {
+            rt.block_on(async {
+                BenchProduct::insert_all(products)
+                    .await
+                    .expect("Batch insert failed");
+            });
+        },
+    );
 }
 
 fn setup_benchmark_with_data(count: usize) {
@@ -130,6 +105,7 @@ fn bench_simple_where(c: &mut Criterion) {
     let rt = runtime();
 
     let mut group = c.benchmark_group("simple_where");
+    group.sample_size(60);
 
     for data_size in [1000, 10000].iter() {
         // Setup with data
@@ -178,6 +154,7 @@ fn bench_range_queries(c: &mut Criterion) {
     setup_benchmark_with_data(10000);
 
     let mut group = c.benchmark_group("range_queries");
+    group.sample_size(30);
 
     group.bench_function("where_gt", |b| {
         b.iter(|| {
@@ -226,6 +203,7 @@ fn bench_compound_queries(c: &mut Criterion) {
     setup_benchmark_with_data(10000);
 
     let mut group = c.benchmark_group("compound_queries");
+    group.sample_size(30);
 
     group.bench_function("two_conditions", |b| {
         b.iter(|| {
@@ -433,6 +411,7 @@ fn bench_like_queries(c: &mut Criterion) {
     setup_benchmark_with_data(10000);
 
     let mut group = c.benchmark_group("like_queries");
+    group.sample_size(50);
 
     group.bench_function("starts_with", |b| {
         b.iter(|| {

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tideorm::{Database, TideConfig};
@@ -58,4 +59,49 @@ pub fn truncate_table(table_name: &str) {
     execute_sql(&format!(
         "TRUNCATE TABLE {table_name} RESTART IDENTITY CASCADE"
     ));
+}
+
+#[allow(dead_code)]
+pub fn for_each_batch<T, Build, Consume>(
+    total: usize,
+    batch_size: usize,
+    mut build: Build,
+    mut consume: Consume,
+) where
+    Build: FnMut(usize) -> T,
+    Consume: FnMut(Vec<T>),
+{
+    assert!(batch_size > 0, "batch_size must be greater than zero");
+
+    let mut start = 0;
+    while start < total {
+        let end = (start + batch_size).min(total);
+        let batch = (start..end).map(&mut build).collect();
+        consume(batch);
+        start = end;
+    }
+}
+
+#[allow(dead_code)]
+pub struct IdCycler {
+    ids: Vec<i64>,
+    counter: AtomicU64,
+}
+
+impl IdCycler {
+    #[allow(dead_code)]
+    pub fn new(ids: Vec<i64>) -> Self {
+        assert!(!ids.is_empty(), "IdCycler requires at least one id");
+
+        Self {
+            ids,
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn next(&self) -> i64 {
+        let index = self.counter.fetch_add(1, Ordering::SeqCst) as usize % self.ids.len();
+        self.ids[index]
+    }
 }

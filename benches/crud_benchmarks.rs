@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tideorm::prelude::*;
 mod support;
 
-use support::{init_postgres_database, runtime, truncate_table};
+use support::{IdCycler, for_each_batch, init_postgres_database, runtime, truncate_table};
 
 // Atomic counter for generating unique values
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -175,11 +175,10 @@ fn bench_find_by_id(c: &mut Criterion) {
     let mut group = c.benchmark_group("find_by_id");
     group.throughput(Throughput::Elements(1));
 
-    let counter = AtomicU64::new(0);
+    let id_cycler = IdCycler::new(user_ids);
     group.bench_function("find_one_user", |b| {
         b.iter(|| {
-            let idx = counter.fetch_add(1, Ordering::SeqCst) as usize % user_ids.len();
-            let id = user_ids[idx];
+            let id = id_cycler.next();
             rt.block_on(async { BenchUser::find(id).await.expect("Find failed") })
         });
     });
@@ -208,11 +207,10 @@ fn bench_update(c: &mut Criterion) {
     let mut group = c.benchmark_group("update");
     group.throughput(Throughput::Elements(1));
 
-    let counter = AtomicU64::new(0);
+    let id_cycler = IdCycler::new(user_ids);
     group.bench_function("update_one_user", |b| {
         b.iter(|| {
-            let idx = counter.fetch_add(1, Ordering::SeqCst) as usize % user_ids.len();
-            let id = user_ids[idx];
+            let id = id_cycler.next();
             rt.block_on(async {
                 let mut user = BenchUser::find(id).await.expect("Find failed").unwrap();
                 user.age += 1;
@@ -275,44 +273,25 @@ fn bench_count(c: &mut Criterion) {
         // Setup: Insert many users
         cleanup_data();
 
-        rt.block_on(async {
-            // Insert in batches for speed
-            let batch_size = 500;
-            let batches = *size / batch_size;
-            let remainder = *size % batch_size;
-
-            for batch in 0..batches {
-                let users: Vec<BenchUser> = (0..batch_size)
-                    .map(|i| {
-                        BenchUser::new(
-                            format!("count_{batch}_{i}@example.com"),
-                            format!("Count User {i}"),
-                        )
-                        .with_age(20 + (i % 50))
-                        .with_active(i % 2 == 0)
-                    })
-                    .collect();
-                BenchUser::insert_all(users)
-                    .await
-                    .expect("Batch insert failed");
-            }
-
-            if remainder > 0 {
-                let users: Vec<BenchUser> = (0..remainder)
-                    .map(|i| {
-                        BenchUser::new(
-                            format!("count_rem_{i}@example.com"),
-                            format!("Count User Rem {i}"),
-                        )
-                        .with_age(20 + (i % 50))
-                        .with_active(i % 2 == 0)
-                    })
-                    .collect();
-                BenchUser::insert_all(users)
-                    .await
-                    .expect("Batch insert failed");
-            }
-        });
+        for_each_batch(
+            *size,
+            500,
+            |global_i| {
+                BenchUser::new(
+                    format!("count_{global_i}@example.com"),
+                    format!("Count User {global_i}"),
+                )
+                .with_age(20 + (global_i % 50) as i32)
+                .with_active(global_i % 2 == 0)
+            },
+            |users| {
+                rt.block_on(async {
+                    BenchUser::insert_all(users)
+                        .await
+                        .expect("Batch insert failed");
+                });
+            },
+        );
 
         group.bench_with_input(BenchmarkId::new("count_all", size), size, |b, _size| {
             b.iter(|| rt.block_on(async { BenchUser::count().await.expect("Count failed") }));
