@@ -14,97 +14,13 @@ use tideorm::translations::{
     HasTranslations, TranslationError, TranslationInput, TranslationsData,
 };
 
-// =============================================================================
-// TEST MODELS (without database dependency)
-// =============================================================================
+#[path = "attachments_translations_benchmarks/combined_operations.rs"]
+mod combined_operations;
+#[path = "attachments_translations_benchmarks/models.rs"]
+mod models;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BenchProduct {
-    pub id: i64,
-    pub name: String,
-    pub description: String,
-    pub price: f64,
-    pub translations: Option<serde_json::Value>,
-    pub files: Option<serde_json::Value>,
-}
-
-impl HasTranslations for BenchProduct {
-    fn translatable_fields() -> Vec<&'static str> {
-        vec!["name", "description"]
-    }
-
-    fn allowed_languages() -> Vec<String> {
-        vec![
-            "en".to_string(),
-            "ar".to_string(),
-            "fr".to_string(),
-            "es".to_string(),
-            "de".to_string(),
-        ]
-    }
-
-    fn fallback_language() -> String {
-        "en".to_string()
-    }
-
-    fn get_translations_data(&self) -> Result<TranslationsData, TranslationError> {
-        match &self.translations {
-            Some(json) => Ok(TranslationsData::from_json(json)),
-            None => Ok(TranslationsData::new()),
-        }
-    }
-
-    fn set_translations_data(&mut self, data: TranslationsData) -> Result<(), TranslationError> {
-        self.translations = Some(data.to_json());
-        Ok(())
-    }
-
-    fn get_default_value(&self, field: &str) -> Result<serde_json::Value, TranslationError> {
-        match field {
-            "name" => Ok(serde_json::json!(self.name)),
-            "description" => Ok(serde_json::json!(self.description)),
-            _ => Err(TranslationError::InvalidField(format!(
-                "Unknown field: {}",
-                field
-            ))),
-        }
-    }
-}
-
-impl HasAttachments for BenchProduct {
-    fn has_one_files() -> Vec<&'static str> {
-        vec!["thumbnail", "cover"]
-    }
-
-    fn has_many_files() -> Vec<&'static str> {
-        vec!["images", "documents"]
-    }
-
-    fn get_files_data(&self) -> Result<FilesData, AttachmentError> {
-        match &self.files {
-            Some(json) => Ok(FilesData::from_json(json)),
-            None => Ok(FilesData::new()),
-        }
-    }
-
-    fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError> {
-        self.files = Some(data.to_json());
-        Ok(())
-    }
-}
-
-impl BenchProduct {
-    fn new(id: i64) -> Self {
-        Self {
-            id,
-            name: format!("Product {}", id),
-            description: format!("Description for product {}", id),
-            price: 99.99,
-            translations: None,
-            files: None,
-        }
-    }
-}
+use combined_operations::*;
+use models::*;
 
 // =============================================================================
 // FILE ATTACHMENT BENCHMARKS
@@ -499,104 +415,6 @@ fn bench_translations_serialization(c: &mut Criterion) {
 // =============================================================================
 // COMBINED OPERATIONS BENCHMARKS
 // =============================================================================
-
-fn bench_combined_operations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("combined_operations");
-    group.sample_size(50);
-
-    // Full product setup with translations and attachments
-    group.bench_function("full_product_setup", |b| {
-        b.iter(|| {
-            let mut product = BenchProduct::new(1);
-
-            // Set translations
-            product
-                .set_translation("name", "en", "Wireless Headphones")
-                .unwrap();
-            product
-                .set_translation("name", "ar", "سماعات لاسلكية")
-                .unwrap();
-            product
-                .set_translation("description", "en", "High-quality wireless headphones")
-                .unwrap();
-            product
-                .set_translation("description", "ar", "سماعات لاسلكية عالية الجودة")
-                .unwrap();
-
-            // Attach files
-            product.attach("thumbnail", "uploads/thumb.jpg").unwrap();
-            product
-                .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
-                .unwrap();
-            product
-                .attach_many("documents", vec!["manual.pdf", "warranty.pdf"])
-                .unwrap();
-
-            black_box(product)
-        });
-    });
-
-    // Full JSON output with translations
-    group.bench_function("full_json_output", |b| {
-        let mut product = BenchProduct::new(1);
-        product
-            .set_translation("name", "en", "Wireless Headphones")
-            .unwrap();
-        product
-            .set_translation("name", "ar", "سماعات لاسلكية")
-            .unwrap();
-        product
-            .set_translation("description", "en", "High-quality wireless headphones")
-            .unwrap();
-        product
-            .set_translation("description", "ar", "سماعات لاسلكية عالية الجودة")
-            .unwrap();
-        product.attach("thumbnail", "uploads/thumb.jpg").unwrap();
-        product
-            .attach_many("images", vec!["img1.jpg", "img2.jpg", "img3.jpg"])
-            .unwrap();
-
-        let mut opts_ar = HashMap::new();
-        opts_ar.insert("language".to_string(), "ar".to_string());
-
-        b.iter(|| {
-            black_box(product.to_translated_json(Some(opts_ar.clone())));
-            black_box(product.to_json_with_all_translations());
-        });
-    });
-
-    // Collection of products
-    for size in [10, 50, 100].iter() {
-        group.throughput(Throughput::Elements(*size as u64));
-
-        group.bench_with_input(
-            BenchmarkId::new("setup_collection", size),
-            size,
-            |b, &size| {
-                b.iter(|| {
-                    let products: Vec<BenchProduct> = (0..size)
-                        .map(|i| {
-                            let mut product = BenchProduct::new(i as i64);
-                            product
-                                .set_translation("name", "en", format!("Product {}", i))
-                                .unwrap();
-                            product
-                                .set_translation("name", "ar", format!("منتج {}", i))
-                                .unwrap();
-                            product
-                                .attach("thumbnail", &format!("thumb{}.jpg", i))
-                                .unwrap();
-                            product
-                        })
-                        .collect();
-                    black_box(products)
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
 
 // =============================================================================
 // BENCHMARK GROUPS

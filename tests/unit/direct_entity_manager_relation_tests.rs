@@ -128,16 +128,10 @@ async fn hasone_load_queries_with_attached_entity_manager_without_global_db()
     let (user, profile, _) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let relation = HasOne::<DirectEntityManagerRelationProfile> {
-        foreign_key: "user_id",
-        local_key: "id",
-        relation_name: "profile",
-        owner_table: USER_TABLE,
-        child_table: PROFILE_TABLE,
-        parent_pk: Some(json!(user.id)),
-        entity_manager: Some(entity_manager.clone()),
-        ..Default::default()
-    };
+    let relation = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
+        .with_metadata("profile", USER_TABLE, PROFILE_TABLE)
+        .with_parent_pk(json!(user.id))
+        .with_entity_manager(entity_manager.clone());
 
     let loaded = relation
         .load()
@@ -161,13 +155,9 @@ async fn belongsto_load_queries_with_attached_entity_manager_without_global_db()
     let (user, _, post) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let relation = BelongsTo::<DirectEntityManagerRelationUser> {
-        foreign_key: "user_id",
-        owner_key: "id",
-        fk_value: Some(json!(post.user_id)),
-        entity_manager: Some(entity_manager.clone()),
-        ..Default::default()
-    };
+    let relation = BelongsTo::<DirectEntityManagerRelationUser>::new("user_id", "id")
+        .with_fk_value(json!(post.user_id))
+        .with_entity_manager(entity_manager.clone());
 
     let loaded = relation
         .load()

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 
 #[test]
@@ -133,4 +135,23 @@ fn test_query_debug_display_labels_preview_as_non_executable() {
     assert!(rendered.contains("SQL Preview (non-executable):"));
     assert!(rendered.contains("-- DEBUG PREVIEW (not executable, values are approximate)"));
     assert!(!rendered.contains("\nSQL: -- DEBUG PREVIEW"));
+}
+
+#[test]
+fn test_query_logger_timing_flag_is_applied() {
+    QueryLogger::global().enable_timing(false).enable();
+    assert!(!super::logger::QueryLogger::timing_enabled());
+
+    QueryLogger::global().enable_timing(true).enable();
+    assert!(super::logger::QueryLogger::timing_enabled());
+
+    QueryLogger::disable();
+}
+
+#[test]
+fn test_slow_query_format_omits_fake_zero_ms_when_timing_is_hidden() {
+    let formatted = super::format::format_slow(&QueryLogEntry::new("SELECT 1"), 100);
+
+    assert!(formatted.contains("exceeded 100ms threshold"));
+    assert!(!formatted.contains("0ms > 100ms threshold"));
 }
