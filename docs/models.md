@@ -164,6 +164,27 @@ user.name = "Jane Doe".to_string();
 let user = user.update().await?;
 ```
 
+### Dirty Tracking
+
+Requires the `dirty-tracking` feature.
+
+Persisted models loaded or saved through TideORM keep a baseline of their last known persisted column values. Use `changed_fields()` to inspect which persisted fields differ from that baseline, and `original_value()` to inspect the previous value before saving.
+
+```rust
+let mut user = User::find(1).await?.unwrap();
+user.name = "Jane Doe".to_string();
+
+assert_eq!(user.changed_fields()?, vec!["name"]);
+assert_eq!(
+    user.original_value("name")?,
+    Some(serde_json::json!("John Doe"))
+);
+```
+
+`changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
+
+Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+
 ### Delete
 
 ```rust
@@ -274,7 +295,39 @@ post.force_delete().await?;
 
 ## Scopes (Reusable Query Fragments)
 
-Define reusable query patterns that can be applied to any query:
+For model-local, chainable scopes, declare a dedicated scope impl block with `#[tideorm::scopes]`:
+
+```rust
+#[tideorm::scopes]
+impl User {
+    pub fn active(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+        query.where_eq(User::columns.active, true)
+    }
+
+    pub fn verified(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+        query.where_not_null(User::columns.verified_at)
+    }
+
+    pub fn role(query: QueryBuilder<Self>, role: &str) -> QueryBuilder<Self> {
+        query.where_eq(User::columns.role, role)
+    }
+}
+
+let users = User::query()
+    .active()
+    .verified()
+    .role("admin")
+    .get()
+    .await?;
+```
+
+If you call a model's named scopes from a different module than the `#[tideorm::scopes]` block, bring the generated extension trait into scope first:
+
+```rust
+use crate::models::UserQueryScopes as _;
+```
+
+The lower-level `.scope(...)` helper still works when you want ad hoc reusable fragments that are not tied to one model type:
 
 ```rust
 // Define scope functions

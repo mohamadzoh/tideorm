@@ -30,6 +30,7 @@ attachments = []
 translations = []
 fulltext = []
 entity-manager = []
+dirty-tracking = []
 
 [dependencies]
 sea-orm = { version = "2.0.0-rc.37", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }

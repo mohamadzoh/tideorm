@@ -73,6 +73,8 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
     belongs_to.set_cached(Some(DirectRelationUser {
         id: 1,
         name: "Stale User".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
     }));
 
     let mut has_many =
@@ -125,6 +127,103 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
             .len(),
         1
     );
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn query_builder_with_batch_loads_direct_relations() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_users should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_profiles (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_profiles should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_posts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_posts should succeed");
+
+    db.__execute_with_params(
+        "INSERT INTO relation_test_users (id, name) VALUES (?, ?), (?, ?)",
+        vec![
+            Value::BigInt(Some(1)),
+            Value::String(Some("Eager User".to_string())),
+            Value::BigInt(Some(2)),
+            Value::String(Some("Filtered Out".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting users should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_profiles (id, user_id, name) VALUES (?, ?, ?), (?, ?, ?)",
+        vec![
+            Value::BigInt(Some(10)),
+            Value::BigInt(Some(1)),
+            Value::String(Some("Eager Profile".to_string())),
+            Value::BigInt(Some(20)),
+            Value::BigInt(Some(2)),
+            Value::String(Some("Other Profile".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting profiles should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_posts (id, user_id, title) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)",
+        vec![
+            Value::BigInt(Some(100)),
+            Value::BigInt(Some(1)),
+            Value::String(Some("First Post".to_string())),
+            Value::BigInt(Some(101)),
+            Value::BigInt(Some(1)),
+            Value::String(Some("Second Post".to_string())),
+            Value::BigInt(Some(200)),
+            Value::BigInt(Some(2)),
+            Value::String(Some("Filtered Post".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting posts should succeed");
+
+    let users = DirectRelationUser::query()
+        .where_eq("id", 1)
+        .with("profile")
+        .with("posts")
+        .get()
+        .await
+        .expect("query builder eager loading should succeed");
+
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].name, "Eager User");
+    assert_eq!(
+        users[0]
+            .profile
+            .get_cached()
+            .map(|profile| profile.name.as_str()),
+        Some("Eager Profile")
+    );
+
+    let posts = users[0]
+        .posts
+        .get_cached()
+        .expect("posts should be cached by eager loading");
+    assert_eq!(posts.len(), 2);
+    assert!(posts.iter().any(|post| post.title == "First Post"));
+    assert!(posts.iter().any(|post| post.title == "Second Post"));
+    assert!(!posts.iter().any(|post| post.title == "Filtered Post"));
 
     cleanup_direct_relation_test_db();
 }

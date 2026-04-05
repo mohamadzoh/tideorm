@@ -295,6 +295,24 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    /// Promote this query into the eager-loading builder and batch-load a relation.
+    ///
+    /// This preserves any filters, ordering, pagination, cache settings, and explicit
+    /// database handle already attached to the query.
+    #[must_use]
+    pub fn with(self, relation: &str) -> crate::relations::EagerQueryBuilder<M> {
+        crate::relations::EagerQueryBuilder::from_query(self).with(relation)
+    }
+
+    /// Promote this query into the eager-loading builder and batch-load multiple relations.
+    ///
+    /// This preserves any filters, ordering, pagination, cache settings, and explicit
+    /// database handle already attached to the query.
+    #[must_use]
+    pub fn with_many(self, relations: &[&str]) -> crate::relations::EagerQueryBuilder<M> {
+        crate::relations::EagerQueryBuilder::from_query(self).with_many(relations)
+    }
+
     pub(super) fn current_db(&self) -> Result<crate::database::Database> {
         if let Some(database) = &self.database {
             Ok(database.clone())

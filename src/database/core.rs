@@ -114,12 +114,16 @@ impl Database {
     pub fn set_global(db: Self) -> Result<&'static Self> {
         let inner = db.current_inner()?;
         global_connection_slot().store(Some(inner));
+        #[cfg(feature = "dirty-tracking")]
+        crate::model::__clear_dirty_snapshots();
         Ok(global_db_handle())
     }
 
     /// Clear the global database connection.
     pub fn reset_global() {
         global_connection_slot().store(None);
+        #[cfg(feature = "dirty-tracking")]
+        crate::model::__clear_dirty_snapshots();
     }
 
     /// Get a reference to the global database connection

@@ -88,6 +88,11 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 use ::tideorm::orm::{EntityTrait, QueryFilter};
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
+                let dirty_tracking_id = if ::tideorm::model::__dirty_tracking_enabled() {
+                    Some(id.clone())
+                } else {
+                    None
+                };
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
@@ -111,6 +116,9 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .map_err(|err| err.with_context(error_context))?;
                 if result.rows_affected > 0 {
                     ::tideorm::QueryCache::global().invalidate_model(#table_name);
+                    if let Some(dirty_tracking_id) = dirty_tracking_id.as_ref() {
+                        let _ = ::tideorm::model::__forget_dirty_snapshot_by_pk::<Self>(dirty_tracking_id);
+                    }
                 }
                 Ok(result.rows_affected)
             }
@@ -175,6 +183,9 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .map_err(|err| err.with_context(error_context))?;
                 if result.rows_affected > 0 {
                     ::tideorm::QueryCache::global().invalidate_model(#table_name);
+                    if ::tideorm::model::__dirty_tracking_enabled() {
+                        let _ = ::tideorm::model::__forget_dirty_snapshot(&model);
+                    }
                 }
                 (&model).run_after_delete()?;
                 Ok(result.rows_affected)

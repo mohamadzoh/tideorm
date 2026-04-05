@@ -292,6 +292,7 @@ pub use tideorm_macros::Model;
 
 // Re-export the attribute macro
 pub use tideorm_macros::model;
+pub use tideorm_macros::scopes;
 
 // Re-export async_trait for macro use
 pub use async_trait;

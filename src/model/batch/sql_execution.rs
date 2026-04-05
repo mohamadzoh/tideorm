@@ -245,6 +245,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let rows_affected = crate::Database::execute_with_params(&sql, params).await?;
         if rows_affected > 0 {
             crate::QueryCache::global().invalidate_model(M::table_name());
+            #[cfg(feature = "dirty-tracking")]
+            crate::model::__invalidate_dirty_snapshots::<M>();
         }
         Ok(rows_affected)
     }
@@ -282,6 +284,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let models = crate::Database::raw_with_params::<M>(&sql, params).await?;
         if !models.is_empty() {
             crate::QueryCache::global().invalidate_model(M::table_name());
+            #[cfg(feature = "dirty-tracking")]
+            {
+            crate::model::__invalidate_dirty_snapshots::<M>();
+            let _ = crate::model::__remember_dirty_snapshots(&models);
+            }
         }
         Ok(models)
     }

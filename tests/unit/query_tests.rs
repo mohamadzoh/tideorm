@@ -18,6 +18,30 @@ struct QueryTestUser {
     name: String,
 }
 
+#[tideorm::model(table = "scoped_query_test_users")]
+struct ScopedQueryTestUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    active: bool,
+    verified_at: Option<String>,
+    role: String,
+}
+
+#[tideorm::scopes]
+impl ScopedQueryTestUser {
+    pub fn active(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+        query.where_eq(Self::columns.active, true)
+    }
+
+    pub fn verified(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+        query.where_not_null(Self::columns.verified_at)
+    }
+
+    pub fn role(query: QueryBuilder<Self>, role: &str) -> QueryBuilder<Self> {
+        query.where_eq(Self::columns.role, role)
+    }
+}
+
 #[path = "query_tests/db_sql_and_safety_tests.rs"]
 mod db_sql_and_safety_tests;
 
@@ -29,3 +53,6 @@ mod window_and_cte_tests;
 
 #[path = "query_tests/query_builder_sql_tests.rs"]
 mod query_builder_sql_tests;
+
+#[path = "query_tests/scope_methods_tests.rs"]
+mod scope_methods_tests;

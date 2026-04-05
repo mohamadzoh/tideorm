@@ -294,6 +294,25 @@ User::query()
 User::query().take(10).skip(20)  // Same as limit(10).offset(20)
 ```
 
+### Chunked Processing
+
+```rust
+async fn process(_user: User) -> tideorm::Result<()> {
+    Ok(())
+}
+
+User::query()
+    .chunk(500, |batch| async move {
+        for user in batch {
+            process(user).await?;
+        }
+        Ok(())
+    })
+    .await?;
+```
+
+`chunk()` walks the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal.
+
 ### Execution Methods
 
 ```rust

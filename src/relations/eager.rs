@@ -271,6 +271,14 @@ impl<M: Model> EagerQueryBuilder<M> {
         }
     }
 
+    #[must_use]
+    pub(crate) fn from_query(query: QueryBuilder<M>) -> Self {
+        Self {
+            query,
+            relation_tree: RelationTree::new(),
+        }
+    }
+
     pub fn with(mut self, relation: &str) -> Self {
         let path = RelationPath::parse(relation);
         self.relation_tree.add_path(&path);

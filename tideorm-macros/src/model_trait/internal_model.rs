@@ -55,11 +55,15 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             fn from_entity_model(model: #internal_entity_mod::Model) -> Self {
-                Self {
+                let model = Self {
                     #(#field_names: model.#field_names),*,
                     #(#relation_field_defaults),*
                 }
-                .with_relations()
+                .with_relations();
+                if ::tideorm::model::__dirty_tracking_enabled() {
+                    let _ = ::tideorm::model::__remember_dirty_snapshot(&model);
+                }
+                model
             }
 
             fn to_entity_model(&self) -> <Self::Entity as ::tideorm::orm::EntityTrait>::Model {

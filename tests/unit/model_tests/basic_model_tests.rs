@@ -201,3 +201,59 @@ fn test_is_new_treats_defaulted_composite_primary_key_component_as_unsaved() {
 
     assert!(model.is_new());
 }
+
+#[cfg(feature = "dirty-tracking")]
+#[test]
+fn test_original_value_accepts_field_and_column_names() {
+    crate::model::__clear_dirty_snapshots();
+
+    let original = CustomPrimaryKeyColumnModel {
+        id: 7,
+        name: "Alice".to_string(),
+    };
+    crate::model::__remember_dirty_snapshot(&original)
+        .expect("dirty snapshot registration should succeed");
+
+    let changed = CustomPrimaryKeyColumnModel {
+        id: 7,
+        name: "Bob".to_string(),
+    };
+
+    assert_eq!(
+        changed
+            .original_value("name")
+            .expect("field lookup should succeed"),
+        Some(serde_json::json!("Alice"))
+    );
+    assert_eq!(
+        changed
+            .original_value("user_id")
+            .expect("column lookup should succeed"),
+        Some(serde_json::json!(7))
+    );
+
+    crate::model::__clear_dirty_snapshots();
+}
+
+#[cfg(feature = "dirty-tracking")]
+#[test]
+fn test_original_value_rejects_unknown_fields() {
+    crate::model::__clear_dirty_snapshots();
+
+    let model = AutoIncrementModel {
+        id: 1,
+        name: "Alice".to_string(),
+    };
+    crate::model::__remember_dirty_snapshot(&model)
+        .expect("dirty snapshot registration should succeed");
+
+    let err = model
+        .original_value("missing")
+        .expect_err("unknown field lookup should fail");
+    assert!(
+        err.to_string()
+            .contains("unknown field or column 'missing' for model 'model_test_users'")
+    );
+
+    crate::model::__clear_dirty_snapshots();
+}

@@ -168,6 +168,7 @@ pub use tideorm_macros::Model;
 
 // Attribute macro
 pub use tideorm_macros::model;
+pub use tideorm_macros::scopes;
 
 // Common external types users will need
 pub use serde::{Deserialize, Serialize};

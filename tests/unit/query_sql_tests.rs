@@ -7,7 +7,7 @@ use crate::query::OrGroup;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::{Database, QueryCache, TideConfig};
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::time::Duration;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -77,6 +77,70 @@ async fn setup_query_mutation_cache_test_db() -> Database {
     .expect("creating soft delete mutation guard schema should succeed");
 
     db
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn chunk_processes_rows_without_skipping_when_callback_changes_query_scope() {
+    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    for index in 1..=7 {
+        MutationGuardUser {
+            id: 0,
+            name: format!("user-{index}"),
+        }
+        .save()
+        .await
+        .expect("seed save should succeed");
+    }
+
+    let seen_batches = Arc::new(Mutex::new(Vec::<Vec<i64>>::new()));
+
+    MutationGuardUser::query()
+        .where_like("name", "user-%")
+        .cache_with_key("chunked-mutation-guard-users", Duration::from_secs(60))
+        .chunk(2, {
+            let seen_batches = Arc::clone(&seen_batches);
+            move |batch| {
+                let seen_batches = Arc::clone(&seen_batches);
+                async move {
+                    let ids: Vec<i64> = batch.iter().map(|user| user.id).collect();
+                    seen_batches.lock().await.push(ids);
+
+                    for mut user in batch {
+                        user.name = format!("done-{}", user.id);
+                        user.update().await?;
+                    }
+
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .expect("chunked iteration should succeed");
+
+    assert_eq!(
+        *seen_batches.lock().await,
+        vec![vec![1, 2], vec![3, 4], vec![5, 6], vec![7]]
+    );
+
+    let remaining = MutationGuardUser::query()
+        .where_like("name", "user-%")
+        .count()
+        .await
+        .expect("post-chunk count should succeed");
+    assert_eq!(remaining, 0);
+
+    let updated = MutationGuardUser::query()
+        .order_by("id", crate::query::Order::Asc)
+        .get()
+        .await
+        .expect("final read should succeed");
+    assert_eq!(updated.len(), 7);
+    assert!(updated.iter().all(|user| user.name == format!("done-{}", user.id)));
+
+    cleanup_query_mutation_cache_test_state();
 }
 
 #[test]

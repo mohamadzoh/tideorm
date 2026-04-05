@@ -2,7 +2,7 @@
 
 ## Model Relations
 
-Relations are declared as struct fields and loaded on demand.
+Relations are declared as struct fields. You can load them on demand from an individual model, or batch-load them eagerly from a query to avoid N+1 lookups.
 
 ### Defining Relations
 
@@ -103,6 +103,34 @@ let has_posts = user.posts.exists().await?;      // bool
 // Count related records
 let post_count = user.posts.count().await?;      // u64
 ```
+
+### Eager Loading (N+1 Prevention)
+
+When you already know which relations you need, promote the query builder into an eager-loading query with `with()` or `with_many()`. TideORM batches each requested relation path with set-based loader queries, so you avoid issuing one relation query per parent row.
+
+```rust
+// Preserve existing query filters, ordering, pagination, and database handle.
+let users = User::query()
+    .where_eq("active", true)
+    .with("profile")
+    .with("posts")
+    .get()
+    .await?;
+
+for user in users {
+    let profile = user.profile.get_cached();
+    let posts = user.posts.get_cached().unwrap_or_default();
+    println!("{} has {} cached posts", user.name, posts.len());
+}
+
+// You can also start directly from the eager-loading builder.
+let users = User::eager()
+    .with_many(&["profile", "posts", "posts.comments"])
+    .get()
+    .await?;
+```
+
+Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
 
 ### Loading with Constraints
 

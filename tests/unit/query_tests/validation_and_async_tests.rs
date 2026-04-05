@@ -49,6 +49,47 @@ async fn test_having_rejects_subquery_like_sql_before_db_lookup() {
 }
 
 #[tokio::test]
+async fn test_chunk_rejects_zero_batch_size_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .chunk(0, |_| async { Ok::<(), crate::Error>(()) })
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("chunk() requires chunk_size to be greater than 0")
+    );
+}
+
+#[tokio::test]
+async fn test_chunk_rejects_offset_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .offset(1)
+        .chunk(10, |_| async { Ok::<(), crate::Error>(()) })
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("chunk() does not support offset()")
+    );
+}
+
+#[tokio::test]
+async fn test_chunk_rejects_non_primary_key_order_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .order_by("name", Order::Asc)
+        .chunk(10, |_| async { Ok::<(), crate::Error>(()) })
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("chunk() only supports explicit ordering by the single primary key 'id'")
+    );
+}
+
+#[tokio::test]
 async fn test_select_raw_rejects_unsafe_sql_before_db_lookup() {
     let err = QueryTestUser::query()
         .select_raw("id; DROP TABLE users")

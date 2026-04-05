@@ -11,6 +11,10 @@ A Rust ORM with field-declared relations and a fluent query builder.
 
 - **Clean Model Definitions** - Simple `#[tideorm::model(table = "...")]` attribute macro
 - **Field-Declared Relations** - `HasOne`, `HasMany`, `BelongsTo`, and `HasManyThrough` relations are defined directly on the model
+- **Eager Loading** - Batch relation loading with `query().with(...)` and nested eager paths to avoid N+1 lookups
+- **Chunked Reads** - Process large result sets with `query().chunk(...)` instead of loading every row at once
+- **Named Query Scopes** - Declare model-local `#[tideorm::scopes]` methods for chains like `User::query().active().verified()`
+- **Optional Dirty Tracking** - Enable `dirty-tracking` only when you want `changed_fields()` and `original_value()` model inspection helpers
 - **Async-First** - Built for modern async/await workflows
 - **Auto Schema Sync** - Automatic table management during development
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
@@ -89,9 +93,17 @@ async fn main() -> tideorm::Result<()> {
         .get()
         .await?;
 
-    // Load relations
+    // Load relations lazily
     let posts = user.posts.load().await?;
     let profile = user.profile.load().await?;
+
+    // Or batch-load them eagerly from the query itself
+    let users = User::query()
+        .where_eq("active", true)
+        .with("profile")
+        .with("posts")
+        .get()
+        .await?;
 
     // Update
     let mut user = User::find(1).await?.unwrap();
@@ -139,6 +151,9 @@ tideorm = { version = "0.9.12", features = ["postgres", "fulltext"] }
 
 # Enable the entity manager explicitly
 tideorm = { version = "0.9.12", features = ["postgres", "entity-manager"] }
+
+# Enable model dirty tracking explicitly
+tideorm = { version = "0.9.12", features = ["postgres", "dirty-tracking"] }
 ```
 
 ### Feature Flags
@@ -154,6 +169,7 @@ tideorm = { version = "0.9.12", features = ["postgres", "entity-manager"] }
 | `translations` | Compile-time-only feature gate for the translations API and translation-specific benchmarks/tests; adds no extra dependencies |
 | `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
 | `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), plus `save_with_entity_manager`, `find_in_entity_manager`, entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
+| `dirty-tracking` | Enables the model-level `changed_fields()` and `original_value()` helpers and their persisted-state tracking hooks |
 
 Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
@@ -162,6 +178,8 @@ Translations are opt-in. Enable the `translations` feature when you want to use 
 Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
 The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. The compatibility entry points `find_in_entity_manager`, `load_in_entity_manager`, and `save_with_entity_manager()` remain available too. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
+
+Dirty tracking is opt-in. Enable the `dirty-tracking` feature when you want model instances to expose `changed_fields()` and `original_value()` based on the latest persisted snapshot TideORM loaded or saved.
 
 ## Documentation
 

@@ -111,6 +111,12 @@ struct DirectRelationUser {
     #[tideorm(primary_key)]
     id: i64,
     name: String,
+
+    #[tideorm(has_one = "DirectRelationProfile", foreign_key = "user_id")]
+    profile: HasOne<DirectRelationProfile>,
+
+    #[tideorm(has_many = "DirectRelationPost", foreign_key = "user_id")]
+    posts: HasMany<DirectRelationPost>,
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

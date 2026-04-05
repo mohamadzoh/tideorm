@@ -7,6 +7,35 @@ use hash_helpers::{hash_having_clause, hash_or_group, hash_where_condition, hash
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
+    fn chunk_primary_key_column(&self) -> Result<&'static str> {
+        match M::primary_key_names() {
+            [primary_key] => Ok(*primary_key),
+            _ => Err(Error::invalid_query(format!(
+                "chunk() only supports models with a single-column primary key; model '{}' uses {} key columns",
+                M::table_name(),
+                M::primary_key_names().len()
+            ))),
+        }
+    }
+
+    fn is_chunk_primary_key_order(column: &str, primary_key: &str) -> bool {
+        column == primary_key || column == format!("{}.{}", M::table_name(), primary_key)
+    }
+
+    fn chunk_order(&self, primary_key: &str) -> Result<crate::query::Order> {
+        match self.order_by.as_slice() {
+            [] => Ok(crate::query::Order::Asc),
+            [(column, direction)] if Self::is_chunk_primary_key_order(column, primary_key) => {
+                Ok(*direction)
+            }
+            _ => Err(Error::invalid_query(format!(
+                "chunk() only supports explicit ordering by the single primary key '{}' for model '{}'",
+                primary_key,
+                M::table_name()
+            ))),
+        }
+    }
+
     #[must_use]
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {
         self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
@@ -118,6 +147,8 @@ impl<M: Model> QueryBuilder<M> {
         let cache_key = if self.cache_options.is_some() {
             let key = self.generate_cache_key();
             if let Some(cached) = crate::cache::QueryCache::global().get::<Vec<M>>(&key) {
+                #[cfg(feature = "dirty-tracking")]
+                let _ = crate::model::__remember_dirty_snapshots(&cached);
                 return Ok(cached);
             }
             Some(key)
@@ -156,6 +187,100 @@ impl<M: Model> QueryBuilder<M> {
         self.first()
             .await?
             .ok_or_else(|| Error::not_found(format!("No {} found matching query", M::table_name())))
+    }
+
+    /// Process matching models in batches without loading the full result set into memory.
+    ///
+    /// The traversal uses the model's single-column primary key as a cursor, so callbacks may
+    /// safely update or delete already-processed rows without causing later batches to skip.
+    /// Existing filters, caching, and any pre-applied `limit()` remain in effect. When you need
+    /// descending traversal, order explicitly by the primary key before calling `chunk()`.
+    pub async fn chunk<F, Fut>(self, chunk_size: u64, mut callback: F) -> Result<()>
+    where
+        F: FnMut(Vec<M>) -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        self.ensure_query_is_valid()?;
+
+        if chunk_size == 0 {
+            return Err(Error::invalid_query(
+                "chunk() requires chunk_size to be greater than 0",
+            ));
+        }
+
+        if self.offset_value.unwrap_or(0) > 0 {
+            return Err(Error::invalid_query(
+                "chunk() does not support offset(); use page()/get() for fixed windows or chunk over primary-key order",
+            ));
+        }
+
+        let primary_key = self.chunk_primary_key_column()?;
+        let order = self.chunk_order(primary_key)?;
+        let mut remaining = self.limit_value;
+        let mut base_query = self;
+        let explicit_cache_key = base_query.cache_key.clone();
+        base_query.limit_value = None;
+        base_query.offset_value = None;
+        if base_query.order_by.is_empty() {
+            base_query = base_query.order_by(
+                format!("{}.{}", M::table_name(), primary_key),
+                order,
+            );
+        }
+        let cursor_column = format!("{}.{}", M::table_name(), primary_key);
+        let mut last_seen_primary_key: Option<serde_json::Value> = None;
+
+        loop {
+            let batch_limit = remaining.map_or(chunk_size, |limit| std::cmp::min(limit, chunk_size));
+            if batch_limit == 0 {
+                break;
+            }
+
+            let mut batch_query = base_query.clone().limit(batch_limit);
+            if let Some(cursor) = &last_seen_primary_key {
+                batch_query = match order {
+                    crate::query::Order::Asc => batch_query.where_gt(&cursor_column, cursor.clone()),
+                    crate::query::Order::Desc => batch_query.where_lt(&cursor_column, cursor.clone()),
+                };
+            }
+            if let Some(cache_key) = &explicit_cache_key {
+                let cursor_marker = match &last_seen_primary_key {
+                    Some(cursor) => serde_json::to_string(cursor).map_err(Error::from)?,
+                    None => "null".to_string(),
+                };
+                batch_query.cache_key = Some(format!(
+                    "{}::chunk(cursor={},limit={})",
+                    cache_key, cursor_marker, batch_limit
+                ));
+            }
+
+            let batch = batch_query.get().await?;
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_len = batch.len() as u64;
+            let last_primary_key = batch
+                .last()
+                .map(Model::primary_key)
+                .ok_or_else(|| Error::internal("chunk() fetched an empty batch unexpectedly"))?;
+            let next_cursor = serde_json::to_value(last_primary_key).map_err(Error::from)?;
+            callback(batch).await?;
+            last_seen_primary_key = Some(next_cursor);
+
+            if let Some(limit) = &mut remaining {
+                *limit = limit.saturating_sub(batch_len);
+                if *limit == 0 {
+                    break;
+                }
+            }
+
+            if batch_len < batch_limit {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn count(self) -> Result<u64> {
@@ -217,9 +342,11 @@ impl<M: Model> QueryBuilder<M> {
         Ok(!rows.is_empty())
     }
 
-    fn invalidate_model_cache(rows_affected: u64) {
+    fn invalidate_model_state(rows_affected: u64) {
         if rows_affected > 0 {
             crate::QueryCache::global().invalidate_model(M::table_name());
+            #[cfg(feature = "dirty-tracking")]
+            crate::model::__invalidate_dirty_snapshots::<M>();
         }
     }
 
@@ -244,7 +371,7 @@ impl<M: Model> QueryBuilder<M> {
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
-        Self::invalidate_model_cache(rows_affected);
+        Self::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
@@ -268,7 +395,7 @@ impl<M: Model> QueryBuilder<M> {
             .__execute_with_params(&sql, Vec::new())
             .await
             .map_err(|err| err.with_context(error_context))?;
-        Self::invalidate_model_cache(rows_affected);
+        Self::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
@@ -305,7 +432,7 @@ impl<M: Model> QueryBuilder<M> {
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
-        Self::invalidate_model_cache(rows_affected);
+        Self::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
@@ -344,7 +471,7 @@ impl<M: Model> QueryBuilder<M> {
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
-        Self::invalidate_model_cache(rows_affected);
+        Self::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
@@ -369,7 +496,7 @@ impl<M: Model> QueryBuilder<M> {
             .__execute_with_params(&sql, params)
             .await
             .map_err(|err| err.with_context(error_context))?;
-        Self::invalidate_model_cache(rows_affected);
+        Self::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 

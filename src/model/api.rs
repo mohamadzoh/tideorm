@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use crate::error::{Error, Result};
 use crate::query::QueryBuilder;
 
+#[cfg(feature = "dirty-tracking")]
+use super::dirty_tracking;
 use super::{BatchUpdateBuilder, OnConflictBuilder, crud, serialization};
 
 /// Core trait for TideORM models
@@ -231,6 +233,28 @@ pub trait Model:
     /// `save()` uses this to decide between `INSERT` and `UPDATE`.
     fn is_new(&self) -> bool {
         crud::is_new(self)
+    }
+
+    /// Return the persisted field names whose values differ from the last snapshot
+    /// TideORM loaded or saved for this model.
+    #[cfg(feature = "dirty-tracking")]
+    fn changed_fields(&self) -> Result<Vec<&'static str>>
+    where
+        Self: Sized,
+    {
+        dirty_tracking::changed_fields(self)
+    }
+
+    /// Return one persisted field's original value from the last snapshot TideORM
+    /// loaded or saved for this model.
+    ///
+    /// Accepts either the Rust field name or the database column name.
+    #[cfg(feature = "dirty-tracking")]
+    fn original_value(&self, field: &str) -> Result<Option<serde_json::Value>>
+    where
+        Self: Sized,
+    {
+        dirty_tracking::original_value(self, field)
     }
 
     fn to_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value

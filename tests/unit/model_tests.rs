@@ -238,6 +238,10 @@ mod basic_model_tests;
 #[path = "model_tests/cache_tests.rs"]
 mod cache_tests;
 
+#[cfg(feature = "dirty-tracking")]
+#[path = "model_tests/dirty_tracking_tests.rs"]
+mod dirty_tracking_tests;
+
 #[path = "model_tests/translation_tests.rs"]
 mod translation_tests;
 
