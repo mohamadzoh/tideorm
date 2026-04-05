@@ -1,73 +1,18 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-use super::GLOBAL_QUERY_CACHE;
-
+mod config;
+mod control;
 mod store;
 
+pub use config::{CacheConfig, CacheStrategy};
 pub use store::CacheStats;
 use store::{CacheEntry, CacheStore};
-
-// =============================================================================
-// CACHE CONFIGURATION
-// =============================================================================
-
-/// Configuration for query result caching
-#[derive(Debug, Clone)]
-pub struct CacheConfig {
-    /// Whether caching is enabled
-    pub enabled: bool,
-    /// Maximum number of entries in the cache
-    pub max_entries: usize,
-    /// Default TTL for cache entries
-    pub default_ttl: Duration,
-    /// Cache eviction strategy
-    pub strategy: CacheStrategy,
-    /// Whether to cache empty results
-    pub cache_empty_results: bool,
-    /// Prefix applied to every cache key to avoid collisions across namespaces
-    pub key_prefix: Option<String>,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            max_entries: 1000,
-            default_ttl: Duration::from_secs(60),
-            strategy: CacheStrategy::LRU,
-            cache_empty_results: true,
-            key_prefix: None,
-        }
-    }
-}
-
-/// Cache eviction strategy
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheStrategy {
-    /// Least Recently Used - evict oldest accessed entries
-    LRU,
-    /// First In First Out - evict oldest added entries
-    FIFO,
-    /// Time To Live - evict based on expiration time
-    TTL,
-}
-
-impl std::fmt::Display for CacheStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CacheStrategy::LRU => write!(f, "LRU"),
-            CacheStrategy::FIFO => write!(f, "FIFO"),
-            CacheStrategy::TTL => write!(f, "TTL"),
-        }
-    }
-}
 
 // =============================================================================
 // QUERY CACHE
@@ -133,106 +78,6 @@ impl QueryCache {
             evictions: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
         }
-    }
-
-    fn snapshot_stats(&self) -> CacheStats {
-        CacheStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
-            entries: self.entries.load(Ordering::Relaxed),
-            size_bytes: self.size_bytes.load(Ordering::Relaxed),
-            evictions: self.evictions.load(Ordering::Relaxed),
-            invalidations: self.invalidations.load(Ordering::Relaxed),
-        }
-    }
-
-    fn record_entries_len(&self, entries: usize) {
-        self.entries.store(entries, Ordering::Relaxed);
-    }
-
-    fn add_size_bytes(&self, bytes: usize) {
-        self.size_bytes.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    fn subtract_size_bytes(&self, bytes: usize) {
-        self.size_bytes.fetch_sub(bytes, Ordering::Relaxed);
-    }
-
-    fn overwrite_size_bytes(&self, bytes: usize) {
-        self.size_bytes.store(bytes, Ordering::Relaxed);
-    }
-
-    fn next_order(&self) -> u64 {
-        self.order_counter.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Get or initialize the global query cache
-    pub fn global() -> &'static QueryCache {
-        GLOBAL_QUERY_CACHE.get_or_init(QueryCache::new)
-    }
-
-    /// Initialize the global cache (call at startup)
-    pub fn init_global(config: CacheConfig) -> &'static QueryCache {
-        let _ = GLOBAL_QUERY_CACHE.set(QueryCache::with_config(config));
-        QueryCache::global()
-    }
-
-    // =========================================================================
-    // CONFIGURATION
-    // =========================================================================
-
-    /// Enable the cache
-    pub fn enable(&self) -> &Self {
-        self.config.write().enabled = true;
-        self.enabled.store(true, Ordering::Release);
-        self
-    }
-
-    /// Disable the cache
-    pub fn disable(&self) -> &Self {
-        self.config.write().enabled = false;
-        self.enabled.store(false, Ordering::Release);
-        self
-    }
-
-    /// Check if cache is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
-    }
-
-    /// Set the maximum number of cache entries
-    pub fn set_max_entries(&self, max: usize) -> &Self {
-        self.config.write().max_entries = max;
-        self
-    }
-
-    /// Set the default TTL for cache entries
-    pub fn set_default_ttl(&self, ttl: Duration) -> &Self {
-        self.config.write().default_ttl = ttl;
-        self
-    }
-
-    /// Set the cache eviction strategy
-    pub fn set_strategy(&self, strategy: CacheStrategy) -> &Self {
-        self.config.write().strategy = strategy;
-        self
-    }
-
-    /// Set the key prefix
-    pub fn set_key_prefix(&self, prefix: &str) -> &Self {
-        self.config.write().key_prefix = Some(prefix.to_string());
-        self
-    }
-
-    /// Set whether to cache empty results
-    pub fn set_cache_empty_results(&self, cache_empty: bool) -> &Self {
-        self.config.write().cache_empty_results = cache_empty;
-        self
-    }
-
-    /// Get current configuration
-    pub fn config(&self) -> Option<CacheConfig> {
-        Some(self.config.read().clone())
     }
 
     // =========================================================================

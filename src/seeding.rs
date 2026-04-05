@@ -6,8 +6,6 @@
 //! If a seed does not run when expected, check its stored name, dependency list,
 //! and whether it was already recorded as executed.
 
-use std::fmt;
-
 use crate::config::DatabaseType;
 use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
@@ -16,8 +14,12 @@ use crate::internal::Value;
 use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::tide_info;
 
+mod results;
+mod store;
+
 // Re-export async_trait for users
 pub use async_trait::async_trait;
+pub use results::{SeedInfo, SeedResult, SeedStatus};
 
 // ============================================================================
 // SEED TRAIT
@@ -389,234 +391,12 @@ impl Seeder {
             .map(|i| seeds[i].as_ref())
             .collect())
     }
-
-    // =========================================================================
-    // SEEDS TABLE MANAGEMENT
-    // =========================================================================
-
-    /// Ensure the seeds table exists
-    async fn ensure_seeds_table(&self) -> Result<()> {
-        let database = require_db()?;
-        let db_type = detect_database_type(&database);
-
-        let sql = match db_type {
-            DatabaseType::Postgres => {
-                r#"
-                CREATE TABLE IF NOT EXISTS "_seeds" (
-                    "id" SERIAL PRIMARY KEY,
-                    "name" VARCHAR(255) NOT NULL UNIQUE,
-                    "executed_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                "#
-            }
-            DatabaseType::MySQL | DatabaseType::MariaDB => {
-                r#"
-                CREATE TABLE IF NOT EXISTS `_seeds` (
-                    `id` INT AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(255) NOT NULL UNIQUE,
-                    `executed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                "#
-            }
-            DatabaseType::SQLite => {
-                r#"
-                CREATE TABLE IF NOT EXISTS "_seeds" (
-                    "id" INTEGER PRIMARY KEY AUTOINCREMENT,
-                    "name" TEXT NOT NULL UNIQUE,
-                    "executed_at" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                )
-                "#
-            }
-        };
-
-        database
-            .__internal_connection()?
-            .execute_unprepared(sql)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// Get list of executed seed names
-    async fn get_executed_seeds(&self) -> Result<Vec<String>> {
-        let database = require_db()?;
-
-        use crate::internal::build_statement;
-
-        let backend = crate::internal::Backend::from(
-            database.__internal_connection()?.get_database_backend(),
-        );
-        let q = |id: &str| quote_ident_for_backend(backend, id);
-        let sql = format!(
-            "SELECT {} FROM {} ORDER BY {} ASC",
-            q("name"),
-            q("_seeds"),
-            q("executed_at")
-        );
-        let stmt = build_statement(backend, sql);
-
-        let results = database
-            .__internal_connection()?
-            .query_all_raw(stmt)
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
-
-        let mut names = Vec::new();
-        for row in results {
-            let name: String = row
-                .try_get("", "name")
-                .map_err(|e| Error::query(e.to_string()))?;
-            names.push(name);
-        }
-
-        Ok(names)
-    }
-
-    /// Record a seed as executed
-    async fn record_seed(&self, name: &str) -> Result<()> {
-        let database = require_db()?;
-        let backend = crate::internal::Backend::from(
-            database.__internal_connection()?.get_database_backend(),
-        );
-        let q = |id: &str| quote_ident_for_backend(backend, id);
-
-        let sql = format!("INSERT INTO {} ({}) VALUES (?)", q("_seeds"), q("name"));
-
-        database
-            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
-            .await?;
-
-        Ok(())
-    }
-
-    /// Remove a seed record
-    async fn remove_seed_record(&self, name: &str) -> Result<()> {
-        let database = require_db()?;
-        let backend = crate::internal::Backend::from(
-            database.__internal_connection()?.get_database_backend(),
-        );
-        let q = |id: &str| quote_ident_for_backend(backend, id);
-
-        let sql = format!("DELETE FROM {} WHERE {} = ?", q("_seeds"), q("name"));
-
-        database
-            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
-            .await?;
-
-        Ok(())
-    }
 }
 
 impl Default for Seeder {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// ============================================================================
-// RESULT TYPES
-// ============================================================================
-
-/// Result of seed operations
-#[derive(Debug, Clone)]
-pub struct SeedResult {
-    /// Successfully executed seeds
-    pub executed: Vec<SeedInfo>,
-    /// Skipped (already executed) seeds
-    pub skipped: Vec<SeedInfo>,
-    /// Rolled back seeds
-    pub rolled_back: Vec<SeedInfo>,
-}
-
-impl SeedResult {
-    fn new() -> Self {
-        Self {
-            executed: Vec::new(),
-            skipped: Vec::new(),
-            rolled_back: Vec::new(),
-        }
-    }
-
-    /// Check if any seeds were executed
-    pub fn has_executed(&self) -> bool {
-        !self.executed.is_empty()
-    }
-
-    /// Check if any seeds were rolled back
-    pub fn has_rolled_back(&self) -> bool {
-        !self.rolled_back.is_empty()
-    }
-
-    /// Total number of seeds processed
-    pub fn total(&self) -> usize {
-        self.executed.len() + self.skipped.len() + self.rolled_back.len()
-    }
-}
-
-impl fmt::Display for SeedResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.executed.is_empty() {
-            writeln!(f, "Executed seeds:")?;
-            for s in &self.executed {
-                writeln!(f, "  ✓ {}", s.name)?;
-            }
-        }
-
-        if !self.skipped.is_empty() {
-            writeln!(f, "Skipped seeds (already executed):")?;
-            for s in &self.skipped {
-                writeln!(f, "  - {}", s.name)?;
-            }
-        }
-
-        if !self.rolled_back.is_empty() {
-            writeln!(f, "Rolled back seeds:")?;
-            for s in &self.rolled_back {
-                writeln!(f, "  ↩ {}", s.name)?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Information about a single seed
-#[derive(Debug, Clone)]
-pub struct SeedInfo {
-    /// Seed name
-    pub name: String,
-}
-
-/// Status of a single seed
-#[derive(Debug, Clone)]
-pub struct SeedStatus {
-    /// Seed name
-    pub name: String,
-    /// Whether the seed has been executed
-    pub executed: bool,
-    /// Seed priority
-    pub priority: u32,
-}
-
-impl fmt::Display for SeedStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = if self.executed { "✓" } else { "○" };
-        write!(
-            f,
-            "[{}] {} (priority: {})",
-            status, self.name, self.priority
-        )
-    }
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/// Detect database type from connection
-fn detect_database_type(database: &Database) -> DatabaseType {
-    database.backend()
 }
 
 /// Log seed start

@@ -7,6 +7,9 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
+#[cfg(feature = "entity-manager")]
+mod entity_manager_support;
+
 use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value, quote_ident};
 use super::require_scalar_relation_key;
 
@@ -82,65 +85,6 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    pub fn with_metadata(
-        mut self,
-        relation_name: &'static str,
-        owner_table: &'static str,
-        related_table: &'static str,
-    ) -> Self {
-        self.relation_name = relation_name;
-        self.owner_table = owner_table;
-        self.related_table = related_table;
-        self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    pub fn with_owner_key(mut self, owner_key: String) -> Self {
-        self.owner_key = Some(owner_key);
-        self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.query_db = Some(database.clone());
-    }
-
-    #[cfg(feature = "entity-manager")]
-    fn scoped_database(&self) -> Result<crate::database::Database> {
-        if matches!(
-            crate::database::__current_connection(),
-            Ok(crate::database::ConnectionRef::Transaction(_))
-        ) {
-            return crate::database::__current_db();
-        }
-
-        if let Some(entity_manager) = &self.entity_manager {
-            return Ok(entity_manager.database().clone());
-        }
-
-        if let Some(db) = &self.query_db {
-            return Ok(db.clone());
-        }
-
-        crate::database::require_db()
-    }
-
-    #[cfg(feature = "entity-manager")]
-    fn scoped_database_for_entity_manager(
-        entity_manager: &Arc<crate::entity_manager::EntityManager>,
-    ) -> Result<crate::database::Database> {
-        if matches!(
-            crate::database::__current_connection(),
-            Ok(crate::database::ConnectionRef::Transaction(_))
-        ) {
-            return crate::database::__current_db();
-        }
-
-        Ok(entity_manager.database().clone())
     }
 
     #[doc(hidden)]
@@ -421,99 +365,6 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     pub fn is_loaded(&self) -> bool {
         self.cached.is_some()
     }
-
-    #[cfg(feature = "entity-manager")]
-    pub fn current_keys(&self) -> Result<Vec<String>>
-    where
-        Related: crate::model::ModelMeta,
-    {
-        let mut keys = Vec::new();
-        for item in self.cached.as_deref().unwrap_or(&[]) {
-            if let Some(key) = crate::entity_manager::__model_entity_manager_key(item)? {
-                keys.push(key);
-            }
-        }
-
-        Ok(keys)
-    }
-
-    #[cfg(feature = "entity-manager")]
-    pub async fn load_in_entity_manager(
-        &mut self,
-        entity_manager: &Arc<crate::entity_manager::EntityManager>,
-    ) -> Result<&Vec<Related>>
-    where
-        Related: crate::internal::InternalModel
-            + crate::entity_manager::TideEntityManagerMeta
-            + Clone
-            + Send
-            + Sync
-            + 'static,
-    {
-        if let Some(items) = self.cached.as_ref() {
-            for entity in items.iter().cloned() {
-                entity_manager.put(entity);
-            }
-
-            self.entity_manager = Some(entity_manager.clone());
-            let owner_key = self.owner_key.as_deref().ok_or_else(|| {
-                Error::query(format!(
-                    "entity manager owner key not set for relation '{}'",
-                    self.relation_name
-                ))
-            })?;
-            let ids = self.current_keys()?;
-            entity_manager
-                .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
-                .await;
-            return Ok(self.cached.as_ref().expect("relation cache should exist"));
-        }
-
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::load_in_entity_manager")?;
-        let owner_key = self.owner_key.as_deref().ok_or_else(|| {
-            Error::query(format!(
-                "entity manager owner key not set for relation '{}'",
-                self.relation_name
-            ))
-        })?;
-        let pivot_related_column = format!("{}.{}", self.pivot_table, self.related_key);
-        let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
-
-        let db = Self::scoped_database_for_entity_manager(entity_manager)?;
-        let loaded = Related::query_with(&db)
-            .inner_join(
-                self.pivot_table,
-                &pivot_related_column,
-                &related_local_column,
-            )
-            .where_eq(
-                format!("{}.{}", self.pivot_table, self.foreign_key),
-                pk.clone(),
-            )
-            .get()
-            .await?;
-
-        let mut registered = Vec::with_capacity(loaded.len());
-        for entity in loaded {
-            registered.push(entity_manager.register(entity).await);
-        }
-
-        self.cached = Some(registered);
-        self.entity_manager = Some(entity_manager.clone());
-
-        let ids = self.current_keys()?;
-        entity_manager
-            .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
-            .await;
-
-        Ok(self.cached.as_ref().expect("relation cache should exist"))
-    }
 }
 
 impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
@@ -568,32 +419,6 @@ impl<'de, Related: Model, Pivot: Model> Deserialize<'de> for HasManyThrough<Rela
 #[cfg(all(test, feature = "entity-manager"))]
 #[path = "../../tests/unit/many_to_many_entity_manager_tests.rs"]
 mod entity_manager_tests;
-
-#[cfg(feature = "entity-manager")]
-impl<Related, Pivot> crate::entity_manager::EntityManagerLoad for HasManyThrough<Related, Pivot>
-where
-    Related: crate::internal::InternalModel
-        + crate::entity_manager::TideEntityManagerMeta
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-    Pivot: Model,
-{
-    type Output<'a>
-        = &'a Vec<Related>
-    where
-        Self: 'a;
-
-    fn load_with_entity_manager<'a>(
-        &'a mut self,
-        entity_manager: &'a Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
-    {
-        Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WithPivot<M, P> {

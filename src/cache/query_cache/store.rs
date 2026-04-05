@@ -1,4 +1,7 @@
 use super::*;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::time::Instant;
 
 /// A cache entry storing query results
 #[derive(Debug, Clone)]

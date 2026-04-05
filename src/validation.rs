@@ -16,7 +16,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+mod builder;
+mod values;
+
+pub use builder::ValidationBuilder;
+pub use values::ValidatableValue;
+use values::compiled_validation_regex;
 
 /// Collection of validation errors organized by field name
 #[derive(Debug, Clone, Default)]
@@ -253,100 +260,6 @@ impl ValidationRule {
     }
 }
 
-fn compiled_validation_regex(pattern: &str) -> Option<regex::Regex> {
-    static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
-    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .entry(pattern.to_string())
-        .or_insert_with(|| regex::Regex::new(pattern).ok())
-        .clone()
-}
-
-/// Value adapter used by the generic validator helpers.
-pub trait ValidatableValue {
-    /// Return whether the value counts as empty for `Required`.
-    fn is_empty_value(&self) -> bool;
-
-    /// Return a string view for string-oriented rules.
-    fn as_str_value(&self) -> Option<&str>;
-
-    /// Return a numeric representation for numeric rules.
-    fn as_f64_value(&self) -> Option<f64>;
-}
-
-impl ValidatableValue for String {
-    fn is_empty_value(&self) -> bool {
-        self.trim().is_empty()
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        Some(self.as_str())
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        self.parse().ok()
-    }
-}
-
-impl ValidatableValue for &str {
-    fn is_empty_value(&self) -> bool {
-        self.trim().is_empty()
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        Some(self)
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        self.parse().ok()
-    }
-}
-
-impl<T: ValidatableValue> ValidatableValue for Option<T> {
-    fn is_empty_value(&self) -> bool {
-        match self {
-            Some(v) => v.is_empty_value(),
-            None => true,
-        }
-    }
-
-    fn as_str_value(&self) -> Option<&str> {
-        self.as_ref().and_then(|v| v.as_str_value())
-    }
-
-    fn as_f64_value(&self) -> Option<f64> {
-        self.as_ref().and_then(|v| v.as_f64_value())
-    }
-}
-
-macro_rules! impl_validatable_for_int {
-    ($($t:ty),*) => {
-        $(
-            impl ValidatableValue for $t {
-                fn is_empty_value(&self) -> bool {
-                    false  // Numbers are never "empty"
-                }
-
-                fn as_str_value(&self) -> Option<&str> {
-                    None
-                }
-
-                fn as_f64_value(&self) -> Option<f64> {
-                    Some(*self as f64)
-                }
-            }
-        )*
-    };
-}
-
-impl_validatable_for_int!(
-    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
-);
-
 /// Validator for applying validation rules
 pub struct Validator;
 
@@ -470,12 +383,8 @@ impl Validator {
                     }
                 }
             }
-            ValidationRule::Confirmed(_) => {
-                // This is handled at the model level, not here
-            }
-            ValidationRule::Custom(_) => {
-                // Custom rules are handled through Validate::custom_validations.
-            }
+            ValidationRule::Confirmed(_) => {}
+            ValidationRule::Custom(_) => {}
         }
         None
     }
@@ -530,136 +439,6 @@ pub trait Validate {
     {
         self.validate()?;
         Ok(self)
-    }
-}
-
-/// Builder for creating validation rules programmatically
-pub struct ValidationBuilder {
-    field: String,
-    rules: Vec<ValidationRule>,
-}
-
-impl ValidationBuilder {
-    /// Start collecting rules for one field.
-    pub fn new(field: impl Into<String>) -> Self {
-        Self {
-            field: field.into(),
-            rules: vec![],
-        }
-    }
-
-    /// Append the `Required` rule.
-    pub fn required(mut self) -> Self {
-        self.rules.push(ValidationRule::Required);
-        self
-    }
-
-    /// Append the `Email` rule.
-    pub fn email(mut self) -> Self {
-        self.rules.push(ValidationRule::Email);
-        self
-    }
-
-    /// Append the `Url` rule.
-    pub fn url(mut self) -> Self {
-        self.rules.push(ValidationRule::Url);
-        self
-    }
-
-    /// Append a minimum-length rule.
-    pub fn min_length(mut self, len: usize) -> Self {
-        self.rules.push(ValidationRule::MinLength(len));
-        self
-    }
-
-    /// Append a maximum-length rule.
-    pub fn max_length(mut self, len: usize) -> Self {
-        self.rules.push(ValidationRule::MaxLength(len));
-        self
-    }
-
-    /// Append an exact-length rule.
-    pub fn length(mut self, len: usize) -> Self {
-        self.rules.push(ValidationRule::Length(len));
-        self
-    }
-
-    /// Append a minimum-value rule.
-    pub fn min(mut self, val: f64) -> Self {
-        self.rules.push(ValidationRule::Min(val));
-        self
-    }
-
-    /// Append a maximum-value rule.
-    pub fn max(mut self, val: f64) -> Self {
-        self.rules.push(ValidationRule::Max(val));
-        self
-    }
-
-    /// Append an inclusive numeric range rule.
-    pub fn range(mut self, min: f64, max: f64) -> Self {
-        self.rules.push(ValidationRule::Range(min, max));
-        self
-    }
-
-    /// Append a regex-match rule.
-    pub fn regex(mut self, pattern: impl Into<String>) -> Self {
-        self.rules.push(ValidationRule::Regex(pattern.into()));
-        self
-    }
-
-    /// Append an alphabetic-only rule.
-    pub fn alpha(mut self) -> Self {
-        self.rules.push(ValidationRule::Alpha);
-        self
-    }
-
-    /// Append an alphanumeric-only rule.
-    pub fn alphanumeric(mut self) -> Self {
-        self.rules.push(ValidationRule::Alphanumeric);
-        self
-    }
-
-    /// Append a numeric-string rule.
-    pub fn numeric(mut self) -> Self {
-        self.rules.push(ValidationRule::Numeric);
-        self
-    }
-
-    /// Append a UUID-shape rule.
-    pub fn uuid(mut self) -> Self {
-        self.rules.push(ValidationRule::Uuid);
-        self
-    }
-
-    /// Append an allowed-values rule.
-    pub fn in_list(mut self, values: Vec<impl Into<String>>) -> Self {
-        self.rules.push(ValidationRule::In(
-            values.into_iter().map(|v| v.into()).collect(),
-        ));
-        self
-    }
-
-    /// Append a disallowed-values rule.
-    pub fn not_in(mut self, values: Vec<impl Into<String>>) -> Self {
-        self.rules.push(ValidationRule::NotIn(
-            values.into_iter().map(|v| v.into()).collect(),
-        ));
-        self
-    }
-
-    /// Add a custom validation marker.
-    ///
-    /// The message is surfaced when your model's `custom_validations()` adds an
-    /// error for the field; it is not evaluated directly by `ValidationBuilder`.
-    pub fn custom(mut self, message: impl Into<String>) -> Self {
-        self.rules.push(ValidationRule::Custom(message.into()));
-        self
-    }
-
-    /// Finish the builder and return the field plus its rules.
-    pub fn build(self) -> (String, Vec<ValidationRule>) {
-        (self.field, self.rules)
     }
 }
 
