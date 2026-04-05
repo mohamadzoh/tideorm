@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.12] - 2026-04-05
+
+### Changed
+
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, macro-crate README, and release-facing issue-template examples to use `0.9.12`.
+
+### Internal
+
+- Split the remaining oversized non-test runtime and proc-macro source files into focused sibling modules, including cache control/configuration, internal backend helpers, full-text PostgreSQL builders, query mutation safety, migration table SQL building, translation input/errors, sync schema helpers, validation builder/value helpers, entity-manager state helpers, relation entity-manager support, and proc-macro index parsing.
+- Verified the release prep with `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, `cargo clippy --all-targets --all-features -- -D warnings`, `mdbook build`, and `cargo package -p tideorm-macros --allow-dirty`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.12` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.11] - 2026-04-04
 
 ### Added
@@ -843,7 +855,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.11...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.12...HEAD
+[0.9.12]: https://github.com/mohamadzoh/tideorm/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mohamadzoh/tideorm/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/mohamadzoh/tideorm/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/mohamadzoh/tideorm/compare/v0.9.8...v0.9.9

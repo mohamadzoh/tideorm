@@ -120,25 +120,25 @@ For aggregate workflows with an explicit persistence context, enable the `entity
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.10", features = ["postgres"] }
+tideorm = { version = "0.9.12", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.10", features = ["mysql"] }
+tideorm = { version = "0.9.12", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.10", features = ["sqlite"] }
+tideorm = { version = "0.9.12", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.10", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.12", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.10", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.12", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.10", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.12", features = ["postgres", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.9.10", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.9.12", features = ["postgres", "entity-manager"] }
 ```
 
 ### Feature Flags

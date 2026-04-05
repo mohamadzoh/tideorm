@@ -38,7 +38,7 @@ body:
     attributes:
       label: Version
       description: TideORM version, commit, or branch where the issue occurs.
-      placeholder: "Example: 0.9.11 or master"
+      placeholder: "Example: 0.9.12 or master"
     validations:
       required: true
 
