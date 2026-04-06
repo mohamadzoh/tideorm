@@ -286,8 +286,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
             crate::QueryCache::global().invalidate_model(M::table_name());
             #[cfg(feature = "dirty-tracking")]
             {
-            crate::model::__invalidate_dirty_snapshots::<M>();
-            let _ = crate::model::__remember_dirty_snapshots(&models);
+                crate::model::__invalidate_dirty_snapshots::<M>();
+                let _ = crate::model::__remember_dirty_snapshots(&models);
             }
         }
         Ok(models)

@@ -471,6 +471,13 @@ fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
                 Self::__get_sync_schema()
             }
         }
+
+        ::tideorm::inventory::submit! {
+            ::tideorm::sync::CompiledModelRegistration {
+                source_path: file!(),
+                sync_schema: #struct_name::__get_sync_schema,
+            }
+        }
     }
 }
 

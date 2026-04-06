@@ -138,7 +138,11 @@ async fn chunk_processes_rows_without_skipping_when_callback_changes_query_scope
         .await
         .expect("final read should succeed");
     assert_eq!(updated.len(), 7);
-    assert!(updated.iter().all(|user| user.name == format!("done-{}", user.id)));
+    assert!(
+        updated
+            .iter()
+            .all(|user| user.name == format!("done-{}", user.id))
+    );
 
     cleanup_query_mutation_cache_test_state();
 }

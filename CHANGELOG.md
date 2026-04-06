@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.13] - 2026-04-05
+
+### Added
+
+- Added model-local query-scope generation with `#[tideorm::scopes]`, so reusable filters can chain directly on `QueryBuilder` values such as `User::query().active().verified()`.
+- Added large-result chunk processing through `QueryBuilder::chunk(...)` using primary-key cursor traversal, plus source-path model registration with `TideConfig::models_matching(...)` and `SyncRegistry::register_models_matching(...)` for compiled models under folders like `src/models/`.
+
+### Changed
+
+- Added query-builder eager-loading entry points with `with(...)` and `with_many(...)`, keeping batched relation loading discoverable from the main `QueryBuilder` API.
+- Made dirty tracking opt-in behind the new `dirty-tracking` feature, including feature-gated public helpers, no-op internal hooks when disabled, and explicit dirty-tracking install guidance in the README and mdBook docs.
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, macro-crate README, and release-facing issue-template examples to use `0.9.13`.
+
+### Fixed
+
+- Replaced offset-based chunk traversal with primary-key cursor traversal so batch callbacks can update or delete already-processed rows without skipping later matches, and tightened chunk validation to reject unsupported offset or non-primary-key ordering shapes.
+- Simplified dirty-tracking baseline semantics to the latest persisted snapshot per model primary key, reduced snapshot storage overhead, and corrected generated delete paths for non-`Copy` primary keys.
+- Fixed recursive glob source-path registration so patterns like `src/models/**/*.rs` match direct child files as well as nested directories.
+
+### Internal
+
+- Added focused regression coverage for eager loading, dirty-tracking lifecycle behavior, chunk traversal under mutation, model-local scope chaining, and source-path sync registration globs.
+- Verified the release prep with `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, and `cargo package -p tideorm-macros --allow-dirty`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.13` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.12] - 2026-04-05
 
 ### Changed
@@ -855,7 +880,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.12...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.13...HEAD
+[0.9.13]: https://github.com/mohamadzoh/tideorm/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mohamadzoh/tideorm/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mohamadzoh/tideorm/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/mohamadzoh/tideorm/compare/v0.9.9...v0.9.10

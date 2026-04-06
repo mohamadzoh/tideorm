@@ -96,9 +96,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arc-swap"
-version = "1.9.0"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a07d1f37ff60921c83bdfc7407723bdefe89b44b98a9b772f225c8f9d67141a6"
+checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
 dependencies = [
  "rustversion",
 ]
@@ -1641,6 +1641,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -3295,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "arc-swap",
  "argon2",
@@ -3304,6 +3313,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dotenvy",
+ "inventory",
  "parking_lot",
  "rand 0.10.0",
  "regex",
@@ -3321,7 +3331,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.9.12"
+version = "0.9.13"
 dependencies = [
  "convert_case",
  "darling 0.23.0",

@@ -1,4 +1,17 @@
 use super::*;
+use crate::sync::SyncRegistry;
+
+#[path = "config_tests/model_pattern_fixture.rs"]
+mod model_pattern_fixture;
+
+fn registered_sync_table_names() -> Vec<String> {
+    let mut table_names: Vec<_> = SyncRegistry::get_all_schemas()
+        .into_iter()
+        .map(|schema| schema.table_name)
+        .collect();
+    table_names.sort();
+    table_names
+}
 
 #[test]
 fn test_default_config() {
@@ -18,6 +31,76 @@ fn test_config_builder() {
     let config = Config::global();
     assert!(config.languages.contains(&"fr".to_string()));
     assert_eq!(config.fallback_language, "fr");
+}
+
+#[test]
+fn test_tide_config_models_matching_registers_models_from_exact_source_file() {
+    SyncRegistry::clear();
+    TideConfig::reset();
+
+    let _ = TideConfig::init().models_matching("**/config_tests/model_pattern_fixture.rs");
+
+    assert_eq!(
+        registered_sync_table_names(),
+        vec![
+            "config_path_match_posts".to_string(),
+            "config_path_match_users".to_string(),
+        ]
+    );
+
+    SyncRegistry::clear();
+    TideConfig::reset();
+}
+
+#[test]
+fn test_tide_config_models_matching_supports_folder_globs() {
+    SyncRegistry::clear();
+    TideConfig::reset();
+
+    let _ = TideConfig::init().models_matching("**/config_tests/*");
+
+    assert_eq!(
+        registered_sync_table_names(),
+        vec![
+            "config_path_match_posts".to_string(),
+            "config_path_match_users".to_string(),
+        ]
+    );
+
+    SyncRegistry::clear();
+    TideConfig::reset();
+}
+
+#[test]
+fn test_tide_config_models_matching_supports_recursive_globs_for_direct_children() {
+    SyncRegistry::clear();
+    TideConfig::reset();
+
+    let _ = TideConfig::init().models_matching("**/config_tests/**/*.rs");
+
+    assert_eq!(
+        registered_sync_table_names(),
+        vec![
+            "config_path_match_posts".to_string(),
+            "config_path_match_users".to_string(),
+        ]
+    );
+
+    SyncRegistry::clear();
+    TideConfig::reset();
+}
+
+#[test]
+fn test_tide_config_models_matching_ignores_non_matching_patterns() {
+    SyncRegistry::clear();
+    TideConfig::reset();
+
+    let _ = TideConfig::init().models_matching("**/does_not_exist/*.rs");
+
+    assert!(registered_sync_table_names().is_empty());
+
+    SyncRegistry::clear();
+    TideConfig::reset();
 }
 
 #[test]

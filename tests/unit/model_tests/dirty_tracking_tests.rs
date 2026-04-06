@@ -1,7 +1,15 @@
-#[cfg(all(feature = "dirty-tracking", feature = "sqlite", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
 use super::*;
 
-#[cfg(all(feature = "dirty-tracking", feature = "sqlite", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
 #[tokio::test]
 async fn loaded_model_reports_changed_fields_and_original_values() {
     let _guard = model_cache_test_guard().lock().await;
@@ -20,9 +28,16 @@ async fn loaded_model_reports_changed_fields_and_original_values() {
         .expect("find should succeed")
         .expect("saved model should exist");
 
-    assert!(loaded.changed_fields().expect("dirty check should succeed").is_empty());
+    assert!(
+        loaded
+            .changed_fields()
+            .expect("dirty check should succeed")
+            .is_empty()
+    );
     assert_eq!(
-        loaded.original_value("name").expect("original value lookup should succeed"),
+        loaded
+            .original_value("name")
+            .expect("original value lookup should succeed"),
         Some(serde_json::json!("Alice"))
     );
 
@@ -33,14 +48,20 @@ async fn loaded_model_reports_changed_fields_and_original_values() {
         vec!["name"]
     );
     assert_eq!(
-        loaded.original_value("name").expect("original value lookup should succeed"),
+        loaded
+            .original_value("name")
+            .expect("original value lookup should succeed"),
         Some(serde_json::json!("Alice"))
     );
 
     cleanup_model_cache_test_state();
 }
 
-#[cfg(all(feature = "dirty-tracking", feature = "sqlite", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
 #[tokio::test]
 async fn update_refreshes_dirty_tracking_baseline() {
     let _guard = model_cache_test_guard().lock().await;
@@ -62,16 +83,27 @@ async fn update_refreshes_dirty_tracking_baseline() {
 
     let updated = loaded.update().await.expect("update should succeed");
 
-    assert!(updated.changed_fields().expect("dirty check should succeed").is_empty());
+    assert!(
+        updated
+            .changed_fields()
+            .expect("dirty check should succeed")
+            .is_empty()
+    );
     assert_eq!(
-        updated.original_value("name").expect("original value lookup should succeed"),
+        updated
+            .original_value("name")
+            .expect("original value lookup should succeed"),
         Some(serde_json::json!("Bob"))
     );
 
     cleanup_model_cache_test_state();
 }
 
-#[cfg(all(feature = "dirty-tracking", feature = "sqlite", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
 #[tokio::test]
 async fn cache_hits_restore_dirty_tracking_snapshots() {
     let _guard = model_cache_test_guard().lock().await;
@@ -105,18 +137,26 @@ async fn cache_hits_restore_dirty_tracking_snapshots() {
     cached[0].name = "Cached Bob".to_string();
 
     assert_eq!(
-        cached[0].changed_fields().expect("dirty check should succeed"),
+        cached[0]
+            .changed_fields()
+            .expect("dirty check should succeed"),
         vec!["name"]
     );
     assert_eq!(
-        cached[0].original_value("name").expect("original value lookup should succeed"),
+        cached[0]
+            .original_value("name")
+            .expect("original value lookup should succeed"),
         Some(serde_json::json!("Alice"))
     );
 
     cleanup_model_cache_test_state();
 }
 
-#[cfg(all(feature = "dirty-tracking", feature = "sqlite", feature = "runtime-tokio"))]
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
 #[tokio::test]
 async fn updated_model_can_continue_tracking_after_baseline_refresh() {
     let _guard = model_cache_test_guard().lock().await;
@@ -141,26 +181,39 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
 
     first.name = "Bob".to_string();
     let mut first = first.update().await.expect("update should succeed");
-    assert!(first.changed_fields().expect("dirty check should succeed").is_empty());
+    assert!(
+        first
+            .changed_fields()
+            .expect("dirty check should succeed")
+            .is_empty()
+    );
 
     first.name = "Carol".to_string();
     assert_eq!(
-        first.changed_fields().expect("dirty check should succeed after update"),
+        first
+            .changed_fields()
+            .expect("dirty check should succeed after update"),
         vec!["name"]
     );
     assert_eq!(
-        first.original_value("name").expect("original value lookup should succeed"),
+        first
+            .original_value("name")
+            .expect("original value lookup should succeed"),
         Some(serde_json::json!("Bob"))
     );
 
     second.name = "Dana".to_string();
 
     assert_eq!(
-        second.changed_fields().expect("stale copies should compare against the latest baseline"),
+        second
+            .changed_fields()
+            .expect("stale copies should compare against the latest baseline"),
         vec!["name"]
     );
     assert_eq!(
-        second.original_value("name").expect("latest baseline lookup should succeed"),
+        second
+            .original_value("name")
+            .expect("latest baseline lookup should succeed"),
         Some(serde_json::json!("Bob"))
     );
 

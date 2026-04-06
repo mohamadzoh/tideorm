@@ -12,8 +12,9 @@
 //!
 //! TideORM models use `ModelSchema`, which the macros generate for you.
 //!
-//! Register TideORM models through `TideConfig::models::<(... )>()` and enable
-//! synchronization with `sync(true)`.
+//! Register TideORM models through `TideConfig::models::<(... )>()`,
+//! `TideConfig::models_matching("src/models/*.model.rs")`, or the corresponding
+//! `SyncRegistry` helpers, and enable synchronization with `sync(true)`.
 //!
 //! ### 2. ORM Entities
 //!
@@ -63,8 +64,10 @@ use crate::{tide_debug, tide_info, tide_warn};
 mod registry;
 mod schema;
 
+#[doc(hidden)]
+pub use registry::CompiledModelRegistration;
 pub use registry::{RegisterModels, SyncModel};
-use registry::{get_entity_registry, get_model_schemas};
+use registry::{get_entity_registry, get_model_schemas, register_compiled_models_matching};
 use schema::sync_model_schemas;
 pub use schema::{ColumnDef, ModelSchema, normalize_rust_type};
 
@@ -140,6 +143,15 @@ impl SyncRegistry {
         if !schemas.iter().any(|s| s.table_name == schema.table_name) {
             schemas.push(schema);
         }
+    }
+
+    /// Register all compiled TideORM models whose source file path matches a glob pattern.
+    ///
+    /// This matches against the source path captured from each `#[tideorm::model]` invocation,
+    /// so modules still need to be part of the crate through normal Rust `mod` declarations.
+    /// Supported wildcards are `*` for one path segment and `**` across directories.
+    pub fn register_models_matching(pattern: &str) -> usize {
+        register_compiled_models_matching(pattern)
     }
 
     /// Get all registered TideORM model schemas

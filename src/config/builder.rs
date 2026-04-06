@@ -92,6 +92,17 @@ impl TideConfig {
         self
     }
 
+    /// Register all compiled TideORM models whose source file path matches a glob pattern.
+    ///
+    /// This matches against the source path captured from each `#[tideorm::model]` invocation,
+    /// so matching files still need to be compiled into the crate through normal `mod`
+    /// declarations. Supported wildcards are `*` for one path segment and `**` across
+    /// directories.
+    pub fn models_matching(self, pattern: &str) -> Self {
+        crate::sync::SyncRegistry::register_models_matching(pattern);
+        self
+    }
+
     pub fn force_sync(mut self, enabled: bool) -> Self {
         self.force_sync = enabled;
         self

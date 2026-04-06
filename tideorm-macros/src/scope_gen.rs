@@ -183,9 +183,15 @@ fn model_ident(model_ty: &Type) -> syn::Result<&syn::Ident> {
         ));
     };
 
-    path.segments.last().map(|segment| &segment.ident).ok_or_else(|| {
-        syn::Error::new_spanned(model_ty, "#[tideorm::scopes] requires a concrete model type")
-    })
+    path.segments
+        .last()
+        .map(|segment| &segment.ident)
+        .ok_or_else(|| {
+            syn::Error::new_spanned(
+                model_ty,
+                "#[tideorm::scopes] requires a concrete model type",
+            )
+        })
 }
 
 fn is_query_builder_type(ty: &Type, model_ty: &Type) -> bool {

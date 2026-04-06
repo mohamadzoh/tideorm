@@ -139,10 +139,13 @@ TideORM can automatically sync your database schema with your models during deve
 ```rust
 TideConfig::init()
     .database("postgres://localhost/mydb")
+    .models_matching("src/models/*")
     .sync(true)  // Enable auto-sync (development only!)
     .connect()
     .await?;
 ```
+
+`models_matching(...)` uses glob-style source path matching against compiled TideORM models. It is useful when your project keeps models under folders like `src/models/`, but it does not replace normal Rust module wiring.
 
 Or export schema to a file:
 

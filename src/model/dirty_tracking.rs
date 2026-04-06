@@ -17,7 +17,9 @@ fn snapshot_store() -> &'static RwLock<SnapshotStore> {
     STORE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-fn snapshot_key_for_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<Option<IdentityKey>> {
+fn snapshot_key_for_primary_key<M: Model>(
+    primary_key: &M::PrimaryKey,
+) -> Result<Option<IdentityKey>> {
     if M::primary_key_is_new(primary_key) {
         return Ok(None);
     }
@@ -132,7 +134,10 @@ pub(crate) fn changed_fields<M: Model>(model: &M) -> Result<Vec<&'static str>> {
     Ok(changed)
 }
 
-pub(crate) fn original_value<M: Model>(model: &M, field: &str) -> Result<Option<serde_json::Value>> {
+pub(crate) fn original_value<M: Model>(
+    model: &M,
+    field: &str,
+) -> Result<Option<serde_json::Value>> {
     let Some(field_name) = resolve_field_name::<M>(field) else {
         return Err(Error::invalid_query(format!(
             "unknown field or column '{}' for model '{}'",

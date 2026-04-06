@@ -1,4 +1,5 @@
 use super::*;
+use regex::Regex;
 
 /// Global registry of entity registration functions
 static ENTITY_REGISTRY: OnceLock<RwLock<Vec<EntityRegistrationFn>>> = OnceLock::new();
@@ -6,12 +7,86 @@ static ENTITY_REGISTRY: OnceLock<RwLock<Vec<EntityRegistrationFn>>> = OnceLock::
 /// Registry of TideORM model schemas used during synchronization.
 static MODEL_SCHEMAS: OnceLock<RwLock<Vec<ModelSchema>>> = OnceLock::new();
 
+/// Distributed registration emitted by `#[tideorm::model]` for source-path-based sync discovery.
+#[doc(hidden)]
+pub struct CompiledModelRegistration {
+    pub source_path: &'static str,
+    pub sync_schema: fn() -> ModelSchema,
+}
+
+inventory::collect!(CompiledModelRegistration);
+
 pub(super) fn get_entity_registry() -> &'static RwLock<Vec<EntityRegistrationFn>> {
     ENTITY_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
 }
 
 pub(super) fn get_model_schemas() -> &'static RwLock<Vec<ModelSchema>> {
     MODEL_SCHEMAS.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {
+    let Some(compiled_pattern) = compile_glob_pattern(pattern) else {
+        return 0;
+    };
+
+    let mut registered = 0;
+
+    for model in inventory::iter::<CompiledModelRegistration> {
+        if glob_path_matches(&compiled_pattern, model.source_path) {
+            SyncRegistry::register_schema((model.sync_schema)());
+            registered += 1;
+        }
+    }
+
+    registered
+}
+
+fn compile_glob_pattern(pattern: &str) -> Option<Regex> {
+    let normalized_pattern = normalize_path(pattern);
+    let regex = glob_to_regex(&normalized_pattern);
+
+    Regex::new(&regex).ok()
+}
+
+fn glob_path_matches(pattern: &Regex, candidate: &str) -> bool {
+    let normalized_candidate = normalize_path(candidate);
+    pattern.is_match(&normalized_candidate)
+}
+
+fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn glob_to_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    if chars.peek() == Some(&'/') {
+                        chars.next();
+                        regex.push_str("(?:[^/]+/)*");
+                    } else {
+                        regex.push_str(".*");
+                    }
+                } else {
+                    regex.push_str("[^/]*");
+                }
+            }
+            '?' => regex.push_str("[^/]"),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+
+    regex.push('$');
+    regex
 }
 
 /// Trait for models that can be synced with the database

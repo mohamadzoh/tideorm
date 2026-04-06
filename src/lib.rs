@@ -297,6 +297,10 @@ pub use tideorm_macros::scopes;
 // Re-export async_trait for macro use
 pub use async_trait;
 
+// Re-export inventory for macro use
+#[doc(hidden)]
+pub use inventory;
+
 // Re-export chrono for macro use (timestamps)
 pub use chrono;
 

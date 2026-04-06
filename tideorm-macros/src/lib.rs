@@ -8,8 +8,8 @@ mod meta_support;
 mod model_trait;
 mod parse;
 mod relation_gen;
-mod serde_gen;
 mod scope_gen;
+mod serde_gen;
 mod tokenization_gen;
 mod validation_gen;
 
@@ -24,8 +24,8 @@ use entity_gen::generate_entity_support;
 use meta_support::{ExistingDerives, detect_existing_derives};
 use model_trait::generate_model_support;
 use parse::{ModelInput, parse_index_attributes};
-use serde_gen::generate_trait_impls;
 use scope_gen::generate_query_scope_support;
+use serde_gen::generate_trait_impls;
 use tokenization_gen::generate_tokenizable_impl;
 use validation_gen::generate_validation_impl;
 
@@ -82,14 +82,14 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-    #[proc_macro_attribute]
-    pub fn scopes(_attr: TokenStream, item: TokenStream) -> TokenStream {
-        let input = parse_macro_input!(item as syn::ItemImpl);
+#[proc_macro_attribute]
+pub fn scopes(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::ItemImpl);
 
-        generate_query_scope_support(input)
+    generate_query_scope_support(input)
         .unwrap_or_else(|error| error.to_compile_error())
         .into()
-    }
+}
 
 fn expand_model(model_attr: TokenStream2, input: DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;

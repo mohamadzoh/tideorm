@@ -222,16 +222,14 @@ impl<M: Model> QueryBuilder<M> {
         base_query.limit_value = None;
         base_query.offset_value = None;
         if base_query.order_by.is_empty() {
-            base_query = base_query.order_by(
-                format!("{}.{}", M::table_name(), primary_key),
-                order,
-            );
+            base_query = base_query.order_by(format!("{}.{}", M::table_name(), primary_key), order);
         }
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
         let mut last_seen_primary_key: Option<serde_json::Value> = None;
 
         loop {
-            let batch_limit = remaining.map_or(chunk_size, |limit| std::cmp::min(limit, chunk_size));
+            let batch_limit =
+                remaining.map_or(chunk_size, |limit| std::cmp::min(limit, chunk_size));
             if batch_limit == 0 {
                 break;
             }
@@ -239,8 +237,12 @@ impl<M: Model> QueryBuilder<M> {
             let mut batch_query = base_query.clone().limit(batch_limit);
             if let Some(cursor) = &last_seen_primary_key {
                 batch_query = match order {
-                    crate::query::Order::Asc => batch_query.where_gt(&cursor_column, cursor.clone()),
-                    crate::query::Order::Desc => batch_query.where_lt(&cursor_column, cursor.clone()),
+                    crate::query::Order::Asc => {
+                        batch_query.where_gt(&cursor_column, cursor.clone())
+                    }
+                    crate::query::Order::Desc => {
+                        batch_query.where_lt(&cursor_column, cursor.clone())
+                    }
                 };
             }
             if let Some(cache_key) = &explicit_cache_key {

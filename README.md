@@ -62,6 +62,7 @@ async fn main() -> tideorm::Result<()> {
     // Connect with auto schema sync (development only!)
     TideConfig::init()
         .database("postgres://localhost/mydb")
+        .models_matching("src/models/*.model.rs")
         .sync(true)
         .connect()
         .await?;
@@ -132,28 +133,28 @@ For aggregate workflows with an explicit persistence context, enable the `entity
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.12", features = ["postgres"] }
+tideorm = { version = "0.9.13", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.12", features = ["mysql"] }
+tideorm = { version = "0.9.13", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.12", features = ["sqlite"] }
+tideorm = { version = "0.9.13", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.12", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.13", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.12", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.13", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.12", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.13", features = ["postgres", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.9.12", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.9.13", features = ["postgres", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.9.12", features = ["postgres", "dirty-tracking"] }
+tideorm = { version = "0.9.13", features = ["postgres", "dirty-tracking"] }
 ```
 
 ### Feature Flags
@@ -180,6 +181,8 @@ Full-text search is opt-in. Enable the `fulltext` feature when you want to use `
 The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. The compatibility entry points `find_in_entity_manager`, `load_in_entity_manager`, and `save_with_entity_manager()` remain available too. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
 
 Dirty tracking is opt-in. Enable the `dirty-tracking` feature when you want model instances to expose `changed_fields()` and `original_value()` based on the latest persisted snapshot TideORM loaded or saved.
+
+Schema sync can also register compiled models by source path with glob-style patterns such as `models_matching("src/models/*")` or `models_matching("src/models/*.model.rs")`. The matching files still need to be part of the crate through normal Rust `mod` declarations because TideORM filters compiled model metadata rather than loading source files dynamically.
 
 ## Documentation
 
