@@ -391,6 +391,8 @@ pub(crate) struct ModelInput {
     #[darling(default)]
     pub(crate) searchable: Option<String>,
     #[darling(default)]
+    pub(crate) encrypted: Option<String>,
+    #[darling(default)]
     pub(crate) skip_debug: bool,
     #[darling(default)]
     pub(crate) skip_clone: bool,

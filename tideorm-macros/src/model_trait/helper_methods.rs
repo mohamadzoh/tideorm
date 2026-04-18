@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let update_active_model_setters = &ctx.update_active_model_setters;
+    let try_update_active_model_setters = build_try_update_active_model_setters(ctx);
     let pk_idents = &ctx.pk_idents;
     let table_name = &ctx.table_name;
     let field_names = &ctx.field_names;
@@ -73,11 +73,11 @@ pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             #[doc(hidden)]
-            fn __into_update_active_model(self) -> #internal_entity_mod::ActiveModel {
+            fn __into_update_active_model(self) -> ::tideorm::Result<#internal_entity_mod::ActiveModel> {
                 use ::tideorm::orm::ActiveValue;
-                #internal_entity_mod::ActiveModel {
-                    #(#update_active_model_setters),*
-                }
+                Ok(#internal_entity_mod::ActiveModel {
+                    #(#try_update_active_model_setters),*
+                })
             }
 
             #[doc(hidden)]
@@ -89,4 +89,34 @@ pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
             #with_relations_method
         }
     }
+}
+
+fn build_try_update_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2> {
+    let table_name = &ctx.table_name;
+
+    ctx.db_fields
+        .iter()
+        .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
+        .map(|(field, ident)| {
+            let column_name = BuildContext::column_name(field);
+            let field_name = ident.to_string();
+
+            if field.primary_key {
+                quote!(#ident: ActiveValue::Unchanged(self.#ident))
+            } else if field_name == "updated_at" || column_name == "updated_at" {
+                quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
+            } else if ctx.encrypted_fields.iter().any(|value| value == &field_name) {
+                quote!(
+                    #ident: ActiveValue::Set(::tideorm::model::__encrypt_model_field(
+                        self.#ident,
+                        #table_name,
+                        stringify!(#ident),
+                        #column_name,
+                    )?)
+                )
+            } else {
+                quote!(#ident: ActiveValue::Set(self.#ident))
+            }
+        })
+        .collect()
 }

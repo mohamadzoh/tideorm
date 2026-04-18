@@ -23,7 +23,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
         db_type: crate::config::DatabaseType,
     ) -> Result<String> {
         Self::validate_update_column(column)?;
-        Ok(Self::quote_identifier(column, db_type))
+        let canonical_column = M::canonical_column_name(column).unwrap_or(column);
+        Ok(Self::quote_identifier(canonical_column, db_type))
     }
 
     pub(crate) fn quote_identifier(name: &str, db_type: crate::config::DatabaseType) -> String {

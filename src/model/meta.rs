@@ -79,6 +79,19 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn field_names() -> &'static [&'static str];
 
+    fn canonical_column_name(name: &str) -> Option<&'static str> {
+        if let Some(column_name) = Self::column_names().iter().copied().find(|column| *column == name)
+        {
+            return Some(column_name);
+        }
+
+        Self::field_names()
+            .iter()
+            .copied()
+            .zip(Self::column_names().iter().copied())
+            .find_map(|(field_name, column_name)| (field_name == name).then_some(column_name))
+    }
+
     fn hidden_attributes() -> Vec<&'static str> {
         vec!["deleted_at"]
     }
@@ -105,6 +118,18 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn translatable_fields() -> Vec<&'static str> {
         vec![]
+    }
+
+    fn encrypted_fields() -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn encrypted_column_names() -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn has_encrypted_fields() -> bool {
+        !Self::encrypted_fields().is_empty()
     }
 
     fn allowed_languages() -> Vec<String> {

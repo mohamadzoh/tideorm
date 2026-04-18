@@ -37,6 +37,12 @@ pub use timestamps::{UnixTimestamp, UnixTimestampMillis};
 
 #[cfg(test)]
 pub(crate) use encrypted::encrypted_field_missing_key_error;
+pub(crate) use encrypted::{
+    decrypt_json_value_for_attribute as __decrypt_json_value_for_attribute,
+    encrypt_json_value as __encrypt_json_value,
+    encrypt_json_value_for_attribute as __encrypt_json_value_for_attribute,
+    is_encrypted_json_value as __is_encrypted_json_value,
+};
 
 #[cfg(test)]
 #[path = "../../tests/unit/types_tests.rs"]

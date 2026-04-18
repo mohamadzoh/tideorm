@@ -4,9 +4,41 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::model::Model;
+use std::collections::BTreeSet;
 use std::marker::PhantomData;
 
 impl<M: Model> QueryBuilder<M> {
+    fn known_model_column_references() -> (&'static str, String) {
+        let field_names = M::field_names()
+            .iter()
+            .copied()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let column_names = M::column_names()
+            .iter()
+            .copied()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+
+        if field_names == column_names {
+            return (
+                "known columns",
+                column_names.into_iter().collect::<Vec<_>>().join(", "),
+            );
+        }
+
+        (
+            "known fields/columns",
+            field_names
+                .into_iter()
+                .chain(column_names)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
     fn split_select_alias(value: &str) -> &str {
         let trimmed = value.trim();
         let lowered = trimmed.to_ascii_lowercase();
@@ -56,15 +88,17 @@ impl<M: Model> QueryBuilder<M> {
         db_sql::validate_identifier_reference(kind, &reference)?;
 
         if table.is_empty() || table == M::table_name() {
-            if M::column_names().contains(&column) {
+            if M::canonical_column_name(column).is_some() {
                 Ok(())
             } else {
+                let (known_label, known_names) = Self::known_model_column_references();
                 Err(format!(
-                    "unknown {} '{}' for model '{}'; known columns: {}",
+                    "unknown {} '{}' for model '{}'; {}: {}",
                     kind,
                     reference,
                     M::table_name(),
-                    M::column_names().join(", ")
+                    known_label,
+                    known_names
                 ))
             }
         } else {

@@ -155,6 +155,72 @@ fn test_primary_key_name_uses_database_column_name() {
     );
 }
 
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn aliased_column_test_guard() -> &'static tokio::sync::Mutex<()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn prepare_aliased_column_test_state() {
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+fn cleanup_aliased_column_test_state() {
+    Database::reset_global();
+    TideConfig::reset();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn setup_aliased_column_test_db() -> Database {
+    prepare_aliased_column_test_state();
+
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed for aliased-column tests");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    db.__execute_with_params(
+        "CREATE TABLE model_test_custom_pk_column (user_id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating aliased-column test schema should succeed");
+
+    db
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn query_filters_accept_field_names_for_aliased_columns() {
+    let _guard = aliased_column_test_guard().lock().await;
+    let db = setup_aliased_column_test_db().await;
+
+    db.__execute_with_params(
+        "INSERT INTO model_test_custom_pk_column (user_id, name) VALUES (?, ?)",
+        vec![
+            crate::internal::Value::BigInt(Some(7)),
+            crate::internal::Value::String(Some("Alice".to_string())),
+        ],
+    )
+    .await
+    .expect("seeding aliased-column test row should succeed");
+
+    let loaded = CustomPrimaryKeyColumnModel::query()
+        .where_eq("id", 7)
+        .first()
+        .await
+        .expect("querying aliased column by field name should succeed")
+        .expect("seeded aliased-column row should be present");
+
+    assert_eq!(loaded.id, 7);
+    assert_eq!(loaded.name, "Alice");
+
+    cleanup_aliased_column_test_state();
+}
+
 #[test]
 fn test_composite_primary_key_metadata_and_accessors() {
     let model = CompositePrimaryKeyModel {

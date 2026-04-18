@@ -27,6 +27,8 @@ pub(crate) struct BuildContext {
     pub(crate) should_gen_deserialize: bool,
     pub(crate) hidden_attrs: Vec<String>,
     pub(crate) translatable_fields: Vec<String>,
+    pub(crate) encrypted_fields: Vec<String>,
+    pub(crate) encrypted_column_names: Vec<String>,
     pub(crate) has_custom_languages: bool,
     pub(crate) allowed_languages: Vec<String>,
     pub(crate) has_custom_fallback: bool,
@@ -51,7 +53,6 @@ pub(crate) struct BuildContext {
     pub(crate) timestamps_enabled: bool,
     pub(crate) sync_column_attrs: Vec<TokenStream2>,
     pub(crate) insert_active_model_setters: Vec<TokenStream2>,
-    pub(crate) update_active_model_setters: Vec<TokenStream2>,
     pub(crate) relation_field_inits: Vec<TokenStream2>,
     pub(crate) relation_state_refreshes: Vec<TokenStream2>,
     pub(crate) internal_entity_mod: Ident,
@@ -70,7 +71,7 @@ pub(crate) struct BuildContext {
     pub(crate) unique_index_impls: Vec<TokenStream2>,
     pub(crate) tokenize_enabled: bool,
     pub(crate) relation_fields: Vec<ModelField>,
-    db_fields: Vec<ModelField>,
+    pub(crate) db_fields: Vec<ModelField>,
 }
 
 impl BuildContext {
@@ -101,6 +102,7 @@ impl BuildContext {
         let hidden_attrs =
             split_csv(input.hidden.as_ref()).unwrap_or_else(|| vec!["deleted_at".to_string()]);
         let translatable_fields = split_csv(input.translatable.as_ref()).unwrap_or_default();
+        let encrypted = split_csv(input.encrypted.as_ref()).unwrap_or_default();
         let has_custom_languages = input.languages.is_some();
         let allowed_languages = split_csv(input.languages.as_ref()).unwrap_or_default();
         let has_custom_fallback = input.fallback_language.is_some();
@@ -132,6 +134,17 @@ impl BuildContext {
 
         validate_primary_key_fields(&db_fields, input.tokenize)?;
         validate_relation_fields(&relation_fields)?;
+
+        let resolved_encrypted_fields = resolve_encrypted_fields(&db_fields, &encrypted)?;
+        let encrypted_fields = resolved_encrypted_fields
+            .iter()
+            .filter_map(|field| field.ident.as_ref())
+            .map(ToString::to_string)
+            .collect();
+        let encrypted_column_names = resolved_encrypted_fields
+            .iter()
+            .map(|field| Self::column_name(field))
+            .collect();
 
         let validation_rules = db_fields
             .iter()
@@ -245,7 +258,6 @@ impl BuildContext {
         let timestamps_enabled = input.timestamps || has_timestamp_pair(&db_fields);
         let sync_column_attrs = build_sync_column_attrs(&db_fields);
         let insert_active_model_setters = build_insert_active_model_setters(&db_fields);
-        let update_active_model_setters = build_update_active_model_setters(&db_fields);
         let internal_entity_mod =
             format_ident!("__tideorm_internal_{}", struct_name_str.to_lowercase());
         let sea_orm_field_defs = build_sea_orm_field_defs(&db_fields);
@@ -287,6 +299,8 @@ impl BuildContext {
             should_gen_deserialize,
             hidden_attrs,
             translatable_fields,
+            encrypted_fields,
+            encrypted_column_names,
             has_custom_languages,
             allowed_languages,
             has_custom_fallback,
@@ -311,7 +325,6 @@ impl BuildContext {
             timestamps_enabled,
             sync_column_attrs,
             insert_active_model_setters,
-            update_active_model_setters,
             relation_field_inits: Vec::new(),
             relation_state_refreshes: Vec::new(),
             internal_entity_mod,
@@ -411,7 +424,7 @@ impl BuildContext {
         }
     }
 
-    fn column_name(field: &ModelField) -> String {
+    pub(crate) fn column_name(field: &ModelField) -> String {
         field.column.clone().unwrap_or_else(|| {
             field
                 .ident

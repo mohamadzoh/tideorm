@@ -43,7 +43,7 @@ impl Database {
             let model =
                 <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
                     .map_err(|e| Error::query(e.to_string()))?;
-            models.push(T::from_entity_model(model));
+            models.push(T::try_from_entity_model(model)?);
         }
 
         Ok(models)
@@ -89,7 +89,7 @@ impl Database {
             let model =
                 <T::Entity as crate::internal::EntityTrait>::Model::from_query_result(&row, "")
                     .map_err(|e| Error::query(e.to_string()))?;
-            models.push(T::from_entity_model(model));
+            models.push(T::try_from_entity_model(model)?);
         }
 
         Ok(models)

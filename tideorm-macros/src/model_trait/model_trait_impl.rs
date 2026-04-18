@@ -46,7 +46,9 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                Ok(result.map(|model| <Self as InternalModel>::from_entity_model(model)))
+                result
+                    .map(<Self as InternalModel>::try_from_entity_model)
+                    .transpose()
             }
 
             async fn find_with(
@@ -80,7 +82,9 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                Ok(result.map(|model| <Self as InternalModel>::from_entity_model(model)))
+                result
+                    .map(<Self as InternalModel>::try_from_entity_model)
+                    .transpose()
             }
 
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
@@ -140,7 +144,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&mut model).run_before_save()?;
                 (&mut model).run_before_create_only()?;
                 let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
-                let active = <Self as InternalModel>::into_active_model(model);
+                let active = <Self as InternalModel>::try_into_active_model(model)?;
                 let result = ::tideorm::profiling::__profile_future(
                     async move {
                         let connection = ::tideorm::database::__current_connection()
@@ -154,7 +158,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                let model = <Self as InternalModel>::from_entity_model(result);
+                let model = <Self as InternalModel>::try_from_entity_model(result)?;
                 ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_create()?;
                 Ok(model)
@@ -227,7 +231,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let primary_key = model.primary_key();
                 let error_context = Self::__primary_key_error_context(&primary_key)
                     .query(format!("update where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));
-                let active = model.__into_update_active_model();
+                let active = model.__into_update_active_model()?;
                 let result = ::tideorm::profiling::__profile_future(
                     async move {
                         let connection = ::tideorm::database::__current_connection()
@@ -241,7 +245,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .await
                     .map_err(::tideorm::Error::from)
                     .map_err(|err| err.with_context(error_context))?;
-                let model = <Self as InternalModel>::from_entity_model(result);
+                let model = <Self as InternalModel>::try_from_entity_model(result)?;
                 ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_update()?;
                 Ok(model)
@@ -325,11 +329,11 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 );
                 let error_context = Self::__base_error_context().query(sql.clone());
 
-                let entity_model = model.to_entity_model();
+                let entity_model = <Self as InternalModel>::try_to_entity_model(&model)?;
                 let active_model = if include_pk {
                     entity_model.into_active_model()
                 } else {
-                    <Self as InternalModel>::into_active_model(model)
+                    <Self as InternalModel>::try_into_active_model(model)?
                 };
 
                 ::tideorm::profiling::__profile_future(async move {

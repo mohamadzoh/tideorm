@@ -69,6 +69,19 @@ struct PresenterSerializationModel {
     title: String,
 }
 
+#[tideorm::model(
+    table = "model_test_encrypted_contacts",
+    encrypted = "customer_phone_number, backup_phone"
+)]
+struct EncryptedFieldModel {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    #[tideorm(column = "customer_phone_number")]
+    phone_number: String,
+    backup_phone: Option<String>,
+}
+
 #[tideorm::model(table = "model_test_custom_pk_column")]
 struct CustomPrimaryKeyColumnModel {
     #[tideorm(primary_key, column = "user_id")]
@@ -237,6 +250,9 @@ mod basic_model_tests;
 
 #[path = "model_tests/cache_tests.rs"]
 mod cache_tests;
+
+#[path = "model_tests/encrypted_field_tests.rs"]
+mod encrypted_field_tests;
 
 #[cfg(feature = "dirty-tracking")]
 #[path = "model_tests/dirty_tracking_tests.rs"]

@@ -54,6 +54,7 @@
 //! - The same record may produce different valid tokens with the default encoder
 
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -92,10 +93,10 @@ static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::
 /// Global token decoder override
 static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::new();
 
-#[derive(Clone)]
 struct ConfiguredEncryptionKey {
     raw: String,
     derived: [u8; 32],
+    scoped_derived: RwLock<HashMap<String, [u8; 32]>>,
 }
 
 impl ConfiguredEncryptionKey {
@@ -103,7 +104,23 @@ impl ConfiguredEncryptionKey {
         Self {
             raw: raw.to_string(),
             derived: derive_encryption_key(raw),
+            scoped_derived: RwLock::new(HashMap::new()),
         }
+    }
+
+    fn derived_field_key(&self, table_name: &str, column_name: &str) -> [u8; 32] {
+        let scope_cache_key = format!("{}\0{}", table_name, column_name);
+
+        if let Some(derived) = self.scoped_derived.read().get(&scope_cache_key).copied() {
+            return derived;
+        }
+
+        let derived = derive_scoped_encryption_key(&self.derived, table_name, column_name);
+        self.scoped_derived
+            .write()
+            .entry(scope_cache_key)
+            .or_insert(derived);
+        derived
     }
 }
 
@@ -117,6 +134,11 @@ fn global_token_encoder_state() -> &'static RwLock<Option<TokenEncoder>> {
 
 fn global_token_decoder_state() -> &'static RwLock<Option<TokenDecoder>> {
     GLOBAL_TOKEN_DECODER.get_or_init(|| RwLock::new(None))
+}
+
+fn with_current_encryption_key<T>(read: impl FnOnce(&ConfiguredEncryptionKey) -> T) -> Option<T> {
+    let state = global_encryption_key_state().read();
+    state.as_ref().map(read)
 }
 
 // =============================================================================
@@ -139,24 +161,26 @@ impl TokenConfig {
     ///
     /// Fails when no global key has been configured yet.
     pub fn get_encryption_key() -> Result<String> {
-        Self::current_encryption_key()
-            .map(|configured| configured.raw)
+        with_current_encryption_key(|configured| configured.raw.clone())
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
     pub(crate) fn get_derived_encryption_key() -> Result<[u8; 32]> {
-        Self::current_encryption_key()
-            .map(|configured| configured.derived)
+        with_current_encryption_key(|configured| configured.derived)
+            .ok_or_else(|| Error::tokenization("No encryption key configured"))
+    }
+
+    pub(crate) fn get_derived_encryption_key_for_field(
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<[u8; 32]> {
+        with_current_encryption_key(|configured| configured.derived_field_key(table_name, column_name))
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
     /// Return whether a global encryption key is currently configured.
     pub fn has_encryption_key() -> bool {
         global_encryption_key_state().read().is_some()
-    }
-
-    fn current_encryption_key() -> Option<ConfiguredEncryptionKey> {
-        global_encryption_key_state().read().clone()
     }
 
     /// Set a global token encoder override.
@@ -207,16 +231,38 @@ impl TokenConfig {
 // ENCRYPTION UTILITIES
 // =============================================================================
 
-pub(crate) fn derive_encryption_key(key: &str) -> [u8; 32] {
-    const DERIVED_KEY_LEN: usize = 32;
-    const TOKENIZATION_KDF_SALT: &[u8] = b"tideorm::xchacha20poly1305-key::v2";
+const DERIVED_ENCRYPTION_KEY_LEN: usize = 32;
+const TOKENIZATION_KDF_SALT: &[u8] = b"tideorm::xchacha20poly1305-key::v2";
+const ENCRYPTED_FIELD_SCOPE_SALT_PREFIX: &[u8] =
+    b"tideorm::xchacha20poly1305-field-key::v1::";
 
-    let params = Params::new(64 * 1024, 3, 1, Some(DERIVED_KEY_LEN))
+pub(crate) fn derive_encryption_key(key: &str) -> [u8; 32] {
+    derive_key_with_salt(key.as_bytes(), TOKENIZATION_KDF_SALT)
+}
+
+fn derive_scoped_encryption_key(
+    master_key: &[u8; 32],
+    table_name: &str,
+    column_name: &str,
+) -> [u8; 32] {
+    let mut salt = Vec::with_capacity(
+        ENCRYPTED_FIELD_SCOPE_SALT_PREFIX.len() + table_name.len() + column_name.len() + 1,
+    );
+    salt.extend_from_slice(ENCRYPTED_FIELD_SCOPE_SALT_PREFIX);
+    salt.extend_from_slice(table_name.as_bytes());
+    salt.push(0);
+    salt.extend_from_slice(column_name.as_bytes());
+
+    derive_key_with_salt(master_key, &salt)
+}
+
+fn derive_key_with_salt(secret: &[u8], salt: &[u8]) -> [u8; 32] {
+    let params = Params::new(64 * 1024, 3, 1, Some(DERIVED_ENCRYPTION_KEY_LEN))
         .expect("argon2 params for tokenization key derivation should be valid");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut derived = [0u8; DERIVED_KEY_LEN];
+    let mut derived = [0u8; DERIVED_ENCRYPTION_KEY_LEN];
     argon2
-        .hash_password_into(key.as_bytes(), TOKENIZATION_KDF_SALT, &mut derived)
+        .hash_password_into(secret, salt, &mut derived)
         .expect("argon2 key derivation should succeed with static parameters");
     derived
 }

@@ -21,8 +21,8 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
 
                 let entity_models: Vec<_> = models
                     .iter()
-                    .map(|entry| entry.model.to_entity_model())
-                    .collect();
+                    .map(|entry| entry.model.try_to_entity_model())
+                    .collect::<::tideorm::Result<Vec<_>>>()?;
                 let connection = ::tideorm::database::__current_connection()?;
 
                 for relation_name in relation_tree.roots() {
@@ -70,8 +70,8 @@ fn build_eager_relation_arms(ctx: &BuildContext) -> Vec<TokenStream2> {
                         for (entry, related_models) in models.iter_mut().zip(loaded.into_iter()) {
                             let mut related_models: Vec<#related_ty> = related_models
                                 .into_iter()
-                                .map(<#related_ty as ::tideorm::internal::InternalModel>::from_entity_model)
-                                .collect();
+                                .map(<#related_ty as ::tideorm::internal::InternalModel>::try_from_entity_model)
+                                .collect::<::tideorm::Result<Vec<_>>>()?;
 
                             if let Some(nested_tree) = nested {
                                 let mut wrapped_related: Vec<::tideorm::relations::WithRelations<#related_ty>> = related_models
@@ -112,7 +112,7 @@ fn build_eager_relation_arms(ctx: &BuildContext) -> Vec<TokenStream2> {
                         for (entry, related_model) in models.iter_mut().zip(loaded.into_iter()) {
                             let related_model = match related_model {
                                 Some(model) => {
-                                    let model = <#related_ty as ::tideorm::internal::InternalModel>::from_entity_model(model);
+                                    let model = <#related_ty as ::tideorm::internal::InternalModel>::try_from_entity_model(model)?;
                                     if let Some(nested_tree) = nested {
                                         let mut wrapped_related = vec![::tideorm::relations::WithRelations::new(model)];
                                         <#related_ty as ::tideorm::relations::EagerLoadModel>::__eager_load(

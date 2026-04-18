@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.14] - 2026-04-18
+
+### Added
+
+- Added model-level encrypted persisted fields through `#[tideorm::model(encrypted = "...")]`, automatically encrypting configured `String` and `Option<String>` columns on writes while decrypting them on model loads, eager loads, raw model hydration, nested saves, and batch updates.
+
+### Changed
+
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, macro-crate README, and release-facing issue-template examples to use `0.9.14`.
+- Documented the current encrypted-field behavior and limitation that plaintext query predicates on encrypted columns are not yet transparently rewritten.
+
+### Fixed
+
+- Fixed generated SeaORM column and primary-key enum metadata for aliased TideORM fields so SQL uses the configured database column names instead of Rust field names.
+- Fixed string-based query validation, SQL rendering, and batch-update column quoting so aliased fields work consistently when callers use either the Rust field name or the database column name.
+- Scoped model-level encrypted fields to per-attribute keys derived from the configured secret plus the model table and column name, and tightened loads to reject plaintext rows or older global-scope encrypted payloads.
+
+### Internal
+
+- Added focused regression coverage for encrypted-field metadata, encrypted write/read flows, aliased-field query filters, and aliased batch updates.
+- Verified the release prep with `cargo test --workspace --all-features --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.14` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.13] - 2026-04-05
 
 ### Added
@@ -880,7 +903,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.13...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.14...HEAD
+[0.9.14]: https://github.com/mohamadzoh/tideorm/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/mohamadzoh/tideorm/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mohamadzoh/tideorm/compare/v0.9.11...v0.9.12
 [0.9.11]: https://github.com/mohamadzoh/tideorm/compare/v0.9.10...v0.9.11

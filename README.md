@@ -23,6 +23,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles
 - **Optional Modules** - Attachments, translations, and full-text search are available behind feature flags
+- **Field Encryption** - Model-level encrypted columns automatically encrypt on write and decrypt on load using TideORM's configured encryption key
 - **Tokenization** - Secure record ID encoding/decoding helpers
 
 ## Quick Start
@@ -128,33 +129,70 @@ For tests and reconfiguration-heavy workflows, TideORM's global state is resetta
 
 For aggregate workflows with an explicit persistence context, enable the `entity-manager` feature and see [docs/entity-manager.md](docs/entity-manager.md).
 
+## Encrypted Fields
+
+Use model-level encrypted fields when you want selected persisted columns, such as phone numbers or other sensitive strings, to be stored encrypted in the database while remaining plain `String` or `Option<String>` values in Rust.
+
+```rust
+use tideorm::prelude::*;
+
+#[tideorm::model(
+    table = "customers",
+    encrypted = "customer_phone_number, backup_phone"
+)]
+pub struct Customer {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    #[tideorm(column = "customer_phone_number")]
+    pub phone_number: String,
+    pub backup_phone: Option<String>,
+}
+
+TideConfig::init()
+    .database("sqlite://./app.db")
+    .encryption_key("replace-with-a-long-random-secret")
+    .connect()
+    .await?;
+```
+
+Encrypted field notes:
+
+- `encrypted = "..."` is separate from `#[tideorm(tokenize)]`; it uses the same configured encryption key and crypto primitives, but it protects normal model columns instead of record IDs.
+- Each encrypted field uses a scoped key derived from the configured encryption secret plus the model table and column name, so ciphertext from one attribute does not decrypt under another attribute's context.
+- TideORM encrypts these fields before `create()`, `save()`, `update()`, `insert_all()`, nested saves, and batch `update_all().set(...)` writes.
+- TideORM decrypts these fields automatically when loading models through normal queries, eager loads, and raw model hydration.
+- Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
+- Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
+- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`.
+
 ## Installation
 
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.13", features = ["postgres"] }
+tideorm = { version = "0.9.14", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.13", features = ["mysql"] }
+tideorm = { version = "0.9.14", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.13", features = ["sqlite"] }
+tideorm = { version = "0.9.14", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.13", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.14", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.13", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.14", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.13", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.14", features = ["postgres", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.9.13", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.9.14", features = ["postgres", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.9.13", features = ["postgres", "dirty-tracking"] }
+tideorm = { version = "0.9.14", features = ["postgres", "dirty-tracking"] }
 ```
 
 ### Feature Flags

@@ -79,6 +79,7 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | `#[tideorm(skip_default)]` | Skip auto-generated Default impl only |
 | `#[tideorm(skip_serialize)]` | Skip auto-generated Serialize impl only |
 | `#[tideorm(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
+| `#[tideorm(encrypted = "field_a,field_b")]` | Encrypt selected persisted string columns on write and decrypt them on load |
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
@@ -93,6 +94,38 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | `#[tideorm(column = "name")]` | Custom column name |
 | `#[tideorm(default = "value")]` | Default value |
 | `#[tideorm(skip)]` | Skip field in queries |
+
+---
+
+### Encrypted Fields
+
+Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
+
+```rust
+#[tideorm::model(
+    table = "customers",
+    encrypted = "customer_phone_number, backup_phone"
+)]
+pub struct Customer {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    #[tideorm(column = "customer_phone_number")]
+    pub phone_number: String,
+    pub backup_phone: Option<String>,
+}
+```
+
+Encrypted field behavior:
+
+- TideORM encrypts these fields before `create()`, `save()`, `update()`, `insert_all()`, nested saves, and batch `update_all().set(...)` writes.
+- TideORM decrypts them automatically on `find()`, query-builder reads, eager loads, and raw model hydration.
+- This feature is separate from `#[tideorm(tokenize)]`. It uses the same configured encryption key, but it protects regular columns rather than primary-key tokens.
+- Each encrypted field uses a scoped key derived from the configured encryption secret plus the model table and column name, so ciphertext from one attribute does not decrypt under another attribute's context.
+- Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
+- Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
+- Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
+- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`.
 
 ---
 

@@ -165,6 +165,52 @@ fn field_level_timestamp_attribute_is_rejected() {
 }
 
 #[test]
+fn encrypted_fields_accept_field_and_column_names_and_canonicalize_metadata() {
+    let input: DeriveInput = parse_quote! {
+        #[tideorm(encrypted = "customer_phone_number, backup_phone")]
+        struct Customer {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "customer_phone_number")]
+            phone_number: String,
+            backup_phone: Option<String>,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let ctx = BuildContext::new(&model_input, vec![], vec![], &existing_derives)
+        .expect("build context should be constructed");
+
+    assert_eq!(ctx.encrypted_fields, vec!["phone_number", "backup_phone"]);
+    assert_eq!(
+        ctx.encrypted_column_names,
+        vec!["customer_phone_number", "backup_phone"]
+    );
+}
+
+#[test]
+fn encrypted_fields_reject_non_string_storage_types() {
+    let input: DeriveInput = parse_quote! {
+        #[tideorm(encrypted = "age")]
+        struct Customer {
+            #[tideorm(primary_key)]
+            id: i64,
+            age: i64,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let error = match BuildContext::new(&model_input, vec![], vec![], &existing_derives) {
+        Ok(_) => panic!("encrypted non-string fields should be rejected"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(error.contains("#[tideorm(encrypted = ...)] only supports String/Text fields"));
+}
+
+#[test]
 fn deserialize_impl_requires_missing_non_optional_fields() {
     let input: DeriveInput = parse_quote! {
         struct User {

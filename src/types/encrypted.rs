@@ -15,7 +15,7 @@ pub struct Encrypted<T> {
 }
 
 const ENCRYPTED_PAYLOAD_AAD: &[u8] = b"tideorm:encrypted-field:v1";
-const ENCRYPTED_PAYLOAD_PREFIX: &str = "enc::";
+pub(crate) const ENCRYPTED_PAYLOAD_PREFIX: &str = "enc::";
 
 impl<T> Encrypted<T> {
     /// Create a new encrypted value
@@ -52,8 +52,8 @@ impl<T: Serialize> Serialize for Encrypted<T> {
     where
         S: serde::Serializer,
     {
-        let plaintext = serde_json::to_vec(&self.value).map_err(serde::ser::Error::custom)?;
-        let encoded = encrypt_encrypted_payload(&plaintext).map_err(serde::ser::Error::custom)?;
+        let json = serde_json::to_value(&self.value).map_err(serde::ser::Error::custom)?;
+        let encoded = encrypt_json_value(&json).map_err(serde::ser::Error::custom)?;
         serializer.serialize_str(&encoded)
     }
 }
@@ -67,11 +67,8 @@ where
         D: serde::Deserializer<'de>,
     {
         let text = String::deserialize(deserializer)?;
-        let ciphertext = text.strip_prefix(ENCRYPTED_PAYLOAD_PREFIX).ok_or_else(|| {
-            serde::de::Error::custom("Encrypted fields must use the encrypted payload format")
-        })?;
-        let plaintext = decrypt_encrypted_payload(ciphertext).map_err(serde::de::Error::custom)?;
-        let value = serde_json::from_slice(&plaintext).map_err(serde::de::Error::custom)?;
+        let value = decrypt_json_value(&text).map_err(serde::de::Error::custom)?;
+        let value = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
         Ok(Self { value })
     }
 }
@@ -97,15 +94,69 @@ pub(crate) fn encrypted_field_missing_key_error(operation: &str) -> crate::Error
     ))
 }
 
-fn encrypted_field_encryption_key(operation: &str) -> crate::error::Result<String> {
-    crate::tokenization::TokenConfig::get_encryption_key()
-        .map_err(|_| encrypted_field_missing_key_error(operation))
+pub(crate) fn encrypt_json_value(value: &serde_json::Value) -> crate::error::Result<String> {
+    let plaintext = serde_json::to_vec(value).map_err(crate::Error::from)?;
+    encrypt_encrypted_payload(&plaintext)
 }
 
-fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
-    let _ = encrypted_field_encryption_key("serialization")?;
+pub(crate) fn encrypt_json_value_for_attribute(
+    value: &serde_json::Value,
+    table_name: &str,
+    column_name: &str,
+) -> crate::error::Result<String> {
+    let plaintext = serde_json::to_vec(value).map_err(crate::Error::from)?;
+    encrypt_encrypted_payload_for_attribute(&plaintext, table_name, column_name)
+}
+
+pub(crate) fn decrypt_json_value(text: &str) -> crate::error::Result<serde_json::Value> {
+    let ciphertext = encrypted_payload_body(text)?;
+    let plaintext = decrypt_encrypted_payload(ciphertext)?;
+    serde_json::from_slice(&plaintext).map_err(crate::Error::from)
+}
+
+pub(crate) fn decrypt_json_value_for_attribute(
+    text: &str,
+    table_name: &str,
+    column_name: &str,
+) -> crate::error::Result<serde_json::Value> {
+    let ciphertext = encrypted_payload_body(text)?;
+    let plaintext = decrypt_encrypted_payload_for_attribute(ciphertext, table_name, column_name)?;
+    serde_json::from_slice(&plaintext).map_err(crate::Error::from)
+}
+
+pub(crate) fn is_encrypted_json_value(text: &str) -> bool {
+    text.starts_with(ENCRYPTED_PAYLOAD_PREFIX)
+}
+
+fn encrypted_payload_body(text: &str) -> crate::error::Result<&str> {
+    text.strip_prefix(ENCRYPTED_PAYLOAD_PREFIX).ok_or_else(|| {
+        crate::Error::tokenization("Encrypted fields must use the encrypted payload format")
+    })
+}
+
+pub(crate) fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
     let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key()
         .map_err(|_| encrypted_field_missing_key_error("serialization"))?;
+    encrypt_encrypted_payload_with_key(plaintext, derived_key)
+}
+
+pub(crate) fn encrypt_encrypted_payload_for_attribute(
+    plaintext: &[u8],
+    table_name: &str,
+    column_name: &str,
+) -> crate::error::Result<String> {
+    let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key_for_field(
+        table_name,
+        column_name,
+    )
+    .map_err(|_| encrypted_field_missing_key_error("serialization"))?;
+    encrypt_encrypted_payload_with_key(plaintext, derived_key)
+}
+
+fn encrypt_encrypted_payload_with_key(
+    plaintext: &[u8],
+    derived_key: [u8; 32],
+) -> crate::error::Result<String> {
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
     let nonce_bytes: [u8; 24] = random();
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -131,10 +182,29 @@ fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Result<String> {
     ))
 }
 
-fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
-    let _ = encrypted_field_encryption_key("deserialization")?;
+pub(crate) fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<Vec<u8>> {
     let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key()
         .map_err(|_| encrypted_field_missing_key_error("deserialization"))?;
+    decrypt_encrypted_payload_with_key(encoded, derived_key)
+}
+
+pub(crate) fn decrypt_encrypted_payload_for_attribute(
+    encoded: &str,
+    table_name: &str,
+    column_name: &str,
+) -> crate::error::Result<Vec<u8>> {
+    let derived_key = crate::tokenization::TokenConfig::get_derived_encryption_key_for_field(
+        table_name,
+        column_name,
+    )
+    .map_err(|_| encrypted_field_missing_key_error("deserialization"))?;
+    decrypt_encrypted_payload_with_key(encoded, derived_key)
+}
+
+fn decrypt_encrypted_payload_with_key(
+    encoded: &str,
+    derived_key: [u8; 32],
+) -> crate::error::Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new((&derived_key).into());
     let payload = crate::tokenization::base64_url_decode(encoded)
         .ok_or_else(|| crate::Error::tokenization("Invalid encrypted field payload"))?;

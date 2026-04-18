@@ -1,5 +1,7 @@
 use super::*;
 
+use std::collections::HashSet;
+
 pub(super) fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
     value.map(|value| {
         value
@@ -138,6 +140,87 @@ pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()>
     Ok(())
 }
 
+pub(super) fn resolve_encrypted_fields<'a>(
+    fields: &'a [ModelField],
+    requested: &[String],
+) -> syn::Result<Vec<&'a ModelField>> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for requested_name in requested {
+        let field = fields
+            .iter()
+            .find(|field| {
+                let Some(ident) = field.ident.as_ref() else {
+                    return false;
+                };
+
+                ident == requested_name || BuildContext::column_name(field) == *requested_name
+            })
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "#[tideorm(encrypted = ...)] references unknown field or column '{}'",
+                        requested_name
+                    ),
+                )
+            })?;
+
+        validate_encrypted_field_type(field)?;
+
+        let canonical_field_name = field
+            .ident
+            .as_ref()
+            .expect("database fields must have identifiers")
+            .to_string();
+        if seen.insert(canonical_field_name) {
+            resolved.push(field);
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn validate_encrypted_field_type(field: &ModelField) -> syn::Result<()> {
+    let ty = normalized_type_name(&field.ty);
+    if is_supported_encrypted_field_type(&ty) {
+        return Ok(());
+    }
+
+    Err(syn::Error::new_spanned(
+        &field.ty,
+        "#[tideorm(encrypted = ...)] only supports String/Text fields and Option<String>/Option<Text> fields",
+    ))
+}
+
+fn normalized_type_name(ty: &Type) -> String {
+    quote!(#ty).to_string().chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn is_supported_encrypted_field_type(ty: &str) -> bool {
+    let inner = ty
+        .strip_prefix("Option<")
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(ty);
+
+    matches_string_like_type(inner)
+}
+
+fn matches_string_like_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "String"
+            | "std::string::String"
+            | "::std::string::String"
+            | "alloc::string::String"
+            | "::alloc::string::String"
+            | "Text"
+            | "::tideorm::types::Text"
+            | "tideorm::types::Text"
+    ) || ty.ends_with("::String") || ty.ends_with("::Text")
+}
+
 pub(super) fn has_timestamp_pair(fields: &[ModelField]) -> bool {
     let has_created_at = fields
         .iter()
@@ -187,22 +270,6 @@ pub(super) fn build_insert_active_model_setters(fields: &[ModelField]) -> Vec<To
             } else if matches_timestamp_field(field, "created_at")
                 || matches_timestamp_field(field, "updated_at")
             {
-                quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
-            } else {
-                quote!(#ident: ActiveValue::Set(self.#ident))
-            }
-        })
-        .collect()
-}
-
-pub(super) fn build_update_active_model_setters(fields: &[ModelField]) -> Vec<TokenStream2> {
-    fields
-        .iter()
-        .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
-        .map(|(field, ident)| {
-            if field.primary_key {
-                quote!(#ident: ActiveValue::Unchanged(self.#ident))
-            } else if matches_timestamp_field(field, "updated_at") {
                 quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
             } else {
                 quote!(#ident: ActiveValue::Set(self.#ident))

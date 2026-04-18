@@ -189,8 +189,11 @@ where
         .collect();
     let active_models: Vec<_> = related
         .into_iter()
-        .map(|model| model.to_entity_model().into_active_model())
-        .collect();
+        .map(|model| {
+            <R as InternalModel>::try_to_entity_model(&model)
+                .map(|entity_model| entity_model.into_active_model())
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let on_conflict = if update_columns.is_empty() {
         OnConflict::columns(pk_columns.iter().cloned())

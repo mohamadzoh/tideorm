@@ -85,11 +85,29 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     /// Convert a TideORM model to the ORM engine's active model.
     fn into_active_model(self) -> Self::ActiveModel;
 
+    /// Convert a TideORM model to the ORM engine's active model and allow
+    /// model-level preprocessing such as encrypted field writes.
+    fn try_into_active_model(self) -> Result<Self::ActiveModel> {
+        Ok(self.into_active_model())
+    }
+
     /// Convert the generated entity model to a TideORM model.
     fn from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
 
+    /// Convert the generated entity model to a TideORM model and allow
+    /// model-level postprocessing such as encrypted field reads.
+    fn try_from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Result<Self> {
+        Ok(Self::from_entity_model(model))
+    }
+
     /// Convert a TideORM model into its generated entity model.
     fn to_entity_model(&self) -> <Self::Entity as EntityTrait>::Model;
+
+    /// Convert a TideORM model into its generated entity model and allow
+    /// model-level preprocessing such as encrypted field writes.
+    fn try_to_entity_model(&self) -> Result<<Self::Entity as EntityTrait>::Model> {
+        Ok(self.to_entity_model())
+    }
 
     /// Resolve an entity column enum from either a field name or column name.
     fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column>;
@@ -256,7 +274,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("find_all()")))?;
 
-        Ok(results.into_iter().map(M::from_entity_model).collect())
+        results.into_iter().map(M::try_from_entity_model).collect()
     }
 
     /// Get first record
@@ -271,7 +289,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>("first()")))?;
 
-        Ok(result.map(M::from_entity_model))
+        result.map(M::try_from_entity_model).transpose()
     }
 
     /// Get last record (by primary key descending)
@@ -299,7 +317,7 @@ impl QueryExecutor {
             .map_err(translate_error)
             .map_err(|err| err.with_context(model_error_context::<M>(query_label)))?;
 
-        Ok(result.map(M::from_entity_model))
+        result.map(M::try_from_entity_model).transpose()
     }
 
     /// Count records
@@ -372,7 +390,7 @@ impl QueryExecutor {
                 )))
             })?;
 
-        Ok(results.into_iter().map(M::from_entity_model).collect())
+        results.into_iter().map(M::try_from_entity_model).collect()
     }
 
     /// Delete a record
@@ -414,13 +432,13 @@ impl QueryExecutor {
 
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
-            let active = models.into_iter().next().unwrap().into_active_model();
+            let active = models.into_iter().next().unwrap().try_into_active_model()?;
             let result =
                 crate::profiling::__profile_future(async move { active.insert(conn).await })
                     .await
                     .map_err(translate_error)
                     .map_err(|err| err.with_context(error_context.clone()))?;
-            return Ok(vec![M::from_entity_model(result)]);
+            return Ok(vec![M::try_from_entity_model(result)?]);
         }
 
         // Check if we can use exec_with_returning (Postgres, MariaDB 10.5+).
@@ -434,7 +452,10 @@ impl QueryExecutor {
 
         if supports_returning {
             // Build batch insert using the ORM engine's insert_many with RETURNING
-            let active_models: Vec<_> = models.into_iter().map(|m| m.into_active_model()).collect();
+            let active_models: Vec<_> = models
+                .into_iter()
+                .map(M::try_into_active_model)
+                .collect::<Result<Vec<_>>>()?;
 
             let results = M::Entity::insert_many(active_models).exec_with_returning(conn);
             let results = crate::profiling::__profile_future(results)
@@ -442,19 +463,19 @@ impl QueryExecutor {
                 .map_err(translate_error)
                 .map_err(|err| err.with_context(error_context.clone()))?;
 
-            Ok(results.into_iter().map(M::from_entity_model).collect())
+            results.into_iter().map(M::try_from_entity_model).collect()
         } else {
             // MySQL/SQLite: fall back to individual inserts
             // MySQL doesn't support multi-row INSERT ... RETURNING
             let mut results = Vec::with_capacity(models.len());
             for model in models {
-                let active = model.into_active_model();
+                let active = model.try_into_active_model()?;
                 let result =
                     crate::profiling::__profile_future(async move { active.insert(conn).await })
                         .await
                         .map_err(translate_error)
                         .map_err(|err| err.with_context(error_context.clone()))?;
-                results.push(M::from_entity_model(result));
+                results.push(M::try_from_entity_model(result)?);
             }
             Ok(results)
         }

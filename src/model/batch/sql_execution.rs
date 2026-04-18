@@ -156,9 +156,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let mut set_parts = Vec::with_capacity(self.updates.len());
 
         for (column, value) in &self.updates {
+            let value = crate::model::__prepare_batch_update_value::<M>(column, value.clone())?;
             set_parts.push(Self::build_assignment_sql(
                 column,
-                value,
+                &value,
                 db_type,
                 &mut params,
             )?);

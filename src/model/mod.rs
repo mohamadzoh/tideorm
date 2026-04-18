@@ -17,6 +17,7 @@ mod builders;
 mod crud;
 #[cfg(feature = "dirty-tracking")]
 mod dirty_tracking;
+mod encryption;
 mod meta;
 mod nested;
 mod serialization;
@@ -26,6 +27,40 @@ pub use batch::{BatchUpdateBuilder, UpdateValue};
 pub use builders::{CreateBuilder, OnConflictBuilder, UpdateBuilder};
 pub use meta::{IndexDefinition, ModelMeta};
 pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
+
+#[doc(hidden)]
+pub fn __encrypt_model_field<T>(
+    value: T,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> crate::error::Result<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    encryption::encrypt_model_field(value, table_name, field_name, column_name)
+}
+
+#[doc(hidden)]
+pub fn __decrypt_model_field<T>(
+    value: T,
+    table_name: &str,
+    field_name: &str,
+    column_name: &str,
+) -> crate::error::Result<T>
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    encryption::decrypt_model_field(value, table_name, field_name, column_name)
+}
+
+#[doc(hidden)]
+pub fn __prepare_batch_update_value<M: ModelMeta>(
+    field_or_column: &str,
+    value: UpdateValue,
+) -> crate::error::Result<UpdateValue> {
+    encryption::prepare_batch_update_value::<M>(field_or_column, value)
+}
 
 // These wrappers stay available in all builds because macro-generated code may
 // expand into downstream crates, where TideORM dependency features are not

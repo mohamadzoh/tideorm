@@ -2,23 +2,37 @@ use super::*;
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
+    fn canonical_model_identifier<'a>(&self, identifier: &'a str) -> std::borrow::Cow<'a, str> {
+        match M::canonical_column_name(identifier) {
+            Some(column_name) => std::borrow::Cow::Borrowed(column_name),
+            None => std::borrow::Cow::Borrowed(identifier),
+        }
+    }
+
     pub(crate) fn format_column_for_db(&self, db_type: DatabaseType, column: &str) -> String {
         let trimmed = column.trim();
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
 
         match parts.as_slice() {
-            [identifier] => db_sql::format_column_or_trusted_expression(db_type, identifier),
+            [identifier] => db_sql::format_column_or_trusted_expression(
+                db_type,
+                self.canonical_model_identifier(identifier).as_ref(),
+            ),
             [identifier, direction]
                 if direction.eq_ignore_ascii_case("asc")
                     || direction.eq_ignore_ascii_case("desc") =>
             {
-                db_sql::format_identifier_reference(db_type, identifier)
+                db_sql::format_identifier_reference(
+                    db_type,
+                    self.canonical_model_identifier(identifier).as_ref(),
+                )
                     .map(|identifier| format!("{} {}", identifier, direction.to_ascii_uppercase()))
                     .unwrap_or_else(|| trimmed.to_string())
             }
             [identifier, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => {
+                let identifier = self.canonical_model_identifier(identifier);
                 match (
-                    db_sql::format_identifier_reference(db_type, identifier),
+                    db_sql::format_identifier_reference(db_type, identifier.as_ref()),
                     db_sql::format_identifier_reference(db_type, alias),
                 ) {
                     (Some(identifier), Some(alias)) => format!("{} AS {}", identifier, alias),
@@ -47,10 +61,11 @@ impl<M: Model> QueryBuilder<M> {
                 if identifier.contains('.') {
                     self.format_column_for_db(db_type, identifier)
                 } else {
+                    let identifier = self.canonical_model_identifier(identifier);
                     format!(
                         "{}.{}",
                         db_sql::quote_ident(db_type, table),
-                        db_sql::quote_ident(db_type, identifier)
+                        db_sql::quote_ident(db_type, identifier.as_ref())
                     )
                 }
             }
@@ -64,10 +79,11 @@ impl<M: Model> QueryBuilder<M> {
                 let identifier = if identifier.contains('.') {
                     self.format_column_for_db(db_type, identifier)
                 } else {
+                    let identifier = self.canonical_model_identifier(identifier);
                     format!(
                         "{}.{}",
                         db_sql::quote_ident(db_type, table),
-                        db_sql::quote_ident(db_type, identifier)
+                        db_sql::quote_ident(db_type, identifier.as_ref())
                     )
                 };
 

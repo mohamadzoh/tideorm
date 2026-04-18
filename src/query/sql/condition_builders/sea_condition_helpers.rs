@@ -87,8 +87,11 @@ impl<M: Model> QueryBuilder<M> {
             {
                 return Expr::col((Alias::new(table), Alias::new(field)));
             }
-        } else if db_sql::validate_identifier("column", column).is_ok() {
-            return Expr::col(Alias::new(column));
+        } else {
+            let column = M::canonical_column_name(column).unwrap_or(column);
+            if db_sql::validate_identifier("column", column).is_ok() {
+                return Expr::col(Alias::new(column));
+            }
         }
 
         Expr::cust(self.format_column_for_db(db_type, column))

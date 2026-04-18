@@ -21,15 +21,17 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let internal_entity_mod = &ctx.internal_entity_mod;
     let table_name = &ctx.table_name;
     let struct_name = &ctx.struct_name;
-    let pk_column_variants = &ctx.pk_column_variants;
+    let primary_key_enum_variants = build_primary_key_enum_variants(ctx);
     let pk_type = &ctx.pk_type;
     let pk_column_names = &ctx.pk_column_names;
     let pk_auto_increment = ctx.pk_auto_increment;
     let column_type_defs = &ctx.column_type_defs;
-    let column_variants = &ctx.column_variants;
+    let column_enum_variants = build_column_enum_variants(ctx);
     let sea_orm_field_defs = &ctx.sea_orm_field_defs;
     let hidden_attrs = &ctx.hidden_attrs;
     let translatable_fields = &ctx.translatable_fields;
+    let encrypted_fields = &ctx.encrypted_fields;
+    let encrypted_column_names = &ctx.encrypted_column_names;
     let has_one_files = &ctx.has_one_files;
     let has_many_files = &ctx.has_many_files;
     let searchable_fields = &ctx.searchable_fields;
@@ -100,12 +102,12 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
 
             #[derive(Copy, Clone, Debug, EnumIter, DeriveColumn)]
             pub enum Column {
-                #(#column_variants),*
+                #(#column_enum_variants),*
             }
 
             #[derive(Copy, Clone, Debug, EnumIter, DerivePrimaryKey)]
             pub enum PrimaryKey {
-                #(#pk_column_variants),*
+                #(#primary_key_enum_variants),*
             }
 
             impl PrimaryKeyTrait for PrimaryKey {
@@ -150,6 +152,8 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             fn hidden_attributes() -> Vec<&'static str> { vec![#(#hidden_attrs),*] }
             fn searchable_fields() -> Vec<&'static str> { vec![#(#searchable_fields),*] }
             fn translatable_fields() -> Vec<&'static str> { vec![#(#translatable_fields),*] }
+            fn encrypted_fields() -> Vec<&'static str> { vec![#(#encrypted_fields),*] }
+            fn encrypted_column_names() -> Vec<&'static str> { vec![#(#encrypted_column_names),*] }
             fn allowed_languages() -> Vec<String> { #allowed_languages_impl }
             fn fallback_language() -> String { #fallback_language_impl }
             fn has_one_attached_file() -> Vec<&'static str> { vec![#(#has_one_files),*] }
@@ -211,6 +215,32 @@ fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
         let (#(#bindings),*) = primary_key.clone();
         false #(|| __tideorm_is_default(&#bindings))*
     }
+}
+
+fn build_column_enum_variants(ctx: &BuildContext) -> Vec<TokenStream2> {
+    ctx.column_variants
+        .iter()
+        .zip(ctx.column_names.iter())
+        .map(|(variant, column_name)| {
+            quote! {
+                #[sea_orm(column_name = #column_name)]
+                #variant
+            }
+        })
+        .collect()
+}
+
+fn build_primary_key_enum_variants(ctx: &BuildContext) -> Vec<TokenStream2> {
+    ctx.pk_column_variants
+        .iter()
+        .zip(ctx.pk_column_names.iter())
+        .map(|(variant, column_name)| {
+            quote! {
+                #[sea_orm(column_name = #column_name)]
+                #variant
+            }
+        })
+        .collect()
 }
 
 fn build_relation_variants(ctx: &BuildContext) -> Vec<syn::Ident> {
