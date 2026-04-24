@@ -22,6 +22,15 @@ use model_trait_impl::generate_model_trait_impl;
 use soft_delete::generate_soft_delete_impl;
 
 pub(crate) fn generate_model_support(ctx: &BuildContext) -> TokenStream2 {
+    let encrypted_feature_assert = if ctx.encrypted_fields.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            const _: fn() = || {
+                ::tideorm::model::__assert_encrypted_fields_feature_enabled();
+            };
+        }
+    };
     let internal_model_impl = generate_internal_model_impl(ctx);
     let helper_methods_impl = generate_helper_methods_impl(ctx);
     let model_trait_impl = generate_model_trait_impl(ctx);
@@ -29,6 +38,7 @@ pub(crate) fn generate_model_support(ctx: &BuildContext) -> TokenStream2 {
     let eager_loader_impl = generate_eager_loader_impl(ctx);
     let entity_manager_support_impl = generate_entity_manager_support_impl(ctx);
     quote! {
+        #encrypted_feature_assert
         #internal_model_impl
         #helper_methods_impl
         #model_trait_impl

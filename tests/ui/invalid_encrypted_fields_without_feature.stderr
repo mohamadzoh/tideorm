@@ -1,0 +1,14 @@
+error[E0425]: cannot find function `__assert_encrypted_fields_feature_enabled` in module `::tideorm::model`
+ --> tests/ui/invalid_encrypted_fields_without_feature.rs:1:1
+  |
+1 | #[tideorm::model(table = "customers", encrypted = "phone_number")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not found in `::tideorm::model`
+  |
+note: found an item that was configured out
+ --> src/model/mod.rs
+  |
+  | #[cfg(feature = "encrypted-fields")]
+  |       ---------------------------- the item is gated behind the `encrypted-fields` feature
+  | pub const fn __assert_encrypted_fields_feature_enabled() {}
+  |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)

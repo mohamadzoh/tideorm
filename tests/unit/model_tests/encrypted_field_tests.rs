@@ -4,9 +4,7 @@ use crate::model::ModelMeta;
 
 fn init_encrypted_model_test_key() {
     crate::tokenization::TokenConfig::reset();
-    crate::tokenization::TokenConfig::set_encryption_key(
-        "encrypted-field-model-test-key-32chars",
-    );
+    crate::tokenization::TokenConfig::set_encryption_key("encrypted-field-model-test-key-32chars");
 }
 
 #[test]
@@ -41,7 +39,11 @@ fn encrypted_field_ciphertext_is_bound_to_table_and_column_context() {
         "backup_phone",
     )
     .expect_err("decrypting with the wrong column scope should fail");
-    assert!(wrong_column.to_string().contains("Failed to decrypt encrypted field"));
+    assert!(
+        wrong_column
+            .to_string()
+            .contains("Failed to decrypt encrypted field")
+    );
 
     let wrong_table = crate::model::__decrypt_model_field::<String>(
         ciphertext,
@@ -50,7 +52,11 @@ fn encrypted_field_ciphertext_is_bound_to_table_and_column_context() {
         "customer_phone_number",
     )
     .expect_err("decrypting with the wrong table scope should fail");
-    assert!(wrong_table.to_string().contains("Failed to decrypt encrypted field"));
+    assert!(
+        wrong_table
+            .to_string()
+            .contains("Failed to decrypt encrypted field")
+    );
 
     crate::tokenization::TokenConfig::reset();
 }
@@ -59,10 +65,8 @@ fn encrypted_field_ciphertext_is_bound_to_table_and_column_context() {
 fn encrypted_field_rejects_legacy_global_payloads() {
     init_encrypted_model_test_key();
 
-    let legacy_ciphertext = crate::types::__encrypt_json_value(&serde_json::json!(
-        "+15551234567"
-    ))
-    .expect("legacy encrypted payload should be produced");
+    let legacy_ciphertext = crate::types::__encrypt_json_value(&serde_json::json!("+15551234567"))
+        .expect("legacy encrypted payload should be produced");
 
     let error = crate::model::__decrypt_model_field::<String>(
         legacy_ciphertext,
@@ -72,7 +76,11 @@ fn encrypted_field_rejects_legacy_global_payloads() {
     )
     .expect_err("legacy global payloads should be rejected by the model helper");
 
-    assert!(error.to_string().contains("Failed to decrypt encrypted field"));
+    assert!(
+        error
+            .to_string()
+            .contains("Failed to decrypt encrypted field")
+    );
 
     crate::tokenization::TokenConfig::reset();
 }
@@ -138,8 +146,8 @@ async fn create_find_and_batch_update_auto_encrypt_and_decrypt_fields() {
     let stored_rows = Database::raw_json(
         "SELECT customer_phone_number, backup_phone FROM model_test_encrypted_contacts",
     )
-        .await
-        .expect("reading stored encrypted row should succeed");
+    .await
+    .expect("reading stored encrypted row should succeed");
     let stored_row = stored_rows
         .first()
         .and_then(serde_json::Value::as_object)
@@ -177,11 +185,10 @@ async fn create_find_and_batch_update_auto_encrypt_and_decrypt_fields() {
         .expect("reloading updated encrypted-field model should succeed");
     assert_eq!(updated.phone_number, "+15550000000");
 
-    let stored_rows = Database::raw_json(
-        "SELECT customer_phone_number FROM model_test_encrypted_contacts",
-    )
-        .await
-        .expect("reading updated encrypted row should succeed");
+    let stored_rows =
+        Database::raw_json("SELECT customer_phone_number FROM model_test_encrypted_contacts")
+            .await
+            .expect("reading updated encrypted row should succeed");
     let stored_phone = stored_rows
         .first()
         .and_then(serde_json::Value::as_object)
@@ -190,6 +197,50 @@ async fn create_find_and_batch_update_auto_encrypt_and_decrypt_fields() {
         .expect("updated encrypted phone should be a string");
     assert!(stored_phone.starts_with("enc::"));
     assert_ne!(stored_phone, "+15550000000");
+
+    let upserted = EncryptedFieldModel::insert_or_update(
+        EncryptedFieldModel {
+            id: updated.id,
+            name: "Encrypted Alice Upsert".to_string(),
+            phone_number: "+15551112222".to_string(),
+            backup_phone: Some("+15553334444".to_string()),
+        },
+        vec!["id"],
+    )
+    .await
+    .expect("upsert on encrypted-field model should succeed");
+    assert_eq!(upserted.phone_number, "+15551112222");
+    assert_eq!(upserted.backup_phone.as_deref(), Some("+15553334444"));
+
+    let stored_rows =
+        Database::raw_json("SELECT customer_phone_number FROM model_test_encrypted_contacts")
+            .await
+            .expect("reading upserted encrypted row should succeed");
+    let stored_phone = stored_rows
+        .first()
+        .and_then(serde_json::Value::as_object)
+        .and_then(|row| row.get("customer_phone_number"))
+        .and_then(serde_json::Value::as_str)
+        .expect("upserted encrypted phone should be stored as text");
+    assert!(stored_phone.starts_with("enc::"));
+    assert_ne!(stored_phone, "+15551112222");
+
+    let encrypted_conflict_error = EncryptedFieldModel::insert_or_update(
+        EncryptedFieldModel {
+            id: updated.id,
+            name: "Encrypted Alice Duplicate".to_string(),
+            phone_number: "+15551112222".to_string(),
+            backup_phone: None,
+        },
+        vec!["phone_number"],
+    )
+    .await
+    .expect_err("encrypted fields should not be usable as upsert conflict columns");
+    assert!(
+        encrypted_conflict_error
+            .to_string()
+            .contains("encrypted field 'phone_number' cannot be used")
+    );
 
     cleanup_encrypted_model_test_state();
 }
@@ -217,7 +268,9 @@ async fn load_rejects_plaintext_values_without_prefix() {
 
     cleanup_encrypted_model_test_state();
 
-    assert!(error
-        .to_string()
-        .contains("loaded plaintext data; expected a TideORM encrypted payload or null"));
+    assert!(
+        error
+            .to_string()
+            .contains("loaded plaintext data; expected a TideORM encrypted payload or null")
+    );
 }

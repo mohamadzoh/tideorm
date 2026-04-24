@@ -99,6 +99,7 @@ pub(crate) fn encrypt_json_value(value: &serde_json::Value) -> crate::error::Res
     encrypt_encrypted_payload(&plaintext)
 }
 
+#[cfg(feature = "encrypted-fields")]
 pub(crate) fn encrypt_json_value_for_attribute(
     value: &serde_json::Value,
     table_name: &str,
@@ -114,6 +115,7 @@ pub(crate) fn decrypt_json_value(text: &str) -> crate::error::Result<serde_json:
     serde_json::from_slice(&plaintext).map_err(crate::Error::from)
 }
 
+#[cfg(feature = "encrypted-fields")]
 pub(crate) fn decrypt_json_value_for_attribute(
     text: &str,
     table_name: &str,
@@ -124,6 +126,7 @@ pub(crate) fn decrypt_json_value_for_attribute(
     serde_json::from_slice(&plaintext).map_err(crate::Error::from)
 }
 
+#[cfg(feature = "encrypted-fields")]
 pub(crate) fn is_encrypted_json_value(text: &str) -> bool {
     text.starts_with(ENCRYPTED_PAYLOAD_PREFIX)
 }
@@ -140,6 +143,7 @@ pub(crate) fn encrypt_encrypted_payload(plaintext: &[u8]) -> crate::error::Resul
     encrypt_encrypted_payload_with_key(plaintext, derived_key)
 }
 
+#[cfg(feature = "encrypted-fields")]
 pub(crate) fn encrypt_encrypted_payload_for_attribute(
     plaintext: &[u8],
     table_name: &str,
@@ -188,6 +192,7 @@ pub(crate) fn decrypt_encrypted_payload(encoded: &str) -> crate::error::Result<V
     decrypt_encrypted_payload_with_key(encoded, derived_key)
 }
 
+#[cfg(feature = "encrypted-fields")]
 pub(crate) fn decrypt_encrypted_payload_for_attribute(
     encoded: &str,
     table_name: &str,

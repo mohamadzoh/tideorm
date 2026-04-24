@@ -25,8 +25,9 @@ where
         return Ok(value);
     }
 
-    let encrypted = crate::types::__encrypt_json_value_for_attribute(&json, table_name, column_name)
-        .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))?;
+    let encrypted =
+        crate::types::__encrypt_json_value_for_attribute(&json, table_name, column_name)
+            .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))?;
     serde_json::from_value(serde_json::Value::String(encrypted)).map_err(|error| {
         Error::configuration(format!(
             "Encrypted field '{}' must use String/Text storage or Option<String>/Option<Text>: {}",
@@ -60,12 +61,11 @@ where
                 return Err(unencrypted_field_data_error(field_name, column_name));
             }
 
-            let decrypted = crate::types::__decrypt_json_value_for_attribute(
-                &text,
-                table_name,
-                column_name,
-            )
-                .map_err(|error| annotate_crypto_error(error, "decrypt", field_name, column_name))?;
+            let decrypted =
+                crate::types::__decrypt_json_value_for_attribute(&text, table_name, column_name)
+                    .map_err(|error| {
+                        annotate_crypto_error(error, "decrypt", field_name, column_name)
+                    })?;
             serde_json::from_value(decrypted).map_err(|error| {
                 Error::conversion(format!(
                     "Failed to deserialize decrypted field '{}': {}",
@@ -109,46 +109,28 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
             field_name,
             column_name,
         )?)),
-        UpdateValue::UnsafeRaw(_) => unsupported_batch_operation(
-            "trusted raw SQL",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::Increment(_) => unsupported_batch_operation(
-            "increment",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::Decrement(_) => unsupported_batch_operation(
-            "decrement",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::Multiply(_) => unsupported_batch_operation(
-            "multiply",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::Divide(_) => unsupported_batch_operation(
-            "divide",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::ArrayAppend(_) => unsupported_batch_operation(
-            "array append",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::ArrayRemove(_) => unsupported_batch_operation(
-            "array remove",
-            field_name,
-            column_name,
-        ),
-        UpdateValue::JsonSet(_, _) => unsupported_batch_operation(
-            "json set",
-            field_name,
-            column_name,
-        ),
+        UpdateValue::UnsafeRaw(_) => {
+            unsupported_batch_operation("trusted raw SQL", field_name, column_name)
+        }
+        UpdateValue::Increment(_) => {
+            unsupported_batch_operation("increment", field_name, column_name)
+        }
+        UpdateValue::Decrement(_) => {
+            unsupported_batch_operation("decrement", field_name, column_name)
+        }
+        UpdateValue::Multiply(_) => {
+            unsupported_batch_operation("multiply", field_name, column_name)
+        }
+        UpdateValue::Divide(_) => unsupported_batch_operation("divide", field_name, column_name),
+        UpdateValue::ArrayAppend(_) => {
+            unsupported_batch_operation("array append", field_name, column_name)
+        }
+        UpdateValue::ArrayRemove(_) => {
+            unsupported_batch_operation("array remove", field_name, column_name)
+        }
+        UpdateValue::JsonSet(_, _) => {
+            unsupported_batch_operation("json set", field_name, column_name)
+        }
     }
 }
 
@@ -220,7 +202,9 @@ fn annotate_crypto_error(
         Error::Connection { .. } => Error::connection(message),
         Error::Transaction { .. } => Error::transaction(message),
         Error::NotFound { .. } => Error::query(message),
-        Error::BackendNotSupported { backend, .. } => Error::backend_not_supported(message, backend),
+        Error::BackendNotSupported { backend, .. } => {
+            Error::backend_not_supported(message, backend)
+        }
         Error::PrimaryKeyNotSet { model, .. } => Error::primary_key_not_set(message, model),
         Error::InsertReturningNotSupported { backend, .. } => {
             Error::insert_returning_not_supported(message, backend)

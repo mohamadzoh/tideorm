@@ -26,8 +26,8 @@ impl<M: Model> QueryBuilder<M> {
                     db_type,
                     self.canonical_model_identifier(identifier).as_ref(),
                 )
-                    .map(|identifier| format!("{} {}", identifier, direction.to_ascii_uppercase()))
-                    .unwrap_or_else(|| trimmed.to_string())
+                .map(|identifier| format!("{} {}", identifier, direction.to_ascii_uppercase()))
+                .unwrap_or_else(|| trimmed.to_string())
             }
             [identifier, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => {
                 let identifier = self.canonical_model_identifier(identifier);

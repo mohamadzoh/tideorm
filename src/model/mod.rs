@@ -17,6 +17,7 @@ mod builders;
 mod crud;
 #[cfg(feature = "dirty-tracking")]
 mod dirty_tracking;
+#[cfg(feature = "encrypted-fields")]
 mod encryption;
 mod meta;
 mod nested;
@@ -29,6 +30,10 @@ pub use meta::{IndexDefinition, ModelMeta};
 pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
 
 #[doc(hidden)]
+#[cfg(feature = "encrypted-fields")]
+pub const fn __assert_encrypted_fields_feature_enabled() {}
+
+#[doc(hidden)]
 pub fn __encrypt_model_field<T>(
     value: T,
     table_name: &str,
@@ -38,7 +43,18 @@ pub fn __encrypt_model_field<T>(
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    encryption::encrypt_model_field(value, table_name, field_name, column_name)
+    #[cfg(feature = "encrypted-fields")]
+    {
+        return encryption::encrypt_model_field(value, table_name, field_name, column_name);
+    }
+
+    #[cfg(not(feature = "encrypted-fields"))]
+    {
+        let _ = (value, table_name, field_name, column_name);
+        Err(crate::Error::configuration(
+            "Model auto-encryption requires the `encrypted-fields` feature. Enable it with `tideorm = { features = [\"encrypted-fields\"] }` before using #[tideorm(encrypted = ...)].",
+        ))
+    }
 }
 
 #[doc(hidden)]
@@ -51,7 +67,18 @@ pub fn __decrypt_model_field<T>(
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    encryption::decrypt_model_field(value, table_name, field_name, column_name)
+    #[cfg(feature = "encrypted-fields")]
+    {
+        return encryption::decrypt_model_field(value, table_name, field_name, column_name);
+    }
+
+    #[cfg(not(feature = "encrypted-fields"))]
+    {
+        let _ = (value, table_name, field_name, column_name);
+        Err(crate::Error::configuration(
+            "Model auto-encryption requires the `encrypted-fields` feature. Enable it with `tideorm = { features = [\"encrypted-fields\"] }` before using #[tideorm(encrypted = ...)].",
+        ))
+    }
 }
 
 #[doc(hidden)]
@@ -59,7 +86,22 @@ pub fn __prepare_batch_update_value<M: ModelMeta>(
     field_or_column: &str,
     value: UpdateValue,
 ) -> crate::error::Result<UpdateValue> {
-    encryption::prepare_batch_update_value::<M>(field_or_column, value)
+    #[cfg(feature = "encrypted-fields")]
+    {
+        return encryption::prepare_batch_update_value::<M>(field_or_column, value);
+    }
+
+    #[cfg(not(feature = "encrypted-fields"))]
+    {
+        if M::has_encrypted_fields() {
+            return Err(crate::Error::configuration(
+                "Model auto-encryption requires the `encrypted-fields` feature. Enable it with `tideorm = { features = [\"encrypted-fields\"] }` before using #[tideorm(encrypted = ...)].",
+            ));
+        }
+
+        let _ = field_or_column;
+        Ok(value)
+    }
 }
 
 // These wrappers stay available in all builds because macro-generated code may

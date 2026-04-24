@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime};
@@ -140,7 +141,7 @@ impl ProfileReport {
         }
 
         let mut slowest: Vec<ProfiledQuery> = queries.clone();
-        slowest.sort_by(|left, right| right.duration.cmp(&left.duration));
+        slowest.sort_by_key(|query| Reverse(query.duration));
         slowest.truncate(10);
 
         Self {

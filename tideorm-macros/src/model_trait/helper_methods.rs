@@ -105,7 +105,11 @@ fn build_try_update_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2
                 quote!(#ident: ActiveValue::Unchanged(self.#ident))
             } else if field_name == "updated_at" || column_name == "updated_at" {
                 quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
-            } else if ctx.encrypted_fields.iter().any(|value| value == &field_name) {
+            } else if ctx
+                .encrypted_fields
+                .iter()
+                .any(|value| value == &field_name)
+            {
                 quote!(
                     #ident: ActiveValue::Set(::tideorm::model::__encrypt_model_field(
                         self.#ident,

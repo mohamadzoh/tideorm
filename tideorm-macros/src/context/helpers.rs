@@ -195,16 +195,28 @@ fn validate_encrypted_field_type(field: &ModelField) -> syn::Result<()> {
 }
 
 fn normalized_type_name(ty: &Type) -> String {
-    quote!(#ty).to_string().chars().filter(|ch| !ch.is_whitespace()).collect()
+    quote!(#ty)
+        .to_string()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
 }
 
 fn is_supported_encrypted_field_type(ty: &str) -> bool {
-    let inner = ty
-        .strip_prefix("Option<")
-        .and_then(|value| value.strip_suffix('>'))
-        .unwrap_or(ty);
-
+    let inner = strip_option_type(ty).unwrap_or(ty);
     matches_string_like_type(inner)
+}
+
+fn strip_option_type(ty: &str) -> Option<&str> {
+    [
+        "Option<",
+        "std::option::Option<",
+        "::std::option::Option<",
+        "core::option::Option<",
+        "::core::option::Option<",
+    ]
+    .into_iter()
+    .find_map(|prefix| ty.strip_prefix(prefix)?.strip_suffix('>'))
 }
 
 fn matches_string_like_type(ty: &str) -> bool {
@@ -218,7 +230,8 @@ fn matches_string_like_type(ty: &str) -> bool {
             | "Text"
             | "::tideorm::types::Text"
             | "tideorm::types::Text"
-    ) || ty.ends_with("::String") || ty.ends_with("::Text")
+    ) || ty.ends_with("::String")
+        || ty.ends_with("::Text")
 }
 
 pub(super) fn has_timestamp_pair(fields: &[ModelField]) -> bool {

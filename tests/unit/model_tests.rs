@@ -69,6 +69,7 @@ struct PresenterSerializationModel {
     title: String,
 }
 
+#[cfg(feature = "encrypted-fields")]
 #[tideorm::model(
     table = "model_test_encrypted_contacts",
     encrypted = "customer_phone_number, backup_phone"
@@ -251,6 +252,7 @@ mod basic_model_tests;
 #[path = "model_tests/cache_tests.rs"]
 mod cache_tests;
 
+#[cfg(feature = "encrypted-fields")]
 #[path = "model_tests/encrypted_field_tests.rs"]
 mod encrypted_field_tests;
 

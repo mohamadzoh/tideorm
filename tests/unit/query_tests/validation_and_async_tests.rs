@@ -143,6 +143,78 @@ fn test_query_validation_allows_safe_expression_slots() {
         .expect("safe select/group/order expressions should remain allowed");
 }
 
+#[test]
+fn test_query_validation_splits_select_alias_at_outer_as_only() {
+    QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["CAST(name AS TEXT) AS display_name"])
+        .ensure_query_is_valid()
+        .expect("outer SELECT alias must not be confused with an inner CAST(... AS ...)");
+
+    QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["CAST(name AS TEXT)"])
+        .ensure_query_is_valid()
+        .expect("SELECT expression without an outer alias must still validate");
+
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["CAST(name AS TEXT) AS bad\"alias"])
+        .ensure_query_is_valid()
+        .expect_err("unsafe outer alias must still be rejected");
+    assert!(err.to_string().contains("unsafe SELECT alias"));
+}
+
+#[test]
+fn test_window_validation_uses_final_join_qualifiers() {
+    let window = WindowFunction::new(
+        WindowFunctionType::Sum("profiles.score".to_string()),
+        "profile_score_sum",
+    )
+    .partition_by("profiles.user_id")
+    .order_by("profiles.created_at", Order::Asc);
+
+    QueryBuilder::<QueryTestUser>::new()
+        .window(window)
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .ensure_query_is_valid()
+        .expect("window columns may reference joins added later in the chain");
+
+    QueryBuilder::<QueryTestUser>::new()
+        .lag(
+            "previous_profile_score",
+            "profiles.score",
+            1,
+            Some("0"),
+            "profiles.user_id",
+            "profiles.created_at",
+            Order::Asc,
+        )
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .ensure_query_is_valid()
+        .expect("lag columns may reference joins added later in the chain");
+}
+
+#[test]
+fn test_window_validation_rejects_unknown_qualifier() {
+    let window = WindowFunction::new(
+        WindowFunctionType::Sum("profiles.score".to_string()),
+        "profile_score_sum",
+    )
+    .partition_by("profiles.user_id")
+    .order_by("profiles.created_at", Order::Asc);
+
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .window(window)
+        .ensure_query_is_valid()
+        .expect_err("unknown window column qualifiers should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("unknown window PARTITION BY column qualifier 'profiles'")
+            || err
+                .to_string()
+                .contains("unknown window function column qualifier 'profiles'")
+    );
+}
+
 #[tokio::test]
 async fn test_where_in_subquery_rejects_invalid_nested_query_before_db_lookup() {
     let err = QueryTestUser::query()

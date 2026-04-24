@@ -11,6 +11,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     let field_names = &ctx.field_names;
     let pk_contains_conflict_check = build_pk_conflict_check(ctx);
     let pk_exclusion_check = build_pk_exclusion_check(ctx, quote!(column));
+    let encrypted_conflict_column_check = build_encrypted_conflict_column_check(ctx);
 
     quote! {
         #[::tideorm::async_trait::async_trait]
@@ -268,6 +269,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
                 let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
+                #encrypted_conflict_column_check
                 let include_pk = #pk_contains_conflict_check || !#pk_auto_increment;
                 let insertable_columns: Vec<&str> = vec![#(#column_names),*]
                     .into_iter()
@@ -381,8 +383,35 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     .map_err(|err| err.with_context(error_context))?;
 
                 result
-                    .map(<Self as InternalModel>::from_entity_model)
+                    .map(<Self as InternalModel>::try_from_entity_model)
+                    .transpose()?
                     .ok_or_else(|| ::tideorm::Error::query("upsert completed but no matching row could be reloaded".to_string()))
+            }
+        }
+    }
+}
+
+fn build_encrypted_conflict_column_check(ctx: &BuildContext) -> TokenStream2 {
+    if ctx.encrypted_fields.is_empty() {
+        return quote! {};
+    }
+
+    let encrypted_fields = &ctx.encrypted_fields;
+    let encrypted_column_names = &ctx.encrypted_column_names;
+    let table_name = &ctx.table_name;
+
+    quote! {
+        const __TIDEORM_ENCRYPTED_CONFLICT_COLUMNS: &[&str] = &[
+            #(#encrypted_fields),*,
+            #(#encrypted_column_names),*
+        ];
+        for conflict_column in &conflict_cols {
+            if __TIDEORM_ENCRYPTED_CONFLICT_COLUMNS.contains(&conflict_column.as_str()) {
+                return Err(::tideorm::Error::invalid_query(format!(
+                    "encrypted field '{}' cannot be used as an insert_or_update conflict column for {}; encrypted fields use randomized ciphertext, so use a plaintext unique key instead",
+                    conflict_column,
+                    #table_name
+                )));
             }
         }
     }

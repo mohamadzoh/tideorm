@@ -115,11 +115,10 @@ impl GlobalStats {
 
     /// Average duration per recorded query, or zero when nothing ran.
     pub fn avg_query_time(&self) -> Duration {
-        if self.total_queries == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_nanos(self.total_time_ns / self.total_queries)
-        }
+        self.total_time_ns
+            .checked_div(self.total_queries)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO)
     }
 
     /// Percentage of recorded queries that crossed the slow-query threshold.

@@ -80,7 +80,10 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     fn field_names() -> &'static [&'static str];
 
     fn canonical_column_name(name: &str) -> Option<&'static str> {
-        if let Some(column_name) = Self::column_names().iter().copied().find(|column| *column == name)
+        if let Some(column_name) = Self::column_names()
+            .iter()
+            .copied()
+            .find(|column| *column == name)
         {
             return Some(column_name);
         }

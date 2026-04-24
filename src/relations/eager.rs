@@ -27,7 +27,7 @@ fn apply_primary_key_filter<M: Model>(
         )));
     }
 
-    for (column, value) in columns.iter().zip(values.into_iter()) {
+    for (column, value) in columns.iter().zip(values) {
         query = query.where_eq(*column, value);
     }
 

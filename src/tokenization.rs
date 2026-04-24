@@ -54,6 +54,7 @@
 //! - The same record may produce different valid tokens with the default encoder
 
 use parking_lot::RwLock;
+#[cfg(feature = "encrypted-fields")]
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -96,6 +97,7 @@ static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::
 struct ConfiguredEncryptionKey {
     raw: String,
     derived: [u8; 32],
+    #[cfg(feature = "encrypted-fields")]
     scoped_derived: RwLock<HashMap<String, [u8; 32]>>,
 }
 
@@ -104,10 +106,12 @@ impl ConfiguredEncryptionKey {
         Self {
             raw: raw.to_string(),
             derived: derive_encryption_key(raw),
+            #[cfg(feature = "encrypted-fields")]
             scoped_derived: RwLock::new(HashMap::new()),
         }
     }
 
+    #[cfg(feature = "encrypted-fields")]
     fn derived_field_key(&self, table_name: &str, column_name: &str) -> [u8; 32] {
         let scope_cache_key = format!("{}\0{}", table_name, column_name);
 
@@ -170,12 +174,15 @@ impl TokenConfig {
             .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
+    #[cfg(feature = "encrypted-fields")]
     pub(crate) fn get_derived_encryption_key_for_field(
         table_name: &str,
         column_name: &str,
     ) -> Result<[u8; 32]> {
-        with_current_encryption_key(|configured| configured.derived_field_key(table_name, column_name))
-            .ok_or_else(|| Error::tokenization("No encryption key configured"))
+        with_current_encryption_key(|configured| {
+            configured.derived_field_key(table_name, column_name)
+        })
+        .ok_or_else(|| Error::tokenization("No encryption key configured"))
     }
 
     /// Return whether a global encryption key is currently configured.
@@ -233,13 +240,14 @@ impl TokenConfig {
 
 const DERIVED_ENCRYPTION_KEY_LEN: usize = 32;
 const TOKENIZATION_KDF_SALT: &[u8] = b"tideorm::xchacha20poly1305-key::v2";
-const ENCRYPTED_FIELD_SCOPE_SALT_PREFIX: &[u8] =
-    b"tideorm::xchacha20poly1305-field-key::v1::";
+#[cfg(feature = "encrypted-fields")]
+const ENCRYPTED_FIELD_SCOPE_SALT_PREFIX: &[u8] = b"tideorm::xchacha20poly1305-field-key::v1::";
 
 pub(crate) fn derive_encryption_key(key: &str) -> [u8; 32] {
     derive_key_with_salt(key.as_bytes(), TOKENIZATION_KDF_SALT)
 }
 
+#[cfg(feature = "encrypted-fields")]
 fn derive_scoped_encryption_key(
     master_key: &[u8; 32],
     table_name: &str,

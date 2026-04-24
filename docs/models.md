@@ -79,7 +79,7 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | `#[tideorm(skip_default)]` | Skip auto-generated Default impl only |
 | `#[tideorm(skip_serialize)]` | Skip auto-generated Serialize impl only |
 | `#[tideorm(skip_deserialize)]` | Skip auto-generated Deserialize impl only |
-| `#[tideorm(encrypted = "field_a,field_b")]` | Encrypt selected persisted string columns on write and decrypt them on load |
+| `#[tideorm(encrypted = "field_a,field_b")]` | Encrypt selected persisted string columns on write and decrypt them on load. Requires the `encrypted-fields` feature. |
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
@@ -98,6 +98,13 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 ---
 
 ### Encrypted Fields
+
+Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
+
+```toml
+[dependencies]
+tideorm = { version = "0.9.14", features = ["postgres", "encrypted-fields"] }
+```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
 

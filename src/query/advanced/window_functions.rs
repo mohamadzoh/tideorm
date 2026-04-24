@@ -4,10 +4,6 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a window function to the SELECT clause
     #[must_use]
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
-        if let Err(reason) = Self::validate_window_function(&window_fn) {
-            self.invalidate_query(reason);
-        }
-
         self.window_functions.push(window_fn);
         self
     }
@@ -93,10 +89,6 @@ impl<M: Model> QueryBuilder<M> {
         .partition_by(partition_by)
         .order_by(order_by, order);
 
-        if let Err(reason) = Self::validate_window_function(&wf) {
-            self.invalidate_query(reason);
-        }
-
         self.window_functions.push(wf);
         self
     }
@@ -126,10 +118,6 @@ impl<M: Model> QueryBuilder<M> {
         )
         .partition_by(partition_by)
         .order_by(order_by, order);
-
-        if let Err(reason) = Self::validate_window_function(&wf) {
-            self.invalidate_query(reason);
-        }
 
         self.window_functions.push(wf);
         self

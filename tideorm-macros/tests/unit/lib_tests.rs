@@ -190,6 +190,25 @@ fn encrypted_fields_accept_field_and_column_names_and_canonicalize_metadata() {
 }
 
 #[test]
+fn encrypted_fields_accept_fully_qualified_optional_string_types() {
+    let input: DeriveInput = parse_quote! {
+        #[tideorm(encrypted = "phone_number, backup_phone")]
+        struct Customer {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            phone_number: ::std::string::String,
+            backup_phone: std::option::Option<std::string::String>,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+
+    BuildContext::new(&model_input, vec![], vec![], &existing_derives)
+        .expect("fully qualified encrypted string fields should be accepted");
+}
+
+#[test]
 fn encrypted_fields_reject_non_string_storage_types() {
     let input: DeriveInput = parse_quote! {
         #[tideorm(encrypted = "age")]

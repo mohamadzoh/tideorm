@@ -82,6 +82,62 @@ fn test_query_validation_allows_joined_table_column_references() {
 }
 
 #[test]
+fn test_query_validation_rejects_unknown_qualifier_in_where() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .where_eq("other_alias.foo", "bar")
+        .ensure_query_is_valid()
+        .expect_err("unknown qualifier in WHERE should invalidate query");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown WHERE column qualifier 'other_alias'"),
+        "expected qualifier error, got: {message}"
+    );
+    assert!(
+        message.contains("known table/alias qualifiers"),
+        "expected known-qualifier hint, got: {message}"
+    );
+}
+
+#[test]
+fn test_query_validation_rejects_unknown_qualifier_in_order_by() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .order_by("other_alias.foo", Order::Asc)
+        .ensure_query_is_valid()
+        .expect_err("unknown qualifier in ORDER BY should invalidate query");
+
+    assert!(
+        err.to_string()
+            .contains("unknown ORDER BY column qualifier 'other_alias'")
+    );
+}
+
+#[test]
+fn test_query_validation_accepts_join_alias_qualifier() {
+    QueryBuilder::<QueryTestUser>::new()
+        .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
+        .where_eq("p.active", true)
+        .order_by("p.created_at", Order::Desc)
+        .ensure_query_is_valid()
+        .expect("join alias should be a valid qualifier");
+}
+
+#[test]
+fn test_query_validation_rejects_join_table_when_aliased() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .inner_join_as("profiles", "p", "query_test_users.id", "p.user_id")
+        .where_eq("profiles.active", true)
+        .ensure_query_is_valid()
+        .expect_err("aliased join should hide the original table name as a qualifier");
+
+    assert!(
+        err.to_string()
+            .contains("unknown WHERE column qualifier 'profiles'")
+    );
+}
+
+#[test]
 fn test_query_validation_rejects_unknown_model_column_in_order_by() {
     let err = QueryBuilder::<QueryTestUser>::new()
         .order_by("naem", Order::Asc)

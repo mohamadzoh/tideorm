@@ -23,7 +23,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles
 - **Optional Modules** - Attachments, translations, and full-text search are available behind feature flags
-- **Field Encryption** - Model-level encrypted columns automatically encrypt on write and decrypt on load using TideORM's configured encryption key
+- **Field Encryption** - Optional `encrypted-fields` feature for model-level encrypted columns that automatically encrypt on write and decrypt on load using TideORM's configured encryption key
 - **Tokenization** - Secure record ID encoding/decoding helpers
 
 ## Quick Start
@@ -131,7 +131,14 @@ For aggregate workflows with an explicit persistence context, enable the `entity
 
 ## Encrypted Fields
 
+Enable the `encrypted-fields` Cargo feature before using model-level auto-encryption.
+
 Use model-level encrypted fields when you want selected persisted columns, such as phone numbers or other sensitive strings, to be stored encrypted in the database while remaining plain `String` or `Option<String>` values in Rust.
+
+```toml
+[dependencies]
+tideorm = { version = "0.9.14", features = ["postgres", "encrypted-fields"] }
+```
 
 ```rust
 use tideorm::prelude::*;
@@ -193,6 +200,9 @@ tideorm = { version = "0.9.14", features = ["postgres", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
 tideorm = { version = "0.9.14", features = ["postgres", "dirty-tracking"] }
+
+# Enable model encrypted fields explicitly
+tideorm = { version = "0.9.14", features = ["postgres", "encrypted-fields"] }
 ```
 
 ### Feature Flags
@@ -209,6 +219,7 @@ tideorm = { version = "0.9.14", features = ["postgres", "dirty-tracking"] }
 | `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
 | `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), plus `save_with_entity_manager`, `find_in_entity_manager`, entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
 | `dirty-tracking` | Enables the model-level `changed_fields()` and `original_value()` helpers and their persisted-state tracking hooks |
+| `encrypted-fields` | Enables `#[tideorm(encrypted = "...")]` model auto-encrypt/decrypt hooks for persisted string columns |
 
 Attachments are opt-in. Enable the `attachments` feature when you want to use `tideorm::attachments`, `HasAttachments`, or attachment URL generation helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
@@ -219,6 +230,8 @@ Full-text search is opt-in. Enable the `fulltext` feature when you want to use `
 The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. The compatibility entry points `find_in_entity_manager`, `load_in_entity_manager`, and `save_with_entity_manager()` remain available too. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
 
 Dirty tracking is opt-in. Enable the `dirty-tracking` feature when you want model instances to expose `changed_fields()` and `original_value()` based on the latest persisted snapshot TideORM loaded or saved.
+
+Model encrypted fields are opt-in. Enable the `encrypted-fields` feature when you want `#[tideorm(encrypted = "...")]` to automatically encrypt configured string columns on writes and decrypt them on model loads.
 
 Schema sync can also register compiled models by source path with glob-style patterns such as `models_matching("src/models/*")` or `models_matching("src/models/*.model.rs")`. The matching files still need to be part of the crate through normal Rust `mod` declarations because TideORM filters compiled model metadata rather than loading source files dynamically.
 
