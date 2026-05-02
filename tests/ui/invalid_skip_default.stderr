@@ -1,18 +1,11 @@
-error[E0599]: no function or associated item named `default` found for struct `User` in the current scope
+error[E0277]: the trait bound `User: Default` is not satisfied
  --> tests/ui/invalid_skip_default.rs:8:19
   |
-1 | #[tideorm::model(table = "users", skip_default)]
-  | ------------------------------------------------ function or associated item `default` not found for this struct
-...
-8 |     let _ = User::default();
-  |                   ^^^^^^^ function or associated item not found in `User`
+8 |     let _: User = Default::default();
+  |                   ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `User`
   |
-  = help: items from traits can only be used if the trait is implemented and in scope
-  = note: the following traits define an item `default`, perhaps you need to implement one of them:
-          candidate #1: `Default`
-          candidate #2: `tideorm::internal::ActiveModelTrait`
-          candidate #3: `tinyvec::array::Array`
-help: there is an associated function `default_order` with a similar name
+help: consider annotating `User` with `#[derive(Default)]`
   |
-8 |     let _ = User::default_order();
-  |                          ++++++
+1 + #[derive(Default)]
+2 | #[tideorm::model(table = "users", skip_default)]
+  |

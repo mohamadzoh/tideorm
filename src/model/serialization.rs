@@ -339,6 +339,24 @@ where
     Ok(())
 }
 
+enum FileRelationKind {
+    HasOne,
+    HasMany,
+}
+
+fn file_relation_kind<M>(relation_type: &str) -> std::result::Result<FileRelationKind, String>
+where
+    M: Model,
+{
+    if M::has_one_attached_file().contains(&relation_type) {
+        Ok(FileRelationKind::HasOne)
+    } else if M::has_many_attached_files().contains(&relation_type) {
+        Ok(FileRelationKind::HasMany)
+    } else {
+        Err(format!("Unknown file relation: {}", relation_type))
+    }
+}
+
 pub(crate) fn attach_files<M>(
     relation_type: &str,
     file_keys: Vec<&str>,
@@ -351,7 +369,10 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    if !M::has_many_attached_files().contains(&relation_type) {
+    if !matches!(
+        file_relation_kind::<M>(relation_type)?,
+        FileRelationKind::HasMany
+    ) {
         return Err(format!(
             "Relation '{}' is not a hasMany relation",
             relation_type
@@ -377,30 +398,35 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    if let Some(key) = file_key {
-        if M::has_one_attached_file().contains(&relation_type) {
-            if let Some(current) = files.get(relation_type) {
-                if current.get("key").and_then(|k| k.as_str()) == Some(key) {
-                    files.insert(relation_type.to_string(), serde_json::Value::Null);
+    match file_relation_kind::<M>(relation_type)? {
+        FileRelationKind::HasOne => {
+            if let Some(key) = file_key {
+                if let Some(current) = files.get(relation_type) {
+                    if current.get("key").and_then(|k| k.as_str()) == Some(key) {
+                        files.insert(relation_type.to_string(), serde_json::Value::Null);
+                    }
                 }
-            }
-        } else if M::has_many_attached_files().contains(&relation_type) {
-            if let Some(array) = files.get(relation_type).and_then(|v| v.as_array()) {
-                let filtered: Vec<serde_json::Value> = array
-                    .iter()
-                    .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(key))
-                    .cloned()
-                    .collect();
-                files.insert(
-                    relation_type.to_string(),
-                    serde_json::Value::Array(filtered),
-                );
+            } else {
+                files.insert(relation_type.to_string(), serde_json::Value::Null);
             }
         }
-    } else if M::has_one_attached_file().contains(&relation_type) {
-        files.insert(relation_type.to_string(), serde_json::Value::Null);
-    } else if M::has_many_attached_files().contains(&relation_type) {
-        files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
+        FileRelationKind::HasMany => {
+            if let Some(key) = file_key {
+                if let Some(array) = files.get(relation_type).and_then(|v| v.as_array()) {
+                    let filtered: Vec<serde_json::Value> = array
+                        .iter()
+                        .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(key))
+                        .cloned()
+                        .collect();
+                    files.insert(
+                        relation_type.to_string(),
+                        serde_json::Value::Array(filtered),
+                    );
+                }
+            } else {
+                files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
+            }
+        }
     }
 
     Ok(())
@@ -418,39 +444,41 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    if file_keys.is_empty() {
-        if M::has_one_attached_file().contains(&relation_type) {
-            files.insert(relation_type.to_string(), serde_json::Value::Null);
-        } else if M::has_many_attached_files().contains(&relation_type) {
-            files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
-        }
-        return Ok(());
-    }
+    match file_relation_kind::<M>(relation_type)? {
+        FileRelationKind::HasOne => {
+            if file_keys.is_empty() {
+                files.insert(relation_type.to_string(), serde_json::Value::Null);
+                return Ok(());
+            }
 
-    if M::has_one_attached_file().contains(&relation_type) {
-        let file_metadata = serde_json::json!({
-            "key": file_keys[0],
-            "filename": file_keys[0].split('/').next_back().unwrap_or(file_keys[0]),
-            "created_at": chrono::Utc::now().to_rfc3339(),
-        });
-        files.insert(relation_type.to_string(), file_metadata);
-    } else if M::has_many_attached_files().contains(&relation_type) {
-        let file_array: Vec<serde_json::Value> = file_keys
-            .iter()
-            .map(|key| {
-                serde_json::json!({
-                    "key": key,
-                    "filename": key.split('/').next_back().unwrap_or(key),
-                    "created_at": chrono::Utc::now().to_rfc3339(),
+            let file_metadata = serde_json::json!({
+                "key": file_keys[0],
+                "filename": file_keys[0].split('/').next_back().unwrap_or(file_keys[0]),
+                "created_at": chrono::Utc::now().to_rfc3339(),
+            });
+            files.insert(relation_type.to_string(), file_metadata);
+        }
+        FileRelationKind::HasMany => {
+            if file_keys.is_empty() {
+                files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
+                return Ok(());
+            }
+
+            let file_array: Vec<serde_json::Value> = file_keys
+                .iter()
+                .map(|key| {
+                    serde_json::json!({
+                        "key": key,
+                        "filename": key.split('/').next_back().unwrap_or(key),
+                        "created_at": chrono::Utc::now().to_rfc3339(),
+                    })
                 })
-            })
-            .collect();
-        files.insert(
-            relation_type.to_string(),
-            serde_json::Value::Array(file_array),
-        );
-    } else {
-        return Err(format!("Unknown file relation: {}", relation_type));
+                .collect();
+            files.insert(
+                relation_type.to_string(),
+                serde_json::Value::Array(file_array),
+            );
+        }
     }
 
     Ok(())

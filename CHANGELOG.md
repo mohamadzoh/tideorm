@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.15] - 2026-05-02
+
+### Changed
+
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, macro-crate README, and release-facing issue-template examples to use `0.9.15`.
+
+### Fixed
+
+- Fixed macro-generated relation state helpers to use TideORM's re-exported `json!` macro instead of referencing `serde_json::json!` directly, so downstream crates no longer need a direct `serde_json` dependency for generated relation code to compile.
+- Fixed database JSON value conversion and `exists_any()` result decoding to preserve large unsigned integers and accept boolean or integer `EXISTS` row shapes across supported backends.
+- Fixed attachment relation mutation helpers to reject unknown file relation names consistently, including attach, detach, and empty sync operations.
+- Fixed backend-specific internal `sqlx` re-exports and raw-row JSON helpers to stay behind backend feature gates, reducing no-backend build breakage.
+
+### Internal
+
+- Added focused regression coverage for unsigned JSON-to-database values, backend-specific SQL parameter placeholders, attachment relation validation, and compile-fail relation fixtures.
+- Tightened release-test coverage around optional postgres-only OR-clause integration tests and compile-fail fixture matching.
+- Verified the release prep with `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.15` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.14] - 2026-04-18
 
 ### Added
@@ -903,7 +923,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.14...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.15...HEAD
+[0.9.15]: https://github.com/mohamadzoh/tideorm/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/mohamadzoh/tideorm/compare/v0.9.13...v0.9.14
 [0.9.13]: https://github.com/mohamadzoh/tideorm/compare/v0.9.12...v0.9.13
 [0.9.12]: https://github.com/mohamadzoh/tideorm/compare/v0.9.11...v0.9.12

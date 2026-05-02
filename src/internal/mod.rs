@@ -34,8 +34,10 @@ pub use crate::orm::{
         Index, MysqlQueryBuilder, OnConflict, PostgresQueryBuilder, Query, SimpleExpr,
         SqliteQueryBuilder, Table, extension::postgres::PgBinOper,
     },
-    sqlx,
 };
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub use crate::orm::sqlx;
 
 pub use backend::Backend;
 pub(crate) use backend::{build_statement, build_statement_with_values};
@@ -47,6 +49,8 @@ pub(crate) fn json_to_db_value(value: &serde_json::Value) -> Value {
         serde_json::Value::Number(number) => {
             if let Some(integer) = number.as_i64() {
                 Value::BigInt(Some(integer))
+            } else if let Some(unsigned) = number.as_u64() {
+                Value::BigUnsigned(Some(unsigned))
             } else if let Some(float) = number.as_f64() {
                 Value::Double(Some(float))
             } else {
@@ -240,6 +244,32 @@ where
     build_statement(backend, sql)
 }
 
+fn query_result_exists_bool(row: &QueryResult) -> Result<bool> {
+    if let Ok(value) = row.try_get_by_index::<bool>(0) {
+        return Ok(value);
+    }
+
+    if let Ok(value) = row.try_get_by_index::<i64>(0) {
+        return Ok(value != 0);
+    }
+
+    if let Ok(value) = row.try_get_by_index::<i32>(0) {
+        return Ok(value != 0);
+    }
+
+    if let Ok(value) = row.try_get_by_index::<u64>(0) {
+        return Ok(value != 0);
+    }
+
+    if let Ok(value) = row.try_get_by_index::<u32>(0) {
+        return Ok(value != 0);
+    }
+
+    Err(Error::query(
+        "Unable to decode database EXISTS result as a boolean or integer",
+    ))
+}
+
 fn scoped_find<M>() -> Select<M::Entity>
 where
     M: InternalModel + crate::model::Model,
@@ -359,16 +389,7 @@ impl QueryExecutor {
             .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
 
         match result {
-            Some(row) => {
-                let exists = match backend {
-                    Backend::Postgres => row.try_get_by_index(0).unwrap_or(false),
-                    _ => {
-                        let value: i32 = row.try_get_by_index(0).unwrap_or(0);
-                        value > 0
-                    }
-                };
-                Ok(exists)
-            }
+            Some(row) => query_result_exists_bool(&row),
             None => Ok(false),
         }
     }

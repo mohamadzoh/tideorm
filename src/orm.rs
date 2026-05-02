@@ -8,4 +8,7 @@
 
 pub use sea_orm::*;
 pub use sea_orm::{DbBackend as OrmBackend, DbErr as OrmError};
-pub use sea_orm::{entity, sea_query, sqlx};
+pub use sea_orm::{entity, sea_query};
+
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+pub use sea_orm::sqlx;

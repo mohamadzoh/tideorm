@@ -18,5 +18,6 @@ mod core_unit_tests;
 #[path = "or_clause/mid_scenarios.rs"]
 mod mid_scenarios;
 
+#[cfg(all(feature = "postgres", feature = "runtime-tokio"))]
 #[path = "or_clause/fluent_or_integration_tests.rs"]
 mod fluent_or_integration_cases;

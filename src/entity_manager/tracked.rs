@@ -165,11 +165,9 @@ impl<T: Model> TrackedHasMany<T> {
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
     {
-        if self.cached.is_some() {
-            if let Some(items) = self.cached.as_ref() {
-                for entity in items.iter().cloned() {
-                    entity_manager.put(entity);
-                }
+        if let Some(items) = self.cached.as_ref() {
+            for entity in items.iter().cloned() {
+                entity_manager.put(entity);
             }
 
             self.plain.attach_query_database(entity_manager.database());
@@ -184,7 +182,10 @@ impl<T: Model> TrackedHasMany<T> {
             entity_manager
                 .snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids)
                 .await;
-            return Ok(self.cached.as_ref().expect("relation cache should exist"));
+            let Some(cached) = self.cached.as_ref() else {
+                unreachable!("relation cache should exist");
+            };
+            return Ok(cached);
         }
 
         self.ensure_configured()?;
@@ -221,10 +222,10 @@ impl<T: Model> TrackedHasMany<T> {
             .snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids)
             .await;
 
-        Ok(self
-            .cached
-            .as_ref()
-            .expect("relation cache should exist after load"))
+        let Some(cached) = self.cached.as_ref() else {
+            unreachable!("relation cache should exist after load");
+        };
+        Ok(cached)
     }
 
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<T>>

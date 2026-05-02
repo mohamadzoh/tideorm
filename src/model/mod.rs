@@ -45,7 +45,7 @@ where
 {
     #[cfg(feature = "encrypted-fields")]
     {
-        return encryption::encrypt_model_field(value, table_name, field_name, column_name);
+        encryption::encrypt_model_field(value, table_name, field_name, column_name)
     }
 
     #[cfg(not(feature = "encrypted-fields"))]
@@ -69,7 +69,7 @@ where
 {
     #[cfg(feature = "encrypted-fields")]
     {
-        return encryption::decrypt_model_field(value, table_name, field_name, column_name);
+        encryption::decrypt_model_field(value, table_name, field_name, column_name)
     }
 
     #[cfg(not(feature = "encrypted-fields"))]
@@ -88,7 +88,7 @@ pub fn __prepare_batch_update_value<M: ModelMeta>(
 ) -> crate::error::Result<UpdateValue> {
     #[cfg(feature = "encrypted-fields")]
     {
-        return encryption::prepare_batch_update_value::<M>(field_or_column, value);
+        encryption::prepare_batch_update_value::<M>(field_or_column, value)
     }
 
     #[cfg(not(feature = "encrypted-fields"))]

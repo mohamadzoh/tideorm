@@ -5,5 +5,5 @@ struct User {
 }
 
 fn main() {
-    let _ = User::default();
+    let _: User = Default::default();
 }

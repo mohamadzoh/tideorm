@@ -1,9 +1,11 @@
 use super::{
-    build_count_select, build_exists_any_statement, count_to_u64, scoped_find,
-    supports_batch_insert_returning,
+    build_count_select, build_exists_any_statement, count_to_u64, json_to_db_value, push_param,
+    scoped_find, supports_batch_insert_returning,
 };
 use crate::config::DatabaseType;
-use crate::internal::{Backend, ColumnTrait, Condition, InternalModel, OrmBackend, QueryTrait};
+use crate::internal::{
+    Backend, ColumnTrait, Condition, InternalModel, OrmBackend, QueryTrait, Value,
+};
 
 #[tideorm::model(table = "internal_count_users")]
 struct InternalCountUser {
@@ -60,6 +62,50 @@ fn batch_insert_returning_rejects_config_backend_mismatches() {
         Some(DatabaseType::MariaDB),
         Backend::Postgres,
     ));
+}
+
+#[test]
+fn json_to_db_value_preserves_large_unsigned_numbers() {
+    let unsigned = i64::MAX as u64 + 1;
+    let value = serde_json::json!(unsigned);
+
+    match json_to_db_value(&value) {
+        Value::BigUnsigned(Some(actual)) => assert_eq!(actual, unsigned),
+        other => panic!("expected BigUnsigned, got {other:?}"),
+    }
+}
+
+#[test]
+fn push_param_uses_backend_specific_placeholders() {
+    let mut postgres_params = Vec::new();
+    assert_eq!(
+        push_param(
+            DatabaseType::Postgres,
+            &mut postgres_params,
+            Value::Bool(Some(true)),
+        ),
+        "$1"
+    );
+    assert_eq!(
+        push_param(
+            DatabaseType::Postgres,
+            &mut postgres_params,
+            Value::Bool(Some(false)),
+        ),
+        "$2"
+    );
+    assert_eq!(postgres_params.len(), 2);
+
+    let mut mysql_params = Vec::new();
+    assert_eq!(
+        push_param(
+            DatabaseType::MySQL,
+            &mut mysql_params,
+            Value::Bool(Some(true)),
+        ),
+        "?"
+    );
+    assert_eq!(mysql_params.len(), 1);
 }
 
 #[test]

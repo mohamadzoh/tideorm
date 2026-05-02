@@ -353,6 +353,7 @@ impl Database {
             .unwrap_or(serde_json::Value::Null)
     }
 
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     fn typed_or_fallback<T>(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value
     where
         T: crate::internal::TryGetable + serde::Serialize,
@@ -361,6 +362,7 @@ impl Database {
             .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
     }
 
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     fn decimal_or_fallback(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value {
         Self::try_get_decimal_json(row, index)
             .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
@@ -446,6 +448,7 @@ impl Database {
         }
     }
 
+    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     fn sqlx_row_to_json<R, F>(
         result: &crate::internal::QueryResult,
         row: &R,
