@@ -27,7 +27,7 @@ fn test_long_model_name() {
 fn test_unicode_model_name() {
     init_test_env();
 
-    let unicode_name = "ç”¨æˆ·æ¨¡åž‹ðŸ”";
+    let unicode_name = "用户模型🔐";
     let token = default_encode("42", unicode_name).unwrap();
     let decoded = default_decode(&token, unicode_name).unwrap();
 
