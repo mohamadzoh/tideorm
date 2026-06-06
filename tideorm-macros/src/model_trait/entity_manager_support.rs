@@ -382,16 +382,12 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
 
         #[cfg(feature = "entity-manager")]
         impl ::tideorm::entity_manager::TideEntityManagerSync for #struct_name {
-            fn tide_sync_entity_manager_relations<'a>(
+            async fn tide_sync_entity_manager_relations<'a>(
                 &'a mut self,
                 entity_manager: &'a ::std::sync::Arc<::tideorm::entity_manager::EntityManager>,
-            ) -> ::std::pin::Pin<
-                Box<dyn ::std::future::Future<Output = ::tideorm::Result<()>> + Send + 'a>,
-            > {
-                Box::pin(async move {
-                    #(#relation_sync_blocks)*
-                    Ok(())
-                })
+            ) -> ::tideorm::Result<()> {
+                #(#relation_sync_blocks)*
+                Ok(())
             }
         }
 

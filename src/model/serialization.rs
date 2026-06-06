@@ -4,20 +4,19 @@ use std::collections::HashMap;
 
 use super::Model;
 
-pub(crate) fn to_json<M>(model: &M, options: Option<HashMap<String, String>>) -> serde_json::Value
+pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -> serde_json::Value
 where
     M: Model + serde::Serialize,
 {
-    let opts = options.unwrap_or_default();
     #[cfg(feature = "translations")]
     let fallback = M::fallback_language();
     #[cfg(feature = "translations")]
-    let current_language = opts
-        .get("language")
+    let current_language = options
+        .and_then(|opts| opts.get("language"))
         .map(|s| s.as_str())
         .unwrap_or(&fallback);
-    let _current_presenter = opts
-        .get("presenter")
+    let _current_presenter = options
+        .and_then(|opts| opts.get("presenter"))
         .map(|s| s.as_str())
         .unwrap_or(M::default_presenter());
 
@@ -120,7 +119,7 @@ where
     serde_json::Value::Array(
         models
             .iter()
-            .map(|model| to_json(model, options.clone()))
+            .map(|model| to_json(model, options.as_ref()))
             .collect(),
     )
 }
@@ -180,10 +179,9 @@ fn overwrite_model_from_object<M>(
 where
     M: Model,
 {
-    let previous = model.clone();
     let mut updated: M = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|error| format!("Failed to deserialize model: {}", error))?;
-    updated.refresh_runtime_relations_from(&previous);
+    updated.refresh_runtime_relations_from(model);
     *model = updated;
     Ok(())
 }
@@ -274,13 +272,10 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    let object = model_to_object(model)?;
-    match object.get("files") {
+    let mut object = model_to_object(model)?;
+    match object.remove("files") {
         None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
-        Some(serde_json::Value::Object(map)) => Ok(map
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()),
+        Some(serde_json::Value::Object(map)) => Ok(map.into_iter().collect()),
         Some(_) => Err("Model files attribute is not a JSON object".to_string()),
     }
 }

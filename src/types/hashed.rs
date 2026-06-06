@@ -46,7 +46,7 @@ impl Hashed {
         argon2::Argon2::default()
             .hash_password(input.as_bytes(), &salt)
             .map(|hash| hash.to_string())
-            .expect("argon2 hashing should succeed with generated salt")
+            .unwrap()
     }
 }
 

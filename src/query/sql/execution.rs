@@ -158,12 +158,12 @@ impl<M: Model> QueryBuilder<M> {
 
         let (sql, params) = self.build_select_sql_with_params();
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let results = self
             .current_db()?
             .__raw_with_params::<M>(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context.clone()))?;
+            .map_err(|err| err.with_context(error_context))?;
 
         if let (Some(key), Some(options)) = (cache_key, &self.cache_options) {
             let _ = crate::cache::QueryCache::global().set(
@@ -291,12 +291,12 @@ impl<M: Model> QueryBuilder<M> {
         let (sql, params) = self.build_count_sql_with_params();
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows = self
             .current_db()?
             .__raw_json_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context.clone()))?;
+            .map_err(|err| err.with_context(error_context))?;
         let count = rows
             .first()
             .and_then(|row| row.get("count"))
@@ -321,12 +321,12 @@ impl<M: Model> QueryBuilder<M> {
         let (sql, params) = self.build_exists_sql_with_params();
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows = self
             .current_db()?
             .__raw_json_with_params(&sql, params)
             .await
-            .map_err(|err| err.with_context(error_context.clone()))?;
+            .map_err(|err| err.with_context(error_context))?;
 
         let exists_value = rows.first().and_then(|row| row.get("exists_result"));
         if let Some(value) = exists_value {
@@ -367,7 +367,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows_affected = self
             .current_db()?
             .__execute_with_params(&sql, params)
@@ -391,7 +391,7 @@ impl<M: Model> QueryBuilder<M> {
         let sql = format!("DELETE FROM {}", table);
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows_affected = self
             .current_db()?
             .__execute_with_params(&sql, Vec::new())
@@ -428,7 +428,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows_affected = self
             .current_db()?
             .__execute_with_params(&sql, params)
@@ -467,7 +467,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows_affected = self
             .current_db()?
             .__execute_with_params(&sql, params)
@@ -492,7 +492,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         let rows_affected = self
             .current_db()?
             .__execute_with_params(&sql, params)
@@ -506,7 +506,7 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_query_is_valid()?;
         let (sql, params) = self.build_select_sql_with_params();
         self.log_query(&sql);
-        let error_context = self.build_query_error_context(Some(sql.clone()));
+        let error_context = self.build_query_error_context(Some(&sql));
         self.current_db()?
             .__raw_json_with_params(&sql, params)
             .await

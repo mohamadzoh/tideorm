@@ -434,7 +434,11 @@ impl<M: Model> QueryBuilder<M> {
             crate::columns::ColumnOperator::Between => {
                 if let serde_json::Value::Array(arr) = condition.value {
                     if arr.len() >= 2 {
-                        ConditionValue::Range(arr[0].clone(), arr[1].clone())
+                        let mut iter = arr.into_iter();
+                        ConditionValue::Range(
+                            iter.next().unwrap_or(serde_json::Value::Null),
+                            iter.next().unwrap_or(serde_json::Value::Null),
+                        )
                     } else {
                         ConditionValue::Single(serde_json::Value::Null)
                     }

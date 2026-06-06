@@ -124,7 +124,8 @@ impl<M: Model> QueryBuilder<M> {
         let col = db_sql::quote_ident(db_type, column.column_name());
 
         let db = self.current_db()?;
-        let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
+        let preview = self.build_sql_preview();
+        let error_context = self.build_query_error_context(Some(&preview));
 
         let mut select = M::Entity::find();
 
@@ -180,7 +181,8 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_query_is_valid()?;
 
         let db = self.current_db()?;
-        let error_context = self.build_query_error_context(Some(self.build_sql_preview()));
+        let preview = self.build_sql_preview();
+        let error_context = self.build_query_error_context(Some(&preview));
 
         let mut select = M::Entity::find();
 

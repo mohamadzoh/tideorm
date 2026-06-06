@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 
-use std::future::Future;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -116,9 +114,9 @@ impl<T: Model> TrackedHasMany<T> {
         if ((allow_cached_without_context && previous.cached.is_some()) || same_relation)
             && self.cached.is_none()
         {
-            self.cached = previous.cached.clone();
-            if let Some(cached) = self.cached.clone() {
-                self.plain.set_cached(cached);
+            if let Some(cached) = previous.cached.as_ref() {
+                self.plain.set_cached(cached.clone());
+                self.cached = Some(cached.clone());
             }
         }
     }
@@ -295,18 +293,18 @@ pub trait TrackedHasManyEntityManagerExt<T: Model> {
     fn load<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = Result<&'a Vec<T>>> + Send + 'a>>;
+    ) -> impl std::future::Future<Output = Result<&'a Vec<T>>> + Send;
 }
 
 impl<T> TrackedHasManyEntityManagerExt<T> for TrackedHasMany<T>
 where
     T: Model + TideEntityManagerMeta + Clone + Send + Sync + 'static,
 {
-    fn load<'a>(
+    async fn load<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = Result<&'a Vec<T>>> + Send + 'a>> {
-        Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
+    ) -> Result<&'a Vec<T>> {
+        self.load_in_entity_manager(entity_manager).await
     }
 }
 
@@ -319,11 +317,11 @@ where
     where
         Self: 'a;
 
-    fn load_with_entity_manager<'a>(
+    async fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Output<'a>>> + Send + 'a>> {
-        Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
+    ) -> Result<Self::Output<'a>> {
+        self.load_in_entity_manager(entity_manager).await
     }
 }
 

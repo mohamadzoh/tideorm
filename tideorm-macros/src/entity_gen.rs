@@ -453,11 +453,7 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
 
 fn compile_time_column_assert(ty: &syn::Type, column: &str, message: &str) -> TokenStream2 {
     quote! {
-        const _: () = {
-            if !<#ty>::__has_column_name(#column) {
-                panic!(#message);
-            }
-        };
+        const _: () = assert!(<#ty>::__has_column_name(#column), #message);
     }
 }
 

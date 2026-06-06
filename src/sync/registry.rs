@@ -1,11 +1,19 @@
 use super::*;
 use regex::Regex;
 
-/// Global registry of entity registration functions
-static ENTITY_REGISTRY: OnceLock<RwLock<Vec<EntityRegistrationFn>>> = OnceLock::new();
+struct SyncState {
+    entity_registry: Vec<EntityRegistrationFn>,
+    model_schemas: Vec<ModelSchema>,
+}
 
-/// Registry of TideORM model schemas used during synchronization.
-static MODEL_SCHEMAS: OnceLock<RwLock<Vec<ModelSchema>>> = OnceLock::new();
+static SYNC_STATE: OnceLock<RwLock<SyncState>> = OnceLock::new();
+
+fn sync_state() -> &'static RwLock<SyncState> {
+    SYNC_STATE.get_or_init(|| RwLock::new(SyncState {
+        entity_registry: Vec::new(),
+        model_schemas: Vec::new(),
+    }))
+}
 
 /// Distributed registration emitted by `#[tideorm::model]` for source-path-based sync discovery.
 #[doc(hidden)]
@@ -16,12 +24,24 @@ pub struct CompiledModelRegistration {
 
 inventory::collect!(CompiledModelRegistration);
 
-pub(super) fn get_entity_registry() -> &'static RwLock<Vec<EntityRegistrationFn>> {
-    ENTITY_REGISTRY.get_or_init(|| RwLock::new(Vec::new()))
+pub(super) fn with_entity_registry<T>(f: impl FnOnce(&Vec<EntityRegistrationFn>) -> T) -> T {
+    let guard = sync_state().read();
+    f(&guard.entity_registry)
 }
 
-pub(super) fn get_model_schemas() -> &'static RwLock<Vec<ModelSchema>> {
-    MODEL_SCHEMAS.get_or_init(|| RwLock::new(Vec::new()))
+pub(super) fn with_entity_registry_mut<T>(f: impl FnOnce(&mut Vec<EntityRegistrationFn>) -> T) -> T {
+    let mut guard = sync_state().write();
+    f(&mut guard.entity_registry)
+}
+
+pub(super) fn with_model_schemas<T>(f: impl FnOnce(&Vec<ModelSchema>) -> T) -> T {
+    let guard = sync_state().read();
+    f(&guard.model_schemas)
+}
+
+pub(super) fn with_model_schemas_mut<T>(f: impl FnOnce(&mut Vec<ModelSchema>) -> T) -> T {
+    let mut guard = sync_state().write();
+    f(&mut guard.model_schemas)
 }
 
 pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {

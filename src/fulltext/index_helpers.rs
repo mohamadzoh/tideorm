@@ -1,4 +1,5 @@
 use super::*;
+use crate::internal::sql_builder::SqlBuilder;
 
 // =============================================================================
 // INDEX GENERATION HELPERS
@@ -69,127 +70,158 @@ impl FullTextIndex {
             PgFullTextIndexType::GiST => "GiST",
         };
 
+        let mut params = Vec::new();
         let tsvector_expr = if self.columns.len() == 1 {
-            format!(
-                "to_tsvector('{}', COALESCE({}, ''))",
-                language,
-                quote_ident(DatabaseType::Postgres, &self.columns[0])
-            )
+            SqlBuilder::new(DatabaseType::Postgres, &mut params)
+                .raw("to_tsvector('")
+                .raw(&escape_string(language))
+                .raw("', COALESCE(")
+                .ident(&self.columns[0])
+                .raw(", ''))")
+                .into_sql()
         } else {
-            let cols: Vec<String> = self
-                .columns
-                .iter()
-                .map(|c| format!("COALESCE({}, '')", quote_ident(DatabaseType::Postgres, c)))
-                .collect();
-            format!("to_tsvector('{}', {})", language, cols.join(" || ' ' || "))
+            let mut builder = SqlBuilder::new(DatabaseType::Postgres, &mut params)
+                .raw("to_tsvector('")
+                .raw(&escape_string(language))
+                .raw("', ");
+            for (i, col) in self.columns.iter().enumerate() {
+                if i > 0 {
+                    builder = builder.raw(" || ' ' || ");
+                }
+                builder = builder.raw("COALESCE(").ident(col).raw(", '')");
+            }
+            builder.raw(")").into_sql()
         };
 
-        format!(
-            "CREATE INDEX {} ON {} USING {} (({}))",
-            quote_ident(DatabaseType::Postgres, &self.name),
-            quote_ident(DatabaseType::Postgres, &self.table),
-            index_type,
-            tsvector_expr
-        )
+        SqlBuilder::new(DatabaseType::Postgres, &mut params)
+            .raw("CREATE INDEX ")
+            .ident(&self.name)
+            .raw(" ON ")
+            .ident(&self.table)
+            .raw(" USING ")
+            .raw(index_type)
+            .raw(" ((")
+            .raw(&tsvector_expr)
+            .raw("))")
+            .into_sql()
     }
 
     /// Generate CREATE FULLTEXT INDEX statement for MySQL
     pub fn to_mysql_sql(&self) -> String {
-        let columns_str = self
-            .columns
-            .iter()
-            .map(|c| quote_ident(DatabaseType::MySQL, c))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let parser = self
-            .config
-            .mysql_parser
-            .as_ref()
-            .map(|p| format!(" WITH PARSER {}", p))
-            .unwrap_or_default();
-
-        format!(
-            "CREATE FULLTEXT INDEX {} ON {}({}){}",
-            quote_ident(DatabaseType::MySQL, &self.name),
-            quote_ident(DatabaseType::MySQL, &self.table),
-            columns_str,
-            parser
-        )
+        let mut params = Vec::new();
+        let mut builder = SqlBuilder::new(DatabaseType::MySQL, &mut params)
+            .raw("CREATE FULLTEXT INDEX ")
+            .ident(&self.name)
+            .raw(" ON ")
+            .ident(&self.table)
+            .raw("(");
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                builder = builder.raw(", ");
+            }
+            builder = builder.ident(col);
+        }
+        builder = builder.raw(")");
+        if let Some(parser) = &self.config.mysql_parser {
+            builder = builder.raw(" WITH PARSER ").raw(parser);
+        }
+        builder.into_sql()
     }
 
     /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5
     pub fn to_sqlite_sql(&self) -> Vec<String> {
+        let mut params = Vec::new();
         let fts_table = format!("{}_fts", self.table);
-        let columns_str = self
-            .columns
-            .iter()
-            .map(|column| quote_ident(DatabaseType::SQLite, column))
-            .collect::<Vec<_>>()
-            .join(", ");
+
+        let mut columns_builder = SqlBuilder::new(DatabaseType::SQLite, &mut params);
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                columns_builder = columns_builder.raw(", ");
+            }
+            columns_builder = columns_builder.ident(col);
+        }
+        let columns_str = columns_builder.into_sql();
+
+        let mut new_columns_str = String::new();
+        let mut old_columns_str = String::new();
+        for (i, col) in self.columns.iter().enumerate() {
+            if i > 0 {
+                new_columns_str.push_str(", ");
+                old_columns_str.push_str(", ");
+            }
+            new_columns_str.push_str(&SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("new.")
+                .ident(col)
+                .into_sql());
+            old_columns_str.push_str(&SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("old.")
+                .ident(col)
+                .into_sql());
+        }
 
         vec![
             // Create FTS5 virtual table
-            format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5({}, content={}, content_rowid={})",
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                columns_str,
-                quote_ident(DatabaseType::SQLite, &self.table),
-                quote_ident(DatabaseType::SQLite, "rowid")
-            ),
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("CREATE VIRTUAL TABLE IF NOT EXISTS ")
+                .ident(&fts_table)
+                .raw(" USING fts5(")
+                .raw(&columns_str)
+                .raw(", content=")
+                .ident(&self.table)
+                .raw(", content_rowid=")
+                .ident("rowid")
+                .raw(")")
+                .into_sql(),
             // Create triggers to keep FTS table in sync
-            format!(
-                "CREATE TRIGGER IF NOT EXISTS {} AFTER INSERT ON {} BEGIN \
-                 INSERT INTO \"{}\"(rowid, {}) VALUES (new.rowid, {}); \
-                 END",
-                quote_ident(DatabaseType::SQLite, &format!("{}_ai", self.table)),
-                quote_ident(DatabaseType::SQLite, &self.table),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                columns_str,
-                self.columns
-                    .iter()
-                    .map(|c| format!("new.{}", quote_ident(DatabaseType::SQLite, c)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            format!(
-                "CREATE TRIGGER IF NOT EXISTS {} AFTER DELETE ON {} BEGIN \
-                 INSERT INTO {}({}, rowid, {}) VALUES('delete', old.rowid, {}); \
-                 END",
-                quote_ident(DatabaseType::SQLite, &format!("{}_ad", self.table)),
-                quote_ident(DatabaseType::SQLite, &self.table),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                columns_str,
-                self.columns
-                    .iter()
-                    .map(|c| format!("old.{}", quote_ident(DatabaseType::SQLite, c)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            format!(
-                "CREATE TRIGGER IF NOT EXISTS {} AFTER UPDATE ON {} BEGIN \
-                 INSERT INTO {}({}, rowid, {}) VALUES('delete', old.rowid, {}); \
-                 INSERT INTO {}(rowid, {}) VALUES (new.rowid, {}); \
-                 END",
-                quote_ident(DatabaseType::SQLite, &format!("{}_au", self.table)),
-                quote_ident(DatabaseType::SQLite, &self.table),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                columns_str,
-                self.columns
-                    .iter()
-                    .map(|c| format!("old.{}", quote_ident(DatabaseType::SQLite, c)))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                quote_ident(DatabaseType::SQLite, &fts_table),
-                columns_str,
-                self.columns
-                    .iter()
-                    .map(|c| format!("new.{}", quote_ident(DatabaseType::SQLite, c)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("CREATE TRIGGER IF NOT EXISTS ")
+                .ident(&format!("{}_ai", self.table))
+                .raw(" AFTER INSERT ON ")
+                .ident(&self.table)
+                .raw(" BEGIN INSERT INTO \"")
+                .raw(&fts_table)
+                .raw("\"(rowid, ")
+                .raw(&columns_str)
+                .raw(") VALUES (new.rowid, ")
+                .raw(&new_columns_str)
+                .raw("); END")
+                .into_sql(),
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("CREATE TRIGGER IF NOT EXISTS ")
+                .ident(&format!("{}_ad", self.table))
+                .raw(" AFTER DELETE ON ")
+                .ident(&self.table)
+                .raw(" BEGIN INSERT INTO ")
+                .ident(&fts_table)
+                .raw("(")
+                .ident(&fts_table)
+                .raw(", rowid, ")
+                .raw(&columns_str)
+                .raw(") VALUES('delete', old.rowid, ")
+                .raw(&old_columns_str)
+                .raw("); END")
+                .into_sql(),
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("CREATE TRIGGER IF NOT EXISTS ")
+                .ident(&format!("{}_au", self.table))
+                .raw(" AFTER UPDATE ON ")
+                .ident(&self.table)
+                .raw(" BEGIN INSERT INTO ")
+                .ident(&fts_table)
+                .raw("(")
+                .ident(&fts_table)
+                .raw(", rowid, ")
+                .raw(&columns_str)
+                .raw(") VALUES('delete', old.rowid, ")
+                .raw(&old_columns_str)
+                .raw("); INSERT INTO ")
+                .ident(&fts_table)
+                .raw("(rowid, ")
+                .raw(&columns_str)
+                .raw(") VALUES (new.rowid, ")
+                .raw(&new_columns_str)
+                .raw("); END")
+                .into_sql(),
         ]
     }
 
@@ -297,16 +329,22 @@ pub fn pg_headline_sql(
 ) -> String {
     let column = format_identifier_reference(DatabaseType::Postgres, column)
         .unwrap_or_else(|| quote_ident(DatabaseType::Postgres, column));
-    let language = escape_string(language);
-    let query = escape_string(query);
-    let start_tag = escape_string(start_tag);
-    let end_tag = escape_string(end_tag);
-
-    format!(
-        "ts_headline('{}', {}, plainto_tsquery('{}', '{}'), \
-         'StartSel={}, StopSel={}, MaxWords=35, MinWords=15')",
-        language, column, language, query, start_tag, end_tag
-    )
+    let mut params = Vec::new();
+    SqlBuilder::new(DatabaseType::Postgres, &mut params)
+        .raw("ts_headline('")
+        .raw(&escape_string(language))
+        .raw("', ")
+        .raw(&column)
+        .raw(", plainto_tsquery('")
+        .raw(&escape_string(language))
+        .raw("', '")
+        .raw(&escape_string(query))
+        .raw("'), 'StartSel=")
+        .raw(&escape_string(start_tag))
+        .raw(", StopSel=")
+        .raw(&escape_string(end_tag))
+        .raw(", MaxWords=35, MinWords=15')")
+        .into_sql()
 }
 
 // =============================================================================

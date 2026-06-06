@@ -4,8 +4,9 @@ use std::time::Duration;
 use super::FileUrlGenerator;
 use super::database::rewrite_driver_url;
 use super::state::{
-    global_config_state, global_db_type_state, global_pool_config_state,
-    global_schema_file_path_state,
+    global_db_type, global_pool_config, global_schema_file_path,
+    set_global_db_type, set_global_pool_config, set_global_schema_file_path,
+    with_global_config_mut,
 };
 use super::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds};
 
@@ -207,7 +208,7 @@ impl TideConfig {
     }
 
     pub async fn connect(self) -> Result<&'static Database> {
-        *global_config_state().write() = self.config.clone();
+        with_global_config_mut(|c| *c = self.config.clone());
 
         if let Some(key) = &self.encryption_key {
             crate::tokenization::TokenConfig::set_encryption_key(key);
@@ -237,7 +238,7 @@ impl TideConfig {
 
         let connect_url = rewrite_driver_url(&url);
 
-        *global_pool_config_state().write() = Some(self.pool.clone());
+        set_global_pool_config(Some(self.pool.clone()));
 
         let db = Database::builder()
             .url(connect_url)
@@ -258,7 +259,7 @@ impl TideConfig {
             }
         }
 
-        *global_db_type_state().write() = Some(db_type);
+        set_global_db_type(Some(db_type));
 
         let db_ref = Database::set_global(db)?;
 
@@ -297,38 +298,37 @@ impl TideConfig {
         }
 
         if let Some(path) = &self.schema_file {
-            *global_schema_file_path_state().write() = Some(path.clone());
+            set_global_schema_file_path(Some(path.clone()));
             crate::schema::SchemaWriter::write_schema(path).await?;
         } else {
-            *global_schema_file_path_state().write() = None;
+            set_global_schema_file_path(None);
         }
 
         Ok(db_ref)
     }
 
     pub fn apply(self) {
-        *global_config_state().write() = self.config;
+        with_global_config_mut(|c| *c = self.config);
 
-        let database_type = self.database_type;
-        *global_db_type_state().write() = database_type;
+        set_global_db_type(self.database_type);
 
-        *global_pool_config_state().write() = Some(self.pool);
+        set_global_pool_config(Some(self.pool));
 
-        *global_schema_file_path_state().write() = self.schema_file;
+        set_global_schema_file_path(self.schema_file);
     }
 
     pub fn reset() {
-        *global_config_state().write() = Config::default();
+        with_global_config_mut(|c| *c = Config::default());
 
-        *global_db_type_state().write() = None;
+        set_global_db_type(None);
 
-        *global_pool_config_state().write() = None;
+        set_global_pool_config(None);
 
-        *global_schema_file_path_state().write() = None;
+        set_global_schema_file_path(None);
 
         #[cfg(feature = "attachments")]
         {
-            *super::state::global_file_url_generator_state().write() = None;
+            super::state::set_global_file_url_generator(None);
         }
     }
 
@@ -345,7 +345,7 @@ impl TideConfig {
     }
 
     pub fn get_database_type() -> Option<DatabaseType> {
-        *global_db_type_state().read()
+        global_db_type()
     }
 
     pub fn is_postgres() -> bool {
@@ -376,14 +376,11 @@ impl TideConfig {
     }
 
     pub fn pool_config() -> PoolConfig {
-        global_pool_config_state()
-            .read()
-            .clone()
-            .unwrap_or_default()
+        global_pool_config().unwrap_or_default()
     }
 
     pub fn schema_file_path() -> Option<String> {
-        global_schema_file_path_state().read().clone()
+        global_schema_file_path()
     }
 
     pub fn write_schema_with_generator(

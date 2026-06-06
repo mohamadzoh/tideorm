@@ -32,7 +32,7 @@ fn json_text_value(text: String) -> Value {
 
 fn json_scalar_parameter(value: &serde_json::Value) -> Value {
     json_text_value(
-        serde_json::to_string(value).expect("serializing scalar predicate value should not fail"),
+        serde_json::to_string(value).unwrap(),
     )
 }
 
@@ -61,7 +61,7 @@ fn sqlite_json_compare_parameter(value: &serde_json::Value) -> Value {
 }
 
 fn json_string_contents(value: &str) -> String {
-    let json = serde_json::to_string(value).expect("serializing JSON path segment should not fail");
+    let json = serde_json::to_string(value).unwrap();
     json[1..json.len() - 1].to_string()
 }
 
@@ -336,13 +336,13 @@ fn mysql_json_array_literal(values: &[String]) -> String {
             .map(|value| sql_array_value_to_json(value))
             .collect::<Vec<_>>(),
     )
-    .expect("serializing JSON array should not fail");
+    .unwrap();
     escape_mysql_literal(&json)
 }
 
 fn mysql_json_scalar_literal(value: &str) -> String {
     let json = serde_json::to_string(&sql_array_value_to_json(value))
-        .expect("serializing JSON scalar should not fail");
+        .unwrap();
     escape_mysql_literal(&json)
 }
 

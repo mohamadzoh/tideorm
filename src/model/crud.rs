@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 
 use std::future::Future;
-use std::pin::Pin;
 
 use crate::error::{Error, Result};
 
@@ -81,7 +80,8 @@ pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
 where
     F: for<'c> FnOnce(
             &'c crate::database::Transaction,
-        ) -> Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
+        )
+            -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
         + Send,
     T: Send,
 {

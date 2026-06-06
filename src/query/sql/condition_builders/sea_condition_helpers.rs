@@ -53,15 +53,13 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(crate) fn json_array_parameter(values: &[serde_json::Value]) -> Value {
         Self::json_text_value(
-            serde_json::to_string(values)
-                .expect("serializing array predicate values should not fail"),
+            serde_json::to_string(values).unwrap(),
         )
     }
 
     pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
         Self::json_text_value(
-            serde_json::to_string(value)
-                .expect("serializing scalar predicate value should not fail"),
+            serde_json::to_string(value).unwrap(),
         )
     }
 

@@ -5,31 +5,74 @@ use std::sync::OnceLock;
 use super::FileUrlGenerator;
 use super::{Config, DatabaseType, PoolConfig};
 
-static GLOBAL_CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
-static GLOBAL_DB_TYPE: OnceLock<RwLock<Option<DatabaseType>>> = OnceLock::new();
-static GLOBAL_POOL_CONFIG: OnceLock<RwLock<Option<PoolConfig>>> = OnceLock::new();
-static SCHEMA_FILE_PATH: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+struct GlobalConfigState {
+    config: Config,
+    db_type: Option<DatabaseType>,
+    pool_config: Option<PoolConfig>,
+    schema_file_path: Option<String>,
+    #[cfg(feature = "attachments")]
+    file_url_generator: Option<FileUrlGenerator>,
+}
+
+impl Default for GlobalConfigState {
+    fn default() -> Self {
+        Self {
+            config: Config::default(),
+            db_type: None,
+            pool_config: None,
+            schema_file_path: None,
+            #[cfg(feature = "attachments")]
+            file_url_generator: None,
+        }
+    }
+}
+
+static GLOBAL_CONFIG_STATE: OnceLock<RwLock<GlobalConfigState>> = OnceLock::new();
+
+fn global_state() -> &'static RwLock<GlobalConfigState> {
+    GLOBAL_CONFIG_STATE.get_or_init(|| RwLock::new(GlobalConfigState::default()))
+}
+
+pub(super) fn with_global_config<T>(f: impl FnOnce(&Config) -> T) -> T {
+    let guard = global_state().read();
+    f(&guard.config)
+}
+
+pub(super) fn with_global_config_mut(f: impl FnOnce(&mut Config)) {
+    let mut guard = global_state().write();
+    f(&mut guard.config);
+}
+
+pub(super) fn global_db_type() -> Option<DatabaseType> {
+    global_state().read().db_type
+}
+
+pub(super) fn set_global_db_type(db_type: Option<DatabaseType>) {
+    global_state().write().db_type = db_type;
+}
+
+pub(super) fn global_pool_config() -> Option<PoolConfig> {
+    global_state().read().pool_config.clone()
+}
+
+pub(super) fn set_global_pool_config(pool_config: Option<PoolConfig>) {
+    global_state().write().pool_config = pool_config;
+}
+
+pub(super) fn global_schema_file_path() -> Option<String> {
+    global_state().read().schema_file_path.clone()
+}
+
+pub(super) fn set_global_schema_file_path(path: Option<String>) {
+    global_state().write().schema_file_path = path;
+}
 
 #[cfg(feature = "attachments")]
-static GLOBAL_FILE_URL_GENERATOR: OnceLock<RwLock<Option<FileUrlGenerator>>> = OnceLock::new();
-
-pub(super) fn global_config_state() -> &'static RwLock<Config> {
-    GLOBAL_CONFIG.get_or_init(|| RwLock::new(Config::default()))
-}
-
-pub(super) fn global_db_type_state() -> &'static RwLock<Option<DatabaseType>> {
-    GLOBAL_DB_TYPE.get_or_init(|| RwLock::new(None))
-}
-
-pub(super) fn global_pool_config_state() -> &'static RwLock<Option<PoolConfig>> {
-    GLOBAL_POOL_CONFIG.get_or_init(|| RwLock::new(None))
-}
-
-pub(super) fn global_schema_file_path_state() -> &'static RwLock<Option<String>> {
-    SCHEMA_FILE_PATH.get_or_init(|| RwLock::new(None))
+pub(super) fn global_file_url_generator() -> Option<FileUrlGenerator> {
+    global_state().read().file_url_generator
 }
 
 #[cfg(feature = "attachments")]
-pub(super) fn global_file_url_generator_state() -> &'static RwLock<Option<FileUrlGenerator>> {
-    GLOBAL_FILE_URL_GENERATOR.get_or_init(|| RwLock::new(None))
+pub(super) fn set_global_file_url_generator(generator: Option<FileUrlGenerator>) {
+    global_state().write().file_url_generator = generator;
 }

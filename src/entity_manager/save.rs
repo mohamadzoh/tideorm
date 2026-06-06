@@ -1,15 +1,11 @@
 #![allow(missing_docs)]
 
 use std::any::Any;
-#[cfg(not(feature = "runtime-tokio"))]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(not(feature = "runtime-tokio"))]
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::task::{Context, Poll};
 
 use parking_lot::Mutex;
 
@@ -55,19 +51,8 @@ where
     }
 }
 
-#[cfg(feature = "runtime-tokio")]
-tokio::task_local! {
-    static ENTITY_MANAGER_TRANSACTION_SCOPE: bool;
-}
-
-#[cfg(feature = "runtime-tokio")]
-tokio::task_local! {
-    static ENTITY_MANAGER_IDENTITY_ROLLBACK: Arc<Mutex<IdentityRollbackLog>>;
-}
-
-#[cfg(not(feature = "runtime-tokio"))]
 thread_local! {
-    static ENTITY_MANAGER_TRANSACTION_SCOPE: RefCell<bool> = const { RefCell::new(false) };
+    static ENTITY_MANAGER_TRANSACTION_SCOPE: Cell<bool> = const { Cell::new(false) };
     static ENTITY_MANAGER_IDENTITY_ROLLBACK: RefCell<Option<Arc<Mutex<IdentityRollbackLog>>>> = const { RefCell::new(None) };
 }
 
@@ -75,45 +60,14 @@ pub(super) fn new_identity_rollback_log() -> Arc<Mutex<IdentityRollbackLog>> {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-#[cfg(feature = "runtime-tokio")]
-fn current_identity_rollback_log() -> Option<Arc<Mutex<IdentityRollbackLog>>> {
-    ENTITY_MANAGER_IDENTITY_ROLLBACK.try_with(Clone::clone).ok()
-}
-
-#[cfg(not(feature = "runtime-tokio"))]
 fn current_identity_rollback_log() -> Option<Arc<Mutex<IdentityRollbackLog>>> {
     ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| log.borrow().clone())
 }
 
-#[cfg(feature = "runtime-tokio")]
 pub(super) fn in_entity_manager_transaction_scope() -> bool {
-    ENTITY_MANAGER_TRANSACTION_SCOPE
-        .try_with(|active| *active)
-        .unwrap_or(false)
+    ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.get())
 }
 
-#[cfg(not(feature = "runtime-tokio"))]
-pub(super) fn in_entity_manager_transaction_scope() -> bool {
-    ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| *active.borrow())
-}
-
-#[cfg(feature = "runtime-tokio")]
-pub(super) async fn with_entity_manager_transaction_scope<F>(
-    rollback_log: Arc<Mutex<IdentityRollbackLog>>,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    ENTITY_MANAGER_TRANSACTION_SCOPE
-        .scope(
-            true,
-            ENTITY_MANAGER_IDENTITY_ROLLBACK.scope(rollback_log, future),
-        )
-        .await
-}
-
-#[cfg(not(feature = "runtime-tokio"))]
 pub(super) fn with_entity_manager_transaction_scope<F>(
     rollback_log: Arc<Mutex<IdentityRollbackLog>>,
     future: F,
@@ -134,16 +88,18 @@ where
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
-            let previous = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.replace(true));
+            let previous = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| {
+                let prev = active.get();
+                active.set(true);
+                prev
+            });
             let previous_log = ENTITY_MANAGER_IDENTITY_ROLLBACK
                 .with(|log| log.replace(Some(this.rollback_log.clone())));
             let result = this.future.as_mut().poll(cx);
             ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| {
                 *log.borrow_mut() = previous_log;
             });
-            ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| {
-                *active.borrow_mut() = previous;
-            });
+            ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.set(previous));
             result
         }
     }
@@ -179,12 +135,10 @@ pub(super) fn record_identity_map_rollback<T>(
         .get(key)
         .and_then(|value| value.downcast_ref::<T>())
         .cloned();
+    let key = key.clone();
     rollback_log.insert(
         key.clone(),
-        Box::new(IdentityMapRollbackEntry {
-            key: key.clone(),
-            original,
-        }),
+        Box::new(IdentityMapRollbackEntry { key, original }),
     );
 }
 
@@ -260,18 +214,15 @@ where
     let checkpoints = capture_managed_checkpoints(entity_manager.as_ref());
     let identity_rollback = new_identity_rollback_log();
     let db = entity_manager.db.clone();
-    let entity_manager = entity_manager.clone();
-    let transaction_entity_manager = entity_manager.clone();
-    let transaction_identity_rollback = identity_rollback.clone();
+    let entity_manager_for_txn = entity_manager.clone();
+    let identity_rollback_for_txn = identity_rollback.clone();
     let entity = entity.clone();
     let result = db
         .transaction(move |_| {
-            let entity_manager = transaction_entity_manager.clone();
-            let identity_rollback = transaction_identity_rollback.clone();
             Box::pin(async move {
                 with_entity_manager_transaction_scope(
-                    identity_rollback,
-                    save_with_entity_manager_impl(&entity, &entity_manager),
+                    identity_rollback_for_txn,
+                    save_with_entity_manager_impl(&entity, &entity_manager_for_txn),
                 )
                 .await
             })
@@ -306,17 +257,16 @@ where
         + Sync
         + 'static,
 {
+    let mut aggregate = entity.clone();
     let persisted = __with_entity_manager_db(
         entity_manager,
         <T as crate::model::Model>::save(entity.clone()),
     )
     .await?;
-    let mut aggregate = entity.clone();
-    let previous = aggregate.clone();
     aggregate.tide_merge_persisted(persisted);
     <T as crate::internal::InternalModel>::refresh_runtime_relations_from(
         &mut aggregate,
-        &previous,
+        entity,
     );
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
@@ -340,10 +290,9 @@ where
         + 'static,
 {
     let mut aggregate = entity.clone();
-    let previous = aggregate.clone();
     <T as crate::internal::InternalModel>::refresh_runtime_relations_from(
         &mut aggregate,
-        &previous,
+        entity,
     );
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)

@@ -434,11 +434,10 @@ where
     where
         Self: 'a;
 
-    fn load_with_entity_manager<'a>(
+    async fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
-    {
-        Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
+    ) -> Result<Self::Output<'a>> {
+        self.load_in_entity_manager(entity_manager).await
     }
 }

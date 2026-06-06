@@ -8,8 +8,6 @@ mod tracked;
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -58,7 +56,7 @@ pub trait EntityManagerLoad {
     fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<Self::Output<'a>>> + Send + 'a>>;
+    ) -> impl std::future::Future<Output = crate::error::Result<Self::Output<'a>>> + Send;
 }
 
 #[doc(hidden)]
@@ -189,7 +187,7 @@ impl EntityManager {
         let snapshot = self.get_by_entity_manager_key::<T>(&key);
 
         let entry = Arc::new(managed::ManagedEntry::new(
-            entity.clone(),
+            entity,
             snapshot,
             EntityState::Managed,
             Some(key.clone()),
@@ -234,13 +232,10 @@ impl EntityManager {
         let result = self
             .db
             .transaction(move |_| {
-                let entity_manager = entity_manager.clone();
-                let checkpoints = transaction_checkpoints.clone();
-                let identity_rollback = transaction_identity_rollback.clone();
                 Box::pin(async move {
                     save::with_entity_manager_transaction_scope(
-                        identity_rollback,
-                        entity_manager.flush_in_scope_with_checkpoints(Some(&checkpoints)),
+                        transaction_identity_rollback,
+                        entity_manager.flush_in_scope_with_checkpoints(Some(&transaction_checkpoints)),
                     )
                     .await
                 })
@@ -273,8 +268,13 @@ impl EntityManager {
         let mut passes = 0;
         let mut checkpointed = HashSet::<usize>::new();
         loop {
-            let entries = self.managed_entries.read().clone();
-            if processed >= entries.len() {
+            let (entries, entries_len) = {
+                let all_entries = self.managed_entries.read();
+                let len = all_entries.len();
+                let entries: Vec<_> = all_entries.iter().skip(processed).cloned().collect();
+                (entries, len)
+            };
+            if processed >= entries_len {
                 break;
             }
 
@@ -285,7 +285,7 @@ impl EntityManager {
             }
             passes += 1;
 
-            for entry in entries.iter().skip(processed).cloned() {
+            for entry in entries {
                 if let Some(checkpoints) = checkpoints {
                     let entry_ptr = Arc::as_ptr(&entry).cast::<()>() as usize;
                     if checkpointed.insert(entry_ptr) {
@@ -296,7 +296,7 @@ impl EntityManager {
                 entry.flush(self).await?;
             }
 
-            processed = entries.len();
+            processed = entries_len;
         }
 
         let mut managed_entries = self.managed_entries.write();
@@ -305,7 +305,7 @@ impl EntityManager {
     }
 
     pub fn clear(&self) {
-        let entries = self.managed_entries.read().clone();
+        let entries: Vec<_> = self.managed_entries.read().iter().cloned().collect();
         for entry in &entries {
             entry.detach_from_context(self);
         }
@@ -316,14 +316,14 @@ impl EntityManager {
         self.snapshots.write().clear();
     }
 
-    pub fn load<'a, R>(
+    pub async fn load<'a, R>(
         self: &'a Arc<Self>,
         relation: &'a mut R,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<R::Output<'a>>> + Send + 'a>>
+    ) -> crate::error::Result<R::Output<'a>>
     where
         R: EntityManagerLoad + 'a,
     {
-        relation.load_with_entity_manager(self)
+        relation.load_with_entity_manager(self).await
     }
 
     pub async fn save<T>(self: &Arc<Self>, entity: &T) -> crate::error::Result<T>

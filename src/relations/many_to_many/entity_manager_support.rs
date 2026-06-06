@@ -98,7 +98,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             entity_manager
                 .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
                 .await;
-            return Ok(self.cached.as_ref().expect("relation cache should exist"));
+            return Ok(self.cached.as_ref().ok_or_else(|| {
+                Error::internal(format!(
+                    "relation cache missing for '{}' after entity manager snapshot",
+                    self.relation_name
+                ))
+            })?);
         }
 
         self.ensure_configured()?;
@@ -144,7 +149,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
             .await;
 
-        Ok(self.cached.as_ref().expect("relation cache should exist"))
+        self.cached.as_ref().ok_or_else(|| {
+            Error::internal(format!(
+                "relation cache missing for '{}' after load",
+                self.relation_name
+            ))
+        })
     }
 }
 
@@ -165,11 +175,10 @@ where
     where
         Self: 'a;
 
-    fn load_with_entity_manager<'a>(
+    async fn load_with_entity_manager<'a>(
         &'a mut self,
         entity_manager: &'a std::sync::Arc<crate::entity_manager::EntityManager>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Self::Output<'a>>> + Send + 'a>>
-    {
-        Box::pin(async move { self.load_in_entity_manager(entity_manager).await })
+    ) -> Result<Self::Output<'a>> {
+        self.load_in_entity_manager(entity_manager).await
     }
 }

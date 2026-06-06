@@ -1,7 +1,6 @@
 #![allow(missing_docs)]
 
-use std::future::Future;
-use std::pin::Pin;
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -51,14 +50,15 @@ impl<T> Managed<T> {
     }
 }
 
+#[async_trait]
 pub(crate) trait ManagedOps: Send + Sync {
     fn current_state(&self) -> EntityState;
     fn detach_from_context(&self, entity_manager: &EntityManager);
     fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint>;
-    fn flush<'a>(
+    async fn flush(
         self: Arc<Self>,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>>;
+        entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()>;
 }
 
 pub(crate) trait ManagedCheckpoint: Send {
@@ -139,6 +139,7 @@ impl<T> ManagedEntry<T> {
     }
 }
 
+#[async_trait]
 impl<T> ManagedOps for ManagedEntry<T>
 where
     T: Model
@@ -158,8 +159,8 @@ where
     }
 
     fn detach_from_context(&self, entity_manager: &EntityManager) {
-        if let Some(key) = self.persisted_key.read().clone() {
-            entity_manager.remove_managed_entry::<T>(&key);
+        if let Some(key) = self.persisted_key.read().as_ref() {
+            entity_manager.remove_managed_entry::<T>(key);
         }
 
         self.mark_detached();
@@ -175,70 +176,68 @@ where
         })
     }
 
-    fn flush<'a>(
+    async fn flush(
         self: Arc<Self>,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            match self.state() {
-                EntityState::Detached => Ok(()),
-                EntityState::Removed => {
-                    let key = self.persisted_key.read().clone();
-                    if let Some(key) = key {
-                        let entity = self
-                            .snapshot
-                            .read()
-                            .clone()
-                            .unwrap_or_else(|| self.current.read().clone());
-                        super::__with_entity_manager_db(
-                            entity_manager,
-                            <T as crate::model::Model>::delete(entity),
-                        )
-                        .await?;
-                        entity_manager.remove_by_entity_manager_key::<T>(&key);
-                        entity_manager.remove_managed_entry::<T>(&key);
-                    }
-
-                    *self.snapshot.write() = None;
-                    *self.persisted_key.write() = None;
-                    self.mark_detached();
-                    Ok(())
+        entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()> {
+        match self.state() {
+            EntityState::Detached => Ok(()),
+            EntityState::Removed => {
+                let key = self.persisted_key.read().as_ref().cloned();
+                if let Some(key) = key {
+                    let entity = self
+                        .snapshot
+                        .read()
+                        .clone()
+                        .unwrap_or_else(|| self.current.read().clone());
+                    super::__with_entity_manager_db(
+                        entity_manager,
+                        <T as crate::model::Model>::delete(entity),
+                    )
+                    .await?;
+                    entity_manager.remove_by_entity_manager_key::<T>(&key);
+                    entity_manager.remove_managed_entry::<T>(&key);
                 }
-                EntityState::New | EntityState::Managed => {
-                    let current = self.current.read().clone();
-                    let snapshot = self.snapshot.read().clone();
-                    let columns_changed = match snapshot.as_ref() {
-                        Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),
-                        None => true,
-                    };
 
-                    let previous_key = self.persisted_key.read().clone();
-                    let saved = if columns_changed {
-                        save_with_entity_manager_impl(&current, entity_manager).await?
-                    } else {
-                        sync_entity_manager_relations_only_impl(&current, entity_manager).await?
-                    };
-                    let next_key = Some(saved.tide_pk_key());
-
-                    if let Some(previous_key) = previous_key.as_deref() {
-                        if Some(previous_key) != next_key.as_deref() {
-                            entity_manager.remove_managed_entry::<T>(previous_key);
-                        }
-                    }
-
-                    if let Some(key) = next_key.as_deref() {
-                        entity_manager.put_managed_entry::<T>(key, self.clone());
-                    }
-
-                    *self.current.write() = saved.clone();
-                    *self.snapshot.write() = Some(saved.clone());
-                    *self.persisted_key.write() = next_key;
-                    *self.state.write() = EntityState::Managed;
-                    entity_manager.put(saved);
-                    Ok(())
-                }
+                *self.snapshot.write() = None;
+                *self.persisted_key.write() = None;
+                self.mark_detached();
+                Ok(())
             }
-        })
+            EntityState::New | EntityState::Managed => {
+                let current = self.current.read().clone();
+                let snapshot = self.snapshot.read().clone();
+                let columns_changed = match snapshot.as_ref() {
+                    Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),
+                    None => true,
+                };
+
+                let previous_key = self.persisted_key.read().as_ref().cloned();
+                let saved = if columns_changed {
+                    save_with_entity_manager_impl(&current, entity_manager).await?
+                } else {
+                    sync_entity_manager_relations_only_impl(&current, entity_manager).await?
+                };
+                let next_key = Some(saved.tide_pk_key());
+
+                if let Some(ref previous_key) = previous_key {
+                    if Some(previous_key.as_str()) != next_key.as_deref() {
+                        entity_manager.remove_managed_entry::<T>(previous_key);
+                    }
+                }
+
+                if let Some(key) = next_key.as_deref() {
+                    entity_manager.put_managed_entry::<T>(key, self.clone());
+                }
+
+                *self.current.write() = saved.clone();
+                *self.snapshot.write() = Some(saved.clone());
+                *self.persisted_key.write() = next_key;
+                *self.state.write() = EntityState::Managed;
+                entity_manager.put(saved);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -255,8 +254,8 @@ where
     T: Send + Sync + 'static,
 {
     fn rollback(self: Box<Self>, entity_manager: &EntityManager) {
-        if let Some(current_key) = self.entry.persisted_key.read().clone() {
-            entity_manager.remove_managed_entry::<T>(&current_key);
+        if let Some(current_key) = self.entry.persisted_key.read().as_deref() {
+            entity_manager.remove_managed_entry::<T>(current_key);
         }
 
         if let Some(previous_key) = self.persisted_key.as_deref() {

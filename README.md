@@ -137,7 +137,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.16", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.9.17", features = ["postgres", "encrypted-fields"] }
 ```
 
 ```rust
@@ -178,31 +178,31 @@ Encrypted field notes:
 ```toml
 [dependencies]
 # PostgreSQL (default)
-tideorm = { version = "0.9.16", features = ["postgres"] }
+tideorm = { version = "0.9.17", features = ["postgres"] }
 
 # MySQL
-tideorm = { version = "0.9.16", features = ["mysql"] }
+tideorm = { version = "0.9.17", features = ["mysql"] }
 
 # SQLite
-tideorm = { version = "0.9.16", features = ["sqlite"] }
+tideorm = { version = "0.9.17", features = ["sqlite"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.17", features = ["postgres", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.17", features = ["postgres", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.9.17", features = ["postgres", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.9.17", features = ["postgres", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "dirty-tracking"] }
+tideorm = { version = "0.9.17", features = ["postgres", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.9.16", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.9.17", features = ["postgres", "encrypted-fields"] }
 ```
 
 ### Feature Flags

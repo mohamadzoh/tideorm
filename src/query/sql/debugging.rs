@@ -186,7 +186,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(crate) fn build_query_error_context(
         &self,
-        query: Option<String>,
+        query: Option<&str>,
     ) -> crate::error::ErrorContext {
         let mut context = crate::error::ErrorContext::new()
             .table(M::table_name())

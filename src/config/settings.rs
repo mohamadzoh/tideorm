@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::state::global_config_state;
+use super::state::with_global_config;
 
 #[cfg(feature = "attachments")]
 pub type FileUrlGenerator =
@@ -36,13 +36,12 @@ impl Config {
     }
 
     pub fn global() -> Config {
-        global_config_state().read().clone()
+        with_global_config(Clone::clone)
     }
 
     #[inline]
     fn with_global<T>(f: impl FnOnce(&Config) -> T) -> T {
-        let guard = global_config_state().read();
-        f(&guard)
+        with_global_config(f)
     }
 
     pub fn get_languages() -> Vec<String> {
@@ -78,13 +77,13 @@ impl Config {
 
     #[cfg(feature = "attachments")]
     pub fn get_file_url_generator() -> FileUrlGenerator {
-        (*super::state::global_file_url_generator_state().read())
+        super::state::global_file_url_generator()
             .unwrap_or(Self::default_file_url_generator)
     }
 
     #[cfg(feature = "attachments")]
     pub fn set_file_url_generator(generator: FileUrlGenerator) {
-        *super::state::global_file_url_generator_state().write() = Some(generator);
+        super::state::set_global_file_url_generator(Some(generator));
     }
 
     #[inline]

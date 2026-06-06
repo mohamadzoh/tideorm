@@ -121,12 +121,12 @@ pub trait Model:
         Self: Sized,
         F: for<'c> FnOnce(
                 &'c crate::database::Transaction,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>,
-            > + Send,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>>
+            + Send,
         T: Send,
     {
-        crud::transaction::<F, T>(f).await
+        crud::transaction(f).await
     }
 
     async fn first() -> Result<Option<Self>>
@@ -261,7 +261,7 @@ pub trait Model:
     where
         Self: serde::Serialize,
     {
-        serialization::to_json::<Self>(self, options)
+        serialization::to_json::<Self>(self, options.as_ref())
     }
 
     #[inline]

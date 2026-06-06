@@ -1,13 +1,9 @@
 use arc_swap::ArcSwapOption;
+use std::cell::RefCell;
 use std::future::Future;
-#[cfg(not(feature = "runtime-tokio"))]
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-#[cfg(not(feature = "runtime-tokio"))]
 use std::task::{Context, Poll};
-
-#[cfg(not(feature = "runtime-tokio"))]
-use std::cell::RefCell;
 
 use crate::error::{Error, Result};
 use crate::internal::{Backend, InternalConnection};
@@ -17,14 +13,8 @@ use super::{ConnectionRef, Database};
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 static GLOBAL_CONNECTION: OnceLock<ArcSwapOption<InternalConnection>> = OnceLock::new();
 
-#[cfg(feature = "runtime-tokio")]
-tokio::task_local! {
-    pub(super) static TASK_DB_OVERRIDE: DatabaseHandle;
-}
-
-#[cfg(not(feature = "runtime-tokio"))]
 thread_local! {
-    pub(super) static THREAD_DB_OVERRIDE: RefCell<Option<DatabaseHandle>> = const { RefCell::new(None) };
+    static DB_OVERRIDE: RefCell<Option<DatabaseHandle>> = const { RefCell::new(None) };
 }
 
 #[derive(Clone)]
@@ -90,32 +80,23 @@ pub fn has_global_db() -> bool {
     global_connection_slot().load_full().is_some()
 }
 
-#[cfg(feature = "runtime-tokio")]
 fn current_override_handle() -> Option<DatabaseHandle> {
-    TASK_DB_OVERRIDE.try_with(Clone::clone).ok()
+    DB_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
-#[cfg(not(feature = "runtime-tokio"))]
-fn current_override_handle() -> Option<DatabaseHandle> {
-    THREAD_DB_OVERRIDE.with(|slot| slot.borrow().clone())
-}
+struct ResetDbOverride(Option<DatabaseHandle>);
 
-#[cfg(not(feature = "runtime-tokio"))]
-struct ResetThreadOverride(Option<DatabaseHandle>);
-
-#[cfg(not(feature = "runtime-tokio"))]
-impl Drop for ResetThreadOverride {
+impl Drop for ResetDbOverride {
     fn drop(&mut self) {
-        THREAD_DB_OVERRIDE.with(|slot| {
+        DB_OVERRIDE.with(|slot| {
             slot.replace(self.0.take());
         });
     }
 }
 
-#[cfg(not(feature = "runtime-tokio"))]
-fn install_thread_override(handle: &DatabaseHandle) -> ResetThreadOverride {
-    let previous = THREAD_DB_OVERRIDE.with(|slot| slot.replace(Some(handle.clone())));
-    ResetThreadOverride(previous)
+fn install_db_override(handle: &DatabaseHandle) -> ResetDbOverride {
+    let previous = DB_OVERRIDE.with(|slot| slot.replace(Some(handle.clone())));
+    ResetDbOverride(previous)
 }
 
 #[doc(hidden)]
@@ -144,15 +125,6 @@ pub(super) fn current_scope_handle() -> Result<DatabaseHandle> {
         })
 }
 
-#[cfg(feature = "runtime-tokio")]
-pub(super) async fn with_connection_override<F>(handle: DatabaseHandle, future: F) -> F::Output
-where
-    F: Future,
-{
-    TASK_DB_OVERRIDE.scope(handle, future).await
-}
-
-#[cfg(not(feature = "runtime-tokio"))]
 pub(super) fn with_connection_override<F>(
     handle: DatabaseHandle,
     future: F,
@@ -173,7 +145,7 @@ where
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
-            let guard = install_thread_override(&this.handle);
+            let guard = install_db_override(&this.handle);
             let result = this.future.as_mut().poll(cx);
             drop(guard);
             result
@@ -210,7 +182,7 @@ pub fn __current_backend() -> Result<Backend> {
     })
 }
 
-#[cfg(all(test, not(feature = "runtime-tokio")))]
+#[cfg(test)]
 mod tests {
     use super::{DatabaseHandle, current_override_handle, with_connection_override};
     use std::future::Future;
@@ -230,7 +202,7 @@ mod tests {
             assert!(current_override_handle().is_some());
             self.polled_threads
                 .lock()
-                .expect("thread list lock should not be poisoned")
+                .unwrap()
                 .push(std::thread::current().id());
 
             if self.stage == 0 {
@@ -269,12 +241,9 @@ mod tests {
             assert!(current_override_handle().is_none());
         });
 
-        join.join()
-            .expect("cross-thread poll should complete successfully");
+        join.join().unwrap();
 
-        let polled_threads = polled_threads
-            .lock()
-            .expect("thread list lock should not be poisoned");
+        let polled_threads = polled_threads.lock().unwrap();
         assert_eq!(polled_threads.len(), 2);
         assert_ne!(polled_threads[0], polled_threads[1]);
     }

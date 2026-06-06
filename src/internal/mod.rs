@@ -13,7 +13,8 @@ use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
 mod backend;
-
+#[cfg(feature = "fulltext")]
+pub(crate) mod sql_builder;
 pub(crate) mod sql_safety;
 
 // Re-export the current ORM engine internally through TideORM's facade.
@@ -453,7 +454,11 @@ impl QueryExecutor {
 
         // For single model, use regular insert for simplicity
         if models.len() == 1 {
-            let active = models.into_iter().next().unwrap().try_into_active_model()?;
+            let active = models
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::internal("insert_many batch iterator unexpectedly empty"))?
+                .try_into_active_model()?;
             let result =
                 crate::profiling::__profile_future(async move { active.insert(conn).await })
                     .await

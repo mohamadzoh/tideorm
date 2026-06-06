@@ -135,17 +135,18 @@ impl QueryCache {
             }
             Some(_) if strategy == CacheStrategy::LRU => {
                 let access_order = self.next_order();
-                let entry = cache
-                    .entries
-                    .get_mut(key)
-                    .expect("entry must exist after successful immutable lookup");
-                entry.touch(access_order);
-                let candidate = entry.lru_candidate(key);
-                let value = serde_json::from_slice(&entry.data).ok();
-                cache.lru_heap.push(Reverse(candidate));
-                cache.maybe_rebuild_indexes();
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                value
+                if let Some(entry) = cache.entries.get_mut(key) {
+                    entry.touch(access_order);
+                    let candidate = entry.lru_candidate(key);
+                    let value = serde_json::from_slice(&entry.data).ok();
+                    cache.lru_heap.push(Reverse(candidate));
+                    cache.maybe_rebuild_indexes();
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    value
+                } else {
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
             }
             Some(entry) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);

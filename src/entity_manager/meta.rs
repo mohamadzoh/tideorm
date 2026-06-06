@@ -1,7 +1,5 @@
 #![allow(missing_docs)]
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -31,7 +29,7 @@ pub trait TideEntityManagerSync:
     fn tide_sync_entity_manager_relations<'a>(
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
 }
 
 #[doc(hidden)]

@@ -2,8 +2,7 @@ use super::{EntityManager, EntityState, managed, save};
 use crate::database::Database;
 use crate::error::Error;
 use crate::model::{Model, ModelMeta, OnConflictBuilder};
-use std::future::Future;
-use std::pin::Pin;
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -36,6 +35,7 @@ struct AppendingManagedEntry {
     child: Option<Arc<dyn managed::ManagedOps>>,
 }
 
+#[async_trait]
 impl managed::ManagedOps for AppendingManagedEntry {
     fn current_state(&self) -> EntityState {
         EntityState::Managed
@@ -47,21 +47,19 @@ impl managed::ManagedOps for AppendingManagedEntry {
         Box::new(NoopCheckpoint)
     }
 
-    fn flush<'a>(
+    async fn flush(
         self: Arc<Self>,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            self.flush_count.fetch_add(1, Ordering::SeqCst);
+        entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()> {
+        self.flush_count.fetch_add(1, Ordering::SeqCst);
 
-            if let Some(child) = &self.child {
-                if !self.appended.swap(true, Ordering::SeqCst) {
-                    entity_manager.managed_entries.write().push(child.clone());
-                }
+        if let Some(child) = &self.child {
+            if !self.appended.swap(true, Ordering::SeqCst) {
+                entity_manager.managed_entries.write().push(child.clone());
             }
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -73,6 +71,7 @@ struct CheckpointedManagedEntry {
     fail: bool,
 }
 
+#[async_trait]
 impl managed::ManagedOps for CheckpointedManagedEntry {
     fn current_state(&self) -> EntityState {
         EntityState::Managed
@@ -86,25 +85,23 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
         })
     }
 
-    fn flush<'a>(
+    async fn flush(
         self: Arc<Self>,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            self.flush_count.fetch_add(1, Ordering::SeqCst);
+        entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()> {
+        self.flush_count.fetch_add(1, Ordering::SeqCst);
 
-            if let Some(child) = &self.child {
-                if !self.appended.swap(true, Ordering::SeqCst) {
-                    entity_manager.managed_entries.write().push(child.clone());
-                }
+        if let Some(child) = &self.child {
+            if !self.appended.swap(true, Ordering::SeqCst) {
+                entity_manager.managed_entries.write().push(child.clone());
             }
+        }
 
-            if self.fail {
-                return Err(Error::invalid_query("forced flush failure".to_string()));
-            }
+        if self.fail {
+            return Err(Error::invalid_query("forced flush failure".to_string()));
+        }
 
-            Ok(())
-        })
+        Ok(())
     }
 }
 
@@ -294,14 +291,12 @@ impl super::TideEntityManagerMergePersisted for RefreshAwareSyncOnlyModel {
 }
 
 impl super::TideEntityManagerSync for RefreshAwareSyncOnlyModel {
-    fn tide_sync_entity_manager_relations<'a>(
+    async fn tide_sync_entity_manager_relations<'a>(
         &'a mut self,
         _entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            self.runtime_state = format!("synced:{}", self.runtime_state);
-            Ok(())
-        })
+    ) -> crate::error::Result<()> {
+        self.runtime_state = format!("synced:{}", self.runtime_state);
+        Ok(())
     }
 }
 
@@ -309,6 +304,7 @@ struct RunawayManagedEntry {
     flush_count: Arc<AtomicUsize>,
 }
 
+#[async_trait]
 impl managed::ManagedOps for RunawayManagedEntry {
     fn current_state(&self) -> EntityState {
         EntityState::Managed
@@ -320,18 +316,16 @@ impl managed::ManagedOps for RunawayManagedEntry {
         Box::new(NoopCheckpoint)
     }
 
-    fn flush<'a>(
+    async fn flush(
         self: Arc<Self>,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Pin<Box<dyn Future<Output = crate::error::Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            self.flush_count.fetch_add(1, Ordering::SeqCst);
-            let next: Arc<dyn managed::ManagedOps> = Arc::new(RunawayManagedEntry {
-                flush_count: self.flush_count.clone(),
-            });
-            entity_manager.managed_entries.write().push(next);
-            Ok(())
-        })
+        entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()> {
+        self.flush_count.fetch_add(1, Ordering::SeqCst);
+        let next: Arc<dyn managed::ManagedOps> = Arc::new(RunawayManagedEntry {
+            flush_count: self.flush_count.clone(),
+        });
+        entity_manager.managed_entries.write().push(next);
+        Ok(())
     }
 }
 

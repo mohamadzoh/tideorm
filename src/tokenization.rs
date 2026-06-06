@@ -85,14 +85,21 @@ pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<Strin
 // GLOBAL STATE
 // =============================================================================
 
-/// Global encryption key for tokenization
-static GLOBAL_ENCRYPTION_KEY: OnceLock<RwLock<Option<ConfiguredEncryptionKey>>> = OnceLock::new();
+struct TokenizationState {
+    encryption_key: Option<ConfiguredEncryptionKey>,
+    encoder: Option<TokenEncoder>,
+    decoder: Option<TokenDecoder>,
+}
 
-/// Global token encoder override
-static GLOBAL_TOKEN_ENCODER: OnceLock<RwLock<Option<TokenEncoder>>> = OnceLock::new();
+static TOKENIZATION_STATE: OnceLock<RwLock<TokenizationState>> = OnceLock::new();
 
-/// Global token decoder override
-static GLOBAL_TOKEN_DECODER: OnceLock<RwLock<Option<TokenDecoder>>> = OnceLock::new();
+fn tokenization_state() -> &'static RwLock<TokenizationState> {
+    TOKENIZATION_STATE.get_or_init(|| RwLock::new(TokenizationState {
+        encryption_key: None,
+        encoder: None,
+        decoder: None,
+    }))
+}
 
 struct ConfiguredEncryptionKey {
     raw: String,
@@ -128,21 +135,9 @@ impl ConfiguredEncryptionKey {
     }
 }
 
-fn global_encryption_key_state() -> &'static RwLock<Option<ConfiguredEncryptionKey>> {
-    GLOBAL_ENCRYPTION_KEY.get_or_init(|| RwLock::new(None))
-}
-
-fn global_token_encoder_state() -> &'static RwLock<Option<TokenEncoder>> {
-    GLOBAL_TOKEN_ENCODER.get_or_init(|| RwLock::new(None))
-}
-
-fn global_token_decoder_state() -> &'static RwLock<Option<TokenDecoder>> {
-    GLOBAL_TOKEN_DECODER.get_or_init(|| RwLock::new(None))
-}
-
 fn with_current_encryption_key<T>(read: impl FnOnce(&ConfiguredEncryptionKey) -> T) -> Option<T> {
-    let state = global_encryption_key_state().read();
-    state.as_ref().map(read)
+    let state = tokenization_state().read();
+    state.encryption_key.as_ref().map(read)
 }
 
 // =============================================================================
@@ -158,7 +153,7 @@ impl TokenConfig {
     /// If this key changes, previously issued default tokens stop decoding.
     pub fn set_encryption_key(key: &str) {
         let configured_key = ConfiguredEncryptionKey::new(key);
-        *global_encryption_key_state().write() = Some(configured_key);
+        tokenization_state().write().encryption_key = Some(configured_key);
     }
 
     /// Return the configured raw encryption key.
@@ -187,38 +182,39 @@ impl TokenConfig {
 
     /// Return whether a global encryption key is currently configured.
     pub fn has_encryption_key() -> bool {
-        global_encryption_key_state().read().is_some()
+        tokenization_state().read().encryption_key.is_some()
     }
 
     /// Set a global token encoder override.
     ///
     /// Model-level encoders still take precedence over this setting.
     pub fn set_encoder(encoder: TokenEncoder) {
-        *global_token_encoder_state().write() = Some(encoder);
+        tokenization_state().write().encoder = Some(encoder);
     }
 
     /// Set a global token decoder override.
     ///
     /// Model-level decoders still take precedence over this setting.
     pub fn set_decoder(decoder: TokenDecoder) {
-        *global_token_decoder_state().write() = Some(decoder);
+        tokenization_state().write().decoder = Some(decoder);
     }
 
     /// Clear the global key and any global encoder or decoder overrides.
     pub fn reset() {
-        *global_encryption_key_state().write() = None;
-        *global_token_encoder_state().write() = None;
-        *global_token_decoder_state().write() = None;
+        let mut state = tokenization_state().write();
+        state.encryption_key = None;
+        state.encoder = None;
+        state.decoder = None;
     }
 
     /// Return the active global encoder, falling back to the default implementation.
     pub fn get_encoder() -> TokenEncoder {
-        (*global_token_encoder_state().read()).unwrap_or(default_encode)
+        tokenization_state().read().encoder.unwrap_or(default_encode)
     }
 
     /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
-        (*global_token_decoder_state().read()).unwrap_or(default_decode)
+        tokenization_state().read().decoder.unwrap_or(default_decode)
     }
 
     /// Encode a serialized primary-key payload using the active global encoder.
@@ -265,13 +261,12 @@ fn derive_scoped_encryption_key(
 }
 
 fn derive_key_with_salt(secret: &[u8], salt: &[u8]) -> [u8; 32] {
-    let params = Params::new(64 * 1024, 3, 1, Some(DERIVED_ENCRYPTION_KEY_LEN))
-        .expect("argon2 params for tokenization key derivation should be valid");
+    let params = Params::new(64 * 1024, 3, 1, Some(DERIVED_ENCRYPTION_KEY_LEN)).unwrap();
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut derived = [0u8; DERIVED_ENCRYPTION_KEY_LEN];
     argon2
         .hash_password_into(secret, salt, &mut derived)
-        .expect("argon2 key derivation should succeed with static parameters");
+        .unwrap();
     derived
 }
 

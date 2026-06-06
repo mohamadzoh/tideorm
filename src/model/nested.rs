@@ -1,8 +1,6 @@
 #![allow(missing_docs)]
 
 use async_trait::async_trait;
-use std::future::Future;
-use std::pin::Pin;
 
 use crate::callbacks::{
     AfterCreateDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeUpdateDispatch,
@@ -12,15 +10,42 @@ use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, OnConflict, t
 
 use super::Model;
 
-type OneRelationSaveOp = Box<
-    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
-        + Send,
->;
+#[async_trait]
+trait OneRelationSaveOp: Send {
+    async fn run(self: Box<Self>, parent_pk_value: serde_json::Value) -> Result<SavedRelation>;
+}
 
-type ManyRelationSaveOp = Box<
-    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<SavedRelation>> + Send>>
-        + Send,
->;
+#[async_trait]
+trait ManyRelationSaveOp: Send {
+    async fn run(self: Box<Self>, parent_pk_value: serde_json::Value) -> Result<SavedRelation>;
+}
+
+struct OneRelationSaveFn<R> {
+    related: R,
+    foreign_key: String,
+}
+
+struct ManyRelationSaveFn<R> {
+    related: Vec<R>,
+    foreign_key: String,
+}
+
+#[async_trait]
+impl<R: Model + Send> OneRelationSaveOp for OneRelationSaveFn<R> {
+    async fn run(self: Box<Self>, parent_pk_value: serde_json::Value) -> Result<SavedRelation> {
+        save_related_model_as_json(self.related, self.foreign_key, parent_pk_value).await
+    }
+}
+
+#[async_trait]
+impl<R: Model + Send> ManyRelationSaveOp for ManyRelationSaveFn<R>
+where
+    <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
+{
+    async fn run(self: Box<Self>, parent_pk_value: serde_json::Value) -> Result<SavedRelation> {
+        save_related_models_as_json(self.related, self.foreign_key, parent_pk_value).await
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum SavedRelationInner {
@@ -421,8 +446,8 @@ impl<M: Model> NestedSave for M {}
 /// Builder for nested/cascade saves.
 pub struct NestedSaveBuilder<M: Model> {
     parent: M,
-    one_relations: Vec<OneRelationSaveOp>,
-    many_relations: Vec<ManyRelationSaveOp>,
+    one_relations: Vec<Box<dyn OneRelationSaveOp>>,
+    many_relations: Vec<Box<dyn ManyRelationSaveOp>>,
 }
 
 impl<M: Model> NestedSaveBuilder<M> {
@@ -435,13 +460,9 @@ impl<M: Model> NestedSaveBuilder<M> {
     }
 
     pub fn with_one<R: Model + 'static>(mut self, related: R, foreign_key: &str) -> Self {
-        let foreign_key = foreign_key.to_string();
-        self.one_relations.push(Box::new(move |parent_pk_value| {
-            Box::pin(save_related_model_as_json(
-                related,
-                foreign_key,
-                parent_pk_value,
-            ))
+        self.one_relations.push(Box::new(OneRelationSaveFn {
+            related,
+            foreign_key: foreign_key.to_string(),
         }));
         self
     }
@@ -450,13 +471,9 @@ impl<M: Model> NestedSaveBuilder<M> {
     where
         <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
     {
-        let foreign_key = foreign_key.to_string();
-        self.many_relations.push(Box::new(move |parent_pk_value| {
-            Box::pin(save_related_models_as_json(
-                related,
-                foreign_key,
-                parent_pk_value,
-            ))
+        self.many_relations.push(Box::new(ManyRelationSaveFn {
+            related,
+            foreign_key: foreign_key.to_string(),
         }));
         self
     }
@@ -470,11 +487,11 @@ impl<M: Model> NestedSaveBuilder<M> {
         let mut saved_relations = Vec::new();
 
         for save_relation in self.one_relations {
-            saved_relations.push(save_relation(pk_value.clone()).await?);
+            saved_relations.push(save_relation.run(pk_value.clone()).await?);
         }
 
         for save_relations in self.many_relations {
-            saved_relations.push(save_relations(pk_value.clone()).await?);
+            saved_relations.push(save_relations.run(pk_value.clone()).await?);
         }
 
         Ok((parent, saved_relations))

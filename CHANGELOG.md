@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.17] - 2026-06-07
+
+### Changed — Breaking
+
+- Reworked `Database::transaction()` and `Model::transaction()` to take a closure that returns a boxed, transaction-scoped future (`Box::pin(async move { ... })`) instead of a bare `async` future, so the closure body can borrow and use the provided `&Transaction` handle across await points. Update call sites from `db.transaction(|tx| async move { ... })` to `db.transaction(|tx| Box::pin(async move { ... }))`.
+
+### Changed
+
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, and macro-crate README to use `0.9.17`, and updated the documented transaction examples to the boxed-future closure form.
+
+### Internal
+
+- Reduced redundant clones and allocations across the model serialization, query builder, query execution, OR-clause, entity-manager flush/save, and transaction paths by borrowing instead of cloning — passing `&str`/`&HashMap`/`&ErrorContext` into helpers, using `as_ref()`/`as_deref()`/`extend_from_slice()`, and draining owned vectors with `into_iter()` rather than cloning their elements.
+- Verified the release prep with `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.17` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.16] - 2026-05-28
 
 ### Changed
@@ -934,7 +950,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.16...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...HEAD
+[0.9.17]: https://github.com/mohamadzoh/tideorm/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/mohamadzoh/tideorm/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/mohamadzoh/tideorm/compare/v0.9.14...v0.9.15
 [0.9.14]: https://github.com/mohamadzoh/tideorm/compare/v0.9.13...v0.9.14

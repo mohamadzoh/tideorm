@@ -394,7 +394,11 @@ impl Validator {
         static EMAIL_REGEX: OnceLock<regex::Regex> = OnceLock::new();
         let email_regex = EMAIL_REGEX.get_or_init(|| {
             regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-                .expect("email validation regex should be valid")
+                .unwrap_or_else(|_| {
+                    // A hardcoded pattern should never fail to compile.
+                    // If it does, conservatively reject all emails.
+                    regex::Regex::new("(?!)").unwrap()
+                })
         });
         email_regex.is_match(s)
     }

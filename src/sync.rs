@@ -67,7 +67,10 @@ mod schema;
 #[doc(hidden)]
 pub use registry::CompiledModelRegistration;
 pub use registry::{RegisterModels, SyncModel};
-use registry::{get_entity_registry, get_model_schemas, register_compiled_models_matching};
+use registry::{
+    register_compiled_models_matching, with_entity_registry, with_entity_registry_mut,
+    with_model_schemas, with_model_schemas_mut,
+};
 use schema::sync_model_schemas;
 pub use schema::{ColumnDef, ModelSchema, normalize_rust_type};
 
@@ -83,66 +86,50 @@ impl SyncRegistry {
     /// This stores a registration function that will call SchemaBuilder.register()
     /// when sync is performed.
     pub fn register_entity<E: EntityTrait + Default + 'static>() {
-        let registry = get_entity_registry();
-        let mut fns = registry.write();
-
-        // Create a registration function for this entity type
-        let register_fn: EntityRegistrationFn =
-            Box::new(|builder: SchemaBuilder| builder.register(E::default()));
-
-        fns.push(register_fn);
+        with_entity_registry_mut(|fns| {
+            let register_fn: EntityRegistrationFn =
+                Box::new(|builder: SchemaBuilder| builder.register(E::default()));
+            fns.push(register_fn);
+        });
     }
 
     /// Build a SchemaBuilder with all registered entities
     ///
     /// Uses the current ORM engine's native SchemaBuilder.register() for each entity.
     pub fn build_schema_builder(backend: Backend) -> SchemaBuilder {
-        let registry = get_entity_registry();
-        let fns = registry.read();
-
-        let schema = Schema::new(backend.into());
-        let mut builder = schema.builder();
-
-        for register_fn in fns.iter() {
-            builder = register_fn(builder);
-        }
-
-        builder
+        with_entity_registry(|fns| {
+            let schema = Schema::new(backend.into());
+            let mut builder = schema.builder();
+            for register_fn in fns.iter() {
+                builder = register_fn(builder);
+            }
+            builder
+        })
     }
 
     /// Get the number of registered entities
     pub fn entity_count() -> usize {
-        let registry = get_entity_registry();
-        let fns = registry.read();
-        fns.len()
+        with_entity_registry(|fns| fns.len())
     }
 
     /// Get the number of registered TideORM model schemas
     pub fn schema_count() -> usize {
-        let direct = get_model_schemas();
-        let schemas = direct.read();
-        schemas.len()
+        with_model_schemas(|schemas| schemas.len())
     }
 
     /// Clear all registered models (for testing)
     pub fn clear() {
-        let registry = get_entity_registry();
-        let mut fns = registry.write();
-        fns.clear();
-
-        let direct = get_model_schemas();
-        let mut schemas = direct.write();
-        schemas.clear();
+        with_entity_registry_mut(|fns| fns.clear());
+        with_model_schemas_mut(|schemas| schemas.clear());
     }
 
     /// Register a TideORM model schema for synchronization
     pub fn register_schema(schema: ModelSchema) {
-        let direct = get_model_schemas();
-        let mut schemas = direct.write();
-
-        if !schemas.iter().any(|s| s.table_name == schema.table_name) {
-            schemas.push(schema);
-        }
+        with_model_schemas_mut(|schemas| {
+            if !schemas.iter().any(|s| s.table_name == schema.table_name) {
+                schemas.push(schema);
+            }
+        });
     }
 
     /// Register all compiled TideORM models whose source file path matches a glob pattern.
@@ -156,9 +143,7 @@ impl SyncRegistry {
 
     /// Get all registered TideORM model schemas
     pub fn get_all_schemas() -> Vec<ModelSchema> {
-        let direct = get_model_schemas();
-        let schemas = direct.read();
-        schemas.clone()
+        with_model_schemas(|schemas| schemas.clone())
     }
 }
 

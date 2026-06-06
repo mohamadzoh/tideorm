@@ -103,7 +103,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.16", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.9.17", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -416,20 +416,20 @@ TideORM provides clean transaction support:
 
 ```rust
 // Model-centric transactions
-User::transaction(|tx| async move {
+User::transaction(|tx| Box::pin(async move {
     // All operations in here are in a single transaction
     let user = User::create(User { ... }).await?;
     let profile = Profile::create(Profile { user_id: user.id, ... }).await?;
     
     // Return Ok to commit, Err to rollback
     Ok((user, profile))
-}).await?;
+})).await?;
 
 // Database-level transactions
-db.transaction(|tx| async move {
+db.transaction(|tx| Box::pin(async move {
     // ... operations ...
     Ok(result)
-}).await?;
+})).await?;
 ```
 
 If the closure returns `Ok`, the transaction is committed.

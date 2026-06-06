@@ -171,7 +171,7 @@ impl<M: Model> QueryBuilder<M> {
             if qualifiers.contains(table) {
                 Ok(())
             } else {
-                let known = qualifiers.iter().cloned().collect::<Vec<_>>().join(", ");
+                let known = qualifiers.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
                 Err(format!(
                     "unknown {} qualifier '{}' in '{}' for model '{}'; known table/alias qualifiers: {}",
                     kind,
@@ -526,11 +526,11 @@ impl<M: Model> QueryBuilder<M> {
     /// Apply a reusable fragment to the current query builder.
     #[must_use]
     pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
-        self.conditions.extend(fragment.conditions.clone());
-        self.or_groups.extend(fragment.or_groups.clone());
+        self.conditions.extend_from_slice(&fragment.conditions);
+        self.or_groups.extend_from_slice(&fragment.or_groups);
 
         if self.order_by.is_empty() {
-            self.order_by.extend(fragment.order_by.clone());
+            self.order_by.extend_from_slice(&fragment.order_by);
         }
 
         if self.limit_value.is_none() {
@@ -546,24 +546,24 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         self.raw_select_expressions
-            .extend(fragment.raw_select_expressions.clone());
+            .extend_from_slice(&fragment.raw_select_expressions);
         self.subquery_select_expressions
-            .extend(fragment.subquery_select_expressions.clone());
+            .extend_from_slice(&fragment.subquery_select_expressions);
 
-        self.group_by.extend(fragment.group_by.clone());
+        self.group_by.extend_from_slice(&fragment.group_by);
         self.having_conditions
-            .extend(fragment.having_conditions.clone());
+            .extend_from_slice(&fragment.having_conditions);
         self.having_bindings.extend(
             fragment
                 .having_conditions
                 .iter()
                 .map(|_| Vec::<serde_json::Value>::new()),
         );
-        self.joins.extend(fragment.joins.clone());
-        self.unions.extend(fragment.unions.clone());
+        self.joins.extend_from_slice(&fragment.joins);
+        self.unions.extend_from_slice(&fragment.unions);
         self.window_functions
-            .extend(fragment.window_functions.clone());
-        self.ctes.extend(fragment.ctes.clone());
+            .extend_from_slice(&fragment.window_functions);
+        self.ctes.extend_from_slice(&fragment.ctes);
 
         if self.cache_options.is_none() {
             self.cache_options = fragment.cache_options.clone();
@@ -596,7 +596,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(super) fn ensure_query_is_valid(&self) -> Result<()> {
         if let Some(reason) = &self.invalid_query_reason {
-            return Err(Error::invalid_query(reason.clone()));
+            return Err(Error::invalid_query(reason));
         }
 
         self.validate_query_fragments()?;
