@@ -133,7 +133,7 @@ where
     F: Future,
 {
     struct ScopedOverrideFuture<F> {
-        handle: DatabaseHandle,
+        handle: Option<DatabaseHandle>,
         future: Pin<Box<F>>,
     }
 
@@ -145,15 +145,30 @@ where
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
-            let guard = install_db_override(&this.handle);
-            let result = this.future.as_mut().poll(cx);
-            drop(guard);
+            let result = match this.handle.as_ref() {
+                Some(handle) => {
+                    let guard = install_db_override(handle);
+                    let result = this.future.as_mut().poll(cx);
+                    drop(guard);
+                    result
+                }
+                None => this.future.as_mut().poll(cx),
+            };
+            // Release the scoped connection handle as soon as the wrapped future
+            // completes — while we are still being polled inside the async
+            // runtime — instead of retaining it until this wrapper future is
+            // dropped. The wrapper may be dropped outside any runtime context
+            // (e.g. after a cross-thread move), and dropping a pooled database
+            // connection there panics with "requires a Tokio context".
+            if result.is_ready() {
+                this.handle = None;
+            }
             result
         }
     }
 
     ScopedOverrideFuture {
-        handle,
+        handle: Some(handle),
         future: Box::pin(future),
     }
 }

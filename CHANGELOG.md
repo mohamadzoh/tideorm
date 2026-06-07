@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed a regression in the scoped connection-override future (`with_connection_override`) so it releases the overridden connection/transaction handle as soon as the wrapped future completes, while still being polled inside the async runtime, instead of retaining it until the wrapper future is dropped. Holding the handle past completion let a pooled database connection be dropped outside any runtime context (for example after the future is moved across threads), which panics with "this functionality requires a Tokio context" under the SQLite backend. This restores the pre-0.9.16 behavior that was lost when the per-runtime `tokio::task_local!` and thread-local override paths were unified into a single thread-local implementation.
 - Replaced the email-validation fallback regex's unsupported `(?!)` look-ahead with the never-matching `\b\B` pattern. The `regex` crate rejects look-around, so the previous fallback would have panicked on `unwrap()` if the primary email pattern ever failed to compile, instead of conservatively rejecting all emails as intended. The branch remains effectively dead code because the hardcoded primary pattern always compiles.
 
 ### Internal
@@ -18,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolved all `cargo clippy --lib --all-features -- -D warnings` lints: derived `Default` for the global config state instead of a hand-written impl, dropped a needless `Ok(_?)` wrapper in the many-to-many entity-manager loader, and switched single-character `push_str(" ")` calls to `push(' ')` in the MySQL/SQLite full-text builders.
 - Applied `cargo fmt` formatting across the config, entity-manager, full-text, internal SQL builder, query, sync, and tokenization modules; these are whitespace-only reflows with no behavior change.
 - Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, and macro-crate README to use `0.9.18`.
-- Verified the release prep with `cargo clippy --lib --all-features -- -D warnings`, `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
+- Verified the release prep with `cargo clippy --lib --all-features -- -D warnings`, `cargo test --lib`, `cargo test --all-features --lib`, `cargo test --lib --no-default-features --features sqlite,runtime-tokio`, `cargo test -p tideorm-macros --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
 - Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.18` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
 
 ## [0.9.17] - 2026-06-07
