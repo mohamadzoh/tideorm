@@ -29,8 +29,10 @@ impl<'a> SqlBuilder<'a> {
 
     /// Append a quoted identifier (`"table"`, `` `table` ``, etc.).
     pub fn ident(mut self, name: &str) -> Self {
-        self.sql
-            .push_str(&crate::internal::sql_safety::quote_ident(self.db_type, name));
+        self.sql.push_str(&crate::internal::sql_safety::quote_ident(
+            self.db_type,
+            name,
+        ));
         self
     }
 

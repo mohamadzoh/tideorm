@@ -4,9 +4,8 @@ use std::time::Duration;
 use super::FileUrlGenerator;
 use super::database::rewrite_driver_url;
 use super::state::{
-    global_db_type, global_pool_config, global_schema_file_path,
-    set_global_db_type, set_global_pool_config, set_global_schema_file_path,
-    with_global_config_mut,
+    global_db_type, global_pool_config, global_schema_file_path, set_global_db_type,
+    set_global_pool_config, set_global_schema_file_path, with_global_config_mut,
 };
 use super::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds};
 

@@ -98,12 +98,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             entity_manager
                 .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
                 .await;
-            return Ok(self.cached.as_ref().ok_or_else(|| {
+            return self.cached.as_ref().ok_or_else(|| {
                 Error::internal(format!(
                     "relation cache missing for '{}' after entity manager snapshot",
                     self.relation_name
                 ))
-            })?);
+            });
         }
 
         self.ensure_configured()?;

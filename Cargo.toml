@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.9.17"
+version = "0.9.18"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -53,7 +53,7 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.9.17", path = "tideorm-macros" }
+tideorm-macros = { version = "0.9.18", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

@@ -149,14 +149,18 @@ impl FullTextIndex {
                 new_columns_str.push_str(", ");
                 old_columns_str.push_str(", ");
             }
-            new_columns_str.push_str(&SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("new.")
-                .ident(col)
-                .into_sql());
-            old_columns_str.push_str(&SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("old.")
-                .ident(col)
-                .into_sql());
+            new_columns_str.push_str(
+                &SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                    .raw("new.")
+                    .ident(col)
+                    .into_sql(),
+            );
+            old_columns_str.push_str(
+                &SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                    .raw("old.")
+                    .ident(col)
+                    .into_sql(),
+            );
         }
 
         vec![

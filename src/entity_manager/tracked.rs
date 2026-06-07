@@ -300,10 +300,7 @@ impl<T> TrackedHasManyEntityManagerExt<T> for TrackedHasMany<T>
 where
     T: Model + TideEntityManagerMeta + Clone + Send + Sync + 'static,
 {
-    async fn load<'a>(
-        &'a mut self,
-        entity_manager: &'a Arc<EntityManager>,
-    ) -> Result<&'a Vec<T>> {
+    async fn load<'a>(&'a mut self, entity_manager: &'a Arc<EntityManager>) -> Result<&'a Vec<T>> {
         self.load_in_entity_manager(entity_manager).await
     }
 }

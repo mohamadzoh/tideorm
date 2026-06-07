@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.18] - 2026-06-07
+
+### Fixed
+
+- Replaced the email-validation fallback regex's unsupported `(?!)` look-ahead with the never-matching `\b\B` pattern. The `regex` crate rejects look-around, so the previous fallback would have panicked on `unwrap()` if the primary email pattern ever failed to compile, instead of conservatively rejecting all emails as intended. The branch remains effectively dead code because the hardcoded primary pattern always compiles.
+
+### Internal
+
+- Resolved all `cargo clippy --lib --all-features -- -D warnings` lints: derived `Default` for the global config state instead of a hand-written impl, dropped a needless `Ok(_?)` wrapper in the many-to-many entity-manager loader, and switched single-character `push_str(" ")` calls to `push(' ')` in the MySQL/SQLite full-text builders.
+- Applied `cargo fmt` formatting across the config, entity-manager, full-text, internal SQL builder, query, sync, and tokenization modules; these are whitespace-only reflows with no behavior change.
+- Refreshed the main crate version, macro-crate dependency version, README, mdBook chapters, and macro-crate README to use `0.9.18`.
+- Verified the release prep with `cargo clippy --lib --all-features -- -D warnings`, `cargo test --lib`, `cargo test --all-features --lib`, `cargo test -p tideorm-macros --lib`, `cargo package -p tideorm-macros --allow-dirty`, and `mdbook build`.
+- Confirmed the main `tideorm` crate package step will remain blocked until `tideorm-macros 0.9.18` is published, because Cargo resolves the packaged dependency graph through the crates.io index instead of the workspace path dependency.
+
 ## [0.9.17] - 2026-06-07
 
 ### Changed — Breaking
@@ -950,7 +964,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.18...HEAD
+[0.9.18]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/mohamadzoh/tideorm/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/mohamadzoh/tideorm/compare/v0.9.15...v0.9.16
 [0.9.15]: https://github.com/mohamadzoh/tideorm/compare/v0.9.14...v0.9.15

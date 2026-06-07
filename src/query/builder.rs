@@ -171,7 +171,11 @@ impl<M: Model> QueryBuilder<M> {
             if qualifiers.contains(table) {
                 Ok(())
             } else {
-                let known = qualifiers.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+                let known = qualifiers
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 Err(format!(
                     "unknown {} qualifier '{}' in '{}' for model '{}'; known table/alias qualifiers: {}",
                     kind,

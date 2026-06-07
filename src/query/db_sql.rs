@@ -31,9 +31,7 @@ fn json_text_value(text: String) -> Value {
 }
 
 fn json_scalar_parameter(value: &serde_json::Value) -> Value {
-    json_text_value(
-        serde_json::to_string(value).unwrap(),
-    )
+    json_text_value(serde_json::to_string(value).unwrap())
 }
 
 fn json_native_parameter(value: &serde_json::Value) -> Value {
@@ -341,8 +339,7 @@ fn mysql_json_array_literal(values: &[String]) -> String {
 }
 
 fn mysql_json_scalar_literal(value: &str) -> String {
-    let json = serde_json::to_string(&sql_array_value_to_json(value))
-        .unwrap();
+    let json = serde_json::to_string(&sql_array_value_to_json(value)).unwrap();
     escape_mysql_literal(&json)
 }
 

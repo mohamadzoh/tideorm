@@ -52,15 +52,11 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(crate) fn json_array_parameter(values: &[serde_json::Value]) -> Value {
-        Self::json_text_value(
-            serde_json::to_string(values).unwrap(),
-        )
+        Self::json_text_value(serde_json::to_string(values).unwrap())
     }
 
     pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
-        Self::json_text_value(
-            serde_json::to_string(value).unwrap(),
-        )
+        Self::json_text_value(serde_json::to_string(value).unwrap())
     }
 
     pub(crate) fn placeholder_list(count: usize) -> String {

@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use super::FileUrlGenerator;
 use super::{Config, DatabaseType, PoolConfig};
 
+#[derive(Default)]
 struct GlobalConfigState {
     config: Config,
     db_type: Option<DatabaseType>,
@@ -12,19 +13,6 @@ struct GlobalConfigState {
     schema_file_path: Option<String>,
     #[cfg(feature = "attachments")]
     file_url_generator: Option<FileUrlGenerator>,
-}
-
-impl Default for GlobalConfigState {
-    fn default() -> Self {
-        Self {
-            config: Config::default(),
-            db_type: None,
-            pool_config: None,
-            schema_file_path: None,
-            #[cfg(feature = "attachments")]
-            file_url_generator: None,
-        }
-    }
 }
 
 static GLOBAL_CONFIG_STATE: OnceLock<RwLock<GlobalConfigState>> = OnceLock::new();

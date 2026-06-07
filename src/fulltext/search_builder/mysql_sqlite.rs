@@ -50,10 +50,16 @@ impl<T: Model> FullTextSearchBuilder<T> {
         };
 
         let mut params = Vec::new();
-        let rank_placeholder =
-            crate::internal::push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
-        let where_placeholder =
-            crate::internal::push_param(DatabaseType::MySQL, &mut params, Value::String(Some(self.query.clone())));
+        let rank_placeholder = crate::internal::push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
+        let where_placeholder = crate::internal::push_param(
+            DatabaseType::MySQL,
+            &mut params,
+            Value::String(Some(self.query.clone())),
+        );
 
         let mut sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
             .raw("SELECT *, MATCH(")
@@ -89,7 +95,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(mode_modifier);
             sql.push_str(") >= ");
             sql.push_str(&min_rank_placeholder);
-            sql.push_str(" ");
+            sql.push(' ');
         }
 
         sql.push_str("ORDER BY _fts_rank DESC ");
@@ -183,7 +189,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&quote_ident(DatabaseType::SQLite, &fts_table_name));
             sql.push_str(") <= ");
             sql.push_str(&min_rank_placeholder);
-            sql.push_str(" ");
+            sql.push(' ');
         }
 
         sql.push_str("ORDER BY bm25(");

@@ -9,10 +9,12 @@ struct SyncState {
 static SYNC_STATE: OnceLock<RwLock<SyncState>> = OnceLock::new();
 
 fn sync_state() -> &'static RwLock<SyncState> {
-    SYNC_STATE.get_or_init(|| RwLock::new(SyncState {
-        entity_registry: Vec::new(),
-        model_schemas: Vec::new(),
-    }))
+    SYNC_STATE.get_or_init(|| {
+        RwLock::new(SyncState {
+            entity_registry: Vec::new(),
+            model_schemas: Vec::new(),
+        })
+    })
 }
 
 /// Distributed registration emitted by `#[tideorm::model]` for source-path-based sync discovery.
@@ -29,7 +31,9 @@ pub(super) fn with_entity_registry<T>(f: impl FnOnce(&Vec<EntityRegistrationFn>)
     f(&guard.entity_registry)
 }
 
-pub(super) fn with_entity_registry_mut<T>(f: impl FnOnce(&mut Vec<EntityRegistrationFn>) -> T) -> T {
+pub(super) fn with_entity_registry_mut<T>(
+    f: impl FnOnce(&mut Vec<EntityRegistrationFn>) -> T,
+) -> T {
     let mut guard = sync_state().write();
     f(&mut guard.entity_registry)
 }

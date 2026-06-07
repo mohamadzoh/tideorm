@@ -77,8 +77,7 @@ impl Config {
 
     #[cfg(feature = "attachments")]
     pub fn get_file_url_generator() -> FileUrlGenerator {
-        super::state::global_file_url_generator()
-            .unwrap_or(Self::default_file_url_generator)
+        super::state::global_file_url_generator().unwrap_or(Self::default_file_url_generator)
     }
 
     #[cfg(feature = "attachments")]

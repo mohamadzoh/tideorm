@@ -94,11 +94,13 @@ struct TokenizationState {
 static TOKENIZATION_STATE: OnceLock<RwLock<TokenizationState>> = OnceLock::new();
 
 fn tokenization_state() -> &'static RwLock<TokenizationState> {
-    TOKENIZATION_STATE.get_or_init(|| RwLock::new(TokenizationState {
-        encryption_key: None,
-        encoder: None,
-        decoder: None,
-    }))
+    TOKENIZATION_STATE.get_or_init(|| {
+        RwLock::new(TokenizationState {
+            encryption_key: None,
+            encoder: None,
+            decoder: None,
+        })
+    })
 }
 
 struct ConfiguredEncryptionKey {
@@ -209,12 +211,18 @@ impl TokenConfig {
 
     /// Return the active global encoder, falling back to the default implementation.
     pub fn get_encoder() -> TokenEncoder {
-        tokenization_state().read().encoder.unwrap_or(default_encode)
+        tokenization_state()
+            .read()
+            .encoder
+            .unwrap_or(default_encode)
     }
 
     /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
-        tokenization_state().read().decoder.unwrap_or(default_decode)
+        tokenization_state()
+            .read()
+            .decoder
+            .unwrap_or(default_decode)
     }
 
     /// Encode a serialized primary-key payload using the active global encoder.

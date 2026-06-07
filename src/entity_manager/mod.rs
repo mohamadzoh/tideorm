@@ -235,7 +235,8 @@ impl EntityManager {
                 Box::pin(async move {
                     save::with_entity_manager_transaction_scope(
                         transaction_identity_rollback,
-                        entity_manager.flush_in_scope_with_checkpoints(Some(&transaction_checkpoints)),
+                        entity_manager
+                            .flush_in_scope_with_checkpoints(Some(&transaction_checkpoints)),
                     )
                     .await
                 })

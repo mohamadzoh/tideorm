@@ -264,10 +264,7 @@ where
     )
     .await?;
     aggregate.tide_merge_persisted(persisted);
-    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(
-        &mut aggregate,
-        entity,
-    );
+    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;
@@ -290,10 +287,7 @@ where
         + 'static,
 {
     let mut aggregate = entity.clone();
-    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(
-        &mut aggregate,
-        entity,
-    );
+    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;

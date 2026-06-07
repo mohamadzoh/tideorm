@@ -80,8 +80,7 @@ pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
 where
     F: for<'c> FnOnce(
             &'c crate::database::Transaction,
-        )
-            -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<T>> + Send + 'c>>
         + Send,
     T: Send,
 {

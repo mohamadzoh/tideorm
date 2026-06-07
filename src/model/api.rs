@@ -121,9 +121,9 @@ pub trait Model:
         Self: Sized,
         F: for<'c> FnOnce(
                 &'c crate::database::Transaction,
-            )
-                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>>
-            + Send,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<T>> + Send + 'c>,
+            > + Send,
         T: Send,
     {
         crud::transaction(f).await
