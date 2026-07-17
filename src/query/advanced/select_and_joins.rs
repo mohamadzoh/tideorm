@@ -21,21 +21,18 @@ impl<M: Model> QueryBuilder<M> {
         remote_pk: &str,
         linked_columns: Vec<&str>,
     ) -> Self {
-        // Set local columns with table prefix
         let table_name = M::table_name();
         let mut all_columns: Vec<String> = local_columns
             .iter()
             .map(|c| format!("{}.{}", table_name, c))
             .collect();
 
-        // Add linked columns with table prefix
         for col in linked_columns {
             all_columns.push(format!("{}.{}", linked_table, col));
         }
 
         self.select_columns = Some(all_columns);
 
-        // Add the join
         self.joins.push(JoinClause {
             join_type: JoinType::Left,
             table: linked_table.to_string(),
@@ -58,13 +55,11 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Self {
         let table_name = M::table_name();
 
-        // Start with all local columns
         let local_cols: Vec<String> = M::column_names()
             .iter()
             .map(|c| format!("{}.{}", table_name, c))
             .collect();
 
-        // Add linked columns
         let mut all_columns = local_cols;
         for col in linked_columns {
             all_columns.push(format!("{}.{}", linked_table, col));
@@ -72,7 +67,6 @@ impl<M: Model> QueryBuilder<M> {
 
         self.select_columns = Some(all_columns);
 
-        // Add the join
         self.joins.push(JoinClause {
             join_type: JoinType::Left,
             table: linked_table.to_string(),

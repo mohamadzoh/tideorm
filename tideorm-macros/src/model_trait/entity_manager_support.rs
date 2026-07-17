@@ -91,6 +91,23 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             None
         })
         .collect();
+    // Every relation-sync arm decides whether a loaded child differs from its
+    // entity-manager-cached copy the same way; emit that check from one place.
+    let should_persist_fragment = |related_ty: &syn::Type| {
+        quote! {
+            let existing_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?;
+            let should_persist = match existing_key.as_deref() {
+                Some(existing_key) => match entity_manager.get_by_entity_manager_key::<#related_ty>(existing_key) {
+                    Some(cached) => {
+                        ::serde_json::to_value(&*item)?
+                            != ::serde_json::to_value(&cached)?
+                    }
+                    None => true,
+                },
+                None => true,
+            };
+        }
+    };
     let relation_sync_blocks: Vec<_> = ctx
         .relation_fields
         .iter()
@@ -104,6 +121,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                 let local_key_ident = ctx
                     .resolve_local_key_ident(local_key, ident)
                     .expect("validated has_many local key should resolve");
+                let should_persist_check = should_persist_fragment(&related_ty);
 
                 return Some(quote! {
                     if self.#ident.is_loaded() {
@@ -142,17 +160,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                                     child_fk_value.clone(),
                                 )?;
 
-                                let existing_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?;
-                                let should_persist = match existing_key.as_deref() {
-                                    Some(existing_key) => match entity_manager.get_by_entity_manager_key::<#related_ty>(existing_key) {
-                                        Some(cached) => {
-                                            ::serde_json::to_value(&*item)?
-                                                != ::serde_json::to_value(&cached)?
-                                        }
-                                        None => true,
-                                    },
-                                    None => true,
-                                };
+                                #should_persist_check
 
                                 if !should_persist {
                                     if let Some(existing_key) = existing_key {
@@ -189,6 +197,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                 let local_key_ident = ctx
                     .resolve_local_key_ident(local_key, ident)
                     .expect("validated has_one local key should resolve");
+                let should_persist_check = should_persist_fragment(&related_ty);
 
                 return Some(quote! {
                     if self.#ident.is_loaded() {
@@ -205,17 +214,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                                 child_fk_value,
                             )?;
 
-                            let existing_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?;
-                            let should_persist = match existing_key.as_deref() {
-                                Some(existing_key) => match entity_manager.get_by_entity_manager_key::<#related_ty>(existing_key) {
-                                    Some(cached) => {
-                                        ::serde_json::to_value(&*item)?
-                                            != ::serde_json::to_value(&cached)?
-                                    }
-                                    None => true,
-                                },
-                                None => true,
-                            };
+                            #should_persist_check
 
                             if !should_persist {
                                 if let Some(existing_key) = existing_key {
@@ -265,6 +264,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                 let mut relation_types = relation_generic_types(&field.ty).into_iter();
                 let related_ty = relation_types.next()?;
                 let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+                let should_persist_check = should_persist_fragment(&related_ty);
 
                 return Some(quote! {
                     if self.#ident.is_loaded() {
@@ -278,17 +278,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                             updated_keys.reserve(items.len());
 
                             for item in items.iter_mut() {
-                                let existing_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?;
-                                let should_persist = match existing_key.as_deref() {
-                                    Some(existing_key) => match entity_manager.get_by_entity_manager_key::<#related_ty>(existing_key) {
-                                        Some(cached) => {
-                                            ::serde_json::to_value(&*item)?
-                                                != ::serde_json::to_value(&cached)?
-                                        }
-                                        None => true,
-                                    },
-                                    None => true,
-                                };
+                                #should_persist_check
 
                                 if !should_persist {
                                     <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;

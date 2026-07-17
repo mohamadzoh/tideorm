@@ -36,7 +36,7 @@ mod builders;
 mod prepared_statements;
 mod query_cache;
 
-pub use builders::{CacheKeyBuilder, CacheOptions, CacheWarmer};
+pub use builders::{CacheKeyBuilder, CacheOptions};
 pub use prepared_statements::{
     CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
 };

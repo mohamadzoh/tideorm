@@ -10,10 +10,6 @@ pub(crate) fn db() -> Result<crate::database::Database> {
     crate::database::require_db()
 }
 
-pub(crate) fn database() -> Result<crate::database::Database> {
-    crate::database::require_db()
-}
-
 pub(crate) async fn all<M>() -> Result<Vec<M>>
 where
     M: Model + Sized,

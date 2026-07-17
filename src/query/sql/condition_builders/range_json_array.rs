@@ -125,10 +125,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         let Some(bound) = maybe_bound else {
-            return Expr::cust(db_sql::invalid_json_path_predicate(matches!(
-                operator,
-                JsonStringOperator::PathPresent
-            )));
+            return Expr::cust(db_sql::invalid_json_path_predicate());
         };
 
         self.build_custom_expression(bound.sql, bound.values)

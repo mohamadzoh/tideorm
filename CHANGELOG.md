@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.19] - 2026-07-18
+
+### Removed
+
+- Removed unused public API that carried no behavior and had no implementors, constructors, or call sites: the `Collection`, `CommaSeparated`, `DbEnum`, `WithDefault`, `Accessor`, `Mutator`, and `AttributeCaster` items from `tideorm::types` (and the prelude); `RelationLoader` from `tideorm::relations`; `CacheWarmer` from `tideorm::cache`; and `CacheOptions::tags` together with its `with_tag`/`with_tags` builders (tags were stored but never read, and no tag-based cache invalidation exists). The live `CastType::Collection` and `CastType::CommaSeparated` cast variants are unaffected. This is the only source-visible breaking change; if you referenced any of these directly, drop the reference.
+
+### Internal
+
+- Collapsed duplicated code with no behavior change. The 17-method `where_*` condition-builder family that `OrGroup` and `OrBranch` implemented byte-for-byte identically now comes from a single declarative macro, and `QueryBuilder::or_where_*` delegate to `OrGroup` instead of re-inlining each condition literal. In the macro crate, the relation-wrapper field-init/state-refresh pair, the entity relation-definition key resolution, the generated `Model::find`/`find_with` bodies, and the entity-manager `should_persist` check are each now single-source; `save_with_one` reuses the existing `apply_foreign_key` helper.
+- Removed dead code and inert plumbing the compiler could not surface: six never-read `auto_*` model attribute options in the macro crate, a discarded `exists` parameter on the JSON-path predicate helper, redundant `#[allow(unused_imports)]` markers, and self-restating step comments. Simplified the internal SeaORM-facade so the shared SQL-safety validators are re-exported directly instead of through pass-through wrapper functions.
+- Removed abandoned working-tree scratch (`wip/`, `objsafe/`) and the now-stale `wip/**` entry from the package `exclude` list.
+- Verified with `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo fmt --all --check`, `cargo test --lib` across the PostgreSQL, SQLite, and MySQL feature sets, `cargo test -p tideorm-macros --lib`, the `relation_compile_fail` and `encrypted_fields_feature_compile_fail` trybuild suites, `cargo package -p tideorm-macros --allow-dirty`, `mdbook build`, and by running the full example binary suite against live PostgreSQL and MySQL servers.
+
 ## [0.9.18] - 2026-06-07
 
 ### Fixed
@@ -965,7 +978,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.18...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.19...HEAD
+[0.9.19]: https://github.com/mohamadzoh/tideorm/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/mohamadzoh/tideorm/compare/v0.9.16...v0.9.17
 [0.9.16]: https://github.com/mohamadzoh/tideorm/compare/v0.9.15...v0.9.16

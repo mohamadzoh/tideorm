@@ -6,9 +6,7 @@ mod previews_and_arrays;
 
 pub(crate) use previews_and_arrays::*;
 
-fn escape_sql_literal(db_type: DatabaseType, value: &str) -> String {
-    sql_safety::escape_sql_literal_for_db(db_type, value)
-}
+pub(crate) use sql_safety::escape_sql_literal_for_db as escape_sql_literal;
 
 fn escape_mysql_literal(value: &str) -> String {
     escape_sql_literal(DatabaseType::MySQL, value)
@@ -307,8 +305,7 @@ fn parse_quoted_json_path_segment(chars: &[char], index: &mut usize) -> Option<S
     None
 }
 
-pub(crate) fn invalid_json_path_predicate(exists: bool) -> String {
-    let _ = exists;
+pub(crate) fn invalid_json_path_predicate() -> String {
     "0 = 1".to_string()
 }
 
@@ -343,59 +340,14 @@ fn mysql_json_scalar_literal(value: &str) -> String {
     escape_mysql_literal(&json)
 }
 
-fn is_safe_identifier_segment(segment: &str) -> bool {
-    sql_safety::is_safe_identifier_segment(segment)
-}
-
-pub(crate) fn validate_raw_sql_fragment(kind: &str, sql: &str) -> std::result::Result<(), String> {
-    sql_safety::validate_raw_sql_fragment(kind, sql)
-}
-
-pub(crate) fn validate_having_sql_fragment(
-    kind: &str,
-    sql: &str,
-) -> std::result::Result<(), String> {
-    sql_safety::validate_having_sql_fragment(kind, sql)
-}
-
-pub(crate) fn validate_subquery_sql(sql: &str) -> std::result::Result<(), String> {
-    sql_safety::validate_subquery_sql(sql)
-}
-
-pub(crate) fn validate_compound_subquery_sql(sql: &str) -> std::result::Result<(), String> {
-    sql_safety::validate_compound_subquery_sql(sql)
-}
-
-pub(crate) fn validate_identifier(kind: &str, value: &str) -> std::result::Result<(), String> {
-    sql_safety::validate_identifier(kind, value)
-}
-
-pub(crate) fn validate_identifier_reference(
-    kind: &str,
-    value: &str,
-) -> std::result::Result<(), String> {
-    sql_safety::validate_identifier_reference(kind, value)
-}
-
-pub(crate) fn validate_join_column(value: &str) -> std::result::Result<(), String> {
-    sql_safety::validate_join_column(value)
-}
-
-/// Get the identifier quote character for the database
 #[cfg(test)]
-pub(crate) fn quote_char(db_type: DatabaseType) -> char {
-    sql_safety::quote_char(db_type)
-}
-
-/// Quote an identifier (column or table name)
-pub fn quote_ident(db_type: DatabaseType, name: &str) -> String {
-    sql_safety::quote_ident(db_type, name)
-}
-
-/// Quote a simple identifier reference like `column` or `table.column`.
-pub fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option<String> {
-    sql_safety::format_identifier_reference(db_type, value)
-}
+pub(crate) use sql_safety::quote_char;
+pub(crate) use sql_safety::{
+    format_identifier_reference, is_safe_identifier_segment, quote_ident,
+    validate_compound_subquery_sql, validate_having_sql_fragment, validate_identifier,
+    validate_identifier_reference, validate_join_column, validate_raw_sql_fragment,
+    validate_subquery_sql,
+};
 
 /// Format a trusted column/expression slot for rendering paths that intentionally
 /// allow raw SQL expressions after higher-level validation.

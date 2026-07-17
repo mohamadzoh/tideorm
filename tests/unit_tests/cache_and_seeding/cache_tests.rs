@@ -387,7 +387,6 @@ fn test_cache_options_creation() {
     let options = CacheOptions::new(Duration::from_secs(300));
     assert_eq!(options.ttl, Duration::from_secs(300));
     assert!(options.key.is_none());
-    assert!(options.tags.is_empty());
 }
 
 #[test]
@@ -398,25 +397,11 @@ fn test_cache_options_with_key() {
 }
 
 #[test]
-fn test_cache_options_with_tags() {
-    let options =
-        CacheOptions::new(Duration::from_secs(300)).with_tags(&["users", "active", "premium"]);
-
-    assert_eq!(options.tags.len(), 3);
-    assert!(options.tags.contains(&"users".to_string()));
-    assert!(options.tags.contains(&"active".to_string()));
-    assert!(options.tags.contains(&"premium".to_string()));
-}
-
-#[test]
 fn test_cache_options_chaining() {
-    let options = CacheOptions::new(Duration::from_secs(600))
-        .with_key("featured_products")
-        .with_tags(&["products", "featured"]);
+    let options = CacheOptions::new(Duration::from_secs(600)).with_key("featured_products");
 
     assert_eq!(options.ttl, Duration::from_secs(600));
     assert_eq!(options.key, Some("featured_products".to_string()));
-    assert_eq!(options.tags.len(), 2);
 }
 
 #[test]

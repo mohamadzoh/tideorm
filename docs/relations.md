@@ -254,7 +254,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.18", features = ["postgres", "attachments"] }
+tideorm = { version = "0.9.19", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -589,7 +589,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.18", features = ["postgres", "translations"] }
+tideorm = { version = "0.9.19", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup

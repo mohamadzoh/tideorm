@@ -405,23 +405,5 @@ pub(crate) struct ModelInput {
     #[darling(default)]
     pub(crate) skip_derives: bool,
     #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_derives: bool,
-    #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_debug: bool,
-    #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_clone: bool,
-    #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_default: bool,
-    #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_serialize: bool,
-    #[darling(default)]
-    #[allow(dead_code)]
-    pub(crate) auto_deserialize: bool,
-    #[darling(default)]
     pub(crate) tokenize: bool,
 }

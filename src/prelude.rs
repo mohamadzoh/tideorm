@@ -90,7 +90,6 @@ pub use crate::relations::{
     RelationExt,
     // Metadata
     RelationInfo,
-    RelationLoader,
     RelationPath,
     RelationTree,
     RelationType,
@@ -126,9 +125,8 @@ pub use crate::profiling::{
 
 // Query and statement caching
 pub use crate::cache::{
-    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CacheWarmer,
-    CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
-    QueryCache,
+    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CachedStatementInfo,
+    PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats, QueryCache,
 };
 
 // Database seeding
@@ -183,16 +181,11 @@ pub use uuid::Uuid;
 
 // Type aliases and casting
 pub use crate::types::{
-    Accessor,
-    AttributeCaster,
     BigIntArray,
     BoolArray,
     CastType,
     CastValue,
     Castable,
-    Collection,
-    CommaSeparated,
-    DbEnum,
     // Casting types
     Encrypted,
     FloatArray,
@@ -202,11 +195,9 @@ pub use crate::types::{
     Json,
     JsonArray,
     Jsonb,
-    Mutator,
     Text,
     TextArray,
     // Unix timestamp types
     UnixTimestamp,
     UnixTimestampMillis,
-    WithDefault,
 };

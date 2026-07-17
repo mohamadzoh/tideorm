@@ -19,7 +19,6 @@ pub(crate) mod sql_safety;
 
 // Re-export the current ORM engine internally through TideORM's facade.
 // Allow unused_imports here: we re-export broadly so other modules can import selectively.
-#[allow(unused_imports)]
 pub use crate::orm::{
     ActiveModelBehavior, ActiveModelTrait, ActiveValue, ColumnTrait, ColumnType, Condition,
     ConnectOptions, ConnectionTrait, Database as OrmDatabase, DatabaseConnection as OrmConnection,

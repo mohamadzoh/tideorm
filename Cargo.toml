@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.9.18"
+version = "0.9.19"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -11,7 +11,7 @@ keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
 rust-version = "1.85"
-exclude = [".cargo/**", ".github/**", ".env.example", "book.toml", "docs/CNAME", "tests/**", "wip/**"]
+exclude = [".cargo/**", ".github/**", ".env.example", "book.toml", "docs/CNAME", "tests/**"]
 
 [workspace]
 members = [".", "tideorm-macros"]
@@ -22,7 +22,7 @@ default = ["postgres", "runtime-tokio"]
 postgres = ["sea-orm/sqlx-postgres"]
 mysql = ["sea-orm/sqlx-mysql"]
 sqlite = ["sea-orm/sqlx-sqlite"]
-runtime-tokio = ["sea-orm/runtime-tokio-rustls", "dep:tokio"]
+runtime-tokio = ["sea-orm/runtime-tokio-rustls"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
 # and feature-specific tests/benches only. They do not enable extra dependencies.
@@ -37,7 +37,6 @@ encrypted-fields = []
 sea-orm = { version = "2.0.0-rc.38", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
 
 # Async runtime
-tokio = { version = "1.51.0", features = ["full"], optional = true }
 async-trait = "0.1.89"
 
 # Serialization
@@ -53,7 +52,7 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.9.18", path = "tideorm-macros" }
+tideorm-macros = { version = "0.9.19", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

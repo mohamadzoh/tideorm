@@ -13,6 +13,50 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_exclusion_check = build_pk_exclusion_check(ctx, quote!(column));
     let encrypted_conflict_column_check = build_encrypted_conflict_column_check(ctx);
 
+    // `find` and `find_with` share an identical primary-key lookup; they differ
+    // only in how the connection is acquired. Interpolate that one expression so
+    // the shared body — including the `__profile_future` wrapper — stays single-source.
+    let find_body = |connection_expr: TokenStream2| {
+        quote! {
+            use ::tideorm::database::Connection;
+            use ::tideorm::internal::InternalModel;
+            use ::tideorm::orm::{EntityTrait, QueryFilter};
+            let error_context = Self::__primary_key_error_context(&id)
+                .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
+            let result = ::tideorm::profiling::__profile_future(async move {
+                let connection = #connection_expr;
+                match connection {
+                    ::tideorm::database::ConnectionRef::Database(conn) => {
+                        #internal_entity_mod::Entity::find()
+                            .filter(<Self as InternalModel>::primary_key_condition(&id))
+                            .one(conn.connection())
+                            .await
+                    }
+                    ::tideorm::database::ConnectionRef::Transaction(tx) => {
+                        #internal_entity_mod::Entity::find()
+                            .filter(<Self as InternalModel>::primary_key_condition(&id))
+                            .one(tx.as_ref())
+                            .await
+                    }
+                }
+            })
+                .await
+                .map_err(::tideorm::Error::from)
+                .map_err(|err| err.with_context(error_context))?;
+            result
+                .map(<Self as InternalModel>::try_from_entity_model)
+                .transpose()
+        }
+    };
+    let find_impl = find_body(quote! {
+        ::tideorm::database::__current_connection()
+            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?
+    });
+    let find_with_impl = find_body(quote! {
+        db.__get_connection()
+            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?
+    });
+
     quote! {
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::model::Model for #struct_name {
@@ -21,71 +65,14 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn find(id: Self::PrimaryKey) -> ::tideorm::Result<Option<Self>> {
-                use ::tideorm::database::Connection;
-                use ::tideorm::internal::InternalModel;
-                use ::tideorm::orm::{EntityTrait, QueryFilter};
-                let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
-                let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = ::tideorm::database::__current_connection()
-                        .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                    match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find()
-                                .filter(<Self as InternalModel>::primary_key_condition(&id))
-                                .one(conn.connection())
-                                .await
-                        }
-                        ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::find()
-                                .filter(<Self as InternalModel>::primary_key_condition(&id))
-                                .one(tx.as_ref())
-                                .await
-                        }
-                    }
-                })
-                    .await
-                    .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
-                result
-                    .map(<Self as InternalModel>::try_from_entity_model)
-                    .transpose()
+                #find_impl
             }
 
             async fn find_with(
                 id: Self::PrimaryKey,
                 db: &::tideorm::database::Database,
             ) -> ::tideorm::Result<Option<Self>> {
-                use ::tideorm::database::Connection;
-                use ::tideorm::internal::InternalModel;
-                use ::tideorm::orm::{EntityTrait, QueryFilter};
-                let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
-                let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = db
-                        .__get_connection()
-                        .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                    match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::find()
-                                .filter(<Self as InternalModel>::primary_key_condition(&id))
-                                .one(conn.connection())
-                                .await
-                        }
-                        ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::find()
-                                .filter(<Self as InternalModel>::primary_key_condition(&id))
-                                .one(tx.as_ref())
-                                .await
-                        }
-                    }
-                })
-                    .await
-                    .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
-                result
-                    .map(<Self as InternalModel>::try_from_entity_model)
-                    .transpose()
+                #find_with_impl
             }
 
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {

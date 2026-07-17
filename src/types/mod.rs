@@ -11,14 +11,11 @@
 //!
 //! Practical split:
 //! - use `Encrypted` and `Hashed` when the stored value should not round-trip as plain text
-//! - use `DbEnum`, JSON aliases, and collection helpers when the database representation is more complex than a scalar
-//! - check `cast` and `defaults` first when a value is being transformed unexpectedly during load or save
+//! - use the JSON aliases when the database representation is more complex than a scalar
+//! - check `cast` first when a value is being transformed unexpectedly during load or save
 
 mod aliases;
 mod cast;
-mod collections;
-mod db_enum;
-mod defaults;
 mod encrypted;
 mod hashed;
 mod timestamps;
@@ -27,10 +24,7 @@ pub use aliases::{
     BigIntArray, BoolArray, DateTime, Decimal, FloatArray, IntArray, Json, JsonArray, Jsonb,
     NaiveDate, NaiveDateTime, NaiveTime, Text, TextArray, Utc, Uuid,
 };
-pub use cast::{AttributeCaster, CastType, CastValue, Castable};
-pub use collections::{Collection, CommaSeparated};
-pub use db_enum::DbEnum;
-pub use defaults::{Accessor, Mutator, WithDefault};
+pub use cast::{CastType, CastValue, Castable};
 pub use encrypted::Encrypted;
 pub use hashed::Hashed;
 pub use timestamps::{UnixTimestamp, UnixTimestampMillis};

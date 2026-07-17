@@ -33,7 +33,7 @@ pub trait Model:
 
     /// Get the global database connection from an instance
     fn database(&self) -> crate::error::Result<crate::database::Database> {
-        crud::database()
+        crud::db()
     }
 
     async fn all() -> Result<Vec<Self>>

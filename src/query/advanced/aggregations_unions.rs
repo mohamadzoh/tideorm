@@ -129,13 +129,11 @@ impl<M: Model> QueryBuilder<M> {
 
         let mut select = M::Entity::find();
 
-        // Apply WHERE conditions
         if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
 
-        // Build COUNT(DISTINCT column) expression
         let count_expr = Expr::cust(format!("COUNT(DISTINCT {})", col));
 
         let result: Option<CountResult> = match db.__get_connection()? {
@@ -186,13 +184,11 @@ impl<M: Model> QueryBuilder<M> {
 
         let mut select = M::Entity::find();
 
-        // Apply WHERE conditions
         if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
             let condition = self.build_sea_condition();
             select = select.filter(condition);
         }
 
-        // Build aggregate expression
         let agg_expr = Expr::cust(expr_sql.to_string());
 
         let result: Option<AggResult> = match db.__get_connection()? {

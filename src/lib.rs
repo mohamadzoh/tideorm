@@ -274,9 +274,8 @@ pub use profiling::{
 
 // Query and statement caching
 pub use cache::{
-    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CacheWarmer,
-    CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
-    QueryCache,
+    CacheConfig, CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, CachedStatementInfo,
+    PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats, QueryCache,
 };
 
 // Validation

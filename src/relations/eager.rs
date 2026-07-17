@@ -369,22 +369,6 @@ impl<M: Model> Default for EagerQueryBuilder<M> {
     }
 }
 
-pub struct RelationLoader<M> {
-    pub name: String,
-    #[allow(clippy::type_complexity)]
-    pub loader: Box<
-        dyn Fn(
-                &[M],
-            ) -> std::pin::Pin<
-                Box<
-                    dyn std::future::Future<Output = Result<HashMap<String, serde_json::Value>>>
-                        + Send,
-                >,
-            > + Send
-            + Sync,
-    >,
-}
-
 pub trait EagerLoadExt: Model {
     fn eager() -> EagerQueryBuilder<Self>
     where

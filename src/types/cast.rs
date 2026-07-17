@@ -112,15 +112,6 @@ impl<T: Castable> Castable for Vec<T> {
     }
 }
 
-/// Trait for attribute casters that transform values when reading/writing
-pub trait AttributeCaster<T>: Sized {
-    /// Cast from database value to Rust type
-    fn get(value: serde_json::Value) -> Result<T, String>;
-
-    /// Cast from Rust type to database value
-    fn set(value: &T) -> serde_json::Value;
-}
-
 /// Cast type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastType {

@@ -113,7 +113,7 @@ pub(crate) fn preview_json_path_exists(db_type: DatabaseType, column: &str, path
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let Some(path) = normalize_mysql_sqlite_json_path(path) else {
-                return invalid_json_path_predicate(true);
+                return invalid_json_path_predicate();
             };
             format!(
                 "JSON_CONTAINS_PATH({}, 'one', '{}')",
@@ -123,7 +123,7 @@ pub(crate) fn preview_json_path_exists(db_type: DatabaseType, column: &str, path
         }
         DatabaseType::SQLite => {
             let Some(path) = normalize_mysql_sqlite_json_path(path) else {
-                return invalid_json_path_predicate(true);
+                return invalid_json_path_predicate();
             };
             format!(
                 "json_extract({}, '{}') IS NOT NULL",
@@ -148,7 +148,7 @@ pub(crate) fn preview_json_path_not_exists(
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let Some(path) = normalize_mysql_sqlite_json_path(path) else {
-                return invalid_json_path_predicate(false);
+                return invalid_json_path_predicate();
             };
             format!(
                 "NOT JSON_CONTAINS_PATH({}, 'one', '{}')",
@@ -158,7 +158,7 @@ pub(crate) fn preview_json_path_not_exists(
         }
         DatabaseType::SQLite => {
             let Some(path) = normalize_mysql_sqlite_json_path(path) else {
-                return invalid_json_path_predicate(false);
+                return invalid_json_path_predicate();
             };
             format!(
                 "json_extract({}, '{}') IS NULL",

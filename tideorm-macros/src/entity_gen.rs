@@ -293,32 +293,13 @@ fn build_relation_defs(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
                 });
             }
 
-            let local_key = if field.belongs_to.is_some() {
-                field.foreign_key.as_deref().unwrap_or("id")
-            } else {
-                field.local_key.as_deref().unwrap_or("id")
-            };
-            let remote_key = if field.belongs_to.is_some() {
-                field.owner_key.as_deref().unwrap_or("id")
-            } else {
-                field.foreign_key.as_deref().unwrap_or("id")
-            };
-            let local_ident = if field.belongs_to.is_some() {
-                ctx.resolve_required_db_field_ident(local_key, ident)?
-            } else {
-                ctx.resolve_local_key_ident(local_key, ident)?
-            };
-            let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
-            let relation_type = if field.has_many.is_some() {
-                quote!(::tideorm::orm::RelationType::HasMany)
-            } else {
-                quote!(::tideorm::orm::RelationType::HasOne)
-            };
-            let remote_error = format!(
-                "relation '{}' references an unknown remote column '{}'",
-                ident, remote_key
-            );
-            let remote_assert = compile_time_column_assert(&related_ty, remote_key, &remote_error);
+            let RegularRelationTokens {
+                local_column_variant,
+                remote_key,
+                relation_type,
+                remote_error,
+                remote_assert,
+            } = resolve_regular_relation_tokens(ctx, field, ident, &related_ty)?;
 
             Ok(quote! {
                 Self::#variant => {
@@ -406,32 +387,13 @@ fn build_related_impls(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
                 });
             }
 
-            let local_key = if field.belongs_to.is_some() {
-                field.foreign_key.as_deref().unwrap_or("id")
-            } else {
-                field.local_key.as_deref().unwrap_or("id")
-            };
-            let remote_key = if field.belongs_to.is_some() {
-                field.owner_key.as_deref().unwrap_or("id")
-            } else {
-                field.foreign_key.as_deref().unwrap_or("id")
-            };
-            let local_ident = if field.belongs_to.is_some() {
-                ctx.resolve_required_db_field_ident(local_key, ident)?
-            } else {
-                ctx.resolve_local_key_ident(local_key, ident)?
-            };
-            let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
-            let relation_type = if field.has_many.is_some() {
-                quote!(::tideorm::orm::RelationType::HasMany)
-            } else {
-                quote!(::tideorm::orm::RelationType::HasOne)
-            };
-            let remote_error = format!(
-                "relation '{}' references an unknown remote column '{}'",
-                ident, remote_key
-            );
-            let remote_assert = compile_time_column_assert(&related_ty, remote_key, &remote_error);
+            let RegularRelationTokens {
+                local_column_variant,
+                remote_key,
+                relation_type,
+                remote_error,
+                remote_assert,
+            } = resolve_regular_relation_tokens(ctx, field, ident, &related_ty)?;
 
             Ok(quote! {
                 impl ::tideorm::orm::Related<<#related_ty as ::tideorm::internal::InternalModel>::Entity> for Entity {
@@ -455,6 +417,59 @@ fn compile_time_column_assert(ty: &syn::Type, column: &str, message: &str) -> To
     quote! {
         const _: () = assert!(<#ty>::__has_column_name(#column), #message);
     }
+}
+
+/// Resolved tokens shared by the two `belongs_to`-based relation definitions
+/// (`RelationTrait::def` arms and the `Related::to` impl) for a non-pivot
+/// relation. Both derive these the same way; keep the derivation single-source.
+struct RegularRelationTokens {
+    local_column_variant: proc_macro2::Ident,
+    remote_key: String,
+    relation_type: TokenStream2,
+    remote_error: String,
+    remote_assert: TokenStream2,
+}
+
+fn resolve_regular_relation_tokens(
+    ctx: &BuildContext,
+    field: &crate::parse::ModelField,
+    ident: &proc_macro2::Ident,
+    related_ty: &syn::Type,
+) -> syn::Result<RegularRelationTokens> {
+    let local_key = if field.belongs_to.is_some() {
+        field.foreign_key.as_deref().unwrap_or("id")
+    } else {
+        field.local_key.as_deref().unwrap_or("id")
+    };
+    let remote_key = if field.belongs_to.is_some() {
+        field.owner_key.as_deref().unwrap_or("id")
+    } else {
+        field.foreign_key.as_deref().unwrap_or("id")
+    };
+    let local_ident = if field.belongs_to.is_some() {
+        ctx.resolve_required_db_field_ident(local_key, ident)?
+    } else {
+        ctx.resolve_local_key_ident(local_key, ident)?
+    };
+    let local_column_variant = format_ident!("{}", local_ident.to_string().to_case(Case::Pascal));
+    let relation_type = if field.has_many.is_some() {
+        quote!(::tideorm::orm::RelationType::HasMany)
+    } else {
+        quote!(::tideorm::orm::RelationType::HasOne)
+    };
+    let remote_error = format!(
+        "relation '{}' references an unknown remote column '{}'",
+        ident, remote_key
+    );
+    let remote_assert = compile_time_column_assert(related_ty, remote_key, &remote_error);
+
+    Ok(RegularRelationTokens {
+        local_column_variant,
+        remote_key: remote_key.to_string(),
+        relation_type,
+        remote_error,
+        remote_assert,
+    })
 }
 
 fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {

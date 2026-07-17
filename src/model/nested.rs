@@ -326,21 +326,7 @@ pub trait NestedSave: Model {
 
         let pk_value = require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_one")?;
 
-        let mut related_json = serde_json::to_value(&related)
-            .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
-
-        if let serde_json::Value::Object(ref mut map) = related_json {
-            let pk_str = pk_value.as_str().unwrap_or_default();
-            if let Ok(pk_i64) = pk_str.parse::<i64>() {
-                map.insert(foreign_key.to_string(), serde_json::json!(pk_i64));
-            } else {
-                map.insert(foreign_key.to_string(), pk_value);
-            }
-        }
-
-        let related: R = serde_json::from_value(related_json).map_err(|e| {
-            Error::conversion(format!("Failed to deserialize related model: {}", e))
-        })?;
+        let related = apply_foreign_key(related, foreign_key, &pk_value)?;
 
         let related = related.save().await?;
 

@@ -22,13 +22,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Eq,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_eq(column, value));
         self
     }
 
@@ -38,13 +32,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::NotEq,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_not(column, value));
         self
     }
 
@@ -54,13 +42,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Gt,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_gt(column, value));
         self
     }
 
@@ -70,13 +52,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Gte,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_gte(column, value));
         self
     }
 
@@ -86,13 +62,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Lt,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_lt(column, value));
         self
     }
 
@@ -102,13 +72,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Lte,
-            value: ConditionValue::Single(value.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_lte(column, value));
         self
     }
 
@@ -118,13 +82,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         pattern: &str,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Like,
-            value: ConditionValue::Single(serde_json::Value::String(pattern.to_string())),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_like(column, pattern));
         self
     }
 
@@ -134,16 +93,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: &str,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::LikeEscaped,
-            value: ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_contains(column, value));
         self
     }
 
@@ -153,16 +104,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: &str,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::LikeEscaped,
-            value: ConditionValue::Single(serde_json::Value::String(format!(
-                "{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_starts_with(column, value));
         self
     }
 
@@ -172,16 +115,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         value: &str,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::LikeEscaped,
-            value: ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_ends_with(column, value));
         self
     }
 
@@ -191,13 +126,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         values: Vec<V>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::In,
-            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_in(column, values));
         self
     }
 
@@ -207,37 +136,20 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         values: Vec<V>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::NotIn,
-            value: ConditionValue::List(values.into_iter().map(|v| v.into()).collect()),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_not_in(column, values));
         self
     }
 
     #[must_use]
     pub fn or_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::IsNull,
-            value: ConditionValue::None,
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_null(column));
         self
     }
 
     #[must_use]
     pub fn or_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::IsNotNull,
-            value: ConditionValue::None,
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_not_null(column));
         self
     }
 
@@ -248,25 +160,14 @@ impl<M: Model> QueryBuilder<M> {
         min: impl Into<serde_json::Value>,
         max: impl Into<serde_json::Value>,
     ) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: column.column_name().to_string(),
-            operator: Operator::Between,
-            value: ConditionValue::Range(min.into(), max.into()),
-        });
-        self.or_groups.push(group);
+        self.or_groups
+            .push(OrGroup::new().where_between(column, min, max));
         self
     }
 
     #[must_use]
     pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
-        let mut group = OrGroup::new();
-        group.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(raw_sql.to_string()),
-        });
-        self.or_groups.push(group);
+        self.or_groups.push(OrGroup::new().where_raw(raw_sql));
         self
     }
 

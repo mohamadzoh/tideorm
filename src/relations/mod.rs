@@ -55,7 +55,7 @@ pub(crate) use direct::HasMany as DirectHasMany;
 pub use direct::{BelongsTo, HasOne};
 pub use eager::{
     EagerLoadExt, EagerLoadModel, EagerQueryBuilder, RelationConstraints, RelationExt,
-    RelationLoader, RelationPath, RelationTree, WithRelations,
+    RelationPath, RelationTree, WithRelations,
 };
 pub use many_to_many::{HasManyThrough, WithPivot};
 pub use metadata::{RelationInfo, RelationType};

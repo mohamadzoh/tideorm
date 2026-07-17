@@ -194,7 +194,6 @@ impl Seeder {
             return Ok(result);
         }
 
-        // Get the last executed seed name
         let last_name = match executed.last() {
             Some(n) => n,
             None => return Ok(result),
@@ -209,7 +208,6 @@ impl Seeder {
 
                 seed.rollback(&database).await?;
 
-                // Remove seed record
                 self.remove_seed_record(last_name).await?;
 
                 result.rolled_back.push(SeedInfo {
@@ -236,7 +234,6 @@ impl Seeder {
 
                 seed.rollback(&database).await?;
 
-                // Remove seed record
                 self.remove_seed_record(seed_name).await?;
 
                 result.rolled_back.push(SeedInfo {
