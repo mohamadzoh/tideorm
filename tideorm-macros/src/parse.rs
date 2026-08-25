@@ -155,7 +155,11 @@ impl ModelField {
             "f32" => quote!(::tideorm::orm::ColumnType::Float),
             "f64" => quote!(::tideorm::orm::ColumnType::Double),
             "bool" => quote!(::tideorm::orm::ColumnType::Boolean),
-            "String" | "&str" | "str" => quote!(::tideorm::orm::ColumnType::Text),
+            // `Text` is `tideorm::types::Text`, a `String` alias exported for
+            // exactly this use. `canonical_schema_type` has always recognised the
+            // name, but without an arm here it fell through to the catch-all and
+            // a model using it failed to compile.
+            "String" | "&str" | "str" | "Text" => quote!(::tideorm::orm::ColumnType::Text),
             "Uuid" | "uuid::Uuid" => quote!(::tideorm::orm::ColumnType::Uuid),
             s if s.contains("DateTime<Utc>")
                 || s.contains("DateTime<chrono::Utc>")
@@ -193,6 +197,13 @@ impl ModelField {
             "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
                 ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
             )),
+            // Same gap as `Text`: recognised by `canonical_schema_type`, but with
+            // no arm it reached the catch-all and failed to compile.
+            "Vec<serde_json::Value>" | "Vec<Json>" | "Vec<JsonValue>" | "JsonArray" => {
+                quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Json)
+                ))
+            }
             _ => {
                 let message = format!(
                     "unsupported TideORM column type '{}' in schema generation; set an explicit column type or use a supported Rust type",

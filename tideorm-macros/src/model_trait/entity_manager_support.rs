@@ -385,6 +385,11 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                 #identity_key_expr
             }
 
+            fn tide_pk_is_new(&self) -> bool {
+                let primary_key = <Self as ::tideorm::model::Model>::primary_key(self);
+                <Self as ::tideorm::model::ModelMeta>::primary_key_is_new(&primary_key)
+            }
+
             fn tide_parent_tables() -> Vec<&'static str>
             where
                 Self: Sized,

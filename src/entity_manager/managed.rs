@@ -268,6 +268,17 @@ pub(crate) struct ManagedEntry<T> {
     snapshot: RwLock<Option<T>>,
     state: RwLock<EntityState>,
     persisted_key: RwLock<Option<String>>,
+    /// The key this entry is filed under in the manager's identity map.
+    ///
+    /// Deliberately separate from [`Self::persisted_key`], which answers a
+    /// different question: whether a row for this entity exists in the database.
+    /// The two coincide for a loaded entity but not for one handed to `persist`
+    /// with a client-assigned primary key — that is trackable immediately, so it
+    /// goes into the identity map, while nothing has been inserted yet. Keying
+    /// removal off `persisted_key` there left an entry no path could clear, so
+    /// `detach` did not detach and a later `find_managed` returned a row that had
+    /// never been written.
+    identity_key: RwLock<Option<String>>,
 }
 
 impl<T> ManagedEntry<T> {
@@ -281,8 +292,20 @@ impl<T> ManagedEntry<T> {
             current: RwLock::new(entity),
             snapshot: RwLock::new(snapshot),
             state: RwLock::new(state),
+            // A caller that already knows the persisted key is filing the entry
+            // under it; `persist` overrides this for the client-assigned case.
+            identity_key: RwLock::new(persisted_key.clone()),
             persisted_key: RwLock::new(persisted_key),
         }
+    }
+
+    /// Record the identity-map key this entry was filed under.
+    pub(crate) fn set_identity_key(&self, key: Option<String>) {
+        *self.identity_key.write() = key;
+    }
+
+    pub(crate) fn identity_key(&self) -> Option<String> {
+        self.identity_key.read().clone()
     }
 
     pub(crate) fn state(&self) -> EntityState {
@@ -322,10 +345,6 @@ impl<T> ManagedEntry<T> {
 
     pub(crate) fn mark_removed(&self) {
         *self.state.write() = EntityState::Removed;
-    }
-
-    pub(crate) fn persisted_key(&self) -> Option<String> {
-        self.persisted_key.read().clone()
     }
 
     fn mark_detached(&self) {
@@ -369,9 +388,12 @@ where
     }
 
     fn detach_from_context(&self, entity_manager: &EntityManager) {
-        if let Some(key) = self.persisted_key.read().as_ref() {
+        // `identity_key`, not `persisted_key`: an entity given to `persist` with a
+        // client-assigned primary key is in the map without having been inserted.
+        if let Some(key) = self.identity_key.read().as_ref() {
             entity_manager.remove_managed_entry::<T>(key);
         }
+        *self.identity_key.write() = None;
 
         self.mark_detached();
     }
@@ -383,6 +405,7 @@ where
             snapshot: self.snapshot.read().clone(),
             state: self.state(),
             persisted_key: self.persisted_key.read().clone(),
+            identity_key: self.identity_key.read().clone(),
         })
     }
 
@@ -393,8 +416,14 @@ where
         match self.state() {
             EntityState::Detached => Ok(()),
             EntityState::Removed => {
-                let key = self.persisted_key.read().as_ref().cloned();
-                if let Some(key) = key {
+                // Only a row that exists gets a DELETE, so that stays gated on
+                // `persisted_key`. Evicting from the identity map is a separate
+                // question and uses `identity_key`, which is also set for an
+                // entity `persist`ed under a client-assigned key and never
+                // inserted — without this it survived the remove and a later
+                // `find_managed` handed back a row that was never written.
+                let persisted = self.persisted_key.read().as_ref().cloned();
+                if let Some(key) = persisted {
                     let entity = self
                         .snapshot
                         .read()
@@ -406,11 +435,15 @@ where
                     )
                     .await?;
                     entity_manager.remove_by_entity_manager_key::<T>(&key);
-                    entity_manager.remove_managed_entry::<T>(&key);
+                }
+
+                if let Some(key) = self.identity_key.read().as_ref() {
+                    entity_manager.remove_managed_entry::<T>(key);
                 }
 
                 *self.snapshot.write() = None;
                 *self.persisted_key.write() = None;
+                *self.identity_key.write() = None;
                 self.mark_detached();
                 Ok(())
             }
@@ -422,7 +455,10 @@ where
                     None => true,
                 };
 
-                let previous_key = self.persisted_key.read().as_ref().cloned();
+                // The map entry may predate the insert: `persist` files a
+                // client-assigned key immediately. Evict under whatever it was
+                // actually filed as, not under the persisted key it may not have.
+                let previous_key = self.identity_key.read().as_ref().cloned();
                 let saved = if columns_changed {
                     save_with_entity_manager_impl(&current, entity_manager).await?
                 } else {
@@ -442,6 +478,7 @@ where
 
                 *self.current.write() = saved.clone();
                 *self.snapshot.write() = Some(saved.clone());
+                *self.identity_key.write() = next_key.clone();
                 *self.persisted_key.write() = next_key;
                 *self.state.write() = EntityState::Managed;
                 entity_manager.put(saved);
@@ -457,6 +494,7 @@ struct ManagedEntryCheckpoint<T> {
     snapshot: Option<T>,
     state: EntityState,
     persisted_key: Option<String>,
+    identity_key: Option<String>,
 }
 
 impl<T> ManagedCheckpoint for ManagedEntryCheckpoint<T>
@@ -464,11 +502,13 @@ where
     T: Send + Sync + 'static,
 {
     fn rollback(self: Box<Self>, entity_manager: &EntityManager) {
-        if let Some(current_key) = self.entry.persisted_key.read().as_deref() {
+        // Both evict and re-file go through `identity_key`, which is what the map
+        // is actually keyed by; `persisted_key` is restored as plain state.
+        if let Some(current_key) = self.entry.identity_key.read().as_deref() {
             entity_manager.remove_managed_entry::<T>(current_key);
         }
 
-        if let Some(previous_key) = self.persisted_key.as_deref() {
+        if let Some(previous_key) = self.identity_key.as_deref() {
             entity_manager.put_managed_entry::<T>(previous_key, self.entry.clone());
         }
 
@@ -476,6 +516,7 @@ where
         *self.entry.snapshot.write() = self.snapshot;
         *self.entry.state.write() = self.state;
         *self.entry.persisted_key.write() = self.persisted_key;
+        *self.entry.identity_key.write() = self.identity_key;
     }
 }
 

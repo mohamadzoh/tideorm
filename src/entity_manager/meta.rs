@@ -14,6 +14,22 @@ pub trait TideEntityManagerMeta {
 
     fn tide_pk_key(&self) -> String;
 
+    /// Whether this entity's primary key is still the type's default, i.e. no
+    /// row has been inserted for it yet.
+    ///
+    /// [`Self::tide_pk_key`] is infallible and has no notion of "unsaved", so it
+    /// renders a default key as an ordinary string — `"0"` for an `i64`. Every
+    /// unsaved instance of a model therefore produces the *same* identity key,
+    /// and filing two of them in the identity map makes the second collide with
+    /// the first. Callers that key the map must skip an entity for which this
+    /// returns `true`: it has no identity to share yet.
+    ///
+    /// Defaults to `false` for hand-written implementations, which preserves the
+    /// previous behaviour for anyone not deriving `Model`.
+    fn tide_pk_is_new(&self) -> bool {
+        false
+    }
+
     /// Tables a row of this model points at with a foreign key, so they have to
     /// hold a row before this one can be inserted.
     ///

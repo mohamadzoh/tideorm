@@ -168,6 +168,10 @@ impl EntityManager {
         self.register_managed_entry(entry.clone());
         if let Some(key) = key.as_deref() {
             self.put_managed_entry::<T>(key, entry.clone());
+            // Record what the entry was filed under. `persisted_key` stays `None`
+            // — nothing is inserted yet — so without this the removal paths, which
+            // all key off the map entry, would have nothing to evict.
+            entry.set_identity_key(Some(key.to_string()));
         }
         Managed::from_entry(entry)
     }
@@ -222,9 +226,14 @@ impl EntityManager {
     where
         T: Send + Sync + 'static,
     {
-        if let Some(key) = managed.entry.persisted_key() {
+        // `identity_key`, not `persisted_key`: an entity `persist`ed with a
+        // client-assigned primary key is in the identity map before any insert,
+        // so keying the eviction off the persisted key left it behind and the
+        // detach silently did nothing.
+        if let Some(key) = managed.entry.identity_key() {
             self.remove_managed_entry::<T>(&key);
         }
+        managed.entry.set_identity_key(None);
 
         managed.entry.mark_detached_public();
         self.remove_managed_ops_entry(managed);
@@ -417,6 +426,16 @@ impl EntityManager {
     {
         let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
+
+        // An unsaved entity has no identity to share. `tide_pk_key` renders its
+        // default primary key as an ordinary string, so every new instance of a
+        // model keys to the same thing — file two of them and the second gets
+        // handed the first one back, which silently drops it and inserts the
+        // first twice. Hand it straight back instead; the flush files it under a
+        // real key once the insert assigns one.
+        if entity.tide_pk_is_new() {
+            return entity;
+        }
 
         let key = (TypeId::of::<T>(), entity.tide_pk_key());
 

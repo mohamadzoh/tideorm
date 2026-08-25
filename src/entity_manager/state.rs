@@ -133,6 +133,12 @@ impl EntityManager {
         let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
 
+        // Same collision as `register`: an unsaved entity's default primary key
+        // is not an identity, and filing several under it makes them alias.
+        if entity.tide_pk_is_new() {
+            return;
+        }
+
         let key = (TypeId::of::<T>(), entity.tide_pk_key());
         save::record_identity_map_rollback::<T>(self, &key);
         let mut map = self.identity_map.write();

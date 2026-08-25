@@ -626,3 +626,31 @@ fn index_attributes_reject_unknown_columns() {
 
     assert!(error.contains("#[unique_index(..)] references unknown field or column 'nickname'"));
 }
+
+#[test]
+fn exported_type_aliases_all_map_to_a_column_type() {
+    // `canonical_schema_type` normalises these names, but two of them had no arm
+    // in the `ColumnType` match and fell through to the catch-all, so a model
+    // using a type the crate exports for exactly this purpose did not compile.
+    let input: DeriveInput = parse_quote! {
+        struct Doc {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            body: Text,
+            tags: TextArray,
+            counts: IntArray,
+            payloads: JsonArray,
+            meta: Json,
+        }
+    };
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let generated =
+        generate_model_impl(&model_input, vec![], vec![], &existing_derives).to_string();
+
+    assert!(
+        !generated.contains("unsupported TideORM column type"),
+        "every alias exported for model fields must map to a ColumnType"
+    );
+}

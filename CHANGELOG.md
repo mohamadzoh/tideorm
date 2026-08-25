@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-08-25
+
+Three defects behind the `entity-manager` feature and the schema type mapper.
+Nothing here affects a default-feature build.
+
+### Added
+
+- `TideEntityManagerMeta::tide_pk_is_new`, reporting whether an entity's primary key is still the
+  type's default. It defaults to `false`, so hand-written implementations are unaffected; the derive
+  emits it from `ModelMeta::primary_key_is_new`.
+
+### Fixed
+
+- **Two unsaved entities registered with an entity manager aliased each other.** `tide_pk_key` is
+  infallible and has no notion of "unsaved", so it renders a default primary key as an ordinary
+  string — `"0"` for an `i64`. `register` and `put` filed entities under it, so the second new
+  instance of a model collided with the first and was handed the first one back. A `HasMany` holding
+  two new children silently dropped one and inserted the other twice. Both now return early for an
+  entity whose primary key is still new: it has no identity to share until the insert assigns one.
+- **`persist` left an identity-map entry that nothing could remove.** `persisted_key` answered two
+  different questions — whether a row exists in the database, and which key the entry is filed under
+  in the identity map. Those diverge for an entity given to `persist` with a client-assigned primary
+  key: trackable immediately, but not yet inserted. All three removal paths keyed off
+  `persisted_key`, so `detach` silently did nothing and `remove` + flush left a `find_managed`
+  returning a row that was never written. The map key is tracked separately now, while the `DELETE`
+  stays gated on whether a row actually exists.
+- **`Text` and `JsonArray` could not be used as model field types.** Both are exported from
+  `tideorm::types` and documented for model fields, and `canonical_schema_type` already recognised
+  the names, but neither had an arm in the `ColumnType` match — so both fell through to the
+  catch-all and failed to compile. `Vec<serde_json::Value>` is accepted for `JsonArray` too.
+
 ## [0.10.1] - 2026-08-25
 
 ### Changed

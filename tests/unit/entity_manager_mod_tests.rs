@@ -656,3 +656,99 @@ fn transaction_scope_is_restored_when_a_polled_future_panics() {
         "a panic must not leave the transaction scope pinned on this worker thread"
     );
 }
+
+/// Client-assigned primary key, so `persist` can file it in the identity map
+/// before anything is inserted — the case where "tracked" and "exists in the
+/// database" genuinely differ.
+#[tideorm::model(table = "entity_manager_mod_test_widgets")]
+struct EntityManagerModTestWidget {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: String,
+}
+
+#[tokio::test]
+async fn detach_clears_an_entry_persisted_under_a_client_assigned_key() {
+    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+
+    let managed = entity_manager.persist(EntityManagerModTestWidget {
+        id: 42,
+        name: "widget".to_string(),
+    });
+
+    assert!(
+        entity_manager
+            .get_managed_by_key::<EntityManagerModTestWidget>("42")
+            .is_some(),
+        "persist should track a client-assigned primary key immediately"
+    );
+
+    entity_manager.detach(&managed);
+
+    // The eviction has to key off the map key, not `persisted_key`: nothing was
+    // inserted, so `persisted_key` is `None` and keying off it left the entry
+    // behind, making `detach` a no-op and a later `find_managed` hand back a row
+    // that never existed.
+    assert!(
+        entity_manager
+            .get_managed_by_key::<EntityManagerModTestWidget>("42")
+            .is_none(),
+        "detach must clear the identity-map entry it was filed under"
+    );
+}
+
+#[tokio::test]
+async fn removing_a_never_inserted_entity_evicts_it_without_a_delete() -> crate::error::Result<()> {
+    // The database is disconnected, so this also asserts the flush issues no
+    // DELETE for a row that was never written — it would fail if it tried.
+    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+
+    let managed = entity_manager.persist(EntityManagerModTestWidget {
+        id: 77,
+        name: "widget".to_string(),
+    });
+    entity_manager.remove(&managed);
+
+    // Drive the entry's own flush rather than `EntityManager::flush`, which opens
+    // a transaction a disconnected handle cannot. This is the branch under test,
+    // and reaching it at all proves no DELETE was attempted.
+    use crate::entity_manager::managed::ManagedOps;
+    managed.entry.clone().flush(&entity_manager).await?;
+
+    assert!(
+        entity_manager
+            .get_managed_by_key::<EntityManagerModTestWidget>("77")
+            .is_none(),
+        "a removed entity must not stay in the identity map"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn registering_two_unsaved_entities_keeps_them_distinct() {
+    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+
+    // Both have the default primary key, which `tide_pk_key` renders as "0".
+    // Filing them under it made the second collide with the first and get the
+    // first handed back — silently dropping one child and inserting the other
+    // twice.
+    let first = entity_manager
+        .register(EntityManagerModTestUser {
+            id: 0,
+            name: "first".to_string(),
+        })
+        .await;
+    let second = entity_manager
+        .register(EntityManagerModTestUser {
+            id: 0,
+            name: "second".to_string(),
+        })
+        .await;
+
+    assert_eq!(first.name, "first");
+    assert_eq!(
+        second.name, "second",
+        "an unsaved entity has no identity to share, so it must not alias another"
+    );
+}
