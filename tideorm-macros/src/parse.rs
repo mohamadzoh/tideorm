@@ -298,14 +298,14 @@ pub(crate) fn relation_wrapper_name(ty: &Type) -> Option<&str> {
         Type::Path(type_path) => {
             let segment = type_path.path.segments.last()?;
             let ident = segment.ident.to_string();
-            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc") {
-                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
-                    for argument in &arguments.args {
-                        if let GenericArgument::Type(inner_ty) = argument {
-                            if let Some(name) = relation_wrapper_name(inner_ty) {
-                                return Some(name);
-                            }
-                        }
+            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc")
+                && let PathArguments::AngleBracketed(arguments) = &segment.arguments
+            {
+                for argument in &arguments.args {
+                    if let GenericArgument::Type(inner_ty) = argument
+                        && let Some(name) = relation_wrapper_name(inner_ty)
+                    {
+                        return Some(name);
                     }
                 }
             }

@@ -293,10 +293,10 @@ pub trait HasTranslations {
         }
 
         // Try fallback language
-        if lang != fallback {
-            if let Some(value) = data.get(field, &fallback) {
-                return Ok(value.clone());
-            }
+        if lang != fallback
+            && let Some(value) = data.get(field, &fallback)
+        {
+            return Ok(value.clone());
         }
 
         // Fall back to default field value

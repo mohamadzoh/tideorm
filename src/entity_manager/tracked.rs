@@ -113,11 +113,10 @@ impl<T: Model> TrackedHasMany<T> {
 
         if ((allow_cached_without_context && previous.cached.is_some()) || same_relation)
             && self.cached.is_none()
+            && let Some(cached) = previous.cached.as_ref()
         {
-            if let Some(cached) = previous.cached.as_ref() {
-                self.plain.set_cached(cached.clone());
-                self.cached = Some(cached.clone());
-            }
+            self.plain.set_cached(cached.clone());
+            self.cached = Some(cached.clone());
         }
     }
 

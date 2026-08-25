@@ -149,23 +149,24 @@ impl<E: Model> HasMany<E> {
             }
         };
 
-        if can_query && self.ensure_configured().is_ok() {
-            if let Some(pk) = self.parent_pk.as_ref() {
-                let pk = require_scalar_relation_key(pk, "HasMany::load")?;
+        if can_query
+            && self.ensure_configured().is_ok()
+            && let Some(pk) = self.parent_pk.as_ref()
+        {
+            let pk = require_scalar_relation_key(pk, "HasMany::load")?;
 
-                let query = {
-                    #[cfg(feature = "entity-manager")]
-                    {
-                        self.query_builder()
-                    }
-                    #[cfg(not(feature = "entity-manager"))]
-                    {
-                        E::query()
-                    }
-                };
+            let query = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    self.query_builder()
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    E::query()
+                }
+            };
 
-                return query.where_eq(self.foreign_key, pk.clone()).get().await;
-            }
+            return query.where_eq(self.foreign_key, pk.clone()).get().await;
         }
 
         if let Some(cached) = &self.cached {

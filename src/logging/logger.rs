@@ -181,10 +181,10 @@ impl QueryLogger {
 
     /// Load logger settings from TIDE_LOG_QUERIES, TIDE_LOG_LEVEL, and TIDE_SLOW_QUERY_MS.
     pub fn init_from_env() {
-        if let Ok(val) = std::env::var("TIDE_LOG_QUERIES") {
-            if val == "1" || val.to_lowercase() == "true" {
-                LOGGER_ENABLED.store(true, Ordering::SeqCst);
-            }
+        if let Ok(val) = std::env::var("TIDE_LOG_QUERIES")
+            && (val == "1" || val.to_lowercase() == "true")
+        {
+            LOGGER_ENABLED.store(true, Ordering::SeqCst);
         }
 
         if let Ok(val) = std::env::var("TIDE_LOG_LEVEL") {
@@ -195,10 +195,10 @@ impl QueryLogger {
             }
         }
 
-        if let Ok(val) = std::env::var("TIDE_SLOW_QUERY_MS") {
-            if let Ok(ms) = val.parse::<u64>() {
-                SLOW_QUERY_THRESHOLD_MS.store(ms, Ordering::SeqCst);
-            }
+        if let Ok(val) = std::env::var("TIDE_SLOW_QUERY_MS")
+            && let Ok(ms) = val.parse::<u64>()
+        {
+            SLOW_QUERY_THRESHOLD_MS.store(ms, Ordering::SeqCst);
         }
     }
 }

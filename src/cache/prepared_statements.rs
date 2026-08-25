@@ -268,12 +268,13 @@ impl PreparedStatementCache {
         // Fast path: read-only cache hit without taking the write lock.
         {
             let statements = self.statements.read();
-            if let Some(stmt) = statements.get(&hash) {
-                if stmt.sql == sql && stmt.prepared_at.elapsed() < max_age {
-                    drop(statements);
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return (sql.to_string(), true);
-                }
+            if let Some(stmt) = statements.get(&hash)
+                && stmt.sql == sql
+                && stmt.prepared_at.elapsed() < max_age
+            {
+                drop(statements);
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return (sql.to_string(), true);
             }
         }
 

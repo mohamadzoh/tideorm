@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-25
+
+### Changed
+
+- **The declared MSRV is now `1.88`, up from `1.85`.** This corrects a promise the crate could not
+  keep rather than dropping support for anything: `darling 0.23` and `sea-query 1.0.0-rc.33` both
+  require 1.88, so 0.10.0 already failed to build on 1.85 despite what its manifest said. 1.88 is
+  the exact ceiling of the dependency tree, not a margin.
+
+### Fixed
+
+- **`Database::backend()` answered for the ambient transaction instead of the handle it was called
+  on.** `__internal_backend` resolved through `current_handle`, so a `Database` with its own
+  connection reported whatever transaction happened to be open around it — and a handle with no
+  connection of its own resolved to the *global* slot, which an `EntityManager` created without a
+  global connection has never set. That failed, `backend()` warned and guessed PostgreSQL, and a
+  SQLite-backed manager then rendered `$1` placeholders. It reads `own_handle` now, which is what
+  the method's own documentation and `Database::backend()`'s public contract both describe.
+
+### Internal
+
+- The `features` CI job runs `cargo test --lib`, and the entity-manager relation tests under
+  `tests/unit/` are `#[path]`-included into that suite and speak real PostgreSQL. With no server
+  they did not skip — each waited out the connection-pool timeout and failed 30 seconds later. That
+  job now has a PostgreSQL service. The rest of `cargo test --lib` remains database-free.
+- Local verification now covers every configuration CI runs, including
+  `--no-default-features --features sqlite,runtime-tokio`. The `Database::backend()` defect above
+  only compiled under that combination, so no local gate had been running the test that caught it.
+
 ## [0.10.0] - 2026-07-25
 
 This is a deliberately breaking release. A repository-wide audit produced a large batch of

@@ -53,10 +53,10 @@ impl managed::ManagedOps for AppendingManagedEntry {
     ) -> crate::error::Result<()> {
         self.flush_count.fetch_add(1, Ordering::SeqCst);
 
-        if let Some(child) = &self.child {
-            if !self.appended.swap(true, Ordering::SeqCst) {
-                entity_manager.managed_entries.write().push(child.clone());
-            }
+        if let Some(child) = &self.child
+            && !self.appended.swap(true, Ordering::SeqCst)
+        {
+            entity_manager.managed_entries.write().push(child.clone());
         }
 
         Ok(())
@@ -91,10 +91,10 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
     ) -> crate::error::Result<()> {
         self.flush_count.fetch_add(1, Ordering::SeqCst);
 
-        if let Some(child) = &self.child {
-            if !self.appended.swap(true, Ordering::SeqCst) {
-                entity_manager.managed_entries.write().push(child.clone());
-            }
+        if let Some(child) = &self.child
+            && !self.appended.swap(true, Ordering::SeqCst)
+        {
+            entity_manager.managed_entries.write().push(child.clone());
         }
 
         if self.fail {

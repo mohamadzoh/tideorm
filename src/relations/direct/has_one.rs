@@ -248,23 +248,24 @@ impl<E: Model> HasOne<E> {
             }
         };
 
-        if can_query && self.ensure_configured().is_ok() {
-            if let Some(pk) = self.parent_pk.as_ref() {
-                let pk = require_scalar_relation_key(pk, "HasOne::load")?;
+        if can_query
+            && self.ensure_configured().is_ok()
+            && let Some(pk) = self.parent_pk.as_ref()
+        {
+            let pk = require_scalar_relation_key(pk, "HasOne::load")?;
 
-                let query = {
-                    #[cfg(feature = "entity-manager")]
-                    {
-                        self.query_builder()
-                    }
-                    #[cfg(not(feature = "entity-manager"))]
-                    {
-                        E::query()
-                    }
-                };
+            let query = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    self.query_builder()
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    E::query()
+                }
+            };
 
-                return query.where_eq(self.foreign_key, pk.clone()).first().await;
-            }
+            return query.where_eq(self.foreign_key, pk.clone()).first().await;
         }
 
         if self.loaded {

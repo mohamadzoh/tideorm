@@ -44,37 +44,35 @@ where
     }
 
     #[cfg(feature = "translations")]
-    if M::has_translations() {
-        if let Some(translations) = json.get("translations").cloned() {
-            if let Some(trans_obj) = translations.as_object() {
-                for field in &translatable {
-                    if let Some(field_trans) = trans_obj.get(*field) {
-                        if let Some(field_obj) = field_trans.as_object() {
-                            if let Some(value) = field_obj
-                                .get(current_language)
-                                .or_else(|| field_obj.get(&fallback))
-                            {
-                                json.insert(field.to_string(), value.clone());
-                            }
-                        }
-                    }
+    if M::has_translations()
+        && let Some(translations) = json.get("translations").cloned()
+    {
+        if let Some(trans_obj) = translations.as_object() {
+            for field in &translatable {
+                if let Some(field_trans) = trans_obj.get(*field)
+                    && let Some(field_obj) = field_trans.as_object()
+                    && let Some(value) = field_obj
+                        .get(current_language)
+                        .or_else(|| field_obj.get(&fallback))
+                {
+                    json.insert(field.to_string(), value.clone());
                 }
             }
-            json.remove("translations");
         }
+        json.remove("translations");
     }
 
     #[cfg(feature = "attachments")]
     if M::has_file_attachments() {
         let url_generator = M::file_url_generator();
-        if let Some(files) = json.remove("files") {
-            if let Some(files_obj) = files.as_object() {
-                for relation in &file_relations {
-                    if let Some(file_data) = files_obj.get(*relation) {
-                        let processed =
-                            process_file_for_json(relation, file_data, &hidden, url_generator);
-                        json.insert(relation.to_string(), processed);
-                    }
+        if let Some(files) = json.remove("files")
+            && let Some(files_obj) = files.as_object()
+        {
+            for relation in &file_relations {
+                if let Some(file_data) = files_obj.get(*relation) {
+                    let processed =
+                        process_file_for_json(relation, file_data, &hidden, url_generator);
+                    json.insert(relation.to_string(), processed);
                 }
             }
         }
@@ -431,11 +429,11 @@ where
     let translatable = M::translatable_fields();
 
     for field in translatable {
-        if let Some(value) = data.get(field) {
-            if value.is_object() {
-                translations.insert(field.to_string(), value.clone());
-                data.remove(field);
-            }
+        if let Some(value) = data.get(field)
+            && value.is_object()
+        {
+            translations.insert(field.to_string(), value.clone());
+            data.remove(field);
         }
     }
 
@@ -588,10 +586,10 @@ where
     match file_relation_kind::<M>(relation_type)? {
         FileRelationKind::HasOne => {
             if let Some(key) = file_key {
-                if let Some(current) = files.get(relation_type) {
-                    if current.get("key").and_then(|k| k.as_str()) == Some(key) {
-                        files.insert(relation_type.to_string(), serde_json::Value::Null);
-                    }
+                if let Some(current) = files.get(relation_type)
+                    && current.get("key").and_then(|k| k.as_str()) == Some(key)
+                {
+                    files.insert(relation_type.to_string(), serde_json::Value::Null);
                 }
             } else {
                 files.insert(relation_type.to_string(), serde_json::Value::Null);

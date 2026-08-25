@@ -220,10 +220,10 @@ impl SchemaWriter {
                     col = col.not_null();
                 }
 
-                if let Some(default) = default {
-                    if !default.contains("nextval") {
-                        col = col.default(default);
-                    }
+                if let Some(default) = default
+                    && !default.contains("nextval")
+                {
+                    col = col.default(default);
                 }
 
                 builder = builder.column(col);

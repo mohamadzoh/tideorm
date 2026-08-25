@@ -184,23 +184,24 @@ impl<E: Model> BelongsTo<E> {
             }
         };
 
-        if can_query && self.ensure_configured().is_ok() {
-            if let Some(fk) = self.fk_value.as_ref() {
-                let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
+        if can_query
+            && self.ensure_configured().is_ok()
+            && let Some(fk) = self.fk_value.as_ref()
+        {
+            let fk = require_scalar_relation_key(fk, "BelongsTo::load")?;
 
-                let query = {
-                    #[cfg(feature = "entity-manager")]
-                    {
-                        self.query_builder()
-                    }
-                    #[cfg(not(feature = "entity-manager"))]
-                    {
-                        E::query()
-                    }
-                };
+            let query = {
+                #[cfg(feature = "entity-manager")]
+                {
+                    self.query_builder()
+                }
+                #[cfg(not(feature = "entity-manager"))]
+                {
+                    E::query()
+                }
+            };
 
-                return query.where_eq(self.owner_key, fk.clone()).first().await;
-            }
+            return query.where_eq(self.owner_key, fk.clone()).first().await;
         }
 
         if self.loaded {

@@ -430,10 +430,10 @@ where
                 };
                 let next_key = Some(saved.tide_pk_key());
 
-                if let Some(ref previous_key) = previous_key {
-                    if Some(previous_key.as_str()) != next_key.as_deref() {
-                        entity_manager.remove_managed_entry::<T>(previous_key);
-                    }
+                if let Some(ref previous_key) = previous_key
+                    && Some(previous_key.as_str()) != next_key.as_deref()
+                {
+                    entity_manager.remove_managed_entry::<T>(previous_key);
                 }
 
                 if let Some(key) = next_key.as_deref() {

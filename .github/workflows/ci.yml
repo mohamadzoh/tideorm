@@ -46,9 +46,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # `rust-version = "1.85"` in both manifests is a promise to downstream
+  # `rust-version = "1.88"` in both manifests is a promise to downstream
   # resolvers, and every other job installs `stable`, so nothing else here would
-  # notice a post-1.85 API landing. This job is the only thing that checks it.
+  # notice a post-1.88 API landing. This job is the only thing that checks it.
   #
   # Deliberately `cargo check` and not `--all-targets`: the MSRV covers the
   # published library and proc-macro crate, not the dev-dependencies
@@ -69,7 +69,7 @@ jobs:
 
       - name: Install Rust
         # Keep this literal in sync with `rust-version` in both manifests.
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -84,6 +84,28 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MODULE_FEATURES: "attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+      POSTGRESQL_DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_tide_orm
+
+    # `cargo test --lib` is otherwise database-free, but the entity-manager
+    # relation tests under `tests/unit/` are `#[path]`-included into it and speak
+    # real PostgreSQL (`BIGSERIAL`, `... CASCADE`). Without a server they do not
+    # skip — they wait out the pool acquisition timeout and fail, 30s apiece.
+    # They only compile under `entity-manager`, which is why this is the one job
+    # that needs a database.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_tide_orm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout

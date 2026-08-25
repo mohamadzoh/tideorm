@@ -178,16 +178,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         index += 2;
                     }
                     '$' => {
-                        if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index) {
-                            if tag_end == index + 1 || !chars[index + 1].is_ascii_digit() {
-                                output.extend(chars[index..=tag_end].iter());
-                                state = ScanState::DollarQuoted {
-                                    tag_start: index,
-                                    tag_end,
-                                };
-                                index = tag_end + 1;
-                                continue;
-                            }
+                        if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index)
+                            && (tag_end == index + 1 || !chars[index + 1].is_ascii_digit())
+                        {
+                            output.extend(chars[index..=tag_end].iter());
+                            state = ScanState::DollarQuoted {
+                                tag_start: index,
+                                tag_end,
+                            };
+                            index = tag_end + 1;
+                            continue;
                         }
 
                         let start = index + 1;
@@ -220,12 +220,13 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 },
                 ScanState::SingleQuoted { backslash_escapes } => {
                     output.push(chars[index]);
-                    if backslash_escapes && chars[index] == '\\' {
-                        if let Some(next) = chars.get(index + 1) {
-                            output.push(*next);
-                            index += 2;
-                            continue;
-                        }
+                    if backslash_escapes
+                        && chars[index] == '\\'
+                        && let Some(next) = chars.get(index + 1)
+                    {
+                        output.push(*next);
+                        index += 2;
+                        continue;
                     }
                     if chars[index] == '\'' {
                         if chars.get(index + 1) == Some(&'\'') {

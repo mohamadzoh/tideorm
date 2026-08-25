@@ -22,17 +22,16 @@ pub(crate) fn detect_existing_derives(attrs: &[Attribute]) -> ExistingDerives {
         if !attr.path().is_ident("derive") {
             continue;
         }
-        if let Meta::List(list) = &attr.meta {
-            if let Ok(paths) =
+        if let Meta::List(list) = &attr.meta
+            && let Ok(paths) =
                 Punctuated::<Path, Token![,]>::parse_terminated.parse2(list.tokens.clone())
-            {
-                for path in paths {
-                    existing.has_debug |= path_matches(&path, "Debug");
-                    existing.has_clone |= path_matches(&path, "Clone");
-                    existing.has_default |= path_matches(&path, "Default");
-                    existing.has_serialize |= path_matches(&path, "Serialize");
-                    existing.has_deserialize |= path_matches(&path, "Deserialize");
-                }
+        {
+            for path in paths {
+                existing.has_debug |= path_matches(&path, "Debug");
+                existing.has_clone |= path_matches(&path, "Clone");
+                existing.has_default |= path_matches(&path, "Default");
+                existing.has_serialize |= path_matches(&path, "Serialize");
+                existing.has_deserialize |= path_matches(&path, "Deserialize");
             }
         }
     }

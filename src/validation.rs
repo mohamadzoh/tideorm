@@ -277,110 +277,109 @@ impl Validator {
                 }
             }
             ValidationRule::Email => {
-                if let Some(s) = value.as_str_value() {
-                    if !Self::is_valid_email(s) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && !Self::is_valid_email(s)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Url => {
-                if let Some(s) = value.as_str_value() {
-                    if !Self::is_valid_url(s) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && !Self::is_valid_url(s)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::MinLength(min) => {
-                if let Some(s) = value.as_str_value() {
-                    if s.chars().count() < *min {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && s.chars().count() < *min
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::MaxLength(max) => {
-                if let Some(s) = value.as_str_value() {
-                    if s.chars().count() > *max {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && s.chars().count() > *max
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Length(len) => {
-                if let Some(s) = value.as_str_value() {
-                    if s.chars().count() != *len {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && s.chars().count() != *len
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Min(min) => {
-                if let Some(n) = value.as_f64_value() {
-                    if n < *min {
-                        return Some(rule.message(field));
-                    }
+                if let Some(n) = value.as_f64_value()
+                    && n < *min
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Max(max) => {
-                if let Some(n) = value.as_f64_value() {
-                    if n > *max {
-                        return Some(rule.message(field));
-                    }
+                if let Some(n) = value.as_f64_value()
+                    && n > *max
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Range(min, max) => {
-                if let Some(n) = value.as_f64_value() {
-                    if n < *min || n > *max {
-                        return Some(rule.message(field));
-                    }
+                if let Some(n) = value.as_f64_value()
+                    && (n < *min || n > *max)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Regex(pattern) => {
-                if let Some(s) = value.as_str_value() {
-                    if let Some(re) = compiled_validation_regex(pattern) {
-                        if !re.is_match(s) {
-                            return Some(rule.message(field));
-                        }
-                    }
+                if let Some(s) = value.as_str_value()
+                    && let Some(re) = compiled_validation_regex(pattern)
+                    && !re.is_match(s)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Alpha => {
-                if let Some(s) = value.as_str_value() {
-                    if !s.chars().all(|c| c.is_alphabetic()) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && !s.chars().all(|c| c.is_alphabetic())
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Alphanumeric => {
-                if let Some(s) = value.as_str_value() {
-                    if !s.chars().all(|c| c.is_alphanumeric()) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && !s.chars().all(|c| c.is_alphanumeric())
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Numeric => {
-                if let Some(s) = value.as_str_value() {
-                    if s.parse::<f64>().is_err() {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && s.parse::<f64>().is_err()
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Uuid => {
-                if let Some(s) = value.as_str_value() {
-                    if uuid::Uuid::parse_str(s).is_err() {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && uuid::Uuid::parse_str(s).is_err()
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::In(values) => {
-                if let Some(s) = value.as_str_value() {
-                    if !values.iter().any(|v| v == s) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && !values.iter().any(|v| v == s)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::NotIn(values) => {
-                if let Some(s) = value.as_str_value() {
-                    if values.iter().any(|v| v == s) {
-                        return Some(rule.message(field));
-                    }
+                if let Some(s) = value.as_str_value()
+                    && values.iter().any(|v| v == s)
+                {
+                    return Some(rule.message(field));
                 }
             }
             ValidationRule::Confirmed(_) => {}

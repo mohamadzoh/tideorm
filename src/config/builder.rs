@@ -460,13 +460,12 @@ impl TideConfig {
             .build()
             .await?;
 
-        if db_type == DatabaseType::MySQL {
-            if let Ok(version) = Self::detect_server_version(&db).await {
-                if version.to_lowercase().contains("mariadb") {
-                    db_type = DatabaseType::MariaDB;
-                    tide_info!("Auto-detected MariaDB server: {}", version);
-                }
-            }
+        if db_type == DatabaseType::MySQL
+            && let Ok(version) = Self::detect_server_version(&db).await
+            && version.to_lowercase().contains("mariadb")
+        {
+            db_type = DatabaseType::MariaDB;
+            tide_info!("Auto-detected MariaDB server: {}", version);
         }
 
         set_global_db_type(Some(db_type));

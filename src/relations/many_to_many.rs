@@ -293,11 +293,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// call is a fresh read. Use [`load_with`](Self::load_with) when you need
     /// ordering, paging, or the pivot's own columns.
     pub async fn load(&self) -> Result<Vec<Related>> {
-        if self.should_requery() && self.ensure_configured().is_ok() {
-            if let Some(pk) = self.parent_pk.as_ref() {
-                let pk = require_scalar_relation_key(pk, "HasManyThrough::load")?;
-                return self.query_related(pk).await;
-            }
+        if self.should_requery()
+            && self.ensure_configured().is_ok()
+            && let Some(pk) = self.parent_pk.as_ref()
+        {
+            let pk = require_scalar_relation_key(pk, "HasManyThrough::load")?;
+            return self.query_related(pk).await;
         }
 
         if let Some(cached) = &self.cached {

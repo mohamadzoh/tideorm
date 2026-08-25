@@ -322,16 +322,15 @@ fn validate_subquery_sql_with_mode(
         ));
     }
 
-    if !allow_top_level_set_ops {
-        if let Some(token) = top_level_tokens
+    if !allow_top_level_set_ops
+        && let Some(token) = top_level_tokens
             .iter()
             .find(|token| matches!(token.as_str(), "union" | "intersect" | "except"))
-        {
-            return Err(format!(
-                "unsafe subquery: top-level '{}' queries are not allowed here; use QueryBuilder union()/union_all()/with_recursive_cte() APIs instead",
-                token
-            ));
-        }
+    {
+        return Err(format!(
+            "unsafe subquery: top-level '{}' queries are not allowed here; use QueryBuilder union()/union_all()/with_recursive_cte() APIs instead",
+            token
+        ));
     }
 
     Ok(())

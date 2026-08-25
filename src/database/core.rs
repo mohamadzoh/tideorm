@@ -279,12 +279,18 @@ impl Database {
     pub fn __internal_backend(&self) -> Result<crate::internal::Backend> {
         use crate::internal::ConnectionTrait;
 
-        // Must resolve the same way `__get_connection` does: this answer picks the
-        // placeholder style and identifier quoting for SQL that is then executed
-        // through the ambient scope. Reading `own_handle` here would render for the
-        // chosen handle's dialect and execute against the ambient transaction's
-        // server — a mismatch that reaches the database as malformed SQL.
-        Ok(match self.current_handle()? {
+        // Deliberately `own_handle`, not `current_handle`. Resolving the ambient
+        // scope here answers for a connection this handle does not speak for, and
+        // it breaks the case that has no ambient scope to fall back to: an
+        // `EntityManager` holding its own database with no global connection set
+        // resolves to the *global* slot, fails, and `backend()` then warns and
+        // guesses Postgres — so a SQLite-backed manager renders `$1` placeholders.
+        //
+        // The cross-dialect render/execute mismatch this could cause instead needs
+        // two handles on different backends inside one transaction scope, which
+        // `Database::backend()` documents as answering from the handle you called
+        // it on either way.
+        Ok(match self.own_handle()? {
             DatabaseHandle::Connection(inner) => {
                 crate::internal::Backend::from(inner.connection().get_database_backend())
             }
