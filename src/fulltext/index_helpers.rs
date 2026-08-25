@@ -70,11 +70,13 @@ impl FullTextIndex {
             PgFullTextIndexType::GiST => "GiST",
         };
 
+        let language_literal = escape_sql_literal_for_db(DatabaseType::Postgres, language);
+
         let mut params = Vec::new();
         let tsvector_expr = if self.columns.len() == 1 {
             SqlBuilder::new(DatabaseType::Postgres, &mut params)
                 .raw("to_tsvector('")
-                .raw(&escape_string(language))
+                .raw(&language_literal)
                 .raw("', COALESCE(")
                 .ident(&self.columns[0])
                 .raw(", ''))")
@@ -82,7 +84,7 @@ impl FullTextIndex {
         } else {
             let mut builder = SqlBuilder::new(DatabaseType::Postgres, &mut params)
                 .raw("to_tsvector('")
-                .raw(&escape_string(language))
+                .raw(&language_literal)
                 .raw("', ");
             for (i, col) in self.columns.iter().enumerate() {
                 if i > 0 {
@@ -122,8 +124,12 @@ impl FullTextIndex {
             builder = builder.ident(col);
         }
         builder = builder.raw(")");
+        // `WITH PARSER` takes an identifier, so it goes through the same quoting
+        // path as every other identifier in this module rather than being pasted
+        // in raw. A name that is not a real parser plugin then fails loudly on
+        // the server instead of silently extending the statement.
         if let Some(parser) = &self.config.mysql_parser {
-            builder = builder.raw(" WITH PARSER ").raw(parser);
+            builder = builder.raw(" WITH PARSER ").ident(parser);
         }
         builder.into_sql()
     }
@@ -182,9 +188,9 @@ impl FullTextIndex {
                 .ident(&format!("{}_ai", self.table))
                 .raw(" AFTER INSERT ON ")
                 .ident(&self.table)
-                .raw(" BEGIN INSERT INTO \"")
-                .raw(&fts_table)
-                .raw("\"(rowid, ")
+                .raw(" BEGIN INSERT INTO ")
+                .ident(&fts_table)
+                .raw("(rowid, ")
                 .raw(&columns_str)
                 .raw(") VALUES (new.rowid, ")
                 .raw(&new_columns_str)
@@ -324,6 +330,11 @@ pub fn generate_snippet(
 }
 
 /// PostgreSQL-specific highlighting using ts_headline
+///
+/// `start_tag` and `end_tag` end up inside `ts_headline`'s comma-separated
+/// option string, so they are double-quoted there (with embedded `"` doubled)
+/// to keep a caller-supplied tag from being read as another option such as
+/// `MaxWords` or `MaxFragments`.
 pub fn pg_headline_sql(
     column: &str,
     query: &str,
@@ -333,21 +344,25 @@ pub fn pg_headline_sql(
 ) -> String {
     let column = format_identifier_reference(DatabaseType::Postgres, column)
         .unwrap_or_else(|| quote_ident(DatabaseType::Postgres, column));
+    let options = format!(
+        "StartSel={}, StopSel={}, MaxWords=35, MinWords=15",
+        quote_ts_headline_option(start_tag),
+        quote_ts_headline_option(end_tag),
+    );
+
     let mut params = Vec::new();
     SqlBuilder::new(DatabaseType::Postgres, &mut params)
         .raw("ts_headline('")
-        .raw(&escape_string(language))
+        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
         .raw("', ")
         .raw(&column)
         .raw(", plainto_tsquery('")
-        .raw(&escape_string(language))
+        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
         .raw("', '")
-        .raw(&escape_string(query))
-        .raw("'), 'StartSel=")
-        .raw(&escape_string(start_tag))
-        .raw(", StopSel=")
-        .raw(&escape_string(end_tag))
-        .raw(", MaxWords=35, MinWords=15')")
+        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, query))
+        .raw("'), '")
+        .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, &options))
+        .raw("')")
         .into_sql()
 }
 
@@ -355,9 +370,13 @@ pub fn pg_headline_sql(
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Escape a string for SQL queries
-fn escape_string(s: &str) -> String {
-    escape_sql_literal(s).replace('\\', "\\\\")
+/// Quote a `ts_headline` option value.
+///
+/// PostgreSQL lets an option value be wrapped in double quotes, with an
+/// embedded double quote written twice. Quoting unconditionally means a value
+/// containing `,` or `=` stays one value instead of introducing extra options.
+fn quote_ts_headline_option(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 // =============================================================================

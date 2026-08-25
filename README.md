@@ -137,7 +137,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.19", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust
@@ -175,35 +175,42 @@ Encrypted field notes:
 
 ## Installation
 
+Every snippet below sets `default-features = false` and names its backend and runtime
+explicitly. The default feature set is `["postgres", "runtime-tokio"]`, so a MySQL- or
+SQLite-only project that leaves the defaults on still compiles the whole PostgreSQL
+driver stack.
+
 ```toml
 [dependencies]
-# PostgreSQL (default)
-tideorm = { version = "0.9.19", features = ["postgres"] }
+# PostgreSQL
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
-# MySQL
-tideorm = { version = "0.9.19", features = ["mysql"] }
+# MySQL / MariaDB
+tideorm = { version = "0.10.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.9.19", features = ["sqlite"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "attachments"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "translations"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "dirty-tracking"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.9.19", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
+
+Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
 
 ### Feature Flags
 
@@ -285,21 +292,32 @@ cargo test --all-features
 cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-default-features
 ```
 
+The backends do not share gate semantics: SQLite is opt-out (`SKIP_SQLITE_TESTS`), MySQL is opt-in (`RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`, with no skip flag), and the PostgreSQL suites always connect. See [CONTRIBUTING.md](CONTRIBUTING.md#test-database-environment-variables) for the full variable table.
+
 See [docs/getting-started.md](docs/getting-started.md#testing) for more.
 
 ## Benchmarking
 
-Use focused Criterion targets rather than `cargo bench` alone when you are chasing a bottleneck. PostgreSQL-backed benchmarks default to `postgres://postgres:postgres@localhost:5432/test_tide_orm` and respect `POSTGRESQL_DATABASE_URL`.
+Always run a single Criterion target; a bare `cargo bench` is not usable because several targets need a database. `query_benchmarks`, `crud_benchmarks`, and `or_clause_benchmarks` require a live PostgreSQL server and abort the run without one; they default to `postgres://postgres:postgres@localhost:5432/test_tide_orm` and respect `POSTGRESQL_DATABASE_URL`.
 
 Common local commands:
 
 ```bash
+# No database required
+cargo bench --bench validation_benchmarks
+cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
+cargo bench --bench fulltext_benchmarks --features fulltext
+
+# SQLite driver required
+cargo bench --bench cache_benchmarks --features sqlite
+
+# Live PostgreSQL server required
 cargo bench --bench query_benchmarks
 cargo bench --bench crud_benchmarks
 cargo bench --bench or_clause_benchmarks
-cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
-cargo bench --bench fulltext_benchmarks --features fulltext
-cargo bench --no-run --features "attachments translations fulltext"
+
+# Compile every bench without running any
+cargo bench --no-run --features "sqlite attachments translations fulltext"
 ```
 
 See [docs/benchmarking.md](docs/benchmarking.md) for the full benchmark matrix and Criterion baseline workflow.

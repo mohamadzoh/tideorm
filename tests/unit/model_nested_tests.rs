@@ -1,4 +1,4 @@
-use super::{NestedSave, NestedSaveBuilder, SavedRelation};
+use super::{NestedSave, NestedSaveBuilder, SavedRelation, apply_foreign_key};
 use crate::internal::ConnectionTrait;
 use crate::model::Model;
 use crate::{Database, GlobalProfiler, TideConfig};
@@ -27,6 +27,27 @@ struct NestedTestProfile {
     id: i64,
     user_id: i64,
     bio: String,
+}
+
+/// The Rust field name and the DB column name differ, so this model is what
+/// distinguishes "accepts both names" from "accepts only the Rust field name".
+#[derive(tideorm::Model, PartialEq)]
+#[tideorm(table = "nested_test_aliased_children")]
+struct NestedTestAliasedChild {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    #[tideorm(column = "parent_id")]
+    owner_id: i64,
+    name: String,
+}
+
+#[derive(tideorm::Model, PartialEq)]
+#[tideorm(table = "nested_test_string_children")]
+struct NestedTestStringChild {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    parent_id: String,
+    name: String,
 }
 
 async fn setup_nested_test_db() -> Database {
@@ -59,6 +80,18 @@ async fn setup_nested_test_db() -> Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 bio TEXT NOT NULL
+            );
+
+            CREATE TABLE nested_test_aliased_children (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER NOT NULL,
+                name TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE nested_test_string_children (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id TEXT NOT NULL,
+                name TEXT NOT NULL
             );
             "#,
         )
@@ -237,6 +270,145 @@ fn saved_relation_rejects_wrong_shape_conversions() {
     assert!(many.into_one::<NestedTestProfile>().is_err());
 }
 
+#[test]
+fn apply_foreign_key_accepts_the_db_column_name_and_the_rust_field_name() {
+    let child = NestedTestAliasedChild {
+        id: 0,
+        owner_id: 0,
+        name: "alpha".to_string(),
+    };
+
+    let by_column = apply_foreign_key(child.clone(), "parent_id", &serde_json::json!(7))
+        .expect("the DB column name should resolve");
+    assert_eq!(by_column.owner_id, 7);
+
+    let by_field = apply_foreign_key(child, "owner_id", &serde_json::json!(9))
+        .expect("the Rust field name should resolve");
+    assert_eq!(by_field.owner_id, 9);
+}
+
+#[test]
+fn apply_foreign_key_rejects_an_unknown_foreign_key_name() {
+    let child = NestedTestChild {
+        id: 0,
+        parent_id: 0,
+        name: "alpha".to_string(),
+    };
+
+    let error = apply_foreign_key(child, "parnt_id", &serde_json::json!(1))
+        .expect_err("a typo must not be silently ignored");
+    assert!(error.to_string().contains("parnt_id"), "{error}");
+}
+
+#[test]
+fn apply_foreign_key_does_not_coerce_a_string_primary_key_to_an_integer() {
+    let child = NestedTestStringChild {
+        id: 0,
+        parent_id: String::new(),
+        name: "alpha".to_string(),
+    };
+
+    let applied = apply_foreign_key(child, "parent_id", &serde_json::json!("00420"))
+        .expect("a string parent key should apply verbatim");
+    assert_eq!(applied.parent_id, "00420");
+}
+
+#[tokio::test]
+async fn save_with_many_accepts_the_db_column_name_for_a_renamed_field() {
+    let _db = setup_nested_test_db().await;
+
+    let parent = NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    };
+
+    let (saved_parent, saved_children) = parent
+        .save_with_many(
+            vec![NestedTestAliasedChild {
+                id: 0,
+                owner_id: 0,
+                name: "alpha".to_string(),
+            }],
+            "parent_id",
+        )
+        .await
+        .expect("save_with_many should accept the DB column name");
+
+    assert!(saved_parent.id > 0);
+    assert_eq!(saved_children.len(), 1);
+    assert_eq!(saved_children[0].owner_id, saved_parent.id);
+}
+
+#[tokio::test]
+async fn save_with_many_rejects_an_unknown_foreign_key_without_writing_the_parent() {
+    let _db = setup_nested_test_db().await;
+
+    let parent = NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    };
+
+    let error = parent
+        .save_with_many(nested_children(&["alpha"]), "parnt_id")
+        .await
+        .expect_err("an unresolvable foreign key must be an error");
+    assert!(error.to_string().contains("parnt_id"), "{error}");
+
+    assert_eq!(
+        NestedTestParent::query()
+            .get()
+            .await
+            .expect("parent query should succeed")
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn save_with_many_rolls_back_the_parent_when_a_child_fails() {
+    let _db = setup_nested_test_db().await;
+
+    let parent = NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    };
+
+    let children = vec![
+        NestedTestAliasedChild {
+            id: 0,
+            owner_id: 0,
+            name: "duplicate".to_string(),
+        },
+        NestedTestAliasedChild {
+            id: 0,
+            owner_id: 0,
+            name: "duplicate".to_string(),
+        },
+    ];
+
+    parent
+        .save_with_many(children, "parent_id")
+        .await
+        .expect_err("the duplicate child must fail the whole nested save");
+
+    assert_eq!(
+        NestedTestParent::query()
+            .get()
+            .await
+            .expect("parent query should succeed")
+            .len(),
+        0
+    );
+    assert_eq!(
+        NestedTestAliasedChild::query()
+            .get()
+            .await
+            .expect("aliased child query should succeed")
+            .len(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn delete_with_many_uses_bulk_delete_for_related_models() {
     let _db = setup_nested_test_db().await;
@@ -281,7 +453,7 @@ async fn delete_with_many_uses_bulk_delete_for_related_models() {
 }
 
 #[tokio::test]
-async fn update_with_many_uses_bulk_upsert_for_existing_related_models() {
+async fn update_with_many_updates_each_related_model() {
     let _db = setup_nested_test_db().await;
 
     let parent = NestedTestParent {
@@ -318,7 +490,10 @@ async fn update_with_many_uses_bulk_upsert_for_existing_related_models() {
 
     assert_eq!(parent_after_update.name, "parent-updated");
     assert_eq!(children_after_update.len(), 3);
-    assert_eq!(GlobalProfiler::stats().total_queries, 5);
+    // One UPDATE for the parent plus one per related model: nested updates run
+    // through each model's own `Model::update` so lifecycle callbacks and
+    // validation are dispatched at a concrete call site.
+    assert_eq!(GlobalProfiler::stats().total_queries, 4);
 
     for (expected, actual) in updated_children.iter().zip(children_after_update.iter()) {
         assert_eq!(expected.id, actual.id);

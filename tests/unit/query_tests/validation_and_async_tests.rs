@@ -137,10 +137,98 @@ async fn test_group_by_rejects_unsafe_expression_before_db_lookup() {
 fn test_query_validation_allows_safe_expression_slots() {
     QueryBuilder::<QueryTestUser>::new()
         .select(vec!["COUNT(*) AS total"])
-        .group_by("DATE(created_at)")
-        .order_by("LOWER(name)", Order::Asc)
+        .group_by("name")
+        .order_by("name", Order::Asc)
         .ensure_query_is_valid()
-        .expect("safe select/group/order expressions should remain allowed");
+        .expect("safe select/group/order slots should remain allowed");
+}
+
+#[test]
+fn test_order_and_group_by_reject_sql_expressions_from_strings() {
+    let order_err = QueryBuilder::<QueryTestUser>::new()
+        .order_by(
+            "(CASE WHEN (SELECT name FROM query_test_users LIMIT 1) = 'a' THEN id ELSE name END)",
+            Order::Asc,
+        )
+        .ensure_query_is_valid()
+        .expect_err("ORDER BY must not accept arbitrary SQL expressions");
+    assert!(
+        order_err.to_string().contains("unsafe ORDER BY column"),
+        "unexpected error: {order_err}"
+    );
+
+    let group_err = QueryBuilder::<QueryTestUser>::new()
+        .group_by("DATE(name)")
+        .ensure_query_is_valid()
+        .expect_err("GROUP BY must not accept arbitrary SQL expressions");
+    assert!(
+        group_err.to_string().contains("unsafe GROUP BY column"),
+        "unexpected error: {group_err}"
+    );
+}
+
+#[test]
+fn test_order_by_accepts_inline_direction_suffix() {
+    QueryBuilder::<QueryTestUser>::new()
+        .order_by("name DESC", Order::Asc)
+        .ensure_query_is_valid()
+        .expect("a column with an inline ASC/DESC suffix should remain allowed");
+
+    let sql = QueryBuilder::<QueryTestUser>::new()
+        .order_by("name DESC", Order::Asc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(sql.ends_with("ORDER BY \"name\" DESC"), "sql: {sql}");
+}
+
+#[test]
+fn test_order_by_raw_is_the_explicit_escape_hatch() {
+    let query =
+        QueryBuilder::<QueryTestUser>::new().order_by_raw("COALESCE(name, '')", Order::Desc);
+
+    query
+        .ensure_query_is_valid()
+        .expect("order_by_raw() should accept a trusted expression");
+
+    let sql = query.build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(
+        sql.ends_with("ORDER BY COALESCE(name, '') DESC"),
+        "sql: {sql}"
+    );
+}
+
+#[test]
+fn test_order_by_rejects_forged_raw_expression_marker() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .order_by("\u{1}tideorm_raw_order_by\u{1}(SELECT 1)", Order::Asc)
+        .ensure_query_is_valid()
+        .expect_err("the raw-expression marker must not be forgeable through order_by()");
+
+    assert!(
+        err.to_string()
+            .contains("raw-expression marker is reserved"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_standalone_offset_renders_a_portable_limit() {
+    let query = QueryBuilder::<QueryTestUser>::new().offset(20);
+
+    let postgres_sql = query.build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(postgres_sql.ends_with(" OFFSET 20"), "sql: {postgres_sql}");
+    assert!(!postgres_sql.contains("LIMIT"), "sql: {postgres_sql}");
+
+    let sqlite_sql = query.build_select_sql_for_db(DatabaseType::SQLite);
+    assert!(
+        sqlite_sql.ends_with(" LIMIT -1 OFFSET 20"),
+        "sql: {sqlite_sql}"
+    );
+
+    let mysql_sql = query.build_select_sql_for_db(DatabaseType::MySQL);
+    assert!(
+        mysql_sql.ends_with(" LIMIT 18446744073709551615 OFFSET 20"),
+        "sql: {mysql_sql}"
+    );
 }
 
 #[test]
@@ -396,6 +484,88 @@ async fn test_lag_rejects_unsafe_default_expression_before_db_lookup() {
         err.to_string()
             .contains("unsafe LAG/LEAD default expression")
     );
+}
+
+#[tokio::test]
+async fn test_sum_rejects_grouped_query_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .group_by("name")
+        .sum("id")
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("sum() returns a single scalar and does not support group_by()"),
+        "{}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_count_distinct_rejects_having_before_db_lookup() {
+    let err = QueryTestUser::query()
+        .having_count_gt(3)
+        .count_distinct("name")
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("count_distinct() returns a single scalar and does not support having()"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn test_aggregate_sql_qualifies_columns_and_keeps_joins() {
+    let (sql, _params) = QueryTestUser::query()
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .build_aggregate_sql_with_params_for_db(
+            DatabaseType::Postgres,
+            "profiles.score",
+            "agg_result",
+            |column: &str| format!("SUM({})", column),
+        );
+
+    assert!(sql.contains("SUM(\"profiles\".\"score\")"), "{}", sql);
+    assert!(sql.contains("INNER JOIN \"profiles\""), "{}", sql);
+}
+
+#[test]
+fn test_aggregate_sql_wraps_limited_query_in_derived_table() {
+    let (sql, _params) = QueryTestUser::query()
+        .limit(10)
+        .build_aggregate_sql_with_params_for_db(
+            DatabaseType::Postgres,
+            "id",
+            "agg_result",
+            |column: &str| format!("SUM({})", column),
+        );
+
+    assert!(
+        sql.starts_with("SELECT SUM(\"id\") AS \"agg_result\" FROM ("),
+        "{}",
+        sql
+    );
+    assert!(sql.contains("LIMIT 10"), "{}", sql);
+    assert!(
+        sql.ends_with("AS \"tideorm_aggregate_subquery\""),
+        "{}",
+        sql
+    );
+}
+
+#[test]
+fn test_having_aggregate_helpers_qualify_table_columns() {
+    let sql = QueryTestUser::query()
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .group_by("query_test_users.id")
+        .having_sum_gt("profiles.score", 10.0)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains("SUM(\"profiles\".\"score\") >"), "{}", sql);
 }
 
 #[tokio::test]

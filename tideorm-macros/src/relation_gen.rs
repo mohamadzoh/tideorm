@@ -27,6 +27,32 @@ pub(crate) fn build_relation_state_refreshes(
         .collect()
 }
 
+/// Emit the expression that renders a model's primary key as its entity-manager
+/// identity key.
+///
+/// `TideEntityManagerMeta::tide_pk_key` and every relation wrapper's
+/// `with_owner_key` have to agree on this string, and both are emitted into
+/// contexts that cannot fail — `with_relations` returns `Self`, so a
+/// serialization error has nowhere to go. Panicking from generated code the
+/// user never sees is close to undebuggable, so fall back to the model's own
+/// primary-key rendering: it is infallible, still maps equal primary keys to
+/// equal identity keys, and always contains " = ", so it can never collide with
+/// a JSON-encoded key.
+///
+/// `model_expr` is how the surrounding context names the model: `self` inside a
+/// `&self` method, `&self` where the method owns or mutably borrows it.
+pub(crate) fn entity_manager_identity_key_expr(model_expr: TokenStream2) -> TokenStream2 {
+    quote! {
+        {
+            let primary_key = <Self as ::tideorm::model::Model>::primary_key(#model_expr);
+            ::tideorm::entity_manager::__pk_to_entity_manager_key(&primary_key)
+                .unwrap_or_else(|_| {
+                    <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)
+                })
+        }
+    }
+}
+
 pub(crate) fn generate_with_relations_method(ctx: &BuildContext) -> TokenStream2 {
     let relation_field_inits = &ctx.relation_field_inits;
     quote! {
@@ -81,6 +107,7 @@ fn build_relation_assignment(
     ident: &Ident,
 ) -> syn::Result<Option<TokenStream2>> {
     let relation_wrapper = relation_wrapper_name(&field.ty);
+    let owner_key = entity_manager_identity_key_expr(quote!(&self));
 
     if field.has_one.is_some() {
         let fk = field.foreign_key.as_deref().unwrap_or("id");
@@ -102,12 +129,7 @@ fn build_relation_assignment(
                             <Self as ::tideorm::model::ModelMeta>::table_name(),
                             <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
                         )
-                        .with_owner_key(
-                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
-                                &<Self as ::tideorm::model::Model>::primary_key(&self),
-                            )
-                            .expect("entity manager owner primary key should serialize"),
-                        )
+                        .with_owner_key(#owner_key)
                         .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
                 }
                 #[cfg(not(feature = "entity-manager"))]
@@ -142,12 +164,7 @@ fn build_relation_assignment(
                             <Self as ::tideorm::model::ModelMeta>::table_name(),
                             <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
                         )
-                        .with_owner_key(
-                            ::tideorm::entity_manager::__pk_to_entity_manager_key(
-                                &<Self as ::tideorm::model::Model>::primary_key(&self),
-                            )
-                            .expect("entity manager owner primary key should serialize"),
-                        )
+                        .with_owner_key(#owner_key)
                         .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
                 }
                 #[cfg(not(feature = "entity-manager"))]
@@ -201,12 +218,7 @@ fn build_relation_assignment(
                         <Self as ::tideorm::model::ModelMeta>::table_name(),
                         <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
                     )
-                    .with_owner_key(
-                        ::tideorm::entity_manager::__pk_to_entity_manager_key(
-                            &<Self as ::tideorm::model::Model>::primary_key(&self),
-                        )
-                        .expect("entity manager owner primary key should serialize"),
-                    )
+                    .with_owner_key(#owner_key)
                     .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()))
                 }
                 #[cfg(not(feature = "entity-manager"))]

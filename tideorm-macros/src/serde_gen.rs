@@ -295,8 +295,17 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
     }
 }
 
-fn is_option_type(ty: &Type) -> bool {
+/// Whether a field type is an `Option<..>`, and therefore may be omitted from the
+/// generated `Deserialize`.
+///
+/// Macro-substituted types arrive wrapped in an invisible `Type::Group`, so the
+/// same wrappers `parse::option_inner_type` unwraps when it looks for the `Option`
+/// payload have to be unwrapped here too — otherwise an `Option` field reached
+/// through a macro variable is generated as a *required* field.
+pub(crate) fn is_option_type(ty: &Type) -> bool {
     match ty {
+        Type::Group(group) => is_option_type(&group.elem),
+        Type::Paren(paren) => is_option_type(&paren.elem),
         Type::Path(type_path) => type_path
             .path
             .segments

@@ -289,13 +289,13 @@ fn test_original_value_accepts_field_and_column_names() {
         changed
             .original_value("name")
             .expect("field lookup should succeed"),
-        Some(serde_json::json!("Alice"))
+        Some(Some(serde_json::json!("Alice")))
     );
     assert_eq!(
         changed
             .original_value("user_id")
             .expect("column lookup should succeed"),
-        Some(serde_json::json!(7))
+        Some(Some(serde_json::json!(7)))
     );
 
     crate::model::__clear_dirty_snapshots();

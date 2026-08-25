@@ -105,3 +105,44 @@ fn relation_constraints_accept_typed_columns() {
     assert_eq!(query.conditions.len(), 1);
     assert_eq!(query.conditions[0].column, "slug");
 }
+
+#[test]
+fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
+    let (sql, _params) = build_self_ref_tree_sql::<RelationTestNode>(
+        "parent_slug",
+        "slug",
+        &json!("root"),
+        5,
+        DatabaseType::Postgres,
+    )
+    .unwrap();
+
+    assert!(
+        sql.contains("MIN(\"tide_tree\".\"depth\") AS \"depth\""),
+        "a cycle in the foreign key must not repeat a node once per level: {sql}"
+    );
+    assert!(sql.contains("GROUP BY \"tide_tree\".\"pk\""), "{sql}");
+    assert!(
+        sql.contains(") \"result_tree\" ON \"result_node\".\"id\" = \"result_tree\".\"pk\""),
+        "{sql}"
+    );
+}
+
+#[test]
+fn relation_info_has_many_through_records_the_related_key_in_its_own_field() {
+    let info = crate::relations::RelationInfo::has_many_through(
+        "tags",
+        "tags",
+        "post_tags",
+        "post_id",
+        "tag_id",
+        "id",
+    );
+
+    assert_eq!(info.pivot_table.as_deref(), Some("post_tags"));
+    assert_eq!(info.related_key.as_deref(), Some("tag_id"));
+    assert_eq!(
+        info.morph_type_column, None,
+        "a through relation has no polymorphic type column"
+    );
+}

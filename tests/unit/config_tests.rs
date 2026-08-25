@@ -466,3 +466,61 @@ fn test_tide_config_full_chain() {
     assert_eq!(config.config.fallback_language, "en");
     assert_eq!(config.config.hidden_attributes, vec!["password", "secret"]);
 }
+
+fn apply_test_token_encoder(record_id: &str, model_name: &str) -> crate::error::Result<String> {
+    Ok(format!("apply-encoder:{model_name}:{record_id}"))
+}
+
+fn apply_test_token_decoder(
+    token: &str,
+    _model_name: &str,
+) -> crate::error::Result<Option<String>> {
+    Ok(Some(format!("apply-decoder:{token}")))
+}
+
+#[test]
+fn test_tide_config_apply_installs_tokenization_settings() {
+    TideConfig::reset();
+    crate::tokenization::TokenConfig::reset();
+
+    TideConfig::init()
+        .encryption_key("apply-installs-the-encryption-key-32ch")
+        .token_encoder(apply_test_token_encoder)
+        .token_decoder(apply_test_token_decoder)
+        .apply();
+
+    assert_eq!(
+        crate::tokenization::TokenConfig::get_encryption_key()
+            .expect("apply() must install the encryption key, not only connect()"),
+        "apply-installs-the-encryption-key-32ch"
+    );
+    assert_eq!(
+        (crate::tokenization::TokenConfig::get_encoder())("7", "Post")
+            .expect("the configured encoder must run"),
+        "apply-encoder:Post:7"
+    );
+    assert_eq!(
+        (crate::tokenization::TokenConfig::get_decoder())("tok", "Post")
+            .expect("the configured decoder must run"),
+        Some("apply-decoder:tok".to_string())
+    );
+
+    crate::tokenization::TokenConfig::reset();
+    TideConfig::reset();
+}
+
+#[test]
+fn test_tide_config_stores_the_acquire_timeout_in_the_pool_config() {
+    TideConfig::reset();
+
+    TideConfig::init()
+        .acquire_timeout(std::time::Duration::from_secs(23))
+        .apply();
+
+    assert_eq!(
+        TideConfig::pool_config().acquire_timeout,
+        std::time::Duration::from_secs(23)
+    );
+
+    TideConfig::reset();
+}

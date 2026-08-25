@@ -1,7 +1,20 @@
+//! Tuple-based bulk registration for migrations and seeds.
+//!
+//! These traits are what let `TideConfig::migrations::<(A, B, C)>()` take a
+//! whole list in one call. They are implemented for the empty tuple and for
+//! tuples up to 200 elements, so there is nothing to implement by hand.
+
 use crate::migration::Migration;
 use crate::seeding::Seed;
 
+/// A tuple of migration types that can be registered in one call.
+///
+/// Implemented for `()` and for tuples of up to 200 `Migration + Default`
+/// types; pass one to
+/// [`TideConfig::migrations`](crate::config::TideConfig::migrations). Order is
+/// preserved, and migrations run in it.
 pub trait RegisterMigrations {
+    /// Instantiate each migration in the tuple, in declaration order.
     fn collect() -> Vec<Box<dyn Migration>>;
 }
 
@@ -11,7 +24,12 @@ impl RegisterMigrations for () {
     }
 }
 
+/// A tuple of seed types that can be registered in one call.
+///
+/// The seeding counterpart of [`RegisterMigrations`], for
+/// [`TideConfig::seeds`](crate::config::TideConfig::seeds).
 pub trait RegisterSeeds {
+    /// Instantiate each seed in the tuple, in declaration order.
     fn collect() -> Vec<Box<dyn Seed>>;
 }
 

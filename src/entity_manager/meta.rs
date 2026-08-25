@@ -14,6 +14,39 @@ pub trait TideEntityManagerMeta {
 
     fn tide_pk_key(&self) -> String;
 
+    /// Tables a row of this model points at with a foreign key, so they have to
+    /// hold a row before this one can be inserted.
+    ///
+    /// Derived from the model's declared `belongs_to` relations. The flush
+    /// planner turns these into dependency edges and orders inserts
+    /// parent-first, deletes child-first. Only *declared* relations are
+    /// visible here: a bare foreign-key column with no relation attribute
+    /// contributes no edge, and a polymorphic (`MorphTo`) target has no
+    /// statically known table, so neither constrains the flush order.
+    ///
+    /// Defaults to empty for hand-written implementations, which then flush in
+    /// registration order within their operation kind.
+    fn tide_parent_tables() -> Vec<&'static str>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
+
+    /// Tables whose rows point back at this model with a foreign key, so they
+    /// can only be inserted once this one holds a row.
+    ///
+    /// Derived from the model's declared `has_one` and `has_many` relations;
+    /// see [`TideEntityManagerMeta::tide_parent_tables`] for what is and is not
+    /// visible. `has_many_through` contributes nothing because the pivot row is
+    /// written by relation sync, after both sides are saved.
+    fn tide_child_tables() -> Vec<&'static str>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
+
     fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
 }
 

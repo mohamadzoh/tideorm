@@ -78,8 +78,8 @@ TideConfig::init()
 | `bool` | BOOLEAN | TINYINT(1) | INTEGER | |
 | `String` | TEXT | TEXT | TEXT | |
 | `Option<T>` | (nullable) | (nullable) | (nullable) | Wraps any type to make it nullable |
-| `uuid::Uuid` | UUID | CHAR(36) | TEXT | |
-| `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | TEXT | |
+| `uuid::Uuid` | UUID | BINARY(16) | TEXT | MySQL binds a UUID as 16 raw bytes, so the column must be `BINARY(16)` |
+| `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | REAL | SQLite reads decimals back through `f64`, so REAL is forced; store a string or minor units if you need exactness |
 | `serde_json::Value` | JSONB | JSON | TEXT | |
 | `Vec<u8>` | BYTEA | BLOB | BLOB | Binary data |
 | `chrono::NaiveDate` | DATE | DATE | TEXT | Date only |

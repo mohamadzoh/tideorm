@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::{
-    escape_fts5_query_literal_terms as escape_fts5_query, escape_sql_literal,
+    escape_fts5_query_literal_terms as escape_fts5_query, escape_sql_literal_for_db,
     format_identifier_reference, quote_ident,
     sanitize_postgres_proximity_tsquery_literals as sanitize_postgres_proximity_tsquery,
     sanitize_postgres_tsquery_literals as sanitize_postgres_tsquery,

@@ -1,7 +1,7 @@
 use super::{
     AlterTableBuilder, DatabaseType, TableBuilder, log_migration_sql, quote_identifier_for_db,
 };
-use crate::database::require_db;
+use crate::database::{__current_connection, ConnectionRef};
 use crate::error::{Error, Result};
 use crate::internal::ConnectionTrait;
 
@@ -10,16 +10,12 @@ use crate::internal::ConnectionTrait;
 /// Provides methods to create, alter, and drop database objects.
 pub struct Schema {
     database_type: DatabaseType,
-    statements: Vec<String>,
 }
 
 impl Schema {
     /// Create a new schema context
     pub fn new(database_type: DatabaseType) -> Self {
-        Self {
-            database_type,
-            statements: Vec::new(),
-        }
+        Self { database_type }
     }
 
     /// Create a new table
@@ -64,7 +60,7 @@ impl Schema {
         let mut builder = AlterTableBuilder::new(name, self.database_type);
         build(&mut builder);
 
-        for sql in builder.build() {
+        for sql in builder.build()? {
             self.execute(&sql).await?;
         }
 
@@ -144,18 +140,26 @@ impl Schema {
 
     async fn execute(&mut self, sql: &str) -> Result<()> {
         log_migration_sql(sql);
-        self.statements.push(sql.to_string());
 
-        let db = require_db()?;
-        db.__internal_connection()?
-            .execute_unprepared(sql)
-            .await
-            .map_err(|error| {
-                Error::query_with_context(
-                    error.to_string(),
-                    crate::error::ErrorContext::new().query(sql.to_string()),
-                )
-            })?;
+        // Resolve the connection through the ambient scope instead of the global
+        // pool: on backends with transactional DDL the migrator wraps a
+        // migration in a transaction, and `require_db()` would hand back a
+        // pooled connection that silently runs the DDL outside it.
+        let outcome = match __current_connection()? {
+            ConnectionRef::Database(connection) => {
+                connection.connection().execute_unprepared(sql).await
+            }
+            ConnectionRef::Transaction(transaction) => {
+                transaction.as_ref().execute_unprepared(sql).await
+            }
+        };
+
+        outcome.map_err(|error| {
+            Error::query_with_context(
+                error.to_string(),
+                crate::error::ErrorContext::new().query(sql.to_string()),
+            )
+        })?;
 
         Ok(())
     }

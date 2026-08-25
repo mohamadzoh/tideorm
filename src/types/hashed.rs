@@ -10,11 +10,28 @@ pub struct Hashed {
 }
 
 impl Hashed {
-    /// Create a new hashed value from plain text
+    /// Create a new hashed value from plain text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if Argon2 refuses to hash the input. This is unreachable in practice:
+    /// the salt is generated locally and is always well-formed, so the only remaining
+    /// failure mode is a plain-text value longer than `u32::MAX` bytes (4 GiB). Use
+    /// [`Hashed::try_new`] when the input length is not under your control.
     pub fn new(plain_text: &str) -> Self {
-        Self {
-            hash: Self::compute_hash(plain_text),
-        }
+        Self::try_new(plain_text).expect(
+            "Argon2 hashing failed; the plain-text value exceeds the Argon2 password length limit",
+        )
+    }
+
+    /// Create a new hashed value from plain text, reporting Argon2 failures as an error.
+    ///
+    /// This is the fallible counterpart to [`Hashed::new`]; prefer it whenever the
+    /// plain-text value comes from an untrusted or unbounded source.
+    pub fn try_new(plain_text: &str) -> crate::error::Result<Self> {
+        Ok(Self {
+            hash: Self::compute_hash(plain_text)?,
+        })
     }
 
     /// Create from an existing Argon2 hash.
@@ -39,23 +56,29 @@ impl Hashed {
     }
 
     /// Compute an Argon2 hash suitable for password storage.
-    fn compute_hash(input: &str) -> String {
+    fn compute_hash(input: &str) -> crate::error::Result<String> {
         use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
 
         let salt = SaltString::generate(&mut OsRng);
         argon2::Argon2::default()
             .hash_password(input.as_bytes(), &salt)
             .map(|hash| hash.to_string())
-            .unwrap()
+            .map_err(|error| {
+                crate::error::Error::internal(format!("Argon2 hashing failed: {error}"))
+            })
     }
 }
 
+/// `From` cannot report failure, so this delegates to [`Hashed::new`] and inherits its
+/// (unreachable in practice) panic. Use [`Hashed::try_new`] for a fallible conversion.
 impl From<&str> for Hashed {
     fn from(s: &str) -> Self {
         Self::new(s)
     }
 }
 
+/// `From` cannot report failure, so this delegates to [`Hashed::new`] and inherits its
+/// (unreachable in practice) panic. Use [`Hashed::try_new`] for a fallible conversion.
 impl From<String> for Hashed {
     fn from(s: String) -> Self {
         Self::new(&s)

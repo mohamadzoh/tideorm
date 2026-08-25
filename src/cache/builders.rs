@@ -59,6 +59,11 @@ impl CacheKeyBuilder {
     }
 
     /// Build and hash the cache key
+    ///
+    /// The digest is 64 bits wide and is not collision-free, so it identifies a
+    /// key only probabilistically. Store or compare the full key from
+    /// [`CacheKeyBuilder::build`] whenever handing back the wrong entry would be
+    /// a correctness problem; use the hash purely as a compact bucket id.
     pub fn build_hash(self) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         let key = self.build();

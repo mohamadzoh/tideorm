@@ -3,16 +3,19 @@
 //! This module groups custom field types and attribute-casting helpers.
 //!
 //! Use these types when a plain Rust scalar is not enough for the storage or
-//! serialization behavior you need, such as encrypted values, hashes, JSON, or
-//! database enums.
+//! serialization behavior you need, such as hashes, JSON, or database enums.
 //!
 //! If a field loads or saves with the wrong representation, this module is the
 //! first place to check.
 //!
 //! Practical split:
-//! - use `Encrypted` and `Hashed` when the stored value should not round-trip as plain text
+//! - use `Hashed` when the stored value should not round-trip as plain text
 //! - use the JSON aliases when the database representation is more complex than a scalar
 //! - check `cast` first when a value is being transformed unexpectedly during load or save
+//!
+//! Column encryption is not a type: mark the field `#[tideorm(encrypted)]`
+//! (feature `encrypted-fields`) and keep the plain Rust type. See the `encrypted`
+//! module for the payload format.
 
 mod aliases;
 mod cast;
@@ -25,7 +28,6 @@ pub use aliases::{
     NaiveDate, NaiveDateTime, NaiveTime, Text, TextArray, Utc, Uuid,
 };
 pub use cast::{CastType, CastValue, Castable};
-pub use encrypted::Encrypted;
 pub use hashed::Hashed;
 pub use timestamps::{UnixTimestamp, UnixTimestampMillis};
 

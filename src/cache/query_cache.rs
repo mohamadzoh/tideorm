@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -40,6 +41,8 @@ pub struct QueryCache {
     entries: AtomicUsize,
     /// Approximate serialized size of cached data.
     size_bytes: AtomicUsize,
+    /// Upper bound on `size_bytes`, or `0` for no byte budget.
+    max_size_bytes: AtomicUsize,
     /// Cache eviction counter.
     evictions: AtomicU64,
     /// Cache invalidation counter.
@@ -58,6 +61,7 @@ impl QueryCache {
             misses: AtomicU64::new(0),
             entries: AtomicUsize::new(0),
             size_bytes: AtomicUsize::new(0),
+            max_size_bytes: AtomicUsize::new(0),
             evictions: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
         }
@@ -75,6 +79,7 @@ impl QueryCache {
             misses: AtomicU64::new(0),
             entries: AtomicUsize::new(0),
             size_bytes: AtomicUsize::new(0),
+            max_size_bytes: AtomicUsize::new(0),
             evictions: AtomicU64::new(0),
             invalidations: AtomicU64::new(0),
         }
@@ -160,12 +165,42 @@ impl QueryCache {
     }
 
     /// Set a cached value
+    ///
+    /// The entry is tagged with `model_name` alone; use
+    /// [`QueryCache::set_tagged`] for a query that reads more than one table.
     pub fn set<T: Serialize>(
         &self,
         key: &str,
         value: &T,
         ttl: Option<Duration>,
         model_name: &str,
+    ) -> Result<()> {
+        self.store(key, value, ttl, HashSet::from([model_name.to_string()]))
+    }
+
+    /// Set a cached value that is invalidated by writes to any of `tables`
+    ///
+    /// A query reading more than its own table — joins, unions, CTEs, subqueries
+    /// — has to be evicted when any of those tables changes, not just when the
+    /// primary model does. Passing every table it reads is what makes
+    /// [`QueryCache::invalidate_model`] reach the entry.
+    pub fn set_tagged<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+        tables: &[String],
+    ) -> Result<()> {
+        self.store(key, value, ttl, tables.iter().cloned().collect())
+    }
+
+    /// Store one entry tagged with every table it reads.
+    fn store<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl: Option<Duration>,
+        tables: HashSet<String>,
     ) -> Result<()> {
         if !self.is_enabled() {
             return Ok(());
@@ -193,13 +228,30 @@ impl QueryCache {
             return Ok(());
         }
 
-        let entry = CacheEntry::new(data, entry_size, ttl, model_name, self.next_order());
+        let max_size_bytes = self.max_size_bytes.load(Ordering::Relaxed);
+        if max_size_bytes > 0 && entry_size > max_size_bytes {
+            // A payload larger than the whole budget can never fit; caching it
+            // would evict every other entry and still overflow.
+            return Ok(());
+        }
+
+        let entry = CacheEntry::new(data, entry_size, ttl, tables, self.next_order());
 
         let mut cache = self.cache.write();
         let replacing_existing = cache.entries.contains_key(key);
 
         // Evict if necessary
         while !replacing_existing && cache.entries.len() >= max_entries {
+            if !self.evict_one(&mut cache) {
+                break;
+            }
+        }
+
+        // Then make room for the new payload inside the byte budget. `entry_size`
+        // is known to fit on its own, so this terminates once the store is empty.
+        while max_size_bytes > 0
+            && self.size_bytes.load(Ordering::Relaxed) + entry_size > max_size_bytes
+        {
             if !self.evict_one(&mut cache) {
                 break;
             }
@@ -238,13 +290,17 @@ impl QueryCache {
         }
     }
 
-    /// Invalidate all cache entries for a specific model/table
+    /// Invalidate all cache entries reading a specific model/table
+    ///
+    /// An entry is removed when the table is anywhere in its tag set, so a
+    /// cached join, union, or CTE result is dropped by a write to any of its
+    /// source tables and not only to the primary one.
     pub fn invalidate_model(&self, model_name: &str) {
         let mut cache = self.cache.write();
         let keys_to_remove: Vec<String> = cache
             .entries
             .iter()
-            .filter(|(_, entry)| entry.model_name == model_name)
+            .filter(|(_, entry)| entry.reads_table(model_name))
             .map(|(key, _)| key.clone())
             .collect();
 
@@ -403,6 +459,28 @@ impl QueryCache {
             return !entry.is_expired();
         }
         false
+    }
+
+    /// Set an upper bound on the total serialized size of cached data
+    ///
+    /// Entries are evicted with the configured strategy until a new payload fits
+    /// inside the budget, and a payload larger than the whole budget is never
+    /// cached. Pass `0` (the default) for no byte budget, in which case only
+    /// `max_entries` bounds the cache.
+    pub fn set_max_size_bytes(&self, max: usize) -> &Self {
+        self.max_size_bytes.store(max, Ordering::Relaxed);
+        self
+    }
+
+    /// Replace this cache's configuration in place
+    ///
+    /// Cached entries are kept; only the configuration and the enabled flag
+    /// change. This is what lets a late `QueryCache::init_global` still take
+    /// effect after the global cache has already been created with defaults.
+    pub fn apply_config(&self, config: CacheConfig) {
+        let enabled = config.enabled;
+        *self.config.write() = config;
+        self.enabled.store(enabled, Ordering::Release);
     }
 
     /// Get the number of entries in the cache

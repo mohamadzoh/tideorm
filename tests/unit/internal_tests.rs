@@ -1,10 +1,10 @@
 use super::{
     build_count_select, build_exists_any_statement, count_to_u64, json_to_db_value, push_param,
-    scoped_find, supports_batch_insert_returning,
+    scoped_find, supports_batch_insert_returning, translate_error,
 };
 use crate::config::DatabaseType;
 use crate::internal::{
-    Backend, ColumnTrait, Condition, InternalModel, OrmBackend, QueryTrait, Value,
+    Backend, ColumnTrait, Condition, InternalModel, OrmBackend, OrmError, QueryTrait, Value,
 };
 
 #[tideorm::model(table = "internal_count_users")]
@@ -188,6 +188,29 @@ fn count_select_applies_optional_condition() {
             .contains("WHERE \"internal_count_users\".\"name\" = $1")
     );
     assert!(statement.values.is_some());
+}
+
+#[test]
+fn translate_error_maps_unset_attributes_to_validation_errors() {
+    let err = translate_error(OrmError::AttrNotSet("email".to_string()));
+
+    assert!(
+        matches!(&err, crate::error::Error::Validation { field, .. } if field == "email"),
+        "err: {err:?}"
+    );
+}
+
+#[test]
+fn translate_error_maps_key_arity_mismatch_to_a_query_error() {
+    let err = translate_error(OrmError::KeyArityMismatch {
+        expected: 2,
+        received: 1,
+    });
+
+    assert!(
+        matches!(err, crate::error::Error::Query { .. }),
+        "key arity mismatch should not collapse into an internal error"
+    );
 }
 
 #[test]

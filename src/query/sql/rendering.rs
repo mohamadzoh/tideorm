@@ -51,17 +51,16 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    pub(super) fn render_array_values(&self, values: &[serde_json::Value]) -> Vec<String> {
-        values
-            .iter()
-            .map(|value| match value {
-                serde_json::Value::String(text) => format!("'{}'", text.replace("'", "''")),
-                serde_json::Value::Number(number) => number.to_string(),
-                serde_json::Value::Bool(boolean) => boolean.to_string(),
-                serde_json::Value::Null => "NULL".to_string(),
-                _ => format!("'{}'", value.to_string().replace("'", "''")),
-            })
-            .collect()
+    /// Isolate a rendered condition from the surrounding `AND`/`OR` join.
+    ///
+    /// A rendered condition can carry top-level logical operators of its own —
+    /// user supplied raw fragments as well as some backend specific composite
+    /// predicates — so joining them bare lets SQL precedence silently swallow
+    /// sibling filters (`tenant = 5 AND a = 1 OR b = 2`). The sea-query
+    /// execution path parenthesizes custom expressions for exactly this reason;
+    /// wrapping unconditionally here keeps both execution paths in agreement.
+    fn parenthesize_condition_sql(expression: &str) -> String {
+        format!("({})", expression)
     }
 
     fn build_or_group_sql_for_db(&self, group: &OrGroup, db_type: DatabaseType) -> String {
@@ -69,7 +68,7 @@ impl<M: Model> QueryBuilder<M> {
 
         for condition in &group.conditions {
             if let Some(expression) = self.build_condition_sql_for_db(condition, db_type) {
-                parts.push(expression);
+                parts.push(Self::parenthesize_condition_sql(&expression));
             }
         }
 
@@ -88,7 +87,7 @@ impl<M: Model> QueryBuilder<M> {
 
         for condition in &self.conditions {
             if let Some(expression) = self.build_condition_sql_for_db(condition, db_type) {
-                clauses.push(expression);
+                clauses.push(Self::parenthesize_condition_sql(&expression));
             }
         }
 

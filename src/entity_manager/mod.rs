@@ -148,6 +148,17 @@ impl EntityManager {
             return existing;
         }
 
+        // Auto-increment models have no usable key until the insert flushes; a
+        // client-assigned primary key can be tracked in the managed identity map
+        // right away so a later `find_managed`/`merge` reuses this handle instead
+        // of opening a second one for the same row.
+        let key = meta::model_entity_manager_key(&entity).unwrap_or(None);
+
+        // `persisted_key` stays `None`: it means "this row exists in the database",
+        // and nothing has been inserted yet. The flush stamps it once the save
+        // succeeds. Setting it here made `put` + `remove` + `flush` issue a real
+        // DELETE — and fire before/after_delete — for a row that was never written.
+        // The identity map is keyed separately below, so tracking still works.
         let entry = Arc::new(managed::ManagedEntry::new(
             entity,
             None,
@@ -155,6 +166,9 @@ impl EntityManager {
             None,
         ));
         self.register_managed_entry(entry.clone());
+        if let Some(key) = key.as_deref() {
+            self.put_managed_entry::<T>(key, entry.clone());
+        }
         Managed::from_entry(entry)
     }
 
@@ -269,7 +283,7 @@ impl EntityManager {
         let mut passes = 0;
         let mut checkpointed = HashSet::<usize>::new();
         loop {
-            let (entries, entries_len) = {
+            let (mut entries, entries_len) = {
                 let all_entries = self.managed_entries.read();
                 let len = all_entries.len();
                 let entries: Vec<_> = all_entries.iter().skip(processed).cloned().collect();
@@ -286,6 +300,14 @@ impl EntityManager {
             }
             passes += 1;
 
+            // Run inserts first and deletes last, and inside each of those order
+            // the tables against each other so a parent row exists before the
+            // child that references it (and is deleted after it). The sort is
+            // stable, so entries that tie on both still flush in registration
+            // order.
+            let order = managed::plan_flush_order(&entries);
+            entries.sort_by_key(|entry| managed::flush_sort_key(entry.as_ref(), &order));
+
             for entry in entries {
                 if let Some(checkpoints) = checkpoints {
                     let entry_ptr = Arc::as_ptr(&entry).cast::<()>() as usize;
@@ -294,7 +316,14 @@ impl EntityManager {
                     }
                 }
 
-                entry.flush(self).await?;
+                let table = entry.table_name();
+                if let Err(error) = entry.flush(self).await {
+                    return Err(managed::explain_flush_ordering_failure(
+                        error,
+                        table,
+                        order.unordered_tables(),
+                    ));
+                }
             }
 
             processed = entries_len;

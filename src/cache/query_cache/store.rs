@@ -1,6 +1,6 @@
 use super::*;
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Instant;
 
 /// A cache entry storing query results
@@ -12,8 +12,12 @@ pub(super) struct CacheEntry {
     pub(super) size_bytes: usize,
     /// Absolute expiration time for efficient TTL eviction.
     pub(super) expires_at: Instant,
-    /// The model/table this entry is for (for targeted invalidation)
-    pub(super) model_name: String,
+    /// Every table this entry reads, used for targeted invalidation.
+    ///
+    /// A query that reads past its own table — a join, union, CTE, or subquery
+    /// — records all of those tables here, so a write to any one of them evicts
+    /// the entry and not only a write to the primary model.
+    pub(super) tables: HashSet<String>,
     /// Number of times this entry has been accessed
     pub(super) hit_count: u64,
     /// Monotonic insertion sequence used by FIFO/TTL eviction indexes.
@@ -27,7 +31,7 @@ impl CacheEntry {
         data: Vec<u8>,
         size_bytes: usize,
         ttl: Duration,
-        model_name: &str,
+        tables: HashSet<String>,
         order: u64,
     ) -> Self {
         let now = Instant::now();
@@ -35,11 +39,16 @@ impl CacheEntry {
             data,
             size_bytes,
             expires_at: now.checked_add(ttl).unwrap_or(now),
-            model_name: model_name.to_string(),
+            tables,
             hit_count: 0,
             insert_order: order,
             access_order: order,
         }
+    }
+
+    /// True when a write to `table` must evict this entry.
+    pub(super) fn reads_table(&self, table: &str) -> bool {
+        self.tables.contains(table)
     }
 
     pub(super) fn is_expired(&self) -> bool {

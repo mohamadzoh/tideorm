@@ -1,207 +1,329 @@
 use super::{ConditionValue, Operator, QueryBuilder, WhereCondition};
+use crate::config::DatabaseType;
+use crate::internal::Value;
 use crate::model::Model;
+use crate::query::db_sql;
 
 impl<M: Model> QueryBuilder<M> {
-    /// Add a WHERE IN (subquery) condition.
-    #[must_use]
-    pub fn where_in_subquery<N: Model>(mut self, column: &str, subquery: QueryBuilder<N>) -> Self {
-        if let Err(err) = subquery.ensure_query_is_valid() {
-            self.invalidate_query(format!("invalid subquery for where_in_subquery(): {}", err));
+    /// Render a bound-parameter placeholder using the backend's own marker.
+    ///
+    /// `Expr::cust_with_values` substitutes only tokens matching the marker the
+    /// target query builder emits — `$n` on PostgreSQL, `?` everywhere else — so
+    /// a fragment written with the wrong marker is passed through verbatim and
+    /// binds nothing.
+    fn bound_parameter_placeholder(db_type: DatabaseType, index: usize) -> String {
+        match db_type {
+            DatabaseType::Postgres => format!("${}", index),
+            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?".to_string(),
+        }
+    }
+
+    /// Render `subquery` as both an executable and a preview operand.
+    ///
+    /// The executable rendering keeps every bound value out of the SQL text, so
+    /// the fragment the crate later executes never contains hand-escaped user
+    /// data. Validation deliberately runs against that parameterized rendering:
+    /// the operand handed to the raw-SQL scanner then holds placeholders only,
+    /// which is why a legitimate value containing `--`, `;` or `#` can no longer
+    /// reject the whole query.
+    ///
+    /// The second rendering is the inline-literal one and stays preview-only.
+    fn render_subquery_operand<N: Model>(
+        &mut self,
+        method: &str,
+        db_type: DatabaseType,
+        subquery: &QueryBuilder<N>,
+    ) -> (String, Vec<Value>, String) {
+        let (sql, values) = subquery.to_subquery_sql_with_params(db_type);
+
+        if let Err(reason) = db_sql::validate_compound_subquery_sql(&sql) {
+            self.invalidate_query(format!("invalid subquery for {}(): {}", method, reason));
         }
 
-        let subquery_sql = subquery.to_subquery_sql();
+        let preview_sql = subquery.build_select_sql_for_db(db_type);
+        (sql, values, preview_sql)
+    }
+
+    /// Build and push a parameterized `IN (subquery)` / `NOT IN (subquery)`
+    /// condition shared by `where_in_subquery` and `where_not_in_subquery`.
+    fn push_subquery_membership_condition<N: Model>(
+        mut self,
+        method: &str,
+        column: &str,
+        negated: bool,
+        subquery: &QueryBuilder<N>,
+    ) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for {}(): {}", method, err));
+        }
+
+        let db_type = self.db_type_for_sql();
+        let (sql, values, preview_sql) = self.render_subquery_operand(method, db_type, subquery);
+        let prefix = if negated { "NOT " } else { "" };
+
         self.conditions.push(WhereCondition {
             column: column.to_string(),
-            operator: Operator::SubqueryIn,
-            value: ConditionValue::Subquery(subquery_sql),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExprWithValues {
+                sql: format!("{}IN ({})", prefix, sql),
+                values,
+                preview_sql: format!("{}IN ({})", prefix, preview_sql),
+            },
         });
         self
+    }
+
+    /// Build and push a parameterized `EXISTS` / `NOT EXISTS` condition shared
+    /// by `where_exists` and `where_not_exists`.
+    fn push_subquery_exists_condition<N: Model>(
+        mut self,
+        method: &str,
+        negated: bool,
+        subquery: &QueryBuilder<N>,
+    ) -> Self {
+        if let Err(err) = subquery.ensure_query_is_valid() {
+            self.invalidate_query(format!("invalid subquery for {}(): {}", method, err));
+        }
+
+        let db_type = self.db_type_for_sql();
+        let (sql, values, preview_sql) = self.render_subquery_operand(method, db_type, subquery);
+        let prefix = if negated { "NOT " } else { "" };
+
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExprWithValues {
+                sql: format!("{}EXISTS ({})", prefix, sql),
+                values,
+                preview_sql: format!("{}EXISTS ({})", prefix, preview_sql),
+            },
+        });
+        self
+    }
+
+    /// Add a WHERE IN (subquery) condition.
+    #[must_use]
+    pub fn where_in_subquery<N: Model>(self, column: &str, subquery: QueryBuilder<N>) -> Self {
+        self.push_subquery_membership_condition("where_in_subquery", column, false, &subquery)
     }
 
     /// Add a WHERE NOT IN (subquery) condition.
     #[must_use]
-    pub fn where_not_in_subquery<N: Model>(
-        mut self,
-        column: &str,
-        subquery: QueryBuilder<N>,
-    ) -> Self {
-        if let Err(err) = subquery.ensure_query_is_valid() {
-            self.invalidate_query(format!(
-                "invalid subquery for where_not_in_subquery(): {}",
-                err
-            ));
-        }
-
-        let subquery_sql = subquery.to_subquery_sql();
-        self.conditions.push(WhereCondition {
-            column: column.to_string(),
-            operator: Operator::SubqueryNotIn,
-            value: ConditionValue::Subquery(subquery_sql),
-        });
-        self
+    pub fn where_not_in_subquery<N: Model>(self, column: &str, subquery: QueryBuilder<N>) -> Self {
+        self.push_subquery_membership_condition("where_not_in_subquery", column, true, &subquery)
     }
 
     /// Add a WHERE EXISTS (subquery) condition.
     #[must_use]
-    pub fn where_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
-        if let Err(err) = subquery.ensure_query_is_valid() {
-            self.invalidate_query(format!("invalid subquery for where_exists(): {}", err));
-        }
-
-        let subquery_sql = subquery.to_subquery_sql();
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(format!("EXISTS ({})", subquery_sql)),
-        });
-        self
+    pub fn where_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
+        self.push_subquery_exists_condition("where_exists", false, &subquery)
     }
 
     /// Add a WHERE NOT EXISTS (subquery) condition.
     #[must_use]
-    pub fn where_not_exists<N: Model>(mut self, subquery: QueryBuilder<N>) -> Self {
-        if let Err(err) = subquery.ensure_query_is_valid() {
-            self.invalidate_query(format!("invalid subquery for where_not_exists(): {}", err));
+    pub fn where_not_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
+        self.push_subquery_exists_condition("where_not_exists", true, &subquery)
+    }
+
+    /// Render a comparison literal for the correlated `EXISTS` helpers.
+    ///
+    /// This feeds the preview rendering only — the executable rendering binds
+    /// the same value as a parameter — so the literal is escaped with the shared
+    /// backend-aware escaper instead of a local `'` replacement.
+    fn related_condition_literal_sql(db_type: DatabaseType, value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Null => "NULL".to_string(),
+            serde_json::Value::Bool(boolean) => boolean.to_string(),
+            serde_json::Value::Number(number) => number.to_string(),
+            serde_json::Value::String(text) => {
+                format!("'{}'", db_sql::escape_sql_literal(db_type, text))
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => format!(
+                "'{}'",
+                db_sql::escape_sql_literal(db_type, &value.to_string())
+            ),
+        }
+    }
+
+    /// Build and push the correlated `EXISTS` / `NOT EXISTS` condition shared by
+    /// the `has_related` family, validating and backend-quoting every identifier.
+    ///
+    /// The comparison value is bound as a parameter rather than escaped into the
+    /// SQL text; only the parallel preview rendering keeps an inline literal.
+    fn push_related_exists_condition(
+        mut self,
+        method: &str,
+        negated: bool,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+        condition: Option<(&str, serde_json::Value)>,
+    ) -> Self {
+        let db_type = self.db_type_for_sql();
+
+        let mut identifiers = vec![
+            ("related table", related_table),
+            ("foreign key", foreign_key),
+            ("local key", local_key),
+        ];
+        if let Some((condition_column, _)) = &condition {
+            identifiers.push(("condition column", *condition_column));
         }
 
-        let subquery_sql = subquery.to_subquery_sql();
+        for (kind, identifier) in identifiers {
+            if let Err(reason) =
+                db_sql::validate_identifier(&format!("{}() {}", method, kind), identifier)
+            {
+                self.invalidate_query(reason);
+            }
+        }
+
+        let related = db_sql::quote_ident(db_type, related_table);
+        let mut exists_sql = format!(
+            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
+            if negated { "NOT " } else { "" },
+            related,
+            related,
+            db_sql::quote_ident(db_type, foreign_key),
+            db_sql::quote_ident(db_type, M::table_name()),
+            db_sql::quote_ident(db_type, local_key),
+        );
+        let mut preview_sql = exists_sql.clone();
+        let mut values = Vec::new();
+
+        if let Some((condition_column, value)) = condition {
+            let condition_column = db_sql::quote_ident(db_type, condition_column);
+            exists_sql.push_str(&format!(
+                " AND {}.{} = {}",
+                related,
+                condition_column,
+                Self::bound_parameter_placeholder(db_type, values.len() + 1),
+            ));
+            preview_sql.push_str(&format!(
+                " AND {}.{} = {}",
+                related,
+                condition_column,
+                Self::related_condition_literal_sql(db_type, &value),
+            ));
+            values.push(crate::internal::json_to_db_value(&value));
+        }
+
+        exists_sql.push(')');
+        preview_sql.push(')');
+
         self.conditions.push(WhereCondition {
             column: String::new(),
             operator: Operator::Raw,
-            value: ConditionValue::RawExpr(format!("NOT EXISTS ({})", subquery_sql)),
+            value: ConditionValue::RawExprWithValues {
+                sql: exists_sql,
+                values,
+                preview_sql,
+            },
         });
         self
     }
 
     /// Check if related records exist matching a condition.
+    ///
+    /// Every identifier must be a plain `table`/`column` name; anything else
+    /// invalidates the query instead of being spliced into SQL.
     #[must_use]
     pub fn has_related(
-        mut self,
+        self,
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
         condition_column: &str,
         condition_value: impl Into<serde_json::Value>,
     ) -> Self {
-        let table = M::table_name();
-        let value = condition_value.into();
-        let value_sql = match &value {
-            serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Null => "NULL".to_string(),
-            _ => value.to_string(),
-        };
-
-        let exists_sql = format!(
-            "EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\" AND \"{}\".\"{}\" = {})",
-            related_table,
+        self.push_related_exists_condition(
+            "has_related",
+            false,
             related_table,
             foreign_key,
-            table,
             local_key,
-            related_table,
-            condition_column,
-            value_sql
-        );
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(exists_sql),
-        });
-        self
+            Some((condition_column, condition_value.into())),
+        )
     }
 
     /// Check if related records do NOT exist matching a condition.
+    ///
+    /// Every identifier must be a plain `table`/`column` name; anything else
+    /// invalidates the query instead of being spliced into SQL.
     #[must_use]
     pub fn has_no_related(
-        mut self,
+        self,
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
         condition_column: &str,
         condition_value: impl Into<serde_json::Value>,
     ) -> Self {
-        let table = M::table_name();
-        let value = condition_value.into();
-        let value_sql = match &value {
-            serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Null => "NULL".to_string(),
-            _ => value.to_string(),
-        };
-
-        let not_exists_sql = format!(
-            "NOT EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\" AND \"{}\".\"{}\" = {})",
-            related_table,
+        self.push_related_exists_condition(
+            "has_no_related",
+            true,
             related_table,
             foreign_key,
-            table,
             local_key,
-            related_table,
-            condition_column,
-            value_sql
-        );
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(not_exists_sql),
-        });
-        self
+            Some((condition_column, condition_value.into())),
+        )
     }
 
     /// Check if any related records exist (without condition).
+    ///
+    /// Every identifier must be a plain `table`/`column` name; anything else
+    /// invalidates the query instead of being spliced into SQL.
     #[must_use]
-    pub fn has_any_related(
-        mut self,
-        related_table: &str,
-        foreign_key: &str,
-        local_key: &str,
-    ) -> Self {
-        let table = M::table_name();
-
-        let exists_sql = format!(
-            "EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\")",
-            related_table, related_table, foreign_key, table, local_key
-        );
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(exists_sql),
-        });
-        self
+    pub fn has_any_related(self, related_table: &str, foreign_key: &str, local_key: &str) -> Self {
+        self.push_related_exists_condition(
+            "has_any_related",
+            false,
+            related_table,
+            foreign_key,
+            local_key,
+            None,
+        )
     }
 
     /// Check if no related records exist.
+    ///
+    /// Every identifier must be a plain `table`/`column` name; anything else
+    /// invalidates the query instead of being spliced into SQL.
     #[must_use]
     pub fn has_no_related_at_all(
-        mut self,
+        self,
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
     ) -> Self {
-        let table = M::table_name();
-
-        let not_exists_sql = format!(
-            "NOT EXISTS (SELECT 1 FROM \"{}\" WHERE \"{}\".\"{}\" = \"{}\".\"{}\")",
-            related_table, related_table, foreign_key, table, local_key
-        );
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExpr(not_exists_sql),
-        });
-        self
+        self.push_related_exists_condition(
+            "has_no_related_at_all",
+            true,
+            related_table,
+            foreign_key,
+            local_key,
+            None,
+        )
     }
 
     /// Convert this query builder to a subquery SQL string.
+    ///
+    /// The rendering inlines every bound value as an escaped SQL literal, so it
+    /// is only safe for display. Use [`Self::to_subquery_sql_with_params`] for
+    /// anything that ends up being executed.
     pub fn to_subquery_sql(&self) -> String {
         self.build_select_sql()
+    }
+
+    /// Convert this query builder to a parameterized subquery operand.
+    ///
+    /// Returns the SQL together with the values bound to it. The placeholders
+    /// use `db_type`'s own marker (`$1..$n` on PostgreSQL, `?` elsewhere), which
+    /// is what `Expr::cust_with_values` renumbers into a surrounding statement,
+    /// so the operand must be rendered for the same backend that will execute
+    /// it.
+    pub fn to_subquery_sql_with_params(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
+        self.build_select_sql_with_params_for_db(db_type)
     }
 
     /// Add a raw WHERE condition.

@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::meta_support::auto_updated_at_value;
+
 pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
@@ -46,8 +48,13 @@ pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
                 true
             }
 
+            // Relation wiring asserts at compile time that a foreign/owner key names a
+            // real column *on the related model*, and that related model routinely lives
+            // in another crate. The accessor therefore has to be reachable from outside
+            // its defining crate; `pub(crate)` made every cross-crate relation fail with
+            // E0624. It stays `#[doc(hidden)]` so it is not part of the documented API.
             #[doc(hidden)]
-            pub(crate) const fn __has_column_name(name: &str) -> bool {
+            pub const fn __has_column_name(name: &str) -> bool {
                 #(
                     if Self::__column_name_eq(name, #column_names) || Self::__column_name_eq(name, stringify!(#field_names)) {
                         return true;
@@ -91,6 +98,13 @@ pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     }
 }
 
+/// UPDATE setters, the twin of the insert setters in `internal_model.rs`.
+///
+/// The `updated_at` value comes from `auto_updated_at_value` rather than a local
+/// `Utc::now()`: the two paths have to agree on the *shape* of the value as well as on
+/// which columns are auto-managed. Spelling `Set(Utc::now())` here while the insert path
+/// emitted `Set(Some(Utc::now()))` made an `Option<DateTime<Utc>>` `updated_at` fail to
+/// compile with `E0308` inside the generated `ActiveModel`.
 fn build_try_update_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2> {
     let table_name = &ctx.table_name;
 
@@ -103,8 +117,8 @@ fn build_try_update_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2
 
             if field.primary_key {
                 quote!(#ident: ActiveValue::Unchanged(self.#ident))
-            } else if field_name == "updated_at" || column_name == "updated_at" {
-                quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
+            } else if let Some(value) = auto_updated_at_value(field) {
+                quote!(#ident: ActiveValue::Set(#value))
             } else if ctx
                 .encrypted_fields
                 .iter()

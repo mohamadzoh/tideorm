@@ -9,8 +9,17 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
         .zip(ctx.column_names.iter())
         .map(|((field_ident, field_ty), column_name)| {
             let field_name = field_ident.to_string();
+            // Field and column name are identical unless `#[tideorm(column = ..)]`
+            // renames the column, so emitting both unconditionally would repeat the
+            // same literal in one `|` pattern. Match the sibling generator and emit
+            // the alternative only when it really is an alternative.
+            let pattern = if field_name == *column_name {
+                quote!(#field_name)
+            } else {
+                quote!(#field_name | #column_name)
+            };
             quote! {
-                #field_name | #column_name => {
+                #pattern => {
                     self.#field_ident = ::serde_json::from_value::<#field_ty>(value.clone())
                         .map_err(|error| ::tideorm::Error::invalid_query(format!(
                             "failed to assign entity manager value for field '{}' on {}: {}",
@@ -130,8 +139,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         let relation_name = stringify!(#ident);
                         let current_keys = self.#ident.current_keys()?;
                         let to_delete = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &current_keys)
-                            .await;
+                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &current_keys);
 
                         if !to_delete.is_empty() {
                             for deleted_key in &to_delete {
@@ -184,8 +192,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
                     }
                 });
             }
@@ -236,8 +243,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         let to_delete = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
 
                         if !to_delete.is_empty() {
                             for deleted_key in &to_delete {
@@ -254,8 +260,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
                     }
                 });
             }
@@ -312,8 +317,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         let to_detach = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
                         for deleted_key in &to_detach {
                             if let Some(deleted) = entity_manager.get_by_entity_manager_key::<#related_ty>(deleted_key) {
                                 if let Some(related_value) = <#related_ty as ::tideorm::internal::InternalModel>::field_json_value(
@@ -326,8 +330,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         let to_attach = entity_manager
-                            .additions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .additions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
                         for attach_key in &to_attach {
                             if let Some(related_value) = related_values.get(attach_key) {
                                 self.#ident.attach(related_value.clone()).await?;
@@ -335,8 +338,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
                         }
 
                         entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys)
-                            .await;
+                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
                     }
                 });
             }
@@ -344,6 +346,30 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             None
         })
         .collect();
+
+    // Flush ordering is decided per table, so the only thing the entity manager
+    // needs from a relation is which side of a foreign key each end sits on: a
+    // `belongs_to` names a table this model points at, `has_one`/`has_many` name
+    // tables pointing back at it. `has_many_through` contributes nothing — the
+    // pivot row is written by relation sync once both sides are saved — and
+    // polymorphic or self-referencing relations have no distinct target table to
+    // order against.
+    let mut parent_tables: Vec<TokenStream2> = Vec::new();
+    let mut child_tables: Vec<TokenStream2> = Vec::new();
+    for field in &ctx.relation_fields {
+        let Some(related_ty) = relation_generic_types(&field.ty).into_iter().next() else {
+            continue;
+        };
+        let table_name = quote!(<#related_ty as ::tideorm::model::ModelMeta>::table_name());
+
+        if field.belongs_to.is_some() {
+            parent_tables.push(table_name);
+        } else if field.has_one.is_some() || field.has_many.is_some() {
+            child_tables.push(table_name);
+        }
+    }
+
+    let identity_key_expr = crate::relation_gen::entity_manager_identity_key_expr(quote!(self));
 
     let entity_manager_impl = quote! {
         #[cfg(feature = "entity-manager")]
@@ -356,10 +382,21 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             }
 
             fn tide_pk_key(&self) -> String {
-                ::tideorm::entity_manager::__pk_to_entity_manager_key(
-                    &<Self as ::tideorm::model::Model>::primary_key(self),
-                )
-                .expect("entity manager primary key should serialize")
+                #identity_key_expr
+            }
+
+            fn tide_parent_tables() -> Vec<&'static str>
+            where
+                Self: Sized,
+            {
+                vec![#(#parent_tables),*]
+            }
+
+            fn tide_child_tables() -> Vec<&'static str>
+            where
+                Self: Sized,
+            {
+                vec![#(#child_tables),*]
             }
 
             fn tide_attach_entity_manager_database(

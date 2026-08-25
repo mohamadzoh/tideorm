@@ -323,3 +323,77 @@ fn test_derive_encryption_key_changes_with_secret() {
 
     assert_ne!(first, second);
 }
+
+#[test]
+fn test_base64_url_decode_rejects_orphan_trailing_character() {
+    // Six leftover bits encode no byte, so the encoder never emits a 4k+1 length.
+    assert!(base64_url_decode("A").is_none());
+    assert!(base64_url_decode("AAAAA").is_none());
+}
+
+#[test]
+fn test_base64_url_decode_rejects_non_canonical_trailing_bits() {
+    // "QQ" is the canonical spelling of the single byte 0x41. "QR" carries the
+    // same leading eight bits with a leftover bit set, so it is a re-spelling.
+    assert_eq!(base64_url_decode("QQ"), Some(vec![0x41]));
+    assert!(base64_url_decode("QR").is_none());
+}
+
+#[test]
+fn test_token_has_exactly_one_valid_spelling() {
+    init_test_key();
+
+    let token = default_encode("42", "User").unwrap();
+    assert_eq!(
+        default_decode(&token, "User").unwrap(),
+        Some("42".to_string())
+    );
+
+    // Appending a character used to decode to the same bytes and authenticate,
+    // so a token was not a stable identity for cache keys or revocation lists.
+    for suffix in ['A', 'B', '-', '_'] {
+        let respelled = format!("{token}{suffix}");
+        assert_ne!(respelled, token);
+        assert_eq!(
+            default_decode(&respelled, "User").unwrap(),
+            None,
+            "non-canonical token spelling '{respelled}' must not authenticate"
+        );
+    }
+}
+
+/// `#[tideorm(encrypted)]` derives a key per `(table, column)`.
+///
+/// This is the property that makes ciphertext non-portable between columns, and it is
+/// why the process-wide `Encrypted<T>` wrapper was removed in 0.10: the wrapper ran at
+/// the serde layer, which cannot see the table or column, so every wrapper column in a
+/// process shared one key and a ciphertext could be moved from a low-privilege column
+/// into a high-privilege one.
+#[cfg(feature = "encrypted-fields")]
+#[test]
+fn test_encrypted_field_key_is_derived_per_table_and_column() {
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key("field-domain-separation-key-32chars");
+
+    let token_key = TokenConfig::get_derived_encryption_key().unwrap();
+    let users_email = TokenConfig::get_derived_encryption_key_for_field("users", "email").unwrap();
+    let users_ssn = TokenConfig::get_derived_encryption_key_for_field("users", "ssn").unwrap();
+    let orders_email =
+        TokenConfig::get_derived_encryption_key_for_field("orders", "email").unwrap();
+
+    // Distinct from the token key, and from each other along both axes.
+    assert_ne!(token_key, users_email);
+    assert_ne!(users_email, users_ssn, "column must affect the derivation");
+    assert_ne!(
+        users_email, orders_email,
+        "table must affect the derivation"
+    );
+
+    // Stable within one configuration, or previously written data stops decrypting.
+    assert_eq!(
+        users_email,
+        TokenConfig::get_derived_encryption_key_for_field("users", "email").unwrap()
+    );
+
+    TokenConfig::reset();
+}

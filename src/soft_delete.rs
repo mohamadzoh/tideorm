@@ -64,6 +64,13 @@ pub trait SoftDelete: Model {
     }
 
     /// Mark the record as deleted by setting the soft-delete timestamp.
+    ///
+    /// The stamp is `Utc::now()` and never the database's `CURRENT_TIMESTAMP`.
+    /// `deleted_at` is a `DateTime<Utc>`, so a session-local database clock —
+    /// which is what `CURRENT_TIMESTAMP` returns on MySQL/MariaDB — would store
+    /// an offset instant that is later read back as if it were UTC. The
+    /// query-level `QueryBuilder::soft_delete` renders the same UTC instant for
+    /// exactly this reason; keep the two in agreement.
     async fn soft_delete(mut self) -> Result<Self>
     where
         Self: Sized,

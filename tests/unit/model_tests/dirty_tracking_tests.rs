@@ -28,30 +28,28 @@ async fn loaded_model_reports_changed_fields_and_original_values() {
         .expect("find should succeed")
         .expect("saved model should exist");
 
-    assert!(
-        loaded
-            .changed_fields()
-            .expect("dirty check should succeed")
-            .is_empty()
+    assert_eq!(
+        loaded.changed_fields().expect("dirty check should succeed"),
+        Some(Vec::new())
     );
     assert_eq!(
         loaded
             .original_value("name")
             .expect("original value lookup should succeed"),
-        Some(serde_json::json!("Alice"))
+        Some(Some(serde_json::json!("Alice")))
     );
 
     loaded.name = "Bob".to_string();
 
     assert_eq!(
         loaded.changed_fields().expect("dirty check should succeed"),
-        vec!["name"]
+        Some(vec!["name"])
     );
     assert_eq!(
         loaded
             .original_value("name")
             .expect("original value lookup should succeed"),
-        Some(serde_json::json!("Alice"))
+        Some(Some(serde_json::json!("Alice")))
     );
 
     cleanup_model_cache_test_state();
@@ -83,17 +81,17 @@ async fn update_refreshes_dirty_tracking_baseline() {
 
     let updated = loaded.update().await.expect("update should succeed");
 
-    assert!(
+    assert_eq!(
         updated
             .changed_fields()
-            .expect("dirty check should succeed")
-            .is_empty()
+            .expect("dirty check should succeed"),
+        Some(Vec::new())
     );
     assert_eq!(
         updated
             .original_value("name")
             .expect("original value lookup should succeed"),
-        Some(serde_json::json!("Bob"))
+        Some(Some(serde_json::json!("Bob")))
     );
 
     cleanup_model_cache_test_state();
@@ -140,13 +138,13 @@ async fn cache_hits_restore_dirty_tracking_snapshots() {
         cached[0]
             .changed_fields()
             .expect("dirty check should succeed"),
-        vec!["name"]
+        Some(vec!["name"])
     );
     assert_eq!(
         cached[0]
             .original_value("name")
             .expect("original value lookup should succeed"),
-        Some(serde_json::json!("Alice"))
+        Some(Some(serde_json::json!("Alice")))
     );
 
     cleanup_model_cache_test_state();
@@ -181,11 +179,9 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
 
     first.name = "Bob".to_string();
     let mut first = first.update().await.expect("update should succeed");
-    assert!(
-        first
-            .changed_fields()
-            .expect("dirty check should succeed")
-            .is_empty()
+    assert_eq!(
+        first.changed_fields().expect("dirty check should succeed"),
+        Some(Vec::new())
     );
 
     first.name = "Carol".to_string();
@@ -193,13 +189,13 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
         first
             .changed_fields()
             .expect("dirty check should succeed after update"),
-        vec!["name"]
+        Some(vec!["name"])
     );
     assert_eq!(
         first
             .original_value("name")
             .expect("original value lookup should succeed"),
-        Some(serde_json::json!("Bob"))
+        Some(Some(serde_json::json!("Bob")))
     );
 
     second.name = "Dana".to_string();
@@ -208,13 +204,13 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
         second
             .changed_fields()
             .expect("stale copies should compare against the latest baseline"),
-        vec!["name"]
+        Some(vec!["name"])
     );
     assert_eq!(
         second
             .original_value("name")
             .expect("latest baseline lookup should succeed"),
-        Some(serde_json::json!("Bob"))
+        Some(Some(serde_json::json!("Bob")))
     );
 
     cleanup_model_cache_test_state();

@@ -203,6 +203,22 @@ pub trait CallbackRunner: Callbacks {
 // Automatically implement CallbackRunner for anything that implements Callbacks
 impl<T: Callbacks> CallbackRunner for T {}
 
+// The `*Dispatch` traits below implement autoref specialization: a bounded impl
+// on `&mut T` / `&T` (requiring `T: Callbacks`) plus an unbounded no-op fallback
+// on `&&mut T` / `&&T`. `Callbacks` is optional, so this is how a model that
+// does not implement it still compiles.
+//
+// This only resolves correctly at *concrete* call sites, which is why every
+// `run_*` call lives in macro-generated code where `Self` is the real model
+// type. Calling them from a generic function or a blanket impl type-checks once
+// with the type parameter opaque, `T: Callbacks` cannot be proven, and the no-op
+// fallback is then baked in for every instantiation — silently skipping the
+// hooks even for models that do implement `Callbacks`.
+//
+// Generic code must therefore drive writes through `Model::create`,
+// `Model::update`, `Model::save`, or `Model::delete` instead of dispatching
+// callbacks itself.
+
 #[doc(hidden)]
 pub trait BeforeCreateDispatch<T> {
     fn run_before_create(self) -> Result<()>;

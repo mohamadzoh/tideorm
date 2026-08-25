@@ -5,7 +5,7 @@ use syn::{DeriveInput, Type, parse_quote};
 
 use crate::context::BuildContext;
 use crate::meta_support::detect_existing_derives;
-use crate::parse::{ModelInput, extract_value};
+use crate::parse::{ModelInput, parse_index_attributes};
 use crate::serde_gen::generate_trait_impls;
 
 use crate::parse::ModelField;
@@ -367,24 +367,222 @@ fn validation_allows_string_rules_on_fully_qualified_optional_string_fields() {
     assert_eq!(ctx.validation_rules.len(), 1);
 }
 
+fn rendered_rules(ctx: &BuildContext, field: &str) -> String {
+    let rules = ctx
+        .validation_rules
+        .iter()
+        .find(|(name, _)| name == field)
+        .map(|(_, rules)| rules)
+        .expect("field should carry validation rules");
+
+    let rendered: Vec<String> = rules.iter().map(ToString::to_string).collect();
+    normalize_tokens(&rendered.join(" "))
+}
+
+fn build_context_for(input: &DeriveInput) -> syn::Result<BuildContext> {
+    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(input).expect("model input should parse");
+    BuildContext::new(&model_input, indexes, unique_indexes, &existing_derives)
+}
+
 #[test]
-fn extract_value_parses_assignment_rules() {
+fn validation_values_are_not_split_on_embedded_commas() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(regex = "^[a-z]{3,5}$", custom = "must be a, b or c")]
+            code: String,
+        }
+    };
+
+    let ctx = build_context_for(&input).expect("validation attributes should parse");
+    let rendered = rendered_rules(&ctx, "code");
+
+    assert!(rendered.contains("Regex(\"^[a-z]{3,5}$\".to_string())"));
+    assert!(rendered.contains("Custom(\"mustbea,borc\".to_string())"));
+}
+
+#[test]
+fn validation_rejects_unknown_rule_names_instead_of_dropping_them() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(minlength = 3)]
+            name: String,
+        }
+    };
+
+    let error = build_context_for(&input)
+        .err()
+        .expect("typo rules must not be silently ignored")
+        .to_string();
+
+    assert!(error.contains("unknown validation rule 'minlength'"));
+}
+
+#[test]
+fn validation_rejects_unparsable_rule_values_instead_of_dropping_them() {
+    let input: DeriveInput = parse_quote! {
+        struct User {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(min_length = "three")]
+            name: String,
+        }
+    };
+
+    let error = build_context_for(&input)
+        .err()
+        .expect("unparsable rule values must not be silently ignored")
+        .to_string();
+
+    assert!(error.contains("validation rule 'min_length' expects a non-negative integer"));
+}
+
+#[test]
+fn validation_accepts_assignment_function_and_range_forms() {
+    let input: DeriveInput = parse_quote! {
+        struct Reading {
+            #[tideorm(primary_key)]
+            id: i64,
+            #[validate(min_length(3), range = "1..10")]
+            label: String,
+        }
+    };
+
+    let ctx = build_context_for(&input).expect("both rule spellings should parse");
+    let rendered = rendered_rules(&ctx, "label");
+
+    assert!(rendered.contains("MinLength(3usize)"));
+    assert!(rendered.contains("Range(1f64,10f64)"));
+}
+
+#[test]
+fn raw_identifier_fields_expand_without_panicking() {
+    let input: DeriveInput = parse_quote! {
+        struct Event {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            r#type: String,
+        }
+    };
+
+    let ctx = build_context_for(&input).expect("raw identifier fields should be supported");
+
+    assert!(ctx.column_names.contains(&"type".to_string()));
+    assert!(ctx.column_variants.iter().any(|variant| variant == "Type"));
+    assert!(ctx.serde_field_names_str.contains(&"type".to_string()));
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let generated =
+        generate_model_impl(&model_input, vec![], vec![], &existing_derives).to_string();
+    let normalized = normalize_tokens(&generated);
+
+    assert!(normalized.contains("__tideorm_internal_event"));
+    assert!(!normalized.contains("R#type"));
+}
+
+#[test]
+fn internal_entity_module_name_is_snake_cased() {
+    let input: DeriveInput = parse_quote! {
+        struct ApiKey {
+            #[tideorm(primary_key)]
+            id: i64,
+        }
+    };
+
+    let ctx = build_context_for(&input).expect("build context should be constructed");
+
     assert_eq!(
-        extract_value("min_length = 3", "min_length"),
-        Some("3".to_string())
+        ctx.internal_entity_mod.to_string(),
+        "__tideorm_internal_api_key"
     );
 }
 
 #[test]
-fn extract_value_parses_function_rules_with_optional_whitespace() {
-    assert_eq!(
-        extract_value("range ( 1 , 10 )", "range"),
-        Some("1 , 10".to_string())
-    );
+fn index_columns_are_parsed_from_string_literals_containing_option_names() {
+    let input: DeriveInput = parse_quote! {
+        #[index("name,columns")]
+        struct Report {
+            #[tideorm(primary_key)]
+            id: i64,
+            name: String,
+            columns: String,
+        }
+    };
+
+    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+
+    assert!(unique_indexes.is_empty());
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].columns, vec!["name", "columns"]);
+    assert!(indexes[0].name.is_none());
+
+    build_context_for(&input).expect("index over declared columns should be accepted");
 }
 
 #[test]
-fn extract_value_rejects_incomplete_or_mismatched_function_rules() {
-    assert_eq!(extract_value("range(1, 10", "range"), None);
-    assert_eq!(extract_value("length(1, 10)", "range"), None);
+fn named_index_attributes_still_parse() {
+    let input: DeriveInput = parse_quote! {
+        #[index(name = "idx_reports_owner", columns = "owner_id, name")]
+        #[unique_index("name")]
+        struct Report {
+            #[tideorm(primary_key)]
+            id: i64,
+            owner_id: i64,
+            name: String,
+        }
+    };
+
+    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].name.as_deref(), Some("idx_reports_owner"));
+    assert_eq!(indexes[0].columns, vec!["owner_id", "name"]);
+    assert_eq!(unique_indexes.len(), 1);
+    assert!(unique_indexes[0].unique);
+
+    build_context_for(&input).expect("named index definitions should be accepted");
+}
+
+#[test]
+fn malformed_index_attributes_are_reported() {
+    let input: DeriveInput = parse_quote! {
+        #[index(name = "idx_reports_owner")]
+        struct Report {
+            #[tideorm(primary_key)]
+            id: i64,
+            owner_id: i64,
+        }
+    };
+
+    let error = build_context_for(&input)
+        .err()
+        .expect("an index without columns must not be silently dropped")
+        .to_string();
+
+    assert!(error.contains("requires a 'columns' option"));
+}
+
+#[test]
+fn index_attributes_reject_unknown_columns() {
+    let input: DeriveInput = parse_quote! {
+        #[unique_index("nickname")]
+        struct Report {
+            #[tideorm(primary_key)]
+            id: i64,
+            name: String,
+        }
+    };
+
+    let error = build_context_for(&input)
+        .err()
+        .expect("indexes over unknown columns must be rejected")
+        .to_string();
+
+    assert!(error.contains("#[unique_index(..)] references unknown field or column 'nickname'"));
 }

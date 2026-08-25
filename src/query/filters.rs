@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
 use super::QueryBuilder;
+use crate::internal::Value;
 use crate::model::Model;
 
 /// Emit the shared `where_*` condition-builder method family as an inherent impl
@@ -328,6 +329,30 @@ pub enum ConditionValue {
     None,
     Subquery(String),
     RawExpr(String),
+    /// A builder-generated SQL fragment that carries its own bound parameters.
+    ///
+    /// Unlike [`ConditionValue::RawExpr`], which is emitted verbatim through
+    /// `Expr::cust`, this variant keeps the operand's values out of the SQL text
+    /// entirely. It exists for the operands the builder generates itself —
+    /// `where_in_subquery`, `where_exists`, the `has_related` family — where the
+    /// only alternative is hand-escaping user data into an inline literal.
+    RawExprWithValues {
+        /// The executable fragment.
+        ///
+        /// It must already use the *target backend's own* placeholder marker
+        /// (`$1..$n` on PostgreSQL, `?` on MySQL/MariaDB/SQLite), because
+        /// `Expr::cust_with_values` only renumbers tokens matching that marker
+        /// into the surrounding statement; a mismatched marker binds nothing.
+        sql: String,
+        /// The parameters bound to `sql`, in placeholder order.
+        values: Vec<Value>,
+        /// An inline-literal rendering of the same fragment.
+        ///
+        /// Used only by the non-executable debug preview (and by the operand
+        /// strings the preview renderer feeds to UNION/CTE clauses). It must
+        /// never be executed with `values` bound alongside it.
+        preview_sql: String,
+    },
 }
 
 /// Logical operator for combining conditions

@@ -68,6 +68,37 @@ pub(super) fn in_entity_manager_transaction_scope() -> bool {
     ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.get())
 }
 
+/// Restores the transaction-scope thread-locals when the guard is dropped.
+///
+/// The restore has to happen in `Drop` rather than in plain statements after
+/// `poll`: a panic inside the wrapped future unwinds straight past those
+/// statements and would leave `ENTITY_MANAGER_TRANSACTION_SCOPE` stuck at
+/// `true` on that worker thread forever, so every later flush/save polled there
+/// would take the "already in scope" path and run with no transaction at all.
+struct ResetEntityManagerTransactionScope {
+    /// Scope flag observed before the scope was installed.
+    scope: bool,
+    /// Identity rollback log observed before the scope was installed.
+    log: Option<Arc<Mutex<IdentityRollbackLog>>>,
+}
+
+impl Drop for ResetEntityManagerTransactionScope {
+    fn drop(&mut self) {
+        ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| {
+            *log.borrow_mut() = self.log.take();
+        });
+        ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.set(self.scope));
+    }
+}
+
+fn install_entity_manager_transaction_scope(
+    rollback_log: &Arc<Mutex<IdentityRollbackLog>>,
+) -> ResetEntityManagerTransactionScope {
+    let scope = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.replace(true));
+    let log = ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| log.replace(Some(rollback_log.clone())));
+    ResetEntityManagerTransactionScope { scope, log }
+}
+
 pub(super) fn with_entity_manager_transaction_scope<F>(
     rollback_log: Arc<Mutex<IdentityRollbackLog>>,
     future: F,
@@ -88,19 +119,8 @@ where
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
-            let previous = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| {
-                let prev = active.get();
-                active.set(true);
-                prev
-            });
-            let previous_log = ENTITY_MANAGER_IDENTITY_ROLLBACK
-                .with(|log| log.replace(Some(this.rollback_log.clone())));
-            let result = this.future.as_mut().poll(cx);
-            ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| {
-                *log.borrow_mut() = previous_log;
-            });
-            ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.set(previous));
-            result
+            let _guard = install_entity_manager_transaction_scope(&this.rollback_log);
+            this.future.as_mut().poll(cx)
         }
     }
 

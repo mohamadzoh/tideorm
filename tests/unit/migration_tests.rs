@@ -39,6 +39,59 @@ fn test_column_type_sqlite() {
     assert_eq!(ColumnType::Time.to_sqlite_sql(), "TEXT");
 }
 
+/// Assert what `column_type` renders to on every backend, in the order
+/// (Postgres, MySQL, MariaDB, SQLite).
+#[track_caller]
+fn assert_renders(column_type: &ColumnType, postgres: &str, mysql: &str, sqlite: &str) {
+    assert_eq!(column_type.to_sql(DatabaseType::Postgres), postgres);
+    assert_eq!(column_type.to_sql(DatabaseType::MySQL), mysql);
+    assert_eq!(column_type.to_sql(DatabaseType::MariaDB), mysql);
+    assert_eq!(column_type.to_sql(DatabaseType::SQLite), sqlite);
+}
+
+#[test]
+fn test_column_types_render_what_the_drivers_bind_and_decode() {
+    // These are pinned per backend because the mapper is shared by migrations,
+    // schema export and DB_SYNC: a "nicer" rendering here silently breaks reads
+    // on a backend nobody runs in CI.
+
+    // Decimal. sea-orm decodes Decimal/BigDecimal on SQLite through
+    // `try_get::<Option<f64>>`, and sqlx only yields an f64 from REAL affinity,
+    // so a TEXT column - though lossless - cannot be read back at all.
+    let money = ColumnType::Decimal {
+        precision: 12,
+        scale: 2,
+    };
+    assert_renders(&money, "DECIMAL(12, 2)", "DECIMAL(12, 2)", "REAL");
+    assert_renders(&ColumnType::Numeric, "DECIMAL", "DECIMAL(65,30)", "REAL");
+
+    // Uuid. sqlx-mysql encodes a Uuid as 16 raw bytes and refuses to decode
+    // anything else, so CHAR(36) rejects every insert with error 1366. These
+    // are also what sea-query's own `ColumnDef::uuid()` renders per backend.
+    assert_renders(&ColumnType::Uuid, "UUID", "BINARY(16)", "TEXT");
+
+    // u32. sea-orm reads it back as an `Oid` and then as an `i32`, so an int8
+    // column is unreadable however well it would hold the range.
+    assert_renders(&ColumnType::Unsigned, "INTEGER", "INT UNSIGNED", "INTEGER");
+
+    // u64. Only MySQL can decode one at all, and the binder narrows it to an
+    // `i64` on the way in, so BIGINT is the honest PostgreSQL column.
+    assert_renders(
+        &ColumnType::BigUnsigned,
+        "BIGINT",
+        "BIGINT UNSIGNED",
+        "INTEGER",
+    );
+
+    // i128/u128 map to a 39-digit decimal, so they inherit the decimal
+    // rendering - including SQLite's REAL, which cannot hold the range.
+    let wide = ColumnType::Decimal {
+        precision: 39,
+        scale: 0,
+    };
+    assert_renders(&wide, "DECIMAL(39, 0)", "DECIMAL(39, 0)", "REAL");
+}
+
 #[test]
 fn test_default_value() {
     assert_eq!(DefaultValue::String("test".to_string()).to_sql(), "'test'");
@@ -289,11 +342,40 @@ fn test_alter_table_builder() {
     builder.drop_column("legacy");
     builder.rename_column("name", "full_name");
 
-    let statements = builder.build();
+    let statements = builder.build().expect("alter statements");
     assert_eq!(statements.len(), 3);
     assert!(statements[0].contains("ADD COLUMN"));
     assert!(statements[1].contains("DROP COLUMN"));
     assert!(statements[2].contains("RENAME COLUMN"));
+}
+
+#[test]
+fn test_change_column_type_is_rejected_on_sqlite() {
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::SQLite);
+    builder.change_column("age", ColumnType::BigInteger);
+
+    let error = builder
+        .build()
+        .expect_err("SQLite cannot alter a column type");
+    assert!(error.is_backend_not_supported(), "Got: {}", error);
+
+    let message = error.to_string();
+    assert!(
+        message.contains("age") && message.contains("users"),
+        "Error should name the column and table. Got: {}",
+        message
+    );
+
+    for database_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::MariaDB,
+    ] {
+        let mut builder = AlterTableBuilder::new("users", database_type);
+        builder.change_column("age", ColumnType::BigInteger);
+        let statements = builder.build().expect("alter statements");
+        assert_eq!(statements.len(), 1);
+    }
 }
 
 #[test]
@@ -343,6 +425,61 @@ fn test_composite_primary_key() {
         "Individual columns should not be marked as primary key. Got: {}",
         sql
     );
+}
+
+#[test]
+fn test_composite_primary_key_replaces_column_level_key() {
+    let mut builder = TableBuilder::new("user_roles", DatabaseType::Postgres);
+    builder.id();
+    builder.big_integer("user_id").not_null();
+    builder.big_integer("role_id").not_null();
+    builder.primary_key(&["user_id", "role_id"]);
+
+    let sql = builder.build_create();
+    assert_eq!(
+        sql.matches("PRIMARY KEY").count(),
+        1,
+        "Exactly one PRIMARY KEY clause may be emitted. Got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
+        "The explicit composite key should win. Got: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_create_index_if_not_exists_is_omitted_for_mysql() {
+    let mut builder = TableBuilder::new("users", DatabaseType::MySQL);
+    builder.id();
+    builder.string("email").not_null();
+    builder.index(&["email"]);
+
+    let indexes = builder.build_indexes_if_not_exists();
+    assert_eq!(indexes.len(), 1);
+    assert!(
+        !indexes[0].contains("IF NOT EXISTS"),
+        "MySQL has no CREATE INDEX IF NOT EXISTS. Got: {}",
+        indexes[0]
+    );
+    assert!(indexes[0].starts_with("CREATE INDEX `idx_users_email` ON `users`"));
+
+    for database_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MariaDB,
+        DatabaseType::SQLite,
+    ] {
+        let mut builder = TableBuilder::new("users", database_type);
+        builder.index(&["email"]);
+        let indexes = builder.build_indexes_if_not_exists();
+        assert!(
+            indexes[0].contains("IF NOT EXISTS"),
+            "{:?} supports CREATE INDEX IF NOT EXISTS. Got: {}",
+            database_type,
+            indexes[0]
+        );
+    }
 }
 
 #[test]
@@ -429,7 +566,7 @@ fn test_mariadb_alter_table_builder() {
     builder.drop_column("legacy");
     builder.rename_column("name", "full_name");
 
-    let statements = builder.build();
+    let statements = builder.build().expect("alter statements");
     assert_eq!(statements.len(), 3);
     assert!(statements[0].contains("ADD COLUMN"));
     assert!(statements[0].contains("`phone`"));
@@ -483,7 +620,7 @@ fn test_mysql_identifier_quoting_escapes_inner_backticks() {
 
     let mut builder = AlterTableBuilder::new("user`roles", DatabaseType::MySQL);
     builder.rename_column("old`name", "new`name");
-    let statements = builder.build();
+    let statements = builder.build().expect("alter statements");
 
     assert!(
         statements[0].contains("ALTER TABLE `user``roles`"),

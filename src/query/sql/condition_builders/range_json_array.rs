@@ -1,5 +1,15 @@
 use super::*;
 
+/// Render one bound-parameter marker per value using PostgreSQL's numbered form.
+///
+/// `Expr::cust_with_values` only substitutes tokens matching the marker its
+/// target query builder emits, so a fragment destined for PostgreSQL has to be
+/// written with `$1, $2, ..` — a `?` there would be passed through verbatim and
+/// bind nothing.
+fn postgres_placeholders(count: usize) -> Vec<String> {
+    (1..=count).map(|index| format!("${}", index)).collect()
+}
+
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     pub(crate) fn build_null_check_expression(
@@ -138,11 +148,10 @@ impl<M: Model> QueryBuilder<M> {
         operator: ArrayOperator,
         values: &[serde_json::Value],
     ) -> String {
-        let rendered = self.render_array_values(values);
         match operator {
-            ArrayOperator::Contains => db_sql::array_contains(db_type, column, &rendered),
-            ArrayOperator::ContainedBy => db_sql::array_contained_by(db_type, column, &rendered),
-            ArrayOperator::Overlaps => db_sql::array_overlaps(db_type, column, &rendered),
+            ArrayOperator::Contains => db_sql::array_contains(db_type, column, values),
+            ArrayOperator::ContainedBy => db_sql::array_contained_by(db_type, column, values),
+            ArrayOperator::Overlaps => db_sql::array_overlaps(db_type, column, values),
         }
     }
 
@@ -157,19 +166,19 @@ impl<M: Model> QueryBuilder<M> {
         match db_type {
             DatabaseType::Postgres => {
                 let _ = column_expr;
-                let rendered = self.render_array_values(values);
+                let placeholders = postgres_placeholders(values.len());
                 let sql = match operator {
                     ArrayOperator::Contains => {
-                        format!("{} @> ARRAY[{}]", column_sql, rendered.join(","))
+                        db_sql::postgres_array_contains(column_sql, &placeholders)
                     }
                     ArrayOperator::ContainedBy => {
-                        format!("{} <@ ARRAY[{}]", column_sql, rendered.join(","))
+                        db_sql::postgres_array_contained_by(column_sql, &placeholders)
                     }
                     ArrayOperator::Overlaps => {
-                        format!("{} && ARRAY[{}]", column_sql, rendered.join(","))
+                        db_sql::postgres_array_overlaps(column_sql, &placeholders)
                     }
                 };
-                Expr::cust(sql)
+                self.build_custom_expression(sql, Self::sea_value_list(values))
             }
             DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
                 ArrayOperator::Contains => self.build_custom_expression(

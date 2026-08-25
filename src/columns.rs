@@ -146,16 +146,28 @@ impl ColumnOperator {
     }
 }
 
+/// The escape character used by every generated `LIKE ... ESCAPE` clause.
+///
+/// Deliberately **not** a backslash. A backslash costs us on three fronts:
+/// SQLite string literals do not process it (so `'\\'` is a two-character
+/// escape argument SQLite rejects), MySQL's handling flips with
+/// `NO_BACKSLASH_ESCAPES`, and sea-query's tokenizer treats it as an escape
+/// character when it re-scans a `cust_with_values` fragment — an `ESCAPE '\'`
+/// clause leaves the literal unterminated and swallows every later placeholder.
+/// `!` is a single character in all three dialects, is not special inside a LIKE
+/// pattern, and keeps generated SQL backslash-free.
+pub(crate) const LIKE_ESCAPE_CHAR: char = '!';
+
+/// The full ` ESCAPE '<char>'` suffix appended to generated LIKE comparisons.
+pub(crate) const LIKE_ESCAPE_CLAUSE: &str = " ESCAPE '!'";
+
 pub(crate) fn escape_like_literal(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
-        match ch {
-            '\\' | '%' | '_' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
+        if ch == LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
+            escaped.push(LIKE_ESCAPE_CHAR);
         }
+        escaped.push(ch);
     }
     escaped
 }

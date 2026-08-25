@@ -39,6 +39,49 @@ fn test_files_data_has_one() {
 }
 
 #[test]
+fn test_file_attachment_filename_uses_backslash_separators_too() {
+    let attachment = FileAttachment::new("uploads\\2024\\01\\image.jpg");
+    assert_eq!(attachment.filename, "image.jpg");
+
+    let mixed = FileAttachment::new("uploads/2024\\report.pdf");
+    assert_eq!(mixed.filename, "report.pdf");
+
+    let bare = FileAttachment::new("image.jpg");
+    assert_eq!(bare.filename, "image.jpg");
+}
+
+#[test]
+fn test_is_safe_key_accepts_plain_relative_keys() {
+    assert!(FileAttachment::is_safe_key("image.jpg"));
+    assert!(FileAttachment::is_safe_key("uploads/2024/01/image.jpg"));
+    assert!(FileAttachment::is_safe_key("uploads/my file (1).jpg"));
+}
+
+#[test]
+fn test_is_safe_key_rejects_traversal_and_absolute_and_url_keys() {
+    for key in [
+        "",
+        "   ",
+        "../secret",
+        "uploads/../../etc/passwd",
+        "uploads\\..\\..\\windows\\system32",
+        "/etc/passwd",
+        "\\\\server\\share\\file",
+        "C:\\Windows\\system32",
+        "C:relative",
+        "https://evil.example/x.png",
+        "//evil.example/x.png",
+        "uploads/a\0b.jpg",
+    ] {
+        assert!(
+            !FileAttachment::is_safe_key(key),
+            "'{}' should be rejected as an unsafe storage key",
+            key.escape_debug()
+        );
+    }
+}
+
+#[test]
 fn test_files_data_has_many() {
     let mut files = FilesData::new();
     files.add_many("images", FileAttachment::new("img1.jpg"));

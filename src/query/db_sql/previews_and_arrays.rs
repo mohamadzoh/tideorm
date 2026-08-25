@@ -169,89 +169,177 @@ pub(crate) fn preview_json_path_not_exists(
     }
 }
 
-/// Generate array contains expression
+/// Alias given to the `unnest(..)` derived table in the PostgreSQL array
+/// renderings, together with the name of its single column.
+const POSTGRES_ARRAY_ELEMENT_ALIAS: &str = "tideorm_array_element";
+
+/// Render one array element as the inline SQL literal used by preview SQL.
 ///
-/// - PostgreSQL: `column @> ARRAY[values]`
-/// - MySQL: Uses JSON_CONTAINS with JSON array
-/// - SQLite: Uses json_each for array element checking
-pub fn array_contains(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+/// The value is escaped exactly once, straight from the original JSON — quote
+/// doubling is what PostgreSQL and SQLite need verbatim, and it is also the
+/// intermediate form `mysql_json_array_literal` re-encodes for MySQL. Nothing
+/// executable goes through here: those paths bind the values as parameters.
+fn array_element_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => format!("'{}'", sql_safety::escape_sql_literal(text)),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::Bool(boolean) => boolean.to_string(),
+        serde_json::Value::Null => "NULL".to_string(),
+        other => format!("'{}'", sql_safety::escape_sql_literal(&other.to_string())),
+    }
+}
+
+fn array_element_literals(values: &[serde_json::Value]) -> Vec<String> {
+    values.iter().map(array_element_literal).collect()
+}
+
+/// Render PostgreSQL's `column @> ARRAY[..]` without the array constructor.
+///
+/// `operands` are already-rendered SQL operands: inline literals on the preview
+/// path, bound placeholders (`$1`, `$2`, ..) on the executable one. Sharing the
+/// shape between both callers is what keeps `debug()` honest about what runs.
+///
+/// The `ARRAY[..]` constructor is deliberately avoided: sea-query's fragment
+/// tokenizer treats `[` as a string delimiter that ends at `]`, so a placeholder
+/// written between the brackets is skipped by `Expr::cust_with_values` and its
+/// value silently never binds. `x = ANY(column)` is the bracket-free equivalent
+/// and additionally lets PostgreSQL infer each parameter's type from the
+/// column's element type.
+///
+/// An empty operand list is vacuously contained, so it renders as true.
+pub(crate) fn postgres_array_contains(column: &str, operands: &[String]) -> String {
+    postgres_array_element_match(column, operands, " AND ", "1 = 1")
+}
+
+/// Render PostgreSQL's `column && ARRAY[..]` (overlap) without the array
+/// constructor. See [`postgres_array_contains`] for why the brackets are gone.
+///
+/// An empty operand list cannot overlap with anything, so it renders as false.
+pub(crate) fn postgres_array_overlaps(column: &str, operands: &[String]) -> String {
+    postgres_array_element_match(column, operands, " OR ", "0 = 1")
+}
+
+fn postgres_array_element_match(
+    column: &str,
+    operands: &[String],
+    combine: &str,
+    empty_result: &str,
+) -> String {
+    if operands.is_empty() {
+        return empty_result.to_string();
+    }
+
+    let checks: Vec<String> = operands
+        .iter()
+        .map(|operand| format!("{} = ANY({})", operand, column))
+        .collect();
+    format!("({})", checks.join(combine))
+}
+
+/// Render PostgreSQL's `column <@ ARRAY[..]` (contained by) without the array
+/// constructor. See [`postgres_array_contains`] for why the brackets are gone.
+///
+/// An empty operand list leaves only the empty array contained, which is exactly
+/// what the element-free `NOT EXISTS` renders.
+pub(crate) fn postgres_array_contained_by(column: &str, operands: &[String]) -> String {
+    let alias = POSTGRES_ARRAY_ELEMENT_ALIAS;
+    let source = format!("unnest({}) AS {}(element)", column, alias);
+
+    if operands.is_empty() {
+        return format!("NOT EXISTS (SELECT 1 FROM {})", source);
+    }
+
+    let elements = operands.join(", ");
+    format!("NOT EXISTS (SELECT 1 FROM {source} WHERE {alias}.element NOT IN ({elements}))")
+}
+
+/// Render non-executable preview SQL for an array contains expression.
+///
+/// - PostgreSQL: one `= ANY(column)` check per element, combined with `AND`
+/// - MySQL: `JSON_CONTAINS` against a JSON array
+/// - SQLite: one `json_each` existence check per element, combined with `AND`
+///
+/// An empty candidate list is vacuously contained on every backend.
+pub fn array_contains(db_type: DatabaseType, column: &str, values: &[serde_json::Value]) -> String {
     let column = format_column(db_type, column);
     match db_type {
-        DatabaseType::Postgres => {
-            format!("{} @> ARRAY[{}]", column, values.join(","))
-        }
+        DatabaseType::Postgres => postgres_array_contains(&column, &array_element_literals(values)),
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             format!(
                 "JSON_CONTAINS({}, '{}')",
                 column,
-                mysql_json_array_literal(values)
+                mysql_json_array_literal(&array_element_literals(values))
             )
         }
         DatabaseType::SQLite => {
+            if values.is_empty() {
+                return "1 = 1".to_string();
+            }
+
             let conditions: Vec<String> = values
                 .iter()
-                .map(|v| {
-                    let clean_val = v.trim_matches('\'');
-                    format!(
-                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = '{}')",
-                        column,
-                        escape_sql_literal(DatabaseType::SQLite, clean_val)
-                    )
-                })
+                .map(|value| sqlite_json_each_match(&column, value))
                 .collect();
             format!("({})", conditions.join(" AND "))
         }
     }
 }
 
-/// Generate array contained by expression
-pub fn array_contained_by(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+/// Render non-executable preview SQL for an array contained-by expression.
+///
+/// An empty candidate list only contains the empty array, which every backend
+/// renders as an emptiness check on the column.
+pub fn array_contained_by(
+    db_type: DatabaseType,
+    column: &str,
+    values: &[serde_json::Value],
+) -> String {
     let column = format_column(db_type, column);
     match db_type {
         DatabaseType::Postgres => {
-            format!("{} <@ ARRAY[{}]", column, values.join(","))
+            postgres_array_contained_by(&column, &array_element_literals(values))
         }
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             format!(
                 "JSON_CONTAINS('{}', {})",
-                mysql_json_array_literal(values),
+                mysql_json_array_literal(&array_element_literals(values)),
                 column
             )
         }
         DatabaseType::SQLite => {
-            let value_list = values
-                .iter()
-                .map(|v| {
-                    format!(
-                        "'{}'",
-                        escape_sql_literal(DatabaseType::SQLite, v.trim_matches('\''))
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
+            if values.is_empty() {
+                return format!("NOT EXISTS (SELECT 1 FROM json_each({}))", column);
+            }
+
             format!(
                 "NOT EXISTS (SELECT 1 FROM json_each({}) WHERE value NOT IN ({}))",
-                column, value_list
+                column,
+                array_element_literals(values).join(", ")
             )
         }
     }
 }
 
-/// Generate array overlaps expression (any element matches)
-pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) -> String {
+/// Render non-executable preview SQL for an array overlaps expression (any
+/// element matches).
+///
+/// An empty candidate list can never overlap, so every backend renders false.
+pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[serde_json::Value]) -> String {
+    if values.is_empty() {
+        return "0 = 1".to_string();
+    }
+
     let column = format_column(db_type, column);
     match db_type {
-        DatabaseType::Postgres => {
-            format!("{} && ARRAY[{}]", column, values.join(","))
-        }
+        DatabaseType::Postgres => postgres_array_overlaps(&column, &array_element_literals(values)),
         DatabaseType::MySQL | DatabaseType::MariaDB => {
             let conditions: Vec<String> = values
                 .iter()
-                .map(|v| {
+                .map(|value| {
                     format!(
                         "JSON_CONTAINS({}, '{}')",
                         column,
-                        mysql_json_scalar_literal(v)
+                        mysql_json_scalar_literal(&array_element_literal(value))
                     )
                 })
                 .collect();
@@ -260,16 +348,17 @@ pub fn array_overlaps(db_type: DatabaseType, column: &str, values: &[String]) ->
         DatabaseType::SQLite => {
             let conditions: Vec<String> = values
                 .iter()
-                .map(|v| {
-                    let clean_val = v.trim_matches('\'');
-                    format!(
-                        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = '{}')",
-                        column,
-                        escape_sql_literal(DatabaseType::SQLite, clean_val)
-                    )
-                })
+                .map(|value| sqlite_json_each_match(&column, value))
                 .collect();
             format!("({})", conditions.join(" OR "))
         }
     }
+}
+
+fn sqlite_json_each_match(column: &str, value: &serde_json::Value) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM json_each({}) WHERE value = {})",
+        column,
+        array_element_literal(value)
+    )
 }

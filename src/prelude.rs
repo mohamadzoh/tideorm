@@ -17,15 +17,22 @@ pub use crate::config::FileUrlGenerator;
 pub use crate::config::{
     Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds, TideConfig,
 };
+// Bound parameter values for `Database::raw_with_params` and friends. Exported
+// here so raw SQL never sends callers into the hidden `internal` module.
+pub use crate::internal::DbValue;
 pub use crate::model::{
     BatchUpdateBuilder, CreateBuilder, IndexDefinition, Model, ModelMeta, NestedSave,
     NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,
 };
 pub use crate::query::{
+    // Aggregate terminals
+    AggregateFunction,
     // CTE types
     CTE,
     FrameBound,
     FrameType,
+    // Joins
+    JoinClause,
     // Join result consolidation
     JoinResultConsolidator,
     JoinType,
@@ -186,8 +193,6 @@ pub use crate::types::{
     CastType,
     CastValue,
     Castable,
-    // Casting types
-    Encrypted,
     FloatArray,
     Hashed,
     // Array types
@@ -201,3 +206,39 @@ pub use crate::types::{
     UnixTimestamp,
     UnixTimestampMillis,
 };
+
+#[cfg(test)]
+mod prelude_surface_tests {
+    //! Regression guard for crate-root/prelude drift.
+    //!
+    //! `AggregateFunction` and `JoinClause` were re-exported from the crate
+    //! root only. Naming each type through both paths fails to compile if one
+    //! surface loses an export.
+
+    #[test]
+    fn query_helpers_are_exported_from_both_surfaces() {
+        fn assert_exported<T>() {}
+
+        assert_exported::<crate::AggregateFunction>();
+        assert_exported::<crate::prelude::AggregateFunction>();
+        assert_exported::<crate::JoinClause>();
+        assert_exported::<crate::prelude::JoinClause>();
+        assert_exported::<crate::JoinType>();
+        assert_exported::<crate::prelude::JoinType>();
+        assert_exported::<crate::Order>();
+        assert_exported::<crate::prelude::Order>();
+    }
+
+    /// The raw-SQL `*_with_params` entry points are only callable if their
+    /// parameter type has a name outside the hidden `internal` module.
+    #[test]
+    fn raw_sql_parameters_are_nameable_without_touching_internal() {
+        let params: Vec<crate::DbValue> = vec![
+            crate::prelude::DbValue::BigInt(Some(7)),
+            true.into(),
+            "alice".into(),
+        ];
+
+        assert_eq!(params.len(), 3);
+    }
+}

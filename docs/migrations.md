@@ -44,7 +44,7 @@ t.timestamptz("expires_at");           // TIMESTAMPTZ (with timezone) - PostgreS
 #### Special Types
 
 ```rust
-t.uuid("external_id");                 // UUID (Postgres) / CHAR(36) (MySQL)
+t.uuid("external_id");                 // UUID (Postgres) / BINARY(16) (MySQL)
 t.json("metadata");                    // JSON
 t.jsonb("data");                       // JSONB (PostgreSQL only)
 t.binary("file_data");                 // BYTEA/BLOB

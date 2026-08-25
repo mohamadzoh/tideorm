@@ -1,15 +1,32 @@
+use convert_case::{Case, Casing};
 use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{GenericArgument, Ident, PathArguments, Type};
 
 mod indexes;
 mod validation;
 
 pub(crate) use indexes::{IndexDef, parse_index_attributes};
-#[cfg(test)]
-pub(crate) use validation::extract_value;
 pub(crate) use validation::parse_validation_attributes;
+
+/// Returns the text of `ident` with any `r#` raw-identifier prefix removed.
+///
+/// Raw identifiers such as `r#type` stringify as `"r#type"`, which is neither a
+/// legal column name nor a legal input to case conversion or `Ident::new`, so
+/// every derived name must be built from the unraw form.
+pub(crate) fn unraw_ident(ident: &Ident) -> String {
+    ident.unraw().to_string()
+}
+
+/// Builds the PascalCase `Column` enum variant identifier for a model field.
+///
+/// Handles raw identifiers, so a `r#type` field yields the `Type` variant
+/// instead of panicking on the invalid identifier `R#type`.
+pub(crate) fn column_variant_ident(ident: &Ident) -> Ident {
+    format_ident!("{}", unraw_ident(ident).to_case(Case::Pascal))
+}
 
 #[derive(Debug, Clone, FromField)]
 #[darling(attributes(tideorm), forward_attrs(validate))]
@@ -121,19 +138,15 @@ impl ModelField {
             .unwrap_or(false)
     }
     pub(crate) fn column_type_expr(&self) -> TokenStream2 {
-        let ty = &self.ty;
-        let ty_str = quote!(#ty).to_string();
-        let ty_str: String = ty_str.chars().filter(|c| !c.is_whitespace()).collect();
-        let is_nullable = ty_str.starts_with("Option<");
-        let base_type = if is_nullable {
-            ty_str
-                .strip_prefix("Option<")
-                .and_then(|s| s.strip_suffix('>'))
-                .unwrap_or(&ty_str)
-        } else {
-            &ty_str
-        };
-        let base_type = canonical_schema_type(base_type);
+        let inner_ty = option_inner_type(&self.ty);
+        let is_nullable = inner_ty.is_some();
+        let base_ty = inner_ty.unwrap_or(&self.ty);
+        let base_type: String = quote!(#base_ty)
+            .to_string()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let base_type = canonical_schema_type(&base_type);
 
         let column_type = match base_type.as_str() {
             "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
@@ -236,7 +249,12 @@ fn validation_base_type(ty: &Type) -> &Type {
     }
 }
 
-fn option_inner_type(ty: &Type) -> Option<&Type> {
+/// Returns the `T` of an `Option<T>` type, honouring parenthesised, grouped and
+/// fully qualified spellings such as `std::option::Option<T>`.
+///
+/// This is the only supported nullability test: a textual `contains("Option")`
+/// check misfires on names such as `OptionalMode` or `Vec<Option<String>>`.
+pub(crate) fn option_inner_type(ty: &Type) -> Option<&Type> {
     match ty {
         Type::Group(group) => option_inner_type(&group.elem),
         Type::Paren(paren) => option_inner_type(&paren.elem),

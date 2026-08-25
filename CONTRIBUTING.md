@@ -17,20 +17,54 @@ Before contributing, please read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development Setup
 
-- Rust `1.85+` is required.
+- Both manifests declare `rust-version = "1.85"` (the Rust 2024 edition floor). Treat that as the
+  supported minimum. The `msrv` CI job installs exactly 1.85.0 and runs `cargo check --workspace`,
+  so a post-1.85 API in the library or the proc-macro crate fails the build. If you knowingly need
+  a newer API, raise `rust-version` in `Cargo.toml` and `tideorm-macros/Cargo.toml` **and** the
+  `dtolnay/rust-toolchain@1.85.0` ref in `.github/workflows/ci.yml` in the same change.
+- The MSRV covers the published crates only. The `msrv` job intentionally omits `--all-targets`, so
+  dev-dependencies (criterion, trybuild, tokio) are free to require a newer toolchain than 1.85.
+- There is deliberately **no `rust-toolchain.toml`**. It would pin every contributor's `cargo` in
+  this tree to a single toolchain: pinned to 1.85 you would lint and format with a three-year-old
+  clippy/rustfmt and drift from the `stable` CI jobs; pinned to `stable` it would not check the
+  MSRV at all. Develop on `stable` and let the `msrv` job be the gate.
 - Install dependencies with standard Rust tooling; no extra bootstrap script is required.
 - Some integration tests require local database access and environment variables loaded from `.env` through `dotenvy`.
 
-Default test database fallbacks used by the project:
+### Test database environment variables
+
+| Variable | Read by | Effect |
+| --- | --- | --- |
+| `TEST_DATABASE_URL` | PostgreSQL test helper | Checked **first**, before `POSTGRESQL_DATABASE_URL` |
+| `POSTGRESQL_DATABASE_URL` | PostgreSQL test helper, benchmarks | Fallback for tests; the only variable the benches read |
+| `MYSQL_DATABASE_URL` | MySQL test helper | Sets the URL **and enables** the MySQL suites |
+| `RUN_MYSQL_TESTS` | MySQL test helper | Enables the MySQL suites on their own |
+| `SQLITE_DATABASE_URL` | SQLite test helper | SQLite URL |
+| `SKIP_SQLITE_TESTS` | SQLite test helper | Skips the SQLite integration and entity-manager suites |
+| `SKIP_POSTGRES_TESTS` | `postgres_entity_manager_tests` only | Does **not** gate `postgres_integration_tests` or `postgres_advanced_tests` |
+
+Default fallbacks when nothing is set:
 
 - PostgreSQL: `postgres://postgres:postgres@localhost:5432/test_tide_orm`
+- MySQL: `mysql://root:@localhost:3306/test_tide_orm`
 - SQLite: `sqlite://./test_tide_orm.db?mode=rwc`
 
-Supported skip flags:
+Gate semantics differ per backend, so read them literally:
 
-- `SKIP_SQLITE_TESTS`
-- `SKIP_MYSQL_TESTS`
-- `SKIP_POSTGRES_TESTS`
+- **SQLite** is opt-**out** via `SKIP_SQLITE_TESTS`.
+- **MySQL** is opt-**in**: the suites run only when `RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL` is set.
+  There is **no `SKIP_MYSQL_TESTS`** — no code reads it. Because setting `MYSQL_DATABASE_URL` in your
+  `.env` is itself the opt-in, the way to turn MySQL tests off is to unset it.
+- **PostgreSQL** is always on. `postgres_integration_tests` and `postgres_advanced_tests` connect
+  unconditionally and hard-fail without a server; only `postgres_entity_manager_tests` honours
+  `SKIP_POSTGRES_TESTS`.
+
+**Run the backend suites one at a time.** They create and drop fixed-name tables in a shared
+database and take no isolation between runs, so two of them against the same server will interfere
+and fail in ways that look like real defects. `.cargo/config.toml` already pins
+`RUST_TEST_THREADS=1`, which serializes tests *within* a target but does nothing across separate
+`cargo test --test ..` invocations. This matters for CI: adding a `services:` block does not make
+these suites safe to run as parallel jobs against one database instance.
 
 ## Project Layout
 
@@ -96,20 +130,42 @@ mdbook build
 
 ## Benchmarking
 
-If you are working on a performance change, benchmark the smallest relevant target instead of running the full bench set first.
+A bare `cargo bench` is not a usable entry point. Always benchmark a single target.
 
-Common commands:
+Benches that need **no database** — safe on any machine:
+
+```bash
+cargo bench --bench validation_benchmarks
+cargo bench --bench stability_benchmarks
+cargo bench --bench relations_benchmarks
+cargo bench --bench tokenization_benchmarks
+cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
+cargo bench --bench fulltext_benchmarks --features fulltext
+```
+
+Benches that open a **SQLite** connection (they carry `required-features = ["sqlite", "runtime-tokio"]`,
+so they are skipped rather than panicking under the default feature set):
+
+```bash
+cargo bench --bench cache_benchmarks --features sqlite
+```
+
+Benches that need a **live PostgreSQL server**. They call `.expect()` on connect and abort the run if
+one is not reachable, so start a server first:
 
 ```bash
 cargo bench --bench query_benchmarks
 cargo bench --bench crud_benchmarks
 cargo bench --bench or_clause_benchmarks
-cargo bench --bench attachments_translations_benchmarks --features "attachments translations"
-cargo bench --bench fulltext_benchmarks --features fulltext
-cargo bench --no-run --features "attachments translations fulltext"
 ```
 
-The PostgreSQL-backed benches use `POSTGRESQL_DATABASE_URL` and fall back to `postgres://postgres:postgres@localhost:5432/test_tide_orm` when it is unset.
+The PostgreSQL-backed benches read `POSTGRESQL_DATABASE_URL` only (not `TEST_DATABASE_URL`) and fall back to `postgres://postgres:postgres@localhost:5432/test_tide_orm` when it is unset.
+
+To type-check every bench without running any of them:
+
+```bash
+cargo bench --no-run --features "sqlite attachments translations fulltext"
+```
 
 For the full benchmark matrix and Criterion baseline workflow, see [docs/benchmarking.md](docs/benchmarking.md).
 

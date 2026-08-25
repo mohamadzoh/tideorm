@@ -2,6 +2,11 @@ use super::*;
 
 use std::collections::HashSet;
 
+use crate::meta_support::{auto_timestamp_value, is_optional_type};
+
+// Re-exported so `context.rs` keeps resolving `has_timestamp_pair` through `helpers::*`.
+pub(super) use crate::meta_support::has_timestamp_pair;
+
 pub(super) fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
     value.map(|value| {
         value
@@ -12,6 +17,7 @@ pub(super) fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
 }
 
 pub(super) fn validate_primary_key_fields(
+    struct_ident: &Ident,
     fields: &[ModelField],
     tokenize_enabled: bool,
 ) -> syn::Result<()> {
@@ -19,18 +25,23 @@ pub(super) fn validate_primary_key_fields(
         fields.iter().filter(|field| field.primary_key).collect();
 
     if primary_key_fields.is_empty() {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
+        // Nothing more specific to point at: the offending thing is the *absence*
+        // of an attribute, so the struct name is the tightest honest span.
+        return Err(syn::Error::new_spanned(
+            struct_ident,
             "TideORM models require exactly one #[tideorm(primary_key)] field",
         ));
     }
 
     if primary_key_fields.len() > 1 {
         if tokenize_enabled {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "#[tideorm(tokenize)] requires exactly one #[tideorm(primary_key)] field",
-            ));
+            // Point at the second primary key — the one that makes the set ambiguous —
+            // falling back to the struct for a tuple struct with no field ident.
+            let message = "#[tideorm(tokenize)] requires exactly one #[tideorm(primary_key)] field";
+            return Err(match primary_key_fields[1].ident.as_ref() {
+                Some(ident) => syn::Error::new_spanned(ident, message),
+                None => syn::Error::new_spanned(struct_ident, message),
+            });
         }
 
         if primary_key_fields.iter().any(|field| field.auto_increment) {
@@ -141,6 +152,7 @@ pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()>
 }
 
 pub(super) fn resolve_encrypted_fields<'a>(
+    struct_ident: &Ident,
     fields: &'a [ModelField],
     requested: &[String],
 ) -> syn::Result<Vec<&'a ModelField>> {
@@ -158,8 +170,10 @@ pub(super) fn resolve_encrypted_fields<'a>(
                 ident == requested_name || BuildContext::column_name(field) == *requested_name
             })
             .ok_or_else(|| {
-                syn::Error::new(
-                    proc_macro2::Span::call_site(),
+                // The name comes from an attribute string, so there is no token of its
+                // own to span; the struct is the closest real location.
+                syn::Error::new_spanned(
+                    struct_ident,
                     format!(
                         "#[tideorm(encrypted = ...)] references unknown field or column '{}'",
                         requested_name
@@ -234,21 +248,6 @@ fn matches_string_like_type(ty: &str) -> bool {
         || ty.ends_with("::Text")
 }
 
-pub(super) fn has_timestamp_pair(fields: &[ModelField]) -> bool {
-    let has_created_at = fields
-        .iter()
-        .any(|field| matches_timestamp_field(field, "created_at"));
-    let has_updated_at = fields
-        .iter()
-        .any(|field| matches_timestamp_field(field, "updated_at"));
-    has_created_at && has_updated_at
-}
-
-fn matches_timestamp_field(field: &ModelField, expected: &str) -> bool {
-    field.ident.as_ref().is_some_and(|ident| ident == expected)
-        || BuildContext::column_name(field) == expected
-}
-
 pub(super) fn build_sync_column_attrs(fields: &[ModelField]) -> Vec<TokenStream2> {
     fields
         .iter()
@@ -260,9 +259,7 @@ pub(super) fn build_sync_column_attrs(fields: &[ModelField]) -> Vec<TokenStream2
             if field.auto_increment {
                 attrs.push(quote!(col = col.auto_increment();));
             }
-            let ty = &field.ty;
-            let ty_str = quote!(#ty).to_string();
-            if !field.nullable && !ty_str.contains("Option") {
+            if !field.nullable && !is_optional_type(&field.ty) {
                 attrs.push(quote!(col = col.not_null();));
             }
             if let Some(default) = &field.default {
@@ -273,6 +270,14 @@ pub(super) fn build_sync_column_attrs(fields: &[ModelField]) -> Vec<TokenStream2
         .collect()
 }
 
+/// Insert setters that write every field straight through, in plaintext.
+///
+/// These are encryption-blind on purpose, and reaching them with an encrypted model
+/// would persist plaintext. Nothing does: `generate_internal_model_impl` only uses
+/// `BuildContext::insert_active_model_setters` when `encrypted_fields` is empty, and
+/// routes encrypted models to `build_unencrypted_insert_active_model_setters`
+/// (columns left `NotSet`) or `build_try_insert_active_model_setters` (columns
+/// encrypted). Keep that guard if this list ever gains another consumer.
 pub(super) fn build_insert_active_model_setters(fields: &[ModelField]) -> Vec<TokenStream2> {
     fields
         .iter()
@@ -280,10 +285,8 @@ pub(super) fn build_insert_active_model_setters(fields: &[ModelField]) -> Vec<To
         .map(|(field, ident)| {
             if field.primary_key && field.auto_increment {
                 quote!(#ident: ActiveValue::NotSet)
-            } else if matches_timestamp_field(field, "created_at")
-                || matches_timestamp_field(field, "updated_at")
-            {
-                quote!(#ident: ActiveValue::Set(::tideorm::chrono::Utc::now()))
+            } else if let Some(value) = auto_timestamp_value(field) {
+                quote!(#ident: ActiveValue::Set(#value))
             } else {
                 quote!(#ident: ActiveValue::Set(self.#ident))
             }

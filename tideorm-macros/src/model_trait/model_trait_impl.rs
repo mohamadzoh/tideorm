@@ -78,6 +78,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
                 use ::tideorm::database::Connection;
                 use ::tideorm::orm::{EntityTrait, QueryFilter};
+                use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
                 let error_context = Self::__primary_key_error_context(&id)
                     .query(format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
                 let dirty_tracking_id = if ::tideorm::model::__dirty_tracking_enabled() {
@@ -85,6 +86,13 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 } else {
                     None
                 };
+                // Load the row first so `destroy(id)` runs the same delete callbacks as
+                // `delete(self)`; a `before_delete` guard must hold on both entry points.
+                let model = match <Self as ::tideorm::model::Model>::find(id.clone()).await? {
+                    Some(model) => model,
+                    None => return Ok(0),
+                };
+                (&model).run_before_delete()?;
                 let result = ::tideorm::profiling::__profile_future(async move {
                     let connection = ::tideorm::database::__current_connection()
                         .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
@@ -112,6 +120,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                         let _ = ::tideorm::model::__forget_dirty_snapshot_by_pk::<Self>(dirty_tracking_id);
                     }
                 }
+                (&model).run_after_delete()?;
                 Ok(result.rows_affected)
             }
 
@@ -188,11 +197,14 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     Self::create(self).await
                 } else {
                     let primary_key = self.primary_key();
+                    // The row-presence probe below is deliberately `find`, not the
+                    // soft-delete scoped `exists`: saving over a trashed natural-key row
+                    // must still UPDATE instead of INSERTing into a conflict.
                     if <Self as ::tideorm::model::ModelMeta>::primary_key_auto_increment()
                         && <Self as ::tideorm::model::ModelMeta>::primary_key_names().len() == 1
                     {
                         self.update().await
-                    } else if Self::exists(primary_key).await? {
+                    } else if <Self as ::tideorm::model::Model>::find(primary_key).await?.is_some() {
                         self.update().await
                     } else {
                         Self::create(self).await

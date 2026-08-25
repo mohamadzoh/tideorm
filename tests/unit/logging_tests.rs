@@ -83,6 +83,49 @@ fn test_query_timer() {
 }
 
 #[test]
+fn test_logger_records_duration_and_failure_from_a_finished_timer() {
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    QueryLogger::disable();
+
+    QueryLogger::global()
+        .set_level(LogLevel::Error)
+        .set_slow_query_threshold_ms(1)
+        .set_history_limit(10)
+        .enable();
+
+    let timer = QueryTimer::start("SELECT * FROM users").with_table("users");
+    std::thread::sleep(Duration::from_millis(5));
+    QueryLogger::log(timer.finish_with_error("connection reset"));
+
+    let history = QueryLogger::history();
+    assert_eq!(history.len(), 1);
+    assert!(
+        !history[0].success,
+        "a failed query must be recorded as failed"
+    );
+    assert!(
+        history[0].duration.is_some(),
+        "a finished query must carry its measured duration"
+    );
+
+    let stats = QueryLogger::stats();
+    assert!(stats.total_time_ms >= 5);
+    assert_eq!(stats.slow_queries, 1);
+    assert_eq!(QueryLogger::slow_queries().len(), 1);
+
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    // `QueryLoggerBuilder::disable` applies none of the builder settings, so the
+    // threshold has to be restored through `enable()` before switching off.
+    QueryLogger::global()
+        .set_slow_query_threshold_ms(100)
+        .set_history_limit(100)
+        .enable();
+    QueryLogger::disable();
+}
+
+#[test]
 fn test_query_history_limit_drops_oldest_entries() {
     QueryLogger::clear_history();
     QueryLogger::reset_stats();

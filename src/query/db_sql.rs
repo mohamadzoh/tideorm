@@ -351,6 +351,11 @@ pub(crate) use sql_safety::{
 
 /// Format a trusted column/expression slot for rendering paths that intentionally
 /// allow raw SQL expressions after higher-level validation.
+///
+/// Anything that is not a plain identifier reference is emitted verbatim, so a
+/// caller must have validated it first. ORDER BY and GROUP BY no longer reach
+/// here with unvalidated text: `QueryBuilder` restricts those slots to a
+/// resolvable column and routes real expressions through `order_by_raw()`.
 pub(crate) fn format_column_or_trusted_expression(
     db_type: DatabaseType,
     column_or_expression: &str,

@@ -1,3 +1,14 @@
+//! The three key-to-key relation wrappers: [`HasOne`], [`HasMany`] and
+//! [`BelongsTo`].
+//!
+//! These are what an ordinary model declares. Each is stored as a struct field,
+//! rebuilt from the model's own columns by the derive-generated
+//! `with_relations()`, and loaded on demand. They differ from the wrappers in
+//! the sibling modules in one behavioural way worth knowing: whenever a database
+//! connection is reachable, `load()` re-queries rather than serving whatever is
+//! cached, so a deserialized JSON payload can never pass itself off as database
+//! state.
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
 #[cfg(feature = "entity-manager")]

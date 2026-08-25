@@ -172,7 +172,39 @@ impl TranslationsData {
 
 /// Trait for models with translations
 ///
-/// This trait is usually macro-generated from translation configuration.
+/// **The derive generates this impl.** `#[tideorm(translatable = ...)]`
+/// populates `ModelMeta` *and* emits a `HasTranslations` impl, so
+/// `set_translation()` and `get_translated()` are available on the model as soon
+/// as the attribute is declared:
+///
+/// ```ignore
+/// #[tideorm::model(table = "products", translatable = "name")]
+/// pub struct Product {
+///     #[tideorm(primary_key, auto_increment)]
+///     pub id: i64,
+///     pub name: String,
+///     pub translations: Option<Json>,
+/// }
+///
+/// product.set_translation("name", "fr", "Nom du produit")?;
+/// ```
+///
+/// **You implement this yourself** — the derive does not generate it. Declaring
+/// `translatable` populates [`ModelMeta`](crate::model::ModelMeta) so the field
+/// names are queryable, but the read/write half needs a body only you can supply:
+/// it has to know which column holds the payload. Store it in a JSON column
+/// (`translations: Option<Json>` by convention) and forward
+/// `get_translations_data` / `set_translations_data` to it.
+///
+/// Implement this by hand on the model that owns the translations column. The
+/// derive does **not** generate it: doing so would collide with `ModelMeta`,
+/// which declares `translatable_fields`, `allowed_languages` and
+/// `fallback_language` under the same names, and would also conflict with any
+/// impl written by hand on a `#[tideorm::model]` struct.
+///
+/// Declaring the three metadata methods here rather than borrowing `ModelMeta`'s
+/// is deliberate: it lets a plain struct implement the trait with its own,
+/// deterministic language policy instead of reading process-global config.
 pub trait HasTranslations {
     /// Get the list of translatable field names
     fn translatable_fields() -> Vec<&'static str>;

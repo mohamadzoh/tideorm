@@ -263,7 +263,13 @@ impl Seeder {
     }
 
     /// Reset all seeds (rollback all)
+    ///
+    /// The tracking table is created first, so a reset on a fresh database
+    /// returns an empty result instead of failing on a missing `_seeds` table -
+    /// which is what makes "reset then run" usable as a bootstrap.
     pub async fn reset(&self) -> Result<SeedResult> {
+        self.ensure_seeds_table().await?;
+
         let executed = self.get_executed_seeds().await?;
         self.rollback_steps(executed.len()).await
     }

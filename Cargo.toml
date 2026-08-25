@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.9.19"
+version = "0.10.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -10,8 +10,37 @@ homepage = "https://tideorm.com"
 keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
+# Declared MSRV. It is the edition-2024 floor and is what downstream resolvers
+# see. The `msrv` job in .github/workflows/ci.yml pins this exact toolchain and
+# runs `cargo check`, so a post-1.85 API cannot land unnoticed. Raising this
+# means raising it in tideorm-macros/Cargo.toml and in the CI job's
+# `dtolnay/rust-toolchain@` ref in the same change.
 rust-version = "1.85"
-exclude = [".cargo/**", ".github/**", ".env.example", "book.toml", "docs/CNAME", "tests/**"]
+# `tests/unit/**` and `tests/support/**` are `#[path]`-included into `src/`, so a
+# blanket `tests/**` exclusion makes `cargo test --lib` fail inside an extracted
+# `.crate`. Keep those two trees and drop only the standalone integration
+# targets, which need live databases and cannot run from a published tarball.
+exclude = [
+    ".cargo/**",
+    ".github/**",
+    ".env.example",
+    "book.toml",
+    "docs/CNAME",
+    "tests/*.rs",
+    "tests/edge_case/**",
+    "tests/entity_manager_tests/**",
+    "tests/mysql_integration_tests/**",
+    "tests/or_clause/**",
+    "tests/postgres_advanced_tests/**",
+    "tests/postgres_integration_tests/**",
+    "tests/query_builder_tests/**",
+    "tests/seaorm2_features_tests/**",
+    "tests/sqlite_ci_smoke_test/**",
+    "tests/sqlite_integration_tests/**",
+    "tests/tokenization_tests/**",
+    "tests/ui/**",
+    "tests/public_api_tests/**",
+]
 
 [workspace]
 members = [".", "tideorm-macros"]
@@ -34,7 +63,12 @@ dirty-tracking = []
 encrypted-fields = []
 
 [dependencies]
-sea-orm = { version = "2.0.0-rc.38", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
+# Pinned exactly, not as a caret range. `src/orm.rs` re-exports all of sea-orm
+# and macro-generated models resolve `sea_orm::` paths through it, so a resolver
+# bump to a later 2.0.0 release candidate (or to final 2.0.0) surfaces as errors
+# inside macro expansion in downstream crates. Relax this to a caret range only
+# once sea-orm 2.0.0 is stable and the generated-entity surface is verified.
+sea-orm = { version = "=2.0.0-rc.38", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
 
 # Async runtime
 async-trait = "0.1.89"
@@ -52,7 +86,7 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.9.19", path = "tideorm-macros" }
+tideorm-macros = { version = "0.10.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
@@ -70,14 +104,19 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
 trybuild = "1.0.112"
 
-# Benchmarks run with: cargo bench
+# Benchmarks. A bare `cargo bench` is not meaningful: the targets below carry
+# `required-features` for the driver they actually open a connection with, and
+# the PostgreSQL-backed ones additionally need a live server. Run them
+# individually - see CONTRIBUTING.md and docs/benchmarking.md.
 [[bench]]
 name = "crud_benchmarks"
 harness = false
+required-features = ["postgres", "runtime-tokio"]
 
 [[bench]]
 name = "query_benchmarks"
 harness = false
+required-features = ["postgres", "runtime-tokio"]
 
 [[bench]]
 name = "attachments_translations_benchmarks"
@@ -87,6 +126,7 @@ required-features = ["attachments", "translations"]
 [[bench]]
 name = "cache_benchmarks"
 harness = false
+required-features = ["sqlite", "runtime-tokio"]
 
 [[bench]]
 name = "stability_benchmarks"
@@ -108,6 +148,7 @@ harness = false
 [[bench]]
 name = "or_clause_benchmarks"
 harness = false
+required-features = ["postgres", "runtime-tokio"]
 
 [[bench]]
 name = "tokenization_benchmarks"
@@ -137,3 +178,26 @@ required-features = ["postgres", "runtime-tokio"]
 name = "mysql_integration_tests"
 path = "tests/mysql_integration_tests.rs"
 required-features = ["mysql", "runtime-tokio"]
+
+# The entity-manager suites carry an inner `#![cfg(...)]`. Without these
+# stanzas cargo always builds them and they report a green "0 passed" instead
+# of being skipped; `required-features` makes the skip visible.
+[[test]]
+name = "entity_manager_tests"
+path = "tests/entity_manager_tests.rs"
+required-features = ["entity-manager"]
+
+[[test]]
+name = "postgres_entity_manager_tests"
+path = "tests/postgres_entity_manager_tests.rs"
+required-features = ["postgres", "runtime-tokio", "entity-manager"]
+
+[[test]]
+name = "sqlite_entity_manager_tests"
+path = "tests/sqlite_entity_manager_tests.rs"
+required-features = ["sqlite", "runtime-tokio", "entity-manager"]
+
+[[test]]
+name = "mysql_entity_manager_tests"
+path = "tests/mysql_entity_manager_tests.rs"
+required-features = ["mysql", "runtime-tokio", "entity-manager"]

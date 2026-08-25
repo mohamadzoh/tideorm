@@ -132,6 +132,21 @@ let users = User::eager()
 
 Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
 
+#### Hidden Attributes in Eager-Loaded Payloads
+
+`to_json()` serializes a cached relation inline, and each payload is filtered by **the target model's** `hidden` list, at any nesting depth. A `User` that declares `hidden = "password_hash"` keeps it out of `post.to_json(None)` even though the hidden list belongs to `User` and the call was made on `Post`:
+
+```rust
+#[tideorm::model(table = "users", hidden = "password_hash")]
+pub struct User { /* ... */ }
+
+let post = Post::query().with("author").first().await?.unwrap();
+// {"id": 1, "title": "…", "author": {"id": 7, "email": "…"}}  — no password_hash
+let body = post.to_json(None);
+```
+
+The owning model's `hidden` list is *not* applied to a relation payload, so a column that one model hides and another does not keeps its value inside the payload that does not hide it. Two payload kinds still fall back to the owning model's list because their type is not known statically: attachment blobs, and `MorphTo` relations.
+
 ### Loading with Constraints
 
 ```rust
@@ -261,7 +276,7 @@ tideorm = { version = "0.9.19", features = ["postgres", "attachments"] }
 
 ```rust
 #[tideorm::model(table = "products")]
-#[tideorm(has_one_file = "thumbnail")]
+#[tideorm(has_one_files = "thumbnail")]
 #[tideorm(has_many_files = "images,documents")]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
@@ -271,11 +286,19 @@ pub struct Product {
 }
 ```
 
+The `files` column is **required**. The derive generates the `HasAttachments` impl
+against it, so declaring `has_one_files` or `has_many_files` without a `files`
+field is a compile error naming the missing column. Nothing else has to be
+written by hand — `attach()`, `detach()` and `sync()` are available on `Product`
+as soon as the attribute is declared, provided the `attachments` feature is
+enabled and `tideorm::prelude::*` (or `tideorm::attachments::HasAttachments`) is
+in scope.
+
 ### Relation Types
 
 | Type | Description | Use Case |
 |------|-------------|----------|
-| `has_one_file` | Single file attachment | Avatar, thumbnail, profile picture |
+| `has_one_files` | Single file attachment | Avatar, thumbnail, profile picture |
 | `has_many_files` | Multiple file attachments | Gallery images, documents, media |
 
 ### Attaching Files
@@ -505,33 +528,33 @@ TideConfig::init()
   - `mime_type` - MIME type (if available)
   - `metadata` - Custom HashMap for additional data
 
-#### Model-Specific URL Generator
+#### Per-Model URL Routing
 
-Override the URL generator for specific models:
+There is no per-model override: the derive already emits the whole `ModelMeta`
+impl for a `#[tideorm::model]` struct, so a second hand-written
+`impl ModelMeta for Product` is a conflicting-implementation error. Every model
+resolves `file_url_generator()` to the one configured on `TideConfig`.
+
+Route per model inside that single generator instead — it receives the field
+name, and `FileAttachment::metadata` carries anything else you stashed at attach
+time:
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(has_one_file = "thumbnail")]
-pub struct Product {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub name: String,
-    pub files: Option<Json>,
-}
+use tideorm::attachments::FileAttachment;
 
-impl ModelMeta for Product {
-    // ... other required methods ...
-    
-    fn file_url_generator() -> FileUrlGenerator {
-        |field_name, file| {
-            match field_name {
-                "thumbnail" => format!("https://products-cdn.example.com/thumb/{}", file.key),
-                "gallery" => format!("https://products-cdn.example.com/gallery/{}", file.key),
-                _ => format!("https://products-cdn.example.com/assets/{}", file.key),
-            }
-        }
+fn product_aware_url_generator(field_name: &str, file: &FileAttachment) -> String {
+    match field_name {
+        "thumbnail" => format!("https://products-cdn.example.com/thumb/{}", file.key),
+        "gallery" => format!("https://products-cdn.example.com/gallery/{}", file.key),
+        _ => format!("https://products-cdn.example.com/assets/{}", file.key),
     }
 }
+
+TideConfig::init()
+    .database("postgres://localhost/mydb")
+    .file_url_generator(product_aware_url_generator)
+    .connect()
+    .await?;
 ```
 
 #### Manual URL Generation
@@ -611,6 +634,15 @@ pub struct Product {
     pub translations: Option<Json>,
 }
 ```
+
+The `translations` column is **required**. The derive generates the
+`HasTranslations` impl against it, so declaring `translatable` without a
+`translations` field is a compile error naming the missing column. Nothing else
+has to be written by hand — `set_translation()` and `get_translated()` are
+available on `Product` as soon as the attribute is declared, provided the
+`translations` feature is enabled and `tideorm::prelude::*` (or
+`tideorm::translations::HasTranslations`) is in scope. The fallback value behind
+`get_translated()` is read from the model's own field of the same name.
 
 ### Setting Translations
 
@@ -779,7 +811,7 @@ Models can use both features together:
 ```rust
 #[tideorm::model(table = "products")]
 #[tideorm(translatable = "name,description")]
-#[tideorm(has_one_file = "thumbnail")]
+#[tideorm(has_one_files = "thumbnail")]
 #[tideorm(has_many_files = "images")]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]

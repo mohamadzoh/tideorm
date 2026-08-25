@@ -1,7 +1,7 @@
 use super::*;
 
 impl EntityManager {
-    pub async fn snapshot<T: 'static>(
+    pub fn snapshot<T: 'static>(
         &self,
         owner_table: &'static str,
         owner_key: &str,
@@ -18,7 +18,7 @@ impl EntityManager {
         snapshots.insert(key, ids.iter().cloned().collect());
     }
 
-    pub async fn deletions<T: 'static>(
+    pub fn deletions<T: 'static>(
         &self,
         owner_table: &'static str,
         owner_key: &str,
@@ -45,7 +45,7 @@ impl EntityManager {
     }
 
     #[doc(hidden)]
-    pub async fn additions<T: 'static>(
+    pub fn additions<T: 'static>(
         &self,
         owner_table: &'static str,
         owner_key: &str,
@@ -60,6 +60,16 @@ impl EntityManager {
         );
         let current: HashSet<_> = current_ids.iter().cloned().collect();
         let snapshots = self.snapshots.read();
+        // No snapshot means no baseline, and that is NOT symmetric with `deletions`:
+        // nothing can have been removed from a set that was never recorded, but
+        // everything currently present is new. Returning empty here loses the
+        // associations permanently — the flush arm attaches `additions()` and then
+        // calls `snapshot()` with the current keys, so the next flush sees them as
+        // already recorded and never inserts the pivot rows.
+        //
+        // Reporting everything used to duplicate pivot rows on a re-flush. It no
+        // longer can: `HasManyThrough::attach` checks for the row first and is a
+        // no-op when the pair is already attached.
         let Some(previous) = snapshots.get(&key) else {
             return current.into_iter().collect();
         };

@@ -26,8 +26,12 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(format!("invalid subquery for with_query(): {}", err));
         }
 
-        self.ctes
-            .push(CTE::new(name, query.build_base_select_sql()));
+        // The body is spliced into the outer statement and executed, so it goes
+        // through the parameterized renderer instead of the debug preview
+        // renderer: its values stay bound parameters rather than inline literals.
+        let db_type = self.db_type_for_sql();
+        let (query_sql, params) = query.build_base_select_sql_with_params_for_db(db_type);
+        self.ctes.push(CTE::with_params(name, query_sql, params));
         self
     }
 

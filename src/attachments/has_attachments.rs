@@ -2,7 +2,38 @@ use super::{AttachmentError, FileAttachment, FilesData};
 
 /// Trait for models with file attachments
 ///
-/// This trait is usually macro-generated from file attachment configuration.
+/// **The derive generates this impl.** `#[tideorm(has_one_files = ...)]` or
+/// `#[tideorm(has_many_files = ...)]` populate `ModelMeta` *and* emit a
+/// `HasAttachments` impl, so `attach()`, `detach()` and `sync()` are available
+/// on the model as soon as the attribute is declared:
+///
+/// ```ignore
+/// #[tideorm::model(table = "products", has_one_files = "thumbnail")]
+/// pub struct Product {
+///     #[tideorm(primary_key, auto_increment)]
+///     pub id: i64,
+///     pub files: Option<Json>,
+/// }
+///
+/// product.attach("thumbnail", "uploads/thumb.jpg")?;
+/// ```
+///
+/// **You implement this yourself** — the derive does not generate it. Declaring
+/// `has_one_files` / `has_many_files` populates [`ModelMeta`](crate::model::ModelMeta)
+/// so the field names are queryable, but the read/write half needs a body only you
+/// can supply: it has to know which column holds the payload. Store it in a JSON
+/// column (`files: Option<Json>` by convention) and forward
+/// `get_files_data` / `set_files_data` to it.
+///
+/// Generating the impl was tried and reverted: it forces a column-naming
+/// convention the attribute never promised, and it conflicts with every impl
+/// already written by hand on a model.
+///
+/// # Trust boundary
+///
+/// File keys are stored exactly as given. See [`FileAttachment`] for what
+/// TideORM does and does not check, and screen untrusted keys with
+/// [`FileAttachment::is_safe_key`] before calling `attach()`.
 pub trait HasAttachments {
     /// Get the list of hasOne file relations
     fn has_one_files() -> Vec<&'static str>;
@@ -37,6 +68,9 @@ pub trait HasAttachments {
     ///
     /// For `hasOne` relations this replaces the previous attachment. For
     /// `hasMany` relations it appends another entry.
+    ///
+    /// The relation name is validated; `file_key` is not. Screen untrusted keys
+    /// with [`FileAttachment::is_safe_key`] first.
     fn attach(&mut self, relation: &str, file_key: &str) -> Result<(), AttachmentError> {
         self.attach_with_metadata(relation, FileAttachment::new(file_key))
     }

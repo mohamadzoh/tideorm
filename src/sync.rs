@@ -38,6 +38,10 @@
 //! - Creates enums (PostgreSQL)
 //! - **Does NOT drop existing tables or columns**
 //!
+//! A model's `#[tideorm(schema = "...")]` qualifies every statement sync issues
+//! on PostgreSQL, so the schema has to exist before sync runs. MySQL and SQLite
+//! ignore it: their "schema" is the connected database.
+//!
 //! ### Force Sync (`force_sync(true)`)
 //!
 //! - For registered entities: uses `apply` mode and fails if tables already exist

@@ -462,14 +462,12 @@ async fn rollback_entity_manager_state_restores_managed_entries_and_checkpoints(
         id: 84,
         name: "Orphan".to_string(),
     })?;
-    entity_manager
-        .snapshot::<EntityManagerModTestUser>(
-            "entity_manager_mod_test_users",
-            "42",
-            "posts",
-            &["84".to_string()],
-        )
-        .await;
+    entity_manager.snapshot::<EntityManagerModTestUser>(
+        "entity_manager_mod_test_users",
+        "42",
+        "posts",
+        &["84".to_string()],
+    );
 
     let identity_rollback = save::new_identity_rollback_log();
     save::rollback_entity_manager_state(
@@ -548,4 +546,113 @@ async fn flush_collects_checkpoints_for_entries_added_during_flush() {
     assert_eq!(parent_rollback_count.load(Ordering::SeqCst), 1);
     assert_eq!(child_rollback_count.load(Ordering::SeqCst), 1);
     assert_eq!(grandchild_rollback_count.load(Ordering::SeqCst), 1);
+}
+
+struct OrderRecordingManagedEntry {
+    state: EntityState,
+    label: &'static str,
+    order: Arc<parking_lot::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl managed::ManagedOps for OrderRecordingManagedEntry {
+    fn current_state(&self) -> EntityState {
+        self.state
+    }
+
+    fn detach_from_context(&self, _entity_manager: &EntityManager) {}
+
+    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
+        Box::new(NoopCheckpoint)
+    }
+
+    async fn flush(
+        self: Arc<Self>,
+        _entity_manager: &Arc<EntityManager>,
+    ) -> crate::error::Result<()> {
+        self.order.lock().push(self.label);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn flush_runs_inserts_then_updates_then_deletes() -> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+    let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    for (state, label) in [
+        (EntityState::Removed, "delete-1"),
+        (EntityState::Managed, "update-1"),
+        (EntityState::New, "insert-1"),
+        (EntityState::Removed, "delete-2"),
+        (EntityState::New, "insert-2"),
+        (EntityState::Managed, "update-2"),
+    ] {
+        let entry: Arc<dyn managed::ManagedOps> = Arc::new(OrderRecordingManagedEntry {
+            state,
+            label,
+            order: order.clone(),
+        });
+        entity_manager.managed_entries.write().push(entry);
+    }
+
+    entity_manager.flush_in_scope().await?;
+
+    assert_eq!(
+        *order.lock(),
+        vec![
+            "insert-1", "insert-2", "update-1", "update-2", "delete-1", "delete-2"
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn transaction_scope_is_restored_when_a_polled_future_panics() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    struct PanickingFuture {
+        scope_seen: Arc<AtomicBool>,
+    }
+
+    impl Future for PanickingFuture {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            self.scope_seen.store(
+                save::in_entity_manager_transaction_scope(),
+                Ordering::SeqCst,
+            );
+            panic!("flush failed inside the entity manager transaction scope");
+        }
+    }
+
+    let scope_seen = Arc::new(AtomicBool::new(false));
+    let mut future = Box::pin(save::with_entity_manager_transaction_scope(
+        save::new_identity_rollback_log(),
+        PanickingFuture {
+            scope_seen: scope_seen.clone(),
+        },
+    ));
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    // Tests run single-threaded, so replacing the hook only silences the
+    // deliberate panic below.
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = future.as_mut().poll(&mut context);
+    }));
+    std::panic::set_hook(previous_hook);
+
+    assert!(polled.is_err());
+    assert!(scope_seen.load(Ordering::SeqCst));
+    assert!(
+        !save::in_entity_manager_transaction_scope(),
+        "a panic must not leave the transaction scope pinned on this worker thread"
+    );
 }

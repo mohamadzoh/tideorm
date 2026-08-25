@@ -2,13 +2,22 @@
 
 use async_trait::async_trait;
 
-use crate::callbacks::{
-    AfterCreateDispatch, AfterUpdateDispatch, BeforeCreateDispatch, BeforeUpdateDispatch,
-};
 use crate::error::{Error, Result};
-use crate::internal::{EntityTrait, InternalModel, IntoActiveModel, OnConflict, translate_error};
+use crate::internal::{EntityTrait, InternalModel, IntoActiveModel};
 
 use super::Model;
+
+// Nested saves must never dispatch lifecycle callbacks themselves.
+//
+// `Callbacks` is optional, so callback dispatch is resolved by autoref
+// specialization (see `crate::callbacks`), and that only works at concrete call
+// sites. Inside the generic helpers below the compiler type-checks once with
+// `R` opaque, `R: Callbacks` is unprovable, and the no-op fallback is selected
+// for every instantiation — including models that do implement `Callbacks`.
+//
+// Every write below therefore goes through `Model::create`, `Model::update`,
+// `Model::save`, or `Model::delete`, which the derive emits as concrete impls
+// where the specialization resolves against the real model type.
 
 #[async_trait]
 trait OneRelationSaveOp: Send {
@@ -139,130 +148,60 @@ fn require_scalar_primary_key<M: Model>(
     Ok(value)
 }
 
+/// Resolve a caller-supplied foreign-key name to the related model's Rust field
+/// name, which is the key its serde impl uses.
+///
+/// Every other TideORM API accepts either the DB column name or the Rust field
+/// name, so nested saves accept both too. An unresolvable name is a hard error:
+/// writing it into the serialized model used to land in serde's `__ignore`
+/// bucket, leaving the children with whatever foreign key they already carried
+/// (usually `0`) and reporting success.
+fn resolve_foreign_key_field<R: Model>(foreign_key: &str) -> Result<&'static str> {
+    R::field_names()
+        .iter()
+        .copied()
+        .zip(R::column_names().iter().copied())
+        .find_map(|(field_name, column_name)| {
+            (field_name == foreign_key || column_name == foreign_key).then_some(field_name)
+        })
+        .ok_or_else(|| {
+            Error::invalid_query(format!(
+                "Unknown foreign key '{}' for {}; expected one of: {}",
+                foreign_key,
+                R::table_name(),
+                R::field_names().join(", ")
+            ))
+        })
+}
+
 fn apply_foreign_key<R: Model>(
     related: R,
     foreign_key: &str,
     parent_pk_value: &serde_json::Value,
 ) -> Result<R> {
+    let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
+
     let mut related_json = serde_json::to_value(&related)
         .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))?;
 
-    if let serde_json::Value::Object(ref mut map) = related_json {
-        let pk_str = parent_pk_value.as_str().unwrap_or_default();
-        if let Ok(pk_i64) = pk_str.parse::<i64>() {
-            map.insert(foreign_key.to_string(), serde_json::json!(pk_i64));
-        } else {
+    match related_json {
+        // The parent key is written through verbatim. Coercing a numeric-looking
+        // string key ("00420") into an integer silently rewrote the child's
+        // foreign key, and the resulting deserialize failure surfaced only after
+        // the parent row had already been written.
+        serde_json::Value::Object(ref mut map) => {
             map.insert(foreign_key.to_string(), parent_pk_value.clone());
+        }
+        _ => {
+            return Err(Error::conversion(format!(
+                "Related model for {} did not serialize to a JSON object",
+                R::table_name()
+            )));
         }
     }
 
     serde_json::from_value(related_json)
         .map_err(|e| Error::conversion(format!("Failed to deserialize related model: {}", e)))
-}
-
-fn primary_key_identity<R: Model>(value: &R::PrimaryKey) -> String {
-    R::primary_key_display(value)
-}
-
-fn reorder_models_by_primary_key<R: Model>(
-    models: Vec<R>,
-    ordered_primary_keys: &[R::PrimaryKey],
-) -> Result<Vec<R>> {
-    let mut models_by_pk = std::collections::HashMap::with_capacity(models.len());
-    for model in models {
-        let key = primary_key_identity::<R>(&model.primary_key());
-        models_by_pk.insert(key, model);
-    }
-
-    ordered_primary_keys
-        .iter()
-        .map(|key| {
-            let identity = primary_key_identity::<R>(key);
-            models_by_pk.remove(&identity).ok_or_else(|| {
-                Error::query(format!(
-                    "Bulk nested operation completed but could not reload related model with primary key {}",
-                    identity
-                ))
-            })
-        })
-        .collect()
-}
-
-async fn bulk_upsert_models<R>(related: Vec<R>) -> Result<Vec<R>>
-where
-    R: Model,
-    <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
-{
-    if related.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let pk_columns = R::primary_key_columns();
-    if pk_columns.is_empty() {
-        return Err(Error::invalid_query(format!(
-            "bulk nested update requires primary key columns for {}",
-            R::table_name()
-        )));
-    }
-
-    let primary_keys: Vec<R::PrimaryKey> = related.iter().map(Model::primary_key).collect();
-    let update_columns: Vec<_> = R::column_names()
-        .iter()
-        .copied()
-        .filter(|column| !R::primary_key_names().contains(column))
-        .filter_map(R::column_from_str)
-        .collect();
-    let active_models: Vec<_> = related
-        .into_iter()
-        .map(|model| {
-            <R as InternalModel>::try_to_entity_model(&model)
-                .map(|entity_model| entity_model.into_active_model())
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let on_conflict = if update_columns.is_empty() {
-        OnConflict::columns(pk_columns.iter().cloned())
-            .do_nothing()
-            .to_owned()
-    } else {
-        OnConflict::columns(pk_columns.iter().cloned())
-            .update_columns(update_columns)
-            .to_owned()
-    };
-
-    match crate::database::__current_connection()? {
-        crate::database::ConnectionRef::Database(conn) => {
-            crate::profiling::__profile_future(
-                R::Entity::insert_many(active_models)
-                    .on_conflict(on_conflict)
-                    .exec(conn.connection()),
-            )
-            .await
-        }
-        crate::database::ConnectionRef::Transaction(tx) => {
-            crate::profiling::__profile_future(
-                R::Entity::insert_many(active_models)
-                    .on_conflict(on_conflict)
-                    .exec(tx.as_ref()),
-            )
-            .await
-        }
-    }
-    .map_err(translate_error)
-    .map_err(|err| {
-        err.with_context(
-            crate::error::ErrorContext::new()
-                .table(R::table_name())
-                .query("nested bulk upsert"),
-        )
-    })?;
-
-    let mut reloaded = Vec::with_capacity(primary_keys.len());
-    for primary_key in &primary_keys {
-        reloaded.push(R::find_or_fail(primary_key.clone()).await?);
-    }
-
-    reorder_models_by_primary_key(reloaded, &primary_keys)
 }
 
 async fn save_related_model_as_json<R>(
@@ -280,7 +219,6 @@ where
         .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))
 }
 
-#[allow(clippy::unnecessary_mut_passed)]
 async fn save_related_models_as_json<R>(
     related: Vec<R>,
     foreign_key: String,
@@ -290,23 +228,12 @@ where
     R: Model,
     <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
 {
-    if related.is_empty() {
-        return Ok(SavedRelation::many(Vec::new()));
-    }
-
-    let mut prepared_related = Vec::with_capacity(related.len());
+    let mut saved_json = Vec::with_capacity(related.len());
     for item in related {
-        let mut item = apply_foreign_key(item, &foreign_key, &parent_pk_value)?;
-        (&mut item).run_before_create()?;
-        prepared_related.push(item);
-    }
-
-    let saved_related = R::insert_all(prepared_related).await?;
-    let mut saved_json = Vec::with_capacity(saved_related.len());
-    for item in saved_related {
-        (&item).run_after_create()?;
+        let item = apply_foreign_key(item, &foreign_key, &parent_pk_value)?;
+        let saved = R::create(item).await?;
         saved_json.push(
-            serde_json::to_value(&item).map_err(|e| {
+            serde_json::to_value(&saved).map_err(|e| {
                 Error::conversion(format!("Failed to serialize related model: {}", e))
             })?,
         );
@@ -322,18 +249,31 @@ pub trait NestedSave: Model {
     where
         Self: Sized,
     {
-        let parent = self.save().await?;
+        // Resolved up front so a bad foreign-key name fails before anything is
+        // written at all.
+        let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
 
-        let pk_value = require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_one")?;
+        // Parent and child are one unit of work: without a transaction a failure
+        // on the child leaves the parent committed and orphaned.
+        // `Database::transaction` defers to an ambient transaction, so this nests
+        // as a SAVEPOINT when the caller already opened one.
+        super::crud::transaction(move |_| {
+            Box::pin(async move {
+                let parent = self.save().await?;
 
-        let related = apply_foreign_key(related, foreign_key, &pk_value)?;
+                let pk_value =
+                    require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_one")?;
 
-        let related = related.save().await?;
+                let related = apply_foreign_key(related, foreign_key, &pk_value)?;
 
-        Ok((parent, related))
+                let related = related.save().await?;
+
+                Ok((parent, related))
+            })
+        })
+        .await
     }
 
-    #[allow(clippy::unnecessary_mut_passed)]
     async fn save_with_many<R: Model>(
         self,
         related: Vec<R>,
@@ -343,27 +283,30 @@ pub trait NestedSave: Model {
         Self: Sized,
         <<R as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<R::ActiveModel>,
     {
-        let parent = self.save().await?;
-
         if related.is_empty() {
+            let parent = self.save().await?;
             return Ok((parent, Vec::new()));
         }
 
-        let pk_value = require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_many")?;
+        let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
 
-        let mut prepared_related = Vec::with_capacity(related.len());
-        for item in related {
-            let mut item = apply_foreign_key(item, foreign_key, &pk_value)?;
-            (&mut item).run_before_create()?;
-            prepared_related.push(item);
-        }
+        super::crud::transaction(move |_| {
+            Box::pin(async move {
+                let parent = self.save().await?;
 
-        let saved_related = R::insert_all(prepared_related).await?;
-        for item in &saved_related {
-            item.run_after_create()?;
-        }
+                let pk_value =
+                    require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_many")?;
 
-        Ok((parent, saved_related))
+                let mut saved_related = Vec::with_capacity(related.len());
+                for item in related {
+                    let item = apply_foreign_key(item, foreign_key, &pk_value)?;
+                    saved_related.push(R::create(item).await?);
+                }
+
+                Ok((parent, saved_related))
+            })
+        })
+        .await
     }
 
     async fn update_with_one<R: Model>(self, related: R) -> Result<(Self, R)>
@@ -375,7 +318,6 @@ pub trait NestedSave: Model {
         Ok((parent, related))
     }
 
-    #[allow(clippy::unnecessary_mut_passed)]
     async fn update_with_many<R: Model>(self, related: Vec<R>) -> Result<(Self, Vec<R>)>
     where
         Self: Sized,
@@ -383,27 +325,9 @@ pub trait NestedSave: Model {
     {
         let parent = self.update().await?;
 
-        if related.is_empty() {
-            return Ok((parent, Vec::new()));
-        }
-
-        if related.iter().any(super::crud::is_new) {
-            let mut updated = Vec::with_capacity(related.len());
-            for item in related {
-                updated.push(item.update().await?);
-            }
-            return Ok((parent, updated));
-        }
-
-        let mut prepared_related = Vec::with_capacity(related.len());
-        for mut item in related {
-            (&mut item).run_before_update()?;
-            prepared_related.push(item);
-        }
-
-        let updated = bulk_upsert_models(prepared_related).await?;
-        for item in &updated {
-            item.run_after_update()?;
+        let mut updated = Vec::with_capacity(related.len());
+        for item in related {
+            updated.push(item.update().await?);
         }
 
         Ok((parent, updated))
@@ -465,22 +389,36 @@ impl<M: Model> NestedSaveBuilder<M> {
     }
 
     pub async fn save(self) -> Result<(M, Vec<SavedRelation>)> {
-        let parent = self.parent.save().await?;
+        let Self {
+            parent,
+            one_relations,
+            many_relations,
+        } = self;
 
-        let pk_value =
-            require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
+        // The parent and every nested relation are one unit of work; see
+        // `NestedSave::save_with_one` for why this nests instead of opening a
+        // second top-level transaction.
+        super::crud::transaction(move |_| {
+            Box::pin(async move {
+                let parent = parent.save().await?;
 
-        let mut saved_relations = Vec::new();
+                let pk_value =
+                    require_scalar_primary_key::<M>(&parent.primary_key(), "nested save builder")?;
 
-        for save_relation in self.one_relations {
-            saved_relations.push(save_relation.run(pk_value.clone()).await?);
-        }
+                let mut saved_relations = Vec::new();
 
-        for save_relations in self.many_relations {
-            saved_relations.push(save_relations.run(pk_value.clone()).await?);
-        }
+                for save_relation in one_relations {
+                    saved_relations.push(save_relation.run(pk_value.clone()).await?);
+                }
 
-        Ok((parent, saved_relations))
+                for save_relations in many_relations {
+                    saved_relations.push(save_relations.run(pk_value.clone()).await?);
+                }
+
+                Ok((parent, saved_relations))
+            })
+        })
+        .await
     }
 }
 

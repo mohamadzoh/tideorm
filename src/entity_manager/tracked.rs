@@ -163,13 +163,21 @@ impl<T: Model> TrackedHasMany<T> {
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
     {
-        if let Some(items) = self.cached.as_ref() {
-            for entity in items.iter().cloned() {
-                entity_manager.put(entity);
-            }
-
+        if let Some(items) = self.cached.take() {
             self.plain.attach_query_database(entity_manager.database());
             self.entity_manager = Some(entity_manager.clone());
+
+            // Route the eagerly-loaded rows through the identity map with exactly
+            // the same semantics as the fresh load below: `register` keeps the
+            // instance the manager already tracks instead of clobbering it with
+            // this (possibly stale) eager copy, so `find`/`get` and the managed
+            // baselines keep pointing at one instance per row.
+            let mut registered = Vec::with_capacity(items.len());
+            for entity in items {
+                registered.push(entity_manager.register(entity).await);
+            }
+            self.set_cached(registered);
+
             let owner_key = self.owner_key.as_deref().ok_or_else(|| {
                 Error::query(format!(
                     "entity manager owner key not set for relation '{}'",
@@ -177,9 +185,7 @@ impl<T: Model> TrackedHasMany<T> {
                 ))
             })?;
             let ids = self.current_keys()?;
-            entity_manager
-                .snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids)
-                .await;
+            entity_manager.snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids);
             let Some(cached) = self.cached.as_ref() else {
                 unreachable!("relation cache should exist");
             };
@@ -216,9 +222,7 @@ impl<T: Model> TrackedHasMany<T> {
         self.entity_manager = Some(entity_manager.clone());
 
         let ids = self.current_keys()?;
-        entity_manager
-            .snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids)
-            .await;
+        entity_manager.snapshot::<T>(self.owner_table, owner_key, self.relation_name, &ids);
 
         let Some(cached) = self.cached.as_ref() else {
             unreachable!("relation cache should exist after load");

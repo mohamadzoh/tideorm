@@ -16,9 +16,12 @@ use super::{ColumnSchema, SCHEMA_REGISTRY, SchemaGenerator, TableSchema, TableSc
 pub struct SchemaWriter;
 
 impl SchemaWriter {
-    /// Register a table schema for generation
+    /// Register a table schema for generation.
     ///
-    /// Called automatically by the Model derive macro
+    /// Nothing calls this automatically: the derive macro registers models with
+    /// [`crate::sync::SyncRegistry::register_schema`] for schema *sync*, which
+    /// is a separate registry. Call this yourself for tables you want
+    /// [`SchemaWriter::write_schema`] to emit without introspecting a database.
     pub fn register_schema(schema: TableSchema) {
         let mut registry = SCHEMA_REGISTRY.write();
         if !registry
@@ -102,13 +105,28 @@ impl SchemaWriter {
                 .try_get("", "table_name")
                 .map_err(|e| Error::query(e.to_string()))?;
 
+            // `information_schema.columns.data_type` is a *category*, not a
+            // declared type: it reports `text[]` as "ARRAY", an enum as
+            // "USER-DEFINED", `varchar(50)` as an unbounded "character varying"
+            // and `numeric(10,2)` as a bare "numeric". Replaying that produces
+            // invalid SQL, so read the exact declared type from pg_catalog
+            // instead - `format_type` renders element type, length and
+            // precision the way the column was declared.
             let col_rows = conn
                 .query_all_raw(build_statement_with_values(
                     Backend::Postgres,
-                    "SELECT column_name, data_type, is_nullable, column_default
-                 FROM information_schema.columns
-                 WHERE table_schema = $1 AND table_name = $2
-                 ORDER BY ordinal_position",
+                    "SELECT a.attname AS column_name,
+                        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+                        pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default
+                 FROM pg_catalog.pg_attribute a
+                 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+                 JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
+                 LEFT JOIN pg_catalog.pg_attrdef d
+                     ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                 WHERE ns.nspname = $1 AND c.relname = $2
+                 AND a.attnum > 0 AND NOT a.attisdropped
+                 ORDER BY a.attnum",
                     vec![table_schema.clone().into(), table_name.clone().into()],
                 ))
                 .await
@@ -176,16 +194,19 @@ impl SchemaWriter {
 
             for row in col_rows {
                 let col_name: String = row.try_get("", "column_name").unwrap_or_default();
-                let data_type: String = row.try_get("", "data_type").unwrap_or_default();
+                // `format_type` already returns the canonical spelling and
+                // quotes what needs quoting, so it is used verbatim: upcasing
+                // it would turn a quoted mixed-case enum type such as
+                // `"MyStatus"` into an identifier that does not exist.
+                let sql_type: String = row.try_get("", "data_type").unwrap_or_default();
                 let is_nullable: String = row.try_get("", "is_nullable").unwrap_or_default();
                 let default: Option<String> = row.try_get("", "column_default").ok();
 
-                let sql_type = data_type.to_uppercase();
                 let mut col = ColumnSchema::new(&col_name, &sql_type);
 
                 if col_name == pk_column {
                     col = col.primary_key();
-                    if sql_type.contains("SERIAL")
+                    if sql_type.to_uppercase().contains("SERIAL")
                         || default
                             .as_ref()
                             .map(|value| value.contains("nextval"))

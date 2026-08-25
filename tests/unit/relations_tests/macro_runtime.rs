@@ -100,6 +100,80 @@ fn macro_generated_morph_to_relation_is_configured() {
     assert_eq!(image.owner.id_column, "imageable_id");
 }
 
+#[test]
+fn morph_to_exposes_the_stored_type_and_id() {
+    let image = RelationTestImage {
+        id: 9,
+        imageable_type: "relation_test_nodes".to_string(),
+        imageable_id: 4,
+        owner: Default::default(),
+    }
+    .with_relations();
+
+    assert_eq!(image.owner.type_value(), Some("relation_test_nodes"));
+    assert_eq!(image.owner.id_value(), Some(&serde_json::json!(4)));
+    assert!(image.owner.is_type::<RelationTestNode>());
+    assert!(!image.owner.is_type::<RelationTestPivot>());
+}
+
+#[tokio::test]
+async fn morph_to_load_rejects_a_mismatched_target_type() {
+    let error = MorphTo::<RelationTestNode>::new("imageable_type", "imageable_id")
+        .with_values("relation_test_pivots".to_string(), serde_json::json!(4))
+        .load()
+        .await
+        .expect_err("a discriminator naming another table must not silently return None");
+
+    assert!(
+        error.to_string().contains("relation_test_pivots"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("load_as"), "{error}");
+}
+
+#[tokio::test]
+async fn morph_to_load_as_returns_none_for_another_target_type() {
+    let owner = MorphTo::<RelationTestNode>::new("imageable_type", "imageable_id")
+        .with_values("relation_test_pivots".to_string(), serde_json::json!(4));
+
+    assert!(
+        owner
+            .load_as::<RelationTestNode>()
+            .await
+            .expect("a type mismatch is not an error for load_as")
+            .is_none()
+    );
+}
+
+#[test]
+fn with_relations_round_trips_its_own_serialization() {
+    use crate::relations::WithRelations;
+
+    let mut wrapped = WithRelations::new(RelationTestNode {
+        id: 1,
+        slug: "root".to_string(),
+        parent_slug: None,
+    });
+    wrapped
+        .set_relation("children", &Vec::<RelationTestNode>::new())
+        .expect("recording a relation payload should succeed");
+
+    let json = serde_json::to_value(&wrapped).expect("WithRelations should serialize");
+    let restored: WithRelations<RelationTestNode> =
+        serde_json::from_value(json).expect("WithRelations should deserialize its own output");
+    assert!(restored.has_relation("children"));
+
+    let bare = WithRelations::new(RelationTestNode {
+        id: 2,
+        slug: "leaf".to_string(),
+        parent_slug: None,
+    });
+    let json = serde_json::to_value(&bare).expect("WithRelations should serialize");
+    let restored: WithRelations<RelationTestNode> = serde_json::from_value(json)
+        .expect("an empty relation map is omitted and must deserialize back");
+    assert!(!restored.has_relation("children"));
+}
+
 #[tokio::test]
 async fn macro_generated_default_initializes_runtime_relations() {
     let employee = RelationTestEmployee::default();

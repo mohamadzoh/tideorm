@@ -21,7 +21,9 @@ use crate::config::DatabaseType;
 use crate::model::IndexDefinition;
 
 pub use generator::SchemaGenerator;
-pub use types::{ColumnSchema, TableSchema, TableSchemaBuilder, rust_type_to_sql};
+pub use types::{
+    ColumnSchema, TableSchema, TableSchemaBuilder, rust_type_to_column_type, rust_type_to_sql,
+};
 pub use writer::SchemaWriter;
 
 pub(super) static SCHEMA_REGISTRY: RwLock<Vec<TableSchema>> = RwLock::new(Vec::new());

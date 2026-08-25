@@ -21,6 +21,7 @@ pub struct DatabaseBuilder {
     connect_timeout: Option<Duration>,
     idle_timeout: Option<Duration>,
     max_lifetime: Option<Duration>,
+    acquire_timeout: Option<Duration>,
 }
 
 impl DatabaseBuilder {
@@ -33,6 +34,7 @@ impl DatabaseBuilder {
             connect_timeout: None,
             idle_timeout: None,
             max_lifetime: None,
+            acquire_timeout: None,
         }
     }
 
@@ -72,6 +74,15 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Set how long to wait for a free connection when the pool is exhausted.
+    ///
+    /// Unlike [`Self::connect_timeout`], which bounds opening a brand-new connection,
+    /// this bounds checking one out of an already-saturated pool.
+    pub fn acquire_timeout(mut self, duration: Duration) -> Self {
+        self.acquire_timeout = Some(duration);
+        self
+    }
+
     /// Connect using the configured URL and pool settings.
     ///
     /// Returns a configuration error if no URL was provided.
@@ -96,6 +107,9 @@ impl DatabaseBuilder {
         }
         if let Some(lifetime) = self.max_lifetime {
             opts.max_lifetime(lifetime);
+        }
+        if let Some(timeout) = self.acquire_timeout {
+            opts.acquire_timeout(timeout);
         }
 
         let conn = crate::internal::OrmDatabase::connect(opts)

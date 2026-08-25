@@ -46,6 +46,82 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # `rust-version = "1.85"` in both manifests is a promise to downstream
+  # resolvers, and every other job installs `stable`, so nothing else here would
+  # notice a post-1.85 API landing. This job is the only thing that checks it.
+  #
+  # Deliberately `cargo check` and not `--all-targets`: the MSRV covers the
+  # published library and proc-macro crate, not the dev-dependencies
+  # (criterion, trybuild, tokio) that only contributors build. The module
+  # features are on because they gate real code that the default feature set
+  # never compiles.
+  #
+  # When this job fails, the fix is to raise `rust-version` in `Cargo.toml` and
+  # `tideorm-macros/Cargo.toml` together, not to relax the job.
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      MODULE_FEATURES: "attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        # Keep this literal in sync with `rust-version` in both manifests.
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check against the declared MSRV
+        run: cargo check --workspace --features "$MODULE_FEATURES"
+
+  # The six module feature flags gate real code but are off by default, so the
+  # `clippy` and `test` jobs above never compile them. Lint and unit-test them
+  # here, together with the non-default async-std runtime.
+  features:
+    runs-on: ubuntu-latest
+    env:
+      MODULE_FEATURES: "attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy with module features
+        run: cargo clippy --workspace --all-targets --features "$MODULE_FEATURES" -- -D warnings
+
+      - name: Test with module features
+        run: cargo test --lib --features "$MODULE_FEATURES"
+
+      - name: Check async-std runtime
+        run: cargo check --no-default-features --features sqlite,runtime-async-std
+
+  macros:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test tideorm-macros
+        run: cargo test -p tideorm-macros --lib
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -88,15 +164,78 @@ jobs:
       - name: Run SQLite integration test
         run: cargo test --package tideorm --test sqlite_ci_smoke_test --no-default-features --features sqlite,runtime-tokio
 
-  docs:
+  # Integration targets that never touch a database. Targets are named
+  # explicitly rather than using `--tests`, because postgres_integration_tests,
+  # postgres_advanced_tests and mysql_integration_tests all need a live server.
+  tests-no-db:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run database-free integration tests
+        run: |
+          cargo test --package tideorm \
+            --test public_api_tests \
+            --test edge_case_tests \
+            --test query_builder_tests \
+            --test seaorm2_features_tests \
+            --test tokenization_tests \
+            --test tokenization_missing_key_test \
+            --test relation_serde_tests
+
+      # or_clause_tests pulls in a Postgres-backed module behind
+      # `feature = "postgres"`, so run it with the sqlite feature set instead.
+      - name: Run OR clause tests
+        run: cargo test --package tideorm --test or_clause_tests --no-default-features --features sqlite,runtime-tokio
+
+      # trybuild suites: the only real check on the tideorm/tideorm-macros ABI.
+      - name: Run compile-fail tests
+        run: cargo test --package tideorm --test relation_compile_fail --test encrypted_fields_feature_compile_fail
+
+  # These targets need a live database to run, but compile rot is still worth
+  # catching, so build them without executing.
+  integration-compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compile SQLite integration tests
+        run: cargo test --package tideorm --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio --no-run
+
+      - name: Compile MySQL integration tests
+        run: cargo test --package tideorm --test mysql_integration_tests --no-default-features --features mysql,runtime-tokio --no-run
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      # Keep in sync with .github/workflows/mdbook.yml, otherwise a book can
+      # pass this gate and then fail the post-merge Pages deploy.
+      MDBOOK_VERSION: 0.4.36
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Install mdBook
-        uses: taiki-e/install-action@mdbook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
 
       - name: Build book
         run: mdbook build

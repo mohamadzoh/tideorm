@@ -32,14 +32,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
+      # Keep in sync with the `docs` job in .github/workflows/ci.yml, otherwise a
+      # book can pass that gate and then fail this post-merge Pages deploy.
       MDBOOK_VERSION: 0.4.36
     steps:
       - uses: actions/checkout@v6
+      # Installs the same pinned mdBook the CI `docs` job uses. The previous
+      # rustup bootstrap passed `-y` to curl (where it means `--speed-time` and
+      # needs an argument) rather than to rustup-init, so the pipeline was a
+      # silent no-op that only worked because the runner preinstalls rustup.
       - name: Install mdBook
-        run: |
-          curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf -y | sh
-          rustup update
-          cargo install --version ${MDBOOK_VERSION} mdbook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@${{ env.MDBOOK_VERSION }}
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5

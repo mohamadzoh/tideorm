@@ -7,6 +7,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-25
+
+This is a deliberately breaking release. A repository-wide audit produced a large batch of
+correctness fixes, and several of them could not be made without changing public API. Dead or
+misleading surface was removed outright rather than deprecated. Read the two breaking sections
+before upgrading; everything else is a behavior fix that should only ever move you from wrong
+results to right ones.
+
+### Upgrading — Action Required
+
+- **MySQL/MariaDB `uuid` columns need an `ALTER TABLE`.** Earlier versions created them as
+  `CHAR(36)`; the correct type is `BINARY(16)`, because `sqlx-mysql` binds a `Uuid` as 16 raw bytes
+  and its decoder rejects anything else. New tables get `BINARY(16)` automatically, but **existing
+  tables are not migrated**: schema sync only adds missing columns, it never changes the type of an
+  existing one. A table left at `CHAR(36)` will fail every insert of a `Uuid` value with
+  `1366 Incorrect string value`. Convert each affected column once:
+
+  ```sql
+  -- back up first; this rewrites the stored representation
+  ALTER TABLE your_table
+    MODIFY external_id BINARY(16);
+  ```
+
+  If the column already holds hyphenated text, convert the data in the same statement with
+  `UNHEX(REPLACE(external_id, '-', ''))` before narrowing the type. PostgreSQL (`UUID`) and SQLite
+  (`TEXT`) are unaffected.
+
+- **SQLite `Decimal`/`Numeric` columns are `REAL` again.** A pre-release build of 0.10.0 briefly
+  emitted `TEXT`, which is lossless but unreadable — sea-orm decodes `Decimal` on SQLite through
+  `f64`. If you created tables with such a build, change those columns back to `REAL`. Released
+  versions before 0.10.0 already used `REAL` and need no action.
+
+### Removed — Breaking
+
+- Removed `Encrypted<T>` (`tideorm::types::Encrypted`, also re-exported from the prelude). It
+  encrypted at the serde layer under a single process-wide key with no per-column context, so a
+  ciphertext lifted out of any `Encrypted<T>` column decrypted cleanly in any other one — column
+  identity was not part of the sealed payload. Use the `encrypted-fields` feature and the
+  derive-level `#[tideorm(encrypted = "...")]` attribute instead, which derives a distinct key per
+  `(table, column)` and stores plain Rust types on the model. A field declared as
+  `pub secret: Encrypted<String>` becomes `pub secret: String` with `secret` named in the model's
+  `encrypted = "..."` list. There is no in-place upgrade for existing data: decrypt with 0.9.x,
+  then re-save under 0.10.0.
+- Removed six `ModelMeta` methods:
+  - `tokenization_enabled`, `token_encoder`, `token_decoder` — these collided with the identically
+    named `Tokenizable` methods, so `Model::tokenization_enabled()` on a tokenizable model was an
+    E0034 "multiple applicable items in scope" ambiguity that no call site could resolve without a
+    fully qualified path. The `Tokenizable` methods are the surviving ones and are unchanged.
+  - `default_order`, `option_set_label`, `option_set_search_fields` — no `#[tideorm(..)]` attribute
+    ever set them and nothing in the crate ever read them; they always returned their defaults.
+  If you implemented `ModelMeta` by hand, delete those six methods. Macro-generated models need no
+  change beyond recompiling against the matching `tideorm-macros`.
+- Removed `Model::has_dirty_baseline()` (feature `dirty-tracking`). It is redundant now that
+  `changed_fields()` and `original_value()` report the missing-baseline case themselves.
+
+### Changed — Breaking
+
+- `Error` variants now carry a structured source instead of a flattened message string. SQLSTATE
+  codes, constraint names, and the underlying driver error survive to the caller, and
+  `Error::suggestion()` together with the `is_*` classifiers (`is_unique_violation`,
+  `is_foreign_key_violation`, and friends) now inspect that structured data instead of
+  substring-matching driver text — which was locale- and backend-dependent and misclassified any
+  message that happened to contain a keyword. Added structured variants for migration failures and
+  for access-denied/authentication errors, which previously collapsed into generic connection
+  errors. Code that matched on `Error` variants exhaustively, or that formatted a variant's payload
+  directly, needs updating; code that only uses `Display`, `?`, and the classifiers does not.
+- `Model::changed_fields()` and `Model::original_value()` (feature `dirty-tracking`) now
+  distinguish "no baseline was ever recorded" from "a baseline exists and nothing changed". A model
+  that was never loaded or saved through TideORM no longer reports itself as clean. Callers that
+  treated an empty change set as proof of a clean persisted row must handle the no-baseline case.
+- `EntityManager::snapshot`, `deletions`, and `additions` (feature `entity-manager`) are no longer
+  `async`. They only read in-memory persistence-context state and never touched the database. Drop
+  the `.await`.
+- `RelationInfo` no longer overloads `morph_type_column` to smuggle a through-relation's related
+  key. The field now means only what its name says; the through-relation key is carried in its own
+  field. This is visible to anything constructing or reading `RelationInfo` directly.
+
+### Fixed
+
+Roughly 160 individual defects from the audit. Grouped by theme:
+
+- **Destructive mutations.** An `update_all()`/`delete_all()` chain whose filters were all dropped
+  or unresolvable could render an unfiltered `DELETE`/`UPDATE`. The explicit-filter guard now
+  covers those paths, so a whole-table mutation must be asked for explicitly.
+- **SQL parameterization.** Subquery, `EXISTS`/`NOT EXISTS`, `IN (subquery)`, `UNION`, CTE, and
+  PostgreSQL array operands were rendered with inlined literals rather than bound parameters.
+  They are now parameterized end to end, with the placeholder numbering carried correctly across
+  composed fragments.
+- **`ORDER BY` / `GROUP BY`.** Both are now validated against the model's resolvable columns
+  instead of being pasted through. `QueryBuilder::order_by_raw(expr, direction)` is the new,
+  explicitly-trusted escape hatch for real SQL expressions — never pass user input to it.
+- **Raw `WHERE` fragments.** Raw conditions are wrapped in parentheses before being combined, so a
+  fragment containing a top-level `OR` can no longer swallow the surrounding filters and widen the
+  result set.
+- **Lifecycle callbacks.** `before_save`/`after_save` and friends now run for models persisted
+  through a nested save rather than only for the root model.
+- **Aggregates.** `count`, `sum`, `avg`, `min`, and `max` now honour the query's joins, CTEs, and
+  `limit`, and reject a scalar terminal on a grouped query instead of silently returning the first
+  group's value.
+- **Eager loading.** Eager loads are soft-delete-scoped like every other read, and nested eager
+  paths batch their queries instead of degrading into an N+1 loop.
+- **Soft delete.** `restore()` and `force_delete()` work; both previously failed or no-opped
+  depending on the path taken.
+- **`LIKE` escaping.** The escape character changed from `\` to `!`, and generated `LIKE` clauses
+  emit an explicit `ESCAPE '!'`. Backslash is a literal in some backends and an escape in others
+  with `NO_BACKSLASH_ESCAPES` off; `!` behaves identically everywhere and keeps generated SQL free
+  of backslashes. `%`, `_`, and `!` in a user-supplied `where_like`/`contains`/`starts_with`/
+  `ends_with` operand are escaped for you.
+- **Migrations.** Migration runs take a database advisory lock, so two processes starting at once
+  no longer both apply the same migration.
+- **Seeding.** Seeding works on PostgreSQL.
+
+### Internal
+
+- CI now compiles and tests all six module feature flags (`attachments`, `translations`,
+  `fulltext`, `entity-manager`, `dirty-tracking`, `encrypted-fields`), runs the `tideorm-macros`
+  crate's own tests, and runs the DB-free integration targets that were previously built but never
+  executed. Feature-gated code is no longer invisible to CI.
+- The four entity-manager test targets (`entity_manager_tests`, and the PostgreSQL, SQLite, and
+  MySQL variants) no longer report a vacuous green. Their inner `#![cfg(feature = "entity-manager")]`
+  used to compile them to zero tests under the default feature set, which cargo reported as a
+  passing "0 passed" run; `required-features` stanzas now make the skip visible and CI enables the
+  feature so they actually run.
+- Refreshed the main crate version, macro-crate version, macro-crate dependency version, README,
+  and mdBook chapters to `0.10.0`.
+- As with every release, `cargo package`/`cargo publish` for `tideorm` stays blocked until
+  `tideorm-macros 0.10.0` is on crates.io, because packaging strips the `path` dependency and
+  resolves through the registry index.
+
 ## [0.9.19] - 2026-07-18
 
 ### Removed
@@ -978,7 +1107,8 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.9.19...HEAD
+[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/mohamadzoh/tideorm/compare/v0.9.19...v0.10.0
 [0.9.19]: https://github.com/mohamadzoh/tideorm/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...v0.9.18
 [0.9.17]: https://github.com/mohamadzoh/tideorm/compare/v0.9.16...v0.9.17

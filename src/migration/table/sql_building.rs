@@ -25,14 +25,10 @@ impl TableBuilder {
 
         sql.push_str(&column_defs.join(",\n"));
 
-        if let Some(primary_key) = &self.primary_key {
-            sql.push_str(",\n");
-            sql.push_str(&format!(
-                "    PRIMARY KEY ({})",
-                self.quote_identifier(primary_key)
-            ));
-        }
-
+        // A table can carry exactly one PRIMARY KEY clause. When both a
+        // column-level key (`id()`, `.primary_key()`) and an explicit composite
+        // key are declared, the explicit composite one wins - emitting both
+        // produces SQL every backend rejects.
         if let Some(composite_primary_key) = &self.composite_primary_key {
             sql.push_str(",\n");
             let columns: Vec<String> = composite_primary_key
@@ -41,6 +37,12 @@ impl TableBuilder {
                 .map(|column| self.quote_identifier(column))
                 .collect();
             sql.push_str(&format!("    PRIMARY KEY ({})", columns.join(", ")));
+        } else if let Some(primary_key) = &self.primary_key {
+            sql.push_str(",\n");
+            sql.push_str(&format!(
+                "    PRIMARY KEY ({})",
+                self.quote_identifier(primary_key)
+            ));
         }
 
         for constraint in &self.unique_constraints {
@@ -121,7 +123,12 @@ impl TableBuilder {
     }
 
     fn build_indexes_internal(&self, if_not_exists: bool) -> Vec<String> {
-        let exists_clause = if if_not_exists { "IF NOT EXISTS " } else { "" };
+        let supports_if_not_exists = supports_create_index_if_not_exists(self.database_type);
+        let exists_clause = if if_not_exists && supports_if_not_exists {
+            "IF NOT EXISTS "
+        } else {
+            ""
+        };
         self.indexes
             .iter()
             .map(|index| {
@@ -159,4 +166,14 @@ impl TableBuilder {
     fn quote_identifier(&self, name: &str) -> String {
         super::quote_identifier_for_db(name, self.database_type)
     }
+}
+
+/// Whether the backend understands `CREATE INDEX IF NOT EXISTS`.
+///
+/// MySQL does not, and rejects the statement outright - which aborts a
+/// `create_table_if_not_exists` migration *after* the table was created.
+/// MariaDB does support it, so the two must be told apart here even though
+/// `internal::Backend` collapses them into one variant.
+fn supports_create_index_if_not_exists(database_type: DatabaseType) -> bool {
+    !matches!(database_type, DatabaseType::MySQL)
 }

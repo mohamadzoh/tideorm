@@ -230,6 +230,185 @@ async fn query_builder_with_batch_loads_direct_relations() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
+async fn eager_loading_records_relation_payloads() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_users should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_profiles (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_profiles should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_posts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, title TEXT NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_posts should succeed");
+
+    db.__execute_with_params(
+        "INSERT INTO relation_test_users (id, name) VALUES (?, ?)",
+        vec![
+            Value::BigInt(Some(1)),
+            Value::String(Some("Eager User".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting user should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_posts (id, user_id, title) VALUES (?, ?, ?), (?, ?, ?)",
+        vec![
+            Value::BigInt(Some(100)),
+            Value::BigInt(Some(1)),
+            Value::String(Some("First Post".to_string())),
+            Value::BigInt(Some(101)),
+            Value::BigInt(Some(1)),
+            Value::String(Some("Second Post".to_string())),
+        ],
+    )
+    .await
+    .expect("inserting posts should succeed");
+
+    let users = DirectRelationUser::eager()
+        .with("posts")
+        .get()
+        .await
+        .expect("eager loading should succeed");
+
+    assert_eq!(users.len(), 1);
+    assert!(
+        users[0].has_relation("posts"),
+        "the eager loader must record what it fetched"
+    );
+
+    let posts: Vec<DirectRelationPost> = users[0]
+        .get_relation("posts")
+        .expect("the recorded payload should deserialize back");
+    assert_eq!(posts.len(), 2);
+    assert!(posts.iter().any(|post| post.title == "First Post"));
+
+    assert!(!users[0].has_relation("profile"));
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn eager_loading_resolves_morph_one_relations() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_employees (id INTEGER PRIMARY KEY, manager_id INTEGER)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_employees should succeed");
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_images (id INTEGER PRIMARY KEY, imageable_type TEXT NOT NULL, imageable_id INTEGER NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_images should succeed");
+
+    db.__execute_with_params(
+        "INSERT INTO relation_test_employees (id, manager_id) VALUES (?, ?), (?, ?)",
+        vec![
+            Value::BigInt(Some(1)),
+            Value::BigInt(None),
+            Value::BigInt(Some(2)),
+            Value::BigInt(Some(1)),
+        ],
+    )
+    .await
+    .expect("inserting employees should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_images (id, imageable_type, imageable_id) VALUES (?, ?, ?), (?, ?, ?)",
+        vec![
+            Value::BigInt(Some(1)),
+            Value::String(Some("relation_test_employees".to_string())),
+            Value::BigInt(Some(1)),
+            Value::BigInt(Some(2)),
+            Value::String(Some("relation_test_nodes".to_string())),
+            Value::BigInt(Some(1)),
+        ],
+    )
+    .await
+    .expect("inserting images should succeed");
+
+    let employees = RelationTestEmployee::eager()
+        .with("avatar")
+        .get()
+        .await
+        .expect("eager loading a polymorphic relation should succeed");
+
+    assert_eq!(employees.len(), 2);
+
+    let owner = employees
+        .iter()
+        .find(|entry| entry.model.id == 1)
+        .expect("employee 1 should be loaded");
+    assert_eq!(
+        owner.model.avatar.get_cached().map(|image| image.id),
+        Some(1),
+        "the row whose imageable_type names another table must not match"
+    );
+    assert!(owner.has_relation("avatar"));
+
+    let without_avatar = employees
+        .iter()
+        .find(|entry| entry.model.id == 2)
+        .expect("employee 2 should be loaded");
+    assert!(without_avatar.model.avatar.get_cached().is_none());
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn eager_loading_names_the_self_referencing_limitation() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_employees (id INTEGER PRIMARY KEY, manager_id INTEGER)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_employees should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_employees (id, manager_id) VALUES (?, ?)",
+        vec![Value::BigInt(Some(1)), Value::BigInt(None)],
+    )
+    .await
+    .expect("inserting employee should succeed");
+
+    let error = RelationTestEmployee::eager()
+        .with("manager")
+        .get()
+        .await
+        .expect_err("self-referencing relations cannot be eager loaded");
+
+    let message = error.to_string();
+    assert!(message.contains("SelfRef"), "{message}");
+    assert!(message.contains("manager"), "{message}");
+    assert!(!message.contains("Unknown relation"), "{message}");
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
 async fn has_many_through_attach_uses_backend_specific_placeholders() {
     let _guard = direct_relation_db_guard().lock().await;
 

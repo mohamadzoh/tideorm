@@ -28,6 +28,109 @@ struct SoftDeleteMutationGuardUser {
     deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+#[tideorm::model(table = "query_column_alias_users")]
+struct ColumnAliasUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    #[tideorm(column = "user_name")]
+    display_name: String,
+}
+
+#[test]
+fn table_qualified_rust_field_name_renders_the_canonical_column() {
+    let (sql, params) = ColumnAliasUser::query()
+        .where_eq("query_column_alias_users.display_name", "alice")
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(
+        sql.contains(r#""query_column_alias_users"."user_name" = $1"#),
+        "sql: {sql}"
+    );
+    assert!(!sql.contains("display_name"), "sql: {sql}");
+    assert_eq!(params.len(), 1);
+}
+
+#[test]
+fn unqualified_rust_field_name_still_renders_the_canonical_column() {
+    let (sql, _params) = ColumnAliasUser::query()
+        .where_eq("display_name", "alice")
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains(r#""user_name" = $1"#), "sql: {sql}");
+    assert!(!sql.contains("display_name"), "sql: {sql}");
+}
+
+#[test]
+fn query_soft_delete_stamp_uses_a_utc_literal_not_the_database_clock() {
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-25T12:34:56.123456Z")
+        .expect("fixture is valid rfc3339")
+        .with_timezone(&chrono::Utc);
+
+    for db_type in [DatabaseType::Postgres, DatabaseType::SQLite] {
+        assert_eq!(
+            crate::query::QueryBuilder::<MutationGuardUser>::utc_timestamp_literal(
+                db_type, timestamp
+            ),
+            "'2026-07-25T12:34:56.123456+00:00'"
+        );
+    }
+
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(
+            crate::query::QueryBuilder::<MutationGuardUser>::utc_timestamp_literal(
+                db_type, timestamp
+            ),
+            "'2026-07-25 12:34:56.123456'"
+        );
+    }
+
+    // The stamp is rendered for the backend the statement carrying it is
+    // rendered for, not for the ambient one: MySQL rejects both the `T`
+    // separator and the UTC offset that the PostgreSQL rendering carries.
+    let stamp =
+        crate::query::QueryBuilder::<MutationGuardUser>::current_timestamp_sql(DatabaseType::MySQL);
+    assert!(!stamp.contains("CURRENT_TIMESTAMP"), "stamp: {stamp}");
+    assert!(
+        stamp.starts_with('\'') && stamp.ends_with('\''),
+        "stamp: {stamp}"
+    );
+    assert!(!stamp.contains('T'), "stamp: {stamp}");
+    assert!(!stamp.contains('+'), "stamp: {stamp}");
+}
+
+#[test]
+fn equality_against_json_null_renders_a_null_check() {
+    let (sql, params) = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .where_eq("deleted_at", serde_json::Value::Null)
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains(r#""deleted_at" IS NULL"#), "sql: {sql}");
+    assert!(params.is_empty(), "params: {params:?}");
+}
+
+#[test]
+fn inequality_against_json_null_renders_a_not_null_check() {
+    let (sql, params) = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .where_not("deleted_at", serde_json::Value::Null)
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(sql.contains(r#""deleted_at" IS NOT NULL"#), "sql: {sql}");
+    assert!(params.is_empty(), "params: {params:?}");
+}
+
+#[test]
+fn ordering_comparison_against_json_null_is_rejected() {
+    let err = SoftDeleteMutationGuardUser::query()
+        .with_trashed()
+        .where_gt("deleted_at", serde_json::Value::Null)
+        .ensure_conditions_are_representable()
+        .expect_err("a NULL ordering bound has no null-safe rendering");
+
+    assert!(err.to_string().contains("where_null()"), "err: {err}");
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 fn query_mutation_cache_test_guard() -> &'static Mutex<()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
@@ -386,9 +489,14 @@ fn exists_sql_preserves_subquery_wrapper_for_union_queries() {
         .union_all(QueryCountGuardUser::query().where_eq("name", "bob"))
         .build_exists_sql_with_params_for_db(DatabaseType::Postgres);
 
-    assert_eq!(params.len(), 1);
+    // The union operand is parameterized like the base select, so it contributes
+    // its own bound value instead of an inline literal.
+    assert_eq!(params.len(), 2);
+    assert!(matches!(params.first(), Some(Value::String(Some(name))) if name == "alice"));
+    assert!(matches!(params.get(1), Some(Value::String(Some(name))) if name == "bob"));
     assert!(sql.starts_with("SELECT 1 FROM (SELECT "));
     assert!(sql.contains("UNION ALL (SELECT"));
+    assert!(!sql.contains("'bob'"), "sql: {sql}");
     assert!(sql.contains("tideorm_exists_subquery"));
     assert!(sql.ends_with("LIMIT 1"));
 }
@@ -401,7 +509,7 @@ fn sql_preview_is_labeled_as_non_executable() {
 
     assert!(preview.starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n"));
     assert!(preview.contains("query_count_guard_users"));
-    assert!(preview.contains("WHERE \"name\" = 'alice'"));
+    assert!(preview.contains("WHERE (\"name\" = 'alice')"));
 }
 
 #[test]
@@ -411,8 +519,8 @@ fn sql_preview_marks_escaped_literal_like_helpers() {
         .where_col(name.starts_with(r"100%_\done"))
         .build_sql_preview_for_db(DatabaseType::Postgres);
 
-    assert!(preview.contains("LIKE '100\\%\\_\\\\done%'"));
-    assert!(preview.contains("ESCAPE '\\'"));
+    assert!(preview.contains("LIKE '100!%!_\\done%'"));
+    assert!(preview.contains("ESCAPE '!'"));
 }
 
 #[test]
@@ -421,7 +529,7 @@ fn mysql_sql_preview_escapes_backslash_quote_pairs() {
         .where_eq("name", r#"\' OR 1=1 --"#)
         .build_sql_preview_for_db(DatabaseType::MySQL);
 
-    assert!(preview.contains("WHERE `name` = '\\\\'' OR 1=1 --'"));
+    assert!(preview.contains("WHERE (`name` = '\\\\'' OR 1=1 --')"));
 }
 
 #[test]
@@ -431,7 +539,7 @@ fn postgres_parameterized_sql_uses_single_character_like_escape() {
         .where_col(name.starts_with(r"100%_\done"))
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
-    assert!(sql.contains("WHERE \"name\" LIKE $1 ESCAPE '\\'"));
+    assert!(sql.contains("WHERE \"name\" LIKE $1 ESCAPE '!'"));
     assert_eq!(params.len(), 1);
 }
 

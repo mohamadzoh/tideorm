@@ -1,6 +1,33 @@
+/// Regroups the flat rows a JOIN returns into the nested shape they describe.
+///
+/// A join between one parent and N children returns the parent repeated once per
+/// child. These helpers collapse that repetition — `Vec<(Order, LineItem)>`
+/// becomes `Vec<(Order, Vec<LineItem>)>` — which is the shape application code
+/// almost always wants after `find_also_related()`.
+///
+/// Three properties are worth relying on, and one is worth avoiding:
+///
+/// - Rows for the same parent do **not** have to be adjacent; grouping is by key
+///   equality, not by run.
+/// - Parents come out in order of first appearance, and each parent's children
+///   keep their relative input order, so an `ORDER BY` on either side survives.
+/// - The **first** parent value seen for a key is the one kept; later copies are
+///   dropped rather than merged, which is correct for a join that repeats an
+///   identical parent row and lossy if it does not.
+/// - The key function is called more than once per row, so keep it cheap and
+///   free of side effects.
+///
+/// This is a namespace, not a value — every method is associated, and the unit
+/// struct is never instantiated.
 pub struct JoinResultConsolidator;
 
 impl JoinResultConsolidator {
+    /// Group `(parent, child)` pairs by the parent's key.
+    ///
+    /// Use this for an INNER JOIN, where every returned row has a child by
+    /// construction. A parent with no children simply does not appear — if you
+    /// need those, the join has to be a LEFT JOIN and the helper
+    /// [`consolidate_two_optional`](Self::consolidate_two_optional).
     pub fn consolidate_two<A, B, K, F>(items: Vec<(A, B)>, key_fn: F) -> Vec<(A, Vec<B>)>
     where
         A: Clone,
@@ -28,6 +55,11 @@ impl JoinResultConsolidator {
             .collect()
     }
 
+    /// Group LEFT JOIN rows, where an unmatched parent arrives with `None`.
+    ///
+    /// The `None`s are dropped and the parent is kept with an empty child
+    /// vector, so "no children" and "children" are both representable — the one
+    /// thing [`consolidate_two`](Self::consolidate_two) cannot express.
     pub fn consolidate_two_optional<A, B, K, F>(
         items: Vec<(A, Option<B>)>,
         key_fn: F,
@@ -61,6 +93,17 @@ impl JoinResultConsolidator {
             .collect()
     }
 
+    /// Nest a three-way join two levels deep: `(A, B, C)` rows become
+    /// `(A, Vec<(B, Vec<C>)>)`.
+    ///
+    /// `key_a` identifies the outer parent and `key_b` the middle row. `key_b`
+    /// is only compared within one `A` group, so a middle key that is only
+    /// unique per parent — a row number, say — still groups correctly.
+    ///
+    /// Every row must carry all three levels, so a `B` with no `C` cannot be
+    /// represented; use
+    /// [`consolidate_three_optional`](Self::consolidate_three_optional) when the
+    /// innermost join is a LEFT JOIN.
     #[allow(clippy::type_complexity)]
     pub fn consolidate_three<A, B, C, KA, KB, FA, FB>(
         items: Vec<(A, B, C)>,
@@ -114,6 +157,11 @@ impl JoinResultConsolidator {
             .collect()
     }
 
+    /// [`consolidate_three`](Self::consolidate_three) for an innermost LEFT
+    /// JOIN: a missing `C` is dropped and its `B` survives with an empty vector.
+    ///
+    /// Only the innermost level may be absent. `A` and `B` are still required on
+    /// every row, so a parent with no middle row at all is not representable.
     #[allow(clippy::type_complexity)]
     pub fn consolidate_three_optional<A, B, C, KA, KB, FA, FB>(
         items: Vec<(A, B, Option<C>)>,

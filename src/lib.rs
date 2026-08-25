@@ -10,139 +10,12 @@
 //! The module docs below cover the public surface area in more detail.
 
 #![recursion_limit = "256"]
+// CI runs `clippy -- -D warnings`, so these `warn` levels are effectively deny
+// there. `missing_docs` is still opted out of by a number of `allow` sites in
+// individual modules; those are the gaps, not this attribute.
 #![warn(missing_docs)]
 #![warn(clippy::all)]
 #![deny(unsafe_code)]
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __doctest_prelude {
-    () => {
-        use std::time::Duration;
-        use tideorm::prelude::*;
-
-        #[tideorm::model(table = "users", soft_delete)]
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            email: String,
-            name: String,
-            active: bool,
-            age: i32,
-            status: String,
-            role: String,
-            tier: String,
-            created_at: chrono::DateTime<chrono::Utc>,
-            deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-            metadata: tideorm::prelude::Json,
-            settings: tideorm::prelude::Json,
-            preferences: tideorm::prelude::Json,
-            tags: tideorm::prelude::TextArray,
-            skills: tideorm::prelude::TextArray,
-            permissions: tideorm::prelude::TextArray,
-            last_login_at: Option<chrono::DateTime<chrono::Utc>>,
-        }
-
-        #[tideorm::model(table = "products")]
-        struct Product {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            category: String,
-            price: f64,
-            in_stock: bool,
-        }
-
-        #[tideorm::model(table = "orders")]
-        struct Order {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            status: String,
-            category: String,
-            customer_id: i64,
-            total: f64,
-            amount: f64,
-            created_at: chrono::DateTime<chrono::Utc>,
-        }
-
-        #[tideorm::model(table = "cakes")]
-        struct Cake {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            name: String,
-            bakery_id: i64,
-        }
-
-        #[tideorm::model(table = "posts")]
-        struct Post {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            user_id: i64,
-            title: String,
-        }
-
-        #[tideorm::model(table = "profiles")]
-        struct Profile {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            user_id: i64,
-            bio: String,
-        }
-
-        #[tideorm::model(table = "employees")]
-        struct Employee {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            name: String,
-            manager_id: Option<i64>,
-            department_id: i64,
-            salary: f64,
-        }
-
-        #[tideorm::model(table = "appointments")]
-        struct Appointment {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            patient_id: i64,
-            date: chrono::DateTime<chrono::Utc>,
-        }
-
-        #[tideorm::model(table = "sales")]
-        struct Sale {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            amount: f64,
-            date: chrono::DateTime<chrono::Utc>,
-            created_at: chrono::DateTime<chrono::Utc>,
-        }
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __doctest_async {
-    ($($body:tt)*) => {
-        async fn demo() -> tideorm::Result<()> {
-            $($body)*
-            Ok(())
-        }
-    };
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __doctest_tokenizable_user {
-    () => {
-        use tideorm::prelude::*;
-
-        #[tideorm::model(table = "users", tokenize)]
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            email: String,
-            name: String,
-        }
-    };
-}
 
 #[doc(hidden)]
 pub mod internal;
@@ -240,6 +113,13 @@ pub mod prelude;
 // ============================================================================
 // PUBLIC RE-EXPORTS
 // ============================================================================
+//
+// Crate root vs. prelude: the prelude is glob-imported by every generated model,
+// so it carries the names a user writes in ordinary code and nothing whose name
+// is common enough to shadow a user's own type. The crate root carries those
+// same names plus anything a user only ever spells out in full. A name exported
+// from the root but missing from the prelude therefore needs a reason; where
+// that reason exists it is written down next to the export.
 
 pub use database::Database;
 // Global database access functions
@@ -249,9 +129,17 @@ pub use callbacks::{CallbackRunner, Callbacks};
 pub use config::{Config, TideConfig};
 pub use database::{db, has_global_db, require_db, try_db};
 pub use error::{Error, Result};
+// The bound parameter type of the raw-SQL `*_with_params` entry points. It is
+// re-exported here and from the prelude so calling a documented API never
+// requires naming the `#[doc(hidden)]` `internal` module.
+pub use internal::DbValue;
 pub use migration::{ColumnType, Migration, Migrator, Schema};
 pub use model::{Model, ModelMeta};
 pub use query::{AggregateFunction, JoinClause, JoinType, Order, QueryBuilder};
+// Note: `relations::EagerLoadModel` is deliberately NOT re-exported here or in
+// the prelude. It is `#[doc(hidden)]` machinery whose only method is
+// `__eager_load`, and macro-generated code names it through the fully qualified
+// `::tideorm::relations::EagerLoadModel` path.
 pub use relations::{BelongsTo, EagerLoadExt, HasMany, HasOne, RelationExt, WithRelations};
 pub use schema::SchemaWriter;
 pub use soft_delete::SoftDelete;

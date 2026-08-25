@@ -48,8 +48,23 @@ impl QueryCache {
     }
 
     /// Initialize the global cache (call at startup)
+    ///
+    /// Any earlier `global()` call already installed a default instance, and the
+    /// `OnceLock` behind it cannot be replaced. Because macro-generated model
+    /// writes reach for `QueryCache::global()`, a single model operation before
+    /// startup is enough to install that default. Rather than silently dropping
+    /// the requested configuration — which left the cache looking configured
+    /// while staying disabled forever — it is applied to the live cache, so a
+    /// late `init_global` still takes effect.
+    ///
+    /// Already-cached entries are kept; see [`QueryCache::apply_config`].
     pub fn init_global(config: CacheConfig) -> &'static QueryCache {
-        let _ = GLOBAL_QUERY_CACHE.set(QueryCache::with_config(config));
+        if GLOBAL_QUERY_CACHE
+            .set(QueryCache::with_config(config.clone()))
+            .is_err()
+        {
+            QueryCache::global().apply_config(config);
+        }
         QueryCache::global()
     }
 
@@ -107,5 +122,40 @@ impl QueryCache {
     /// Get current configuration
     pub fn config(&self) -> Option<CacheConfig> {
         Some(self.config.read().clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_global_applies_config_after_a_default_cache_was_installed() {
+        // Reaching for the global cache is what a macro-generated model write
+        // does; it installs the disabled default that `init_global` used to be
+        // unable to replace.
+        let previous = QueryCache::global()
+            .config()
+            .expect("the global cache always reports a configuration");
+
+        let installed = QueryCache::init_global(CacheConfig {
+            enabled: true,
+            max_entries: 17,
+            key_prefix: Some("late-init".to_string()),
+            ..CacheConfig::default()
+        });
+
+        assert!(
+            installed.is_enabled(),
+            "a late init_global must apply instead of being silently dropped"
+        );
+        let config = installed
+            .config()
+            .expect("the global cache always reports a configuration");
+        assert_eq!(config.max_entries, 17);
+        assert_eq!(config.key_prefix.as_deref(), Some("late-init"));
+
+        // Leave the process-wide cache as it was found.
+        QueryCache::init_global(previous);
     }
 }

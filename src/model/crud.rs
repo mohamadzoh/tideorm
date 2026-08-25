@@ -123,7 +123,17 @@ where
         return Err(Error::validation("per_page", "must be greater than 0"));
     }
 
-    let offset = (page - 1) * per_page;
+    // `page` is 1-based and already known to be non-zero here, but the product
+    // still has to be checked: an out-of-range page number used to panic in
+    // debug builds and wrap around to a small offset in release ones, silently
+    // returning the wrong page instead of reporting the bad input.
+    let offset = (page - 1).checked_mul(per_page).ok_or_else(|| {
+        Error::validation(
+            "page",
+            "page is too large for this page size; (page - 1) * per_page overflows",
+        )
+    })?;
+
     match crate::database::__current_connection()? {
         crate::database::ConnectionRef::Database(conn) => {
             crate::internal::QueryExecutor::paginate::<M, _>(conn.connection(), per_page, offset)
@@ -133,6 +143,51 @@ where
             crate::internal::QueryExecutor::paginate::<M, _>(tx.as_ref(), per_page, offset).await
         }
     }
+}
+
+/// Look up a model by primary key while honoring its soft-delete scope.
+///
+/// The macro-generated `Model::find` intentionally applies no scope, so callers that
+/// should hide trashed rows (`exists`, `find_or_fail`) go through here instead. Models
+/// without soft delete fall straight back to `Model::find`.
+pub(crate) async fn find_active<M>(id: M::PrimaryKey) -> Result<Option<M>>
+where
+    M: Model + Sized,
+{
+    use crate::internal::{ColumnTrait, EntityTrait, InternalModel, QueryFilter};
+
+    if !M::soft_delete_enabled() {
+        return M::find(id).await;
+    }
+
+    let Some(deleted_at_column) = M::column_from_str(M::deleted_at_column()) else {
+        return M::find(id).await;
+    };
+
+    // Resolved before the profiled future so a connection failure keeps its own
+    // classification. Funnelling it through the engine's error type instead
+    // would flatten it into `OrmError::Custom`, which translates to
+    // `Error::Internal` — and `exists`/`find_or_fail` would then report an
+    // outage differently from `find`, breaking retry and health-check branches.
+    let connection = crate::database::__current_connection()?;
+
+    let result = crate::profiling::__profile_future(async move {
+        let scoped_find = || {
+            <<M as InternalModel>::Entity as EntityTrait>::find()
+                .filter(<M as InternalModel>::primary_key_condition(&id))
+                .filter(deleted_at_column.is_null())
+        };
+
+        match connection {
+            crate::database::ConnectionRef::Database(conn) => {
+                scoped_find().one(conn.connection()).await
+            }
+            crate::database::ConnectionRef::Transaction(tx) => scoped_find().one(tx.as_ref()).await,
+        }
+    })
+    .await?;
+
+    result.map(M::try_from_entity_model).transpose()
 }
 
 pub(crate) async fn reload<M>(model: &M) -> Result<M>
@@ -156,4 +211,82 @@ where
     M: Model,
 {
     M::primary_key_is_new(&model.primary_key())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // The macro-generated entity module emits `Result<_, DbErr>`, so it must not see
+    // tideorm's own one-parameter `Result<T>` alias that `use super::*` brings in here.
+    use std::result::Result;
+
+    #[tideorm::model(table = "crud_pagination_users")]
+    struct PaginationUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+    }
+
+    #[tideorm::model(table = "crud_soft_delete_users", soft_delete)]
+    struct SoftDeleteUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        name: String,
+        deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    #[tokio::test]
+    async fn paginate_rejects_a_zero_page_number() {
+        let error = paginate::<PaginationUser>(0, 10)
+            .await
+            .expect_err("page 0 should be rejected");
+
+        assert!(
+            error.to_string().contains("must be at least 1"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_rejects_a_zero_page_size() {
+        let error = paginate::<PaginationUser>(1, 0)
+            .await
+            .expect_err("per_page 0 should be rejected");
+
+        assert!(
+            error.to_string().contains("must be greater than 0"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paginate_reports_an_offset_that_would_overflow() {
+        // Used to panic in debug builds and wrap to a small offset in release.
+        let error = paginate::<PaginationUser>(u64::MAX, 4)
+            .await
+            .expect_err("an overflowing offset should be reported");
+
+        assert!(
+            error.to_string().contains("overflows"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_active_reports_a_missing_connection_as_a_connection_error() {
+        // `find` reports an outage as `Error::Connection`; the soft-delete path
+        // used to rewrap it as an engine `Custom` error, which translates to
+        // `Error::Internal` and takes `exists`/`find_or_fail` off every
+        // connection-specific branch.
+        crate::database::Database::reset_global();
+
+        let error = find_active::<SoftDeleteUser>(1)
+            .await
+            .expect_err("a missing global connection should be reported");
+
+        assert!(
+            matches!(error, Error::Connection { .. }),
+            "expected a connection error, got: {error:?}"
+        );
+    }
 }

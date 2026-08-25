@@ -199,6 +199,66 @@ fn test_query_cache_get_removes_expired_entries() {
 }
 
 #[test]
+fn test_query_cache_invalidates_on_any_tagged_table() {
+    let cache = QueryCache::new();
+    cache.enable();
+
+    cache
+        .set_tagged(
+            "joined",
+            &"value",
+            None,
+            &["posts".to_string(), "users".to_string()],
+        )
+        .unwrap();
+    cache.set("posts_only", &"value", None, "posts").unwrap();
+
+    cache.invalidate_model("users");
+
+    assert!(
+        !cache.contains("joined"),
+        "a write to a joined table must evict the cached join result"
+    );
+    assert!(cache.contains("posts_only"));
+}
+
+#[test]
+fn test_query_cache_enforces_max_size_bytes() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set_strategy(CacheStrategy::FIFO);
+    cache.set_max_size_bytes(40);
+
+    cache.set("first", &"a".repeat(20), None, "model").unwrap();
+    cache.set("second", &"b".repeat(20), None, "model").unwrap();
+
+    assert!(cache.stats().size_bytes <= 40);
+    assert!(!cache.contains("first"));
+    assert!(cache.contains("second"));
+
+    cache.set("huge", &"c".repeat(200), None, "model").unwrap();
+    assert!(
+        !cache.contains("huge"),
+        "a payload larger than the whole budget is never cached"
+    );
+}
+
+#[test]
+fn test_query_cache_apply_config_replaces_configuration() {
+    let cache = QueryCache::new();
+    assert!(!cache.is_enabled());
+
+    cache.apply_config(CacheConfig {
+        enabled: true,
+        max_entries: 5,
+        ..CacheConfig::default()
+    });
+
+    assert!(cache.is_enabled());
+    assert_eq!(cache.config().unwrap().max_entries, 5);
+}
+
+#[test]
 fn test_prepared_statement_cache() {
     let cache = PreparedStatementCache::new();
     cache.enable();
@@ -239,6 +299,68 @@ fn test_prepared_statement_cache_reset_stats_preserves_cached_count() {
     assert_eq!(after_reset.evictions, 0);
     assert_eq!(after_reset.total_executions, 0);
     assert_eq!(after_reset.cached_count, 1);
+}
+
+#[test]
+fn test_prepared_statement_cache_zero_max_statements_caches_nothing() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+    cache.set_max_statements(0);
+
+    // Before the guard existed this spun forever holding the write lock.
+    let (sql, cached) = cache.get_or_prepare("SELECT 1");
+
+    assert_eq!(sql, "SELECT 1");
+    assert!(!cached);
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn test_prepared_statement_cached_info_handles_multibyte_sql() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+
+    let sql = format!("SELECT '{}' AS label", "数".repeat(150));
+    let _ = cache.get_or_prepare(&sql);
+
+    let info = cache.cached_statements_info();
+
+    assert_eq!(info.len(), 1);
+    assert!(info[0].sql_preview.ends_with("..."));
+}
+
+#[test]
+fn test_prepared_statement_observe_execution_records_real_traffic() {
+    let disabled = PreparedStatementCache::new();
+    disabled.observe_execution("SELECT 1", 10);
+    assert_eq!(disabled.stats().total_executions, 0);
+
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+
+    cache.observe_execution("SELECT 1", 120);
+    cache.observe_execution("SELECT 1", 80);
+
+    let stats = cache.stats();
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.total_executions, 2);
+    assert_eq!(stats.cached_count, 1);
+}
+
+#[test]
+fn test_prepared_statement_apply_config_replaces_configuration() {
+    let cache = PreparedStatementCache::new();
+    assert!(!cache.is_enabled());
+
+    cache.apply_config(PreparedStatementConfig {
+        enabled: true,
+        max_statements: 7,
+        max_age: Duration::from_secs(1),
+    });
+
+    assert!(cache.is_enabled());
+    assert_eq!(cache.config().unwrap().max_statements, 7);
 }
 
 #[test]

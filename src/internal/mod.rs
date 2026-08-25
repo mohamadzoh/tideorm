@@ -8,8 +8,10 @@
 //! 3. Error translation happens in one place
 //! 4. Query translation is centralized
 
-use crate::error::{Error, Result};
+use crate::error::{DbFailure, DbFailureKind, Error, Result};
 use crate::internal::sql_safety::quote_ident_for_backend;
+// `ConnAcquireErr` and `RuntimeErr` arrive through the `entity::prelude::*` re-export
+// below; importing them again privately would shadow that public glob.
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
 
 mod backend;
@@ -26,7 +28,7 @@ pub use crate::orm::{
     DeriveEntityModel, DeriveRelation, EntityTrait, EnumIter, ExecResult, FromQueryResult, Iden,
     IntoActiveModel, Iterable, LoaderTrait, ModelTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, QueryTrait, Related, RelationDef, RelationTrait, Statement as OrmStatement,
-    TransactionTrait, TryGetable, Value,
+    TransactionSession, TransactionTrait, TryGetable, Value,
     entity::prelude::*,
     schema::{Schema, SchemaBuilder},
     sea_query::{
@@ -42,6 +44,35 @@ pub use crate::orm::sqlx;
 pub use backend::Backend;
 pub(crate) use backend::{build_statement, build_statement_with_values};
 
+/// A single database parameter value.
+///
+/// This is the type the public raw-SQL entry points bind — see
+/// [`Database::raw_with_params`](crate::database::Database::raw_with_params),
+/// [`Database::execute_with_params`](crate::database::Database::execute_with_params)
+/// and
+/// [`Database::raw_json_with_params`](crate::database::Database::raw_json_with_params).
+///
+/// It exists so callers have a TideORM-owned name for the parameter type and
+/// never have to reach into this hidden module (or name the ORM engine's type)
+/// just to call a documented API — reach it as [`tideorm::DbValue`](crate::DbValue)
+/// or through the prelude, not through `tideorm::internal`. Most values are
+/// built with `.into()` from the corresponding Rust type, so the name is only
+/// needed for annotations and explicit `NULL` bindings.
+pub type DbValue = Value;
+
+/// Bind one JSON value as a database parameter.
+///
+/// `Null` becomes a typed NULL binding, which is only ever correct where SQL
+/// itself expects a NULL operand — never on either side of `=` or `!=`, where
+/// the comparison is UNKNOWN for every row and the filter silently matches
+/// nothing. `QueryBuilder::condition_spec` rewrites those into `IS NULL` /
+/// `IS NOT NULL` before reaching this function, and ordering comparisons
+/// against NULL are rejected outright, so no comparison arrives here with a
+/// null to bind.
+///
+/// Arrays and objects are bound as their JSON text. The JSON operators do not
+/// come through here — `query::db_sql` binds those with backend-appropriate
+/// JSON parameters — so this stays the generic scalar path.
 pub(crate) fn json_to_db_value(value: &serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::String(None),
@@ -79,37 +110,80 @@ pub(crate) fn push_param(
     placeholder
 }
 
+/// Refuse an encryption-blind fallback before it can move plaintext or
+/// ciphertext across the persistence boundary.
+///
+/// `InternalModel`'s fallible conversions default to their infallible twins,
+/// which is correct for the overwhelming majority of models: they declare no
+/// `#[tideorm(encrypted)]` fields, so the two paths are the same conversion and
+/// the default saves every model from spelling it twice. A model that *does*
+/// declare encrypted fields must override the fallible half — the derive always
+/// does — because the infallible half has nowhere to report a cipher failure and
+/// would either write plaintext into a ciphertext column or hand ciphertext back
+/// as if it were plaintext. If that override is ever missing, this turns a silent
+/// data-integrity bug into an error at the point of conversion.
+pub(crate) fn reject_encryption_blind_conversion<M>(conversion: &str) -> Result<()>
+where
+    M: crate::model::ModelMeta,
+{
+    if !M::has_encrypted_fields() {
+        return Ok(());
+    }
+
+    Err(Error::internal(format!(
+        "`{}` fell back to the plaintext conversion for `{}`, which cannot handle the encrypted \
+         field(s): {}",
+        conversion,
+        M::table_name(),
+        M::encrypted_fields().join(", ")
+    )))
+}
+
 /// Internal trait that maps TideORM models to ORM engine entities.
 /// This is implemented by TideORM's model macros.
+///
+/// The conversions come in pairs. The `try_` half is the persistence path: it is
+/// where encrypted fields are encrypted on the way out and decrypted on the way
+/// in, so it is the only half allowed to reach the database. The infallible half
+/// is a plaintext, in-memory convenience that cannot report a cipher failure —
+/// never build a statement from it. The `try_` defaults bridge to it only for
+/// models with no encrypted fields; see `reject_encryption_blind_conversion`.
 #[doc(hidden)]
 pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     type Entity: EntityTrait;
     type ActiveModel: ActiveModelTrait<Entity = Self::Entity> + ActiveModelBehavior + Send;
 
-    /// Convert a TideORM model to the ORM engine's active model.
+    /// Convert a TideORM model to the ORM engine's active model, in plaintext.
     fn into_active_model(self) -> Self::ActiveModel;
 
     /// Convert a TideORM model to the ORM engine's active model and allow
     /// model-level preprocessing such as encrypted field writes.
     fn try_into_active_model(self) -> Result<Self::ActiveModel> {
+        reject_encryption_blind_conversion::<Self>("try_into_active_model")?;
         Ok(self.into_active_model())
     }
 
-    /// Convert the generated entity model to a TideORM model.
+    /// Convert the generated entity model to a TideORM model, in plaintext.
     fn from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Self;
 
     /// Convert the generated entity model to a TideORM model and allow
     /// model-level postprocessing such as encrypted field reads.
     fn try_from_entity_model(model: <Self::Entity as EntityTrait>::Model) -> Result<Self> {
+        reject_encryption_blind_conversion::<Self>("try_from_entity_model")?;
         Ok(Self::from_entity_model(model))
     }
 
-    /// Convert a TideORM model into its generated entity model.
+    /// Convert a TideORM model into its generated entity model, in plaintext.
+    ///
+    /// The plaintext rendering is what in-memory comparisons want — comparing
+    /// two ciphertexts of a randomized cipher reports a change on every field —
+    /// so this stays the comparison path even for encrypted models.
     fn to_entity_model(&self) -> <Self::Entity as EntityTrait>::Model;
 
     /// Convert a TideORM model into its generated entity model and allow
     /// model-level preprocessing such as encrypted field writes.
     fn try_to_entity_model(&self) -> Result<<Self::Entity as EntityTrait>::Model> {
+        reject_encryption_blind_conversion::<Self>("try_to_entity_model")?;
         Ok(self.to_entity_model())
     }
 
@@ -159,8 +233,84 @@ impl InternalConnection {
     }
 }
 
+/// Read the SQLSTATE, constraint name and table a driver reported.
+///
+/// The engine's own error kind answers the constraint violations on every
+/// backend; everything else is classified from the SQLSTATE, which is where
+/// syntax, privilege and lock failures become distinguishable.
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
+fn runtime_failure(runtime: &RuntimeErr) -> DbFailure {
+    use crate::orm::sqlx::error::ErrorKind;
+
+    let RuntimeErr::SqlxError(driver_error) = runtime else {
+        return DbFailure::new(DbFailureKind::Unclassified);
+    };
+    let Some(database_error) = driver_error.as_database_error() else {
+        return DbFailure::new(DbFailureKind::Unclassified);
+    };
+
+    let code = database_error.code().map(|code| code.into_owned());
+    let kind = match database_error.kind() {
+        ErrorKind::UniqueViolation => DbFailureKind::UniqueViolation,
+        ErrorKind::ForeignKeyViolation => DbFailureKind::ForeignKeyViolation,
+        ErrorKind::NotNullViolation => DbFailureKind::NotNullViolation,
+        ErrorKind::CheckViolation => DbFailureKind::CheckViolation,
+        _ => code
+            .as_deref()
+            .map_or(DbFailureKind::Unclassified, DbFailureKind::from_sqlstate),
+    };
+
+    DbFailure::new(kind)
+        .with_code(code)
+        .with_constraint(database_error.constraint().map(str::to_string))
+        .with_table(database_error.table().map(str::to_string))
+}
+
+/// Without a driver feature compiled in there is no driver error to read, so
+/// every runtime failure stays unclassified.
+#[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+fn runtime_failure(_runtime: &RuntimeErr) -> DbFailure {
+    DbFailure::new(DbFailureKind::Unclassified)
+}
+
+/// Recover the structured driver detail behind an engine error.
+///
+/// Only the engine variants that actually came back from a driver produce a
+/// failure — the rest is engine bookkeeping with nothing to preserve. The engine
+/// error itself is kept as the failure's own source, which is what makes
+/// `{:#}`-style chains and `anyhow` interop reach the backend instead of
+/// stopping at TideORM's rendered message.
+pub(crate) fn driver_failure(err: &OrmError) -> Option<DbFailure> {
+    let failure = match err {
+        // A pool acquire failure never reaches a driver, so it has no SQLSTATE,
+        // but the engine already classified it and both cases are transient.
+        OrmError::ConnectionAcquire(ConnAcquireErr::Timeout) => {
+            DbFailure::new(DbFailureKind::ConnectionTimeout)
+        }
+        OrmError::ConnectionAcquire(ConnAcquireErr::ConnectionClosed) => {
+            DbFailure::new(DbFailureKind::ConnectionClosed)
+        }
+        OrmError::Conn(runtime) | OrmError::Exec(runtime) | OrmError::Query(runtime) => {
+            runtime_failure(runtime)
+        }
+        _ => return None,
+    };
+
+    Some(failure.with_source(Box::new(err.clone())))
+}
+
 /// Translate ORM engine errors to TideORM errors.
+///
+/// The structured driver detail rides along, so the returned error can answer
+/// for its SQLSTATE and constraint name and its `source` chain still reaches the
+/// driver.
 pub(crate) fn translate_error(err: OrmError) -> Error {
+    let failure = driver_failure(&err);
+    translate_engine_error(err).with_db_failure(failure)
+}
+
+/// Map an engine error onto the TideORM variant that describes it.
+fn translate_engine_error(err: OrmError) -> Error {
     match err {
         OrmError::RecordNotFound(msg) => Error::not_found(msg),
         OrmError::ConnectionAcquire(e) => Error::connection(e.to_string()),
@@ -168,11 +318,43 @@ pub(crate) fn translate_error(err: OrmError) -> Error {
         OrmError::Exec(e) => Error::query(e.to_string()),
         OrmError::Query(e) => Error::query(e.to_string()),
         OrmError::ConvertFromU64(msg) => Error::conversion(msg),
+        OrmError::TryIntoErr { from, into, source } => {
+            Error::conversion(format!("Error converting `{from}` into `{into}`: {source}"))
+        }
+        OrmError::Type(msg) => Error::conversion(msg),
+        OrmError::Json(msg) => Error::conversion(msg),
+        // Raised by `TryFrom<ActiveModel>` when an attribute was never set, which
+        // is a per-field completeness failure and carries the field name — the
+        // exact shape of `Error::Validation`.
+        OrmError::AttrNotSet(attribute) => Error::validation(attribute, "attribute is not set"),
+        OrmError::KeyArityMismatch { expected, received } => Error::query(format!(
+            "Primary key arity mismatch: expected {expected} key column(s), received {received}"
+        )),
         OrmError::UnpackInsertId => Error::query("Failed to get insert ID".to_string()),
         OrmError::UpdateGetPrimaryKey => {
             Error::query("Failed to get primary key after update".to_string())
         }
+        OrmError::BackendNotSupported { db, ctx } => Error::backend_not_supported(ctx, db),
+        OrmError::PrimaryKeyNotSet { ctx } => {
+            Error::primary_key_not_set(format!("primary key not set for {ctx}"), "model")
+        }
+        OrmError::RecordNotInserted => Error::query("None of the records are inserted".to_string()),
+        OrmError::RecordNotUpdated => Error::not_found("None of the records are updated"),
+        // A migration failure is a statement that did not execute, which is what
+        // `Error::Query` describes — and it is what TideORM's own migrator
+        // (`migration::migrator`) already reports for the same failures, so
+        // engine-raised migration errors must not land somewhere else.
+        OrmError::Migration(msg) => Error::query(msg),
+        OrmError::AccessDenied {
+            permission,
+            resource,
+        } => Error::access_denied(permission, resource),
+        OrmError::RbacError(msg) => Error::rbac(msg),
         OrmError::Custom(msg) => Error::internal(msg),
+        // Everything left over — a poisoned engine mutex, plus whatever a future
+        // engine release adds — has no TideORM counterpart and stays internal on
+        // purpose. This arm is deliberately a catch-all so an engine upgrade
+        // cannot break the build.
         _ => Error::internal(err.to_string()),
     }
 }
@@ -268,6 +450,34 @@ fn query_result_exists_bool(row: &QueryResult) -> Result<bool> {
     Err(Error::query(
         "Unable to decode database EXISTS result as a boolean or integer",
     ))
+}
+
+/// Insert models one row at a time, preserving the caller's ordering.
+///
+/// Used by the backends that cannot execute a multi-row `INSERT ... RETURNING`.
+/// The caller is responsible for providing a transactional connection so the
+/// whole batch stays all-or-nothing.
+async fn insert_models_individually<M, C>(
+    conn: &C,
+    models: Vec<M>,
+    error_context: &crate::error::ErrorContext,
+) -> Result<Vec<M>>
+where
+    M: InternalModel + crate::model::Model,
+    <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
+    C: ConnectionTrait,
+{
+    let mut results = Vec::with_capacity(models.len());
+    for model in models {
+        let active = model.try_into_active_model()?;
+        let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
+            .await
+            .map_err(translate_error)
+            .map_err(|err| err.with_context(error_context.clone()))?;
+        results.push(M::try_from_entity_model(result)?);
+    }
+
+    Ok(results)
 }
 
 fn scoped_find<M>() -> Select<M::Entity>
@@ -414,20 +624,11 @@ impl QueryExecutor {
         results.into_iter().map(M::try_from_entity_model).collect()
     }
 
-    /// Delete a record
-    pub async fn delete<M, C>(conn: &C, model: M) -> Result<u64>
-    where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
-    {
-        let active = model.into_active_model();
-        let result = active.delete(conn);
-        let result = crate::profiling::__profile_future(result)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>("delete(model)")))?;
-        Ok(result.rows_affected)
-    }
+    // Deletes deliberately do not live here. `into_active_model` produces an
+    // insert-shaped `ActiveModel` — an auto-increment primary key is `NotSet` —
+    // so an executor-side delete would fail with `PrimaryKeyNotSet` before it
+    // reached the database. The macro emits `__into_delete_active_model`, which
+    // sets the primary key, and `Model::delete` uses that instead.
 
     /// Insert multiple records in a single batch INSERT statement
     ///
@@ -436,12 +637,15 @@ impl QueryExecutor {
     ///
     /// On PostgreSQL and MariaDB, uses `INSERT ... RETURNING` for efficiency.
     /// On MySQL and SQLite, falls back to individual inserts since they don't
-    /// support multi-row `INSERT ... RETURNING`.
+    /// support multi-row `INSERT ... RETURNING`. Those inserts run inside a
+    /// transaction — a savepoint when the caller already opened one — so the
+    /// batch is all-or-nothing on every backend and the difference between
+    /// backends stays an efficiency one.
     pub async fn insert_many<M, C>(conn: &C, models: Vec<M>) -> Result<Vec<M>>
     where
         M: InternalModel + crate::model::Model,
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
-        C: ConnectionTrait,
+        C: ConnectionTrait + TransactionTrait,
     {
         if models.is_empty() {
             return Ok(Vec::new());
@@ -490,20 +694,193 @@ impl QueryExecutor {
 
             results.into_iter().map(M::try_from_entity_model).collect()
         } else {
-            // MySQL/SQLite: fall back to individual inserts
-            // MySQL doesn't support multi-row INSERT ... RETURNING
-            let mut results = Vec::with_capacity(models.len());
-            for model in models {
-                let active = model.try_into_active_model()?;
-                let result =
-                    crate::profiling::__profile_future(async move { active.insert(conn).await })
+            // MySQL/SQLite: fall back to individual inserts because they don't
+            // support multi-row INSERT ... RETURNING. Wrap them in a transaction
+            // so a failure halfway through cannot leave earlier rows committed.
+            // `begin()` on an open transaction opens a SAVEPOINT, so this also
+            // nests correctly inside a caller's transaction.
+            let txn = conn
+                .begin()
+                .await
+                .map_err(translate_error)
+                .map_err(|err| err.with_context(error_context.clone()))?;
+
+            let inserted = insert_models_individually::<M, _>(&txn, models, &error_context).await;
+
+            match inserted {
+                Ok(results) => {
+                    txn.commit()
                         .await
                         .map_err(translate_error)
                         .map_err(|err| err.with_context(error_context.clone()))?;
-                results.push(M::try_from_entity_model(result)?);
+                    Ok(results)
+                }
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    Err(err)
+                }
             }
-            Ok(results)
         }
+    }
+}
+
+#[cfg(test)]
+mod error_translation_tests {
+    use super::{ConnAcquireErr, DbFailureKind, Error, OrmError, driver_failure, translate_error};
+    use std::error::Error as StdError;
+
+    #[test]
+    fn migration_failures_are_query_errors_like_the_migrator_reports() {
+        match translate_error(OrmError::Migration("relation exists".to_string())) {
+            Error::Query { message, .. } => assert_eq!(message, "relation exists"),
+            other => panic!("unexpected translation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn access_control_failures_get_their_own_variants() {
+        match translate_error(OrmError::AccessDenied {
+            permission: "delete".to_string(),
+            resource: "users".to_string(),
+        }) {
+            Error::AccessDenied {
+                permission,
+                resource,
+            } => {
+                assert_eq!(permission, "delete");
+                assert_eq!(resource, "users");
+            }
+            other => panic!("unexpected translation: {other:?}"),
+        }
+
+        match translate_error(OrmError::RbacError("denied".to_string())) {
+            Error::Rbac { message } => assert_eq!(message, "denied"),
+            other => panic!("unexpected translation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_errors_without_a_tideorm_counterpart_stay_internal() {
+        for err in [
+            OrmError::Custom("boom".to_string()),
+            OrmError::MutexPoisonError,
+        ] {
+            let translated = translate_error(err);
+            assert!(
+                matches!(translated, Error::Internal { .. }),
+                "unexpected translation: {translated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pool_acquire_failures_keep_a_retryable_classification() {
+        let translated = translate_error(OrmError::ConnectionAcquire(ConnAcquireErr::Timeout));
+
+        assert!(translated.is_connection_error());
+        assert_eq!(translated.failure_kind(), DbFailureKind::ConnectionTimeout);
+        assert!(translated.is_retryable());
+    }
+
+    #[test]
+    fn the_engine_error_survives_as_the_source_of_the_translated_error() {
+        let translated = translate_error(OrmError::ConnectionAcquire(
+            ConnAcquireErr::ConnectionClosed,
+        ));
+
+        // Error -> DbFailure -> engine error. The last hop is what a `{:#}`
+        // chain or an `anyhow` report needs to reach the driver.
+        let failure = StdError::source(&translated).expect("driver failure is the source");
+        assert!(
+            failure.source().is_some(),
+            "the engine error must stay reachable through the failure"
+        );
+    }
+
+    #[test]
+    fn engine_bookkeeping_errors_carry_no_driver_failure() {
+        assert!(driver_failure(&OrmError::MutexPoisonError).is_none());
+        assert!(driver_failure(&OrmError::RecordNotInserted).is_none());
+    }
+}
+
+#[cfg(test)]
+mod encryption_blind_conversion_tests {
+    use super::reject_encryption_blind_conversion;
+    use crate::model::ModelMeta;
+
+    #[derive(Clone)]
+    struct PlainModel;
+
+    impl ModelMeta for PlainModel {
+        type PrimaryKey = i64;
+
+        fn table_name() -> &'static str {
+            "plain_models"
+        }
+
+        fn primary_key_names() -> &'static [&'static str] {
+            &["id"]
+        }
+
+        fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
+            primary_key.to_string()
+        }
+
+        fn column_names() -> &'static [&'static str] {
+            &["id", "name"]
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["id", "name"]
+        }
+    }
+
+    #[derive(Clone)]
+    struct EncryptedModel;
+
+    impl ModelMeta for EncryptedModel {
+        type PrimaryKey = i64;
+
+        fn table_name() -> &'static str {
+            "encrypted_models"
+        }
+
+        fn primary_key_names() -> &'static [&'static str] {
+            &["id"]
+        }
+
+        fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
+            primary_key.to_string()
+        }
+
+        fn column_names() -> &'static [&'static str] {
+            &["id", "secret"]
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["id", "secret"]
+        }
+
+        fn encrypted_fields() -> Vec<&'static str> {
+            vec!["secret"]
+        }
+    }
+
+    #[test]
+    fn models_without_encrypted_fields_keep_the_plaintext_fallback() {
+        assert!(reject_encryption_blind_conversion::<PlainModel>("try_into_active_model").is_ok());
+    }
+
+    #[test]
+    fn an_encrypted_model_never_falls_back_to_the_plaintext_conversion() {
+        let error = reject_encryption_blind_conversion::<EncryptedModel>("try_from_entity_model")
+            .expect_err("the plaintext fallback cannot decrypt");
+        let message = error.to_string();
+
+        assert!(message.contains("try_from_entity_model"), "{message}");
+        assert!(message.contains("encrypted_models"), "{message}");
+        assert!(message.contains("secret"), "{message}");
     }
 }
 

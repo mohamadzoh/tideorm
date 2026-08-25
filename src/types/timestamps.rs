@@ -116,13 +116,18 @@ impl UnixTimestampMillis {
     }
 
     /// Get as seconds (losing millisecond precision)
+    ///
+    /// Rounds toward negative infinity so that pre-epoch values stay consistent with
+    /// [`Self::to_datetime`]: `-1500` milliseconds is `-2` seconds, not `-1`.
     pub fn as_seconds(&self) -> i64 {
-        self.0 / 1000
+        self.0.div_euclid(1000)
     }
 
     /// Convert to UnixTimestamp (seconds)
+    ///
+    /// Uses the same floor semantics as [`Self::as_seconds`].
     pub fn to_unix_timestamp(self) -> UnixTimestamp {
-        UnixTimestamp(self.0 / 1000)
+        UnixTimestamp(self.as_seconds())
     }
 
     /// Check if this timestamp is in the past
@@ -160,9 +165,12 @@ impl From<DateTime<Utc>> for UnixTimestampMillis {
     }
 }
 
+/// `From` cannot report failure, so seconds that do not fit in milliseconds saturate at
+/// `i64::MIN`/`i64::MAX` instead of overflowing. Such values are ~292 million years from
+/// the epoch and are not representable as a `chrono::DateTime` either.
 impl From<UnixTimestamp> for UnixTimestampMillis {
     fn from(ts: UnixTimestamp) -> Self {
-        Self(ts.0 * 1000)
+        Self(ts.0.saturating_mul(1000))
     }
 }
 

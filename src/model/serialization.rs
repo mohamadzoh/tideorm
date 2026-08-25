@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::Model;
+use super::{Model, ModelMeta};
 
 pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -> serde_json::Value
 where
@@ -21,18 +21,26 @@ where
         .unwrap_or(M::default_presenter());
 
     let hidden = M::hidden_attributes();
+    let global_hidden = crate::config::Config::get_hidden_attributes();
     #[cfg(feature = "translations")]
     let translatable = M::translatable_fields();
     #[cfg(feature = "attachments")]
     let file_relations = M::files_relations();
 
-    let mut json = match serde_json::to_value(model) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return serde_json::json!({}),
+    let mut json = match model_to_object(model) {
+        Ok(map) => map,
+        Err(error) => {
+            crate::tide_warn!("to_json for `{}` failed: {}", M::table_name(), error);
+            return serde_json::json!({});
+        }
     };
 
     for attr in &hidden {
         json.remove(*attr);
+    }
+
+    for attr in &global_hidden {
+        json.remove(attr.as_str());
     }
 
     #[cfg(feature = "translations")]
@@ -72,7 +80,118 @@ where
         }
     }
 
+    strip_hidden_from_non_column_payloads::<M>(&mut json, &global_hidden);
+
     serde_json::Value::Object(json)
+}
+
+/// Return whether `name` is one of the model's own persisted attributes.
+///
+/// Anything else in the serialized payload is relation or attachment data that
+/// belongs to another model, so it still needs hidden-attribute filtering.
+fn is_persisted_attribute<M>(name: &str) -> bool
+where
+    M: ModelMeta,
+{
+    M::field_names().contains(&name) || M::column_names().contains(&name)
+}
+
+/// Apply hidden-attribute filtering to eager-loaded relation and attachment
+/// payloads, which serde emits verbatim from the related model.
+///
+/// Only non-column keys are visited so JSON-typed columns keep their contents.
+///
+/// A key `M` declares as a relation is filtered with the **target** model's
+/// hidden list — via the function pointer in
+/// `ModelMeta::relation_payload_filters` — and then descended recursively to
+/// any depth, so `post.to_json(None)` after `.with("author")` hides what `User`
+/// declares hidden rather than what `Post` does. Payloads with no declared
+/// target (attachment blobs, and `MorphTo` fields whose model is only known at
+/// runtime) keep the older behaviour of reusing the owning model's list.
+fn strip_hidden_from_non_column_payloads<M>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    global_hidden: &[String],
+) where
+    M: ModelMeta,
+{
+    let hidden = M::hidden_attributes();
+    let relation_filters = M::relation_payload_filters();
+
+    for (key, value) in object.iter_mut() {
+        if is_persisted_attribute::<M>(key) {
+            continue;
+        }
+
+        let filter = relation_filters
+            .iter()
+            .find_map(|(field, filter)| (*field == key.as_str()).then_some(*filter));
+
+        match filter {
+            Some(filter) => filter(value, global_hidden),
+            None => strip_hidden_attributes(value, &hidden, global_hidden),
+        }
+    }
+}
+
+/// Filter one already-serialized payload of model `M` in place: drop `M`'s own
+/// hidden attributes plus the global list, then recurse through `M`'s relation
+/// payloads.
+///
+/// Reached through `ModelMeta::__strip_hidden_payload`, which is what lets a
+/// nested payload — untagged JSON by the time `to_json` sees it — be filtered by
+/// the model that produced it. Recursion is driven by the JSON, not by the
+/// relation graph, so a cyclic relation graph still terminates.
+pub(crate) fn strip_model_payload<M>(value: &mut serde_json::Value, global_hidden: &[String])
+where
+    M: ModelMeta,
+{
+    match value {
+        serde_json::Value::Object(map) => {
+            for attr in M::hidden_attributes() {
+                map.remove(attr);
+            }
+
+            for attr in global_hidden {
+                map.remove(attr.as_str());
+            }
+
+            strip_hidden_from_non_column_payloads::<M>(map, global_hidden);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_model_payload::<M>(item, global_hidden);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_hidden_attributes(
+    value: &mut serde_json::Value,
+    hidden: &[&str],
+    global_hidden: &[String],
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for attr in hidden {
+                map.remove(*attr);
+            }
+
+            for attr in global_hidden {
+                map.remove(attr.as_str());
+            }
+
+            for nested in map.values_mut() {
+                strip_hidden_attributes(nested, hidden, global_hidden);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_hidden_attributes(item, hidden, global_hidden);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(feature = "attachments")]
@@ -184,6 +303,79 @@ where
     updated.refresh_runtime_relations_from(model);
     *model = updated;
     Ok(())
+}
+
+/// Resolve a field or database column name to the model's serde field name,
+/// which is the key used by the JSON representation of the model.
+fn canonical_field_name<M>(name: &str) -> Option<&'static str>
+where
+    M: Model,
+{
+    if let Some(field_name) = M::field_names()
+        .iter()
+        .copied()
+        .find(|field| *field == name)
+    {
+        return Some(field_name);
+    }
+
+    M::field_names()
+        .iter()
+        .copied()
+        .zip(M::column_names().iter().copied())
+        .find_map(|(field_name, column_name)| (column_name == name).then_some(field_name))
+}
+
+fn changes_to_object<M>(
+    changes: HashMap<String, serde_json::Value>,
+    object: &mut serde_json::Map<String, serde_json::Value>,
+) -> std::result::Result<(), String>
+where
+    M: Model,
+{
+    for (name, value) in changes {
+        let field_name = canonical_field_name::<M>(&name)
+            .ok_or_else(|| format!("Unknown field '{}' for '{}'", name, M::table_name()))?;
+        object.insert(field_name.to_string(), value);
+    }
+
+    Ok(())
+}
+
+/// Apply accumulated attribute changes to `model` in place.
+///
+/// Keys accept either the Rust field name or the database column name.
+pub(crate) fn apply_changes<M>(
+    model: &mut M,
+    changes: HashMap<String, serde_json::Value>,
+) -> std::result::Result<(), String>
+where
+    M: Model,
+{
+    if changes.is_empty() {
+        return Ok(());
+    }
+
+    let mut object = model_to_object(model)?;
+    changes_to_object::<M>(changes, &mut object)?;
+
+    overwrite_model_from_object(model, object)
+}
+
+/// Build a brand new model from accumulated attribute values.
+///
+/// Keys accept either the Rust field name or the database column name.
+pub(crate) fn model_from_values<M>(
+    values: HashMap<String, serde_json::Value>,
+) -> std::result::Result<M, String>
+where
+    M: Model,
+{
+    let mut object = serde_json::Map::new();
+    changes_to_object::<M>(values, &mut object)?;
+
+    serde_json::from_value(serde_json::Value::Object(object))
+        .map_err(|error| format!("Failed to build model from values: {}", error))
 }
 
 pub(crate) fn load_language_translations<M>(

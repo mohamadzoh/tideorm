@@ -121,3 +121,40 @@ async fn tracked_has_many_read_helpers_query_via_parent_entity_manager_database(
 
     Ok(())
 }
+
+#[tokio::test]
+async fn cached_relation_load_keeps_the_registered_identity_map_instance()
+-> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+
+    entity_manager
+        .register(TrackedEntityManagerRelationPost {
+            id: 7,
+            user_id: 1,
+            title: "Canonical".to_string(),
+        })
+        .await;
+
+    let mut relation =
+        super::TrackedHasMany::<TrackedEntityManagerRelationPost>::new("user_id", "id")
+            .with_metadata("posts", USER_TABLE, POST_TABLE)
+            .with_owner_key("1".to_string());
+    relation.set_cached(vec![TrackedEntityManagerRelationPost {
+        id: 7,
+        user_id: 1,
+        title: "Stale eager copy".to_string(),
+    }]);
+
+    let loaded = relation.load_in_entity_manager(&entity_manager).await?;
+
+    // The eagerly cached copy must not replace the already tracked instance.
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].title, "Canonical");
+
+    let mapped = entity_manager
+        .get::<TrackedEntityManagerRelationPost>(&7)?
+        .expect("identity map should still hold the registered instance");
+    assert_eq!(mapped.title, "Canonical");
+
+    Ok(())
+}

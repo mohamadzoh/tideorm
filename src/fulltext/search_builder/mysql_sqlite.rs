@@ -1,6 +1,62 @@
 use super::*;
 use crate::internal::sql_builder::SqlBuilder;
 
+/// Predicate used when a SQLite full-text query carries no searchable terms.
+const SQLITE_MATCH_NOTHING: &str = "1 = 0";
+
+/// Render the MySQL/MariaDB `AGAINST(...)` search-mode modifier.
+///
+/// The row-returning, ranked, and counting builders must all render the *same*
+/// modifier: a count taken in a different mode than the rows it paginates
+/// reports a total that disagrees with the result set. The mapping therefore
+/// lives here and nowhere else, and the match is deliberately exhaustive so a
+/// new [`SearchMode`] variant has to be classified rather than silently falling
+/// through to natural-language mode in some builders only.
+fn mysql_against_mode_modifier(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Natural | SearchMode::Prefix | SearchMode::Fuzzy | SearchMode::Proximity(_) => {
+            ""
+        }
+        SearchMode::Boolean => " IN BOOLEAN MODE",
+        SearchMode::Phrase => " WITH QUERY EXPANSION",
+    }
+}
+
+/// Build the FTS5 `MATCH` operand for a query, or `None` when it has no terms.
+///
+/// FTS5 rejects an empty operand outright (`fts5: syntax error near ""`), so a
+/// whitespace-only or operator-only query must not reach `MATCH` at all; the
+/// callers substitute a predicate that matches nothing instead.
+fn sqlite_match_operand(query: &str) -> Option<String> {
+    let operand = escape_fts5_query(query);
+    if operand.is_empty() {
+        None
+    } else {
+        Some(operand)
+    }
+}
+
+/// Render the SQLite `WHERE` predicate, binding the FTS5 `MATCH` operand.
+///
+/// A `None` operand yields a match-nothing predicate so that a term-less query
+/// returns no rows on every SQLite builder — rows, ranked rows, and count alike
+/// — instead of failing at the driver with an FTS5 syntax error. Call this
+/// before pushing any later parameter so the bound operand keeps its position.
+fn sqlite_match_predicate(
+    fts_table_name: &str,
+    operand: Option<String>,
+    params: &mut Vec<Value>,
+) -> String {
+    match operand {
+        Some(operand) => SqlBuilder::new(DatabaseType::SQLite, params)
+            .ident(fts_table_name)
+            .raw(" MATCH ")
+            .param(Value::String(Some(operand)))
+            .into_sql(),
+        None => SQLITE_MATCH_NOTHING.to_string(),
+    }
+}
+
 impl<T: Model> FullTextSearchBuilder<T> {
     pub(super) fn build_mysql_sql(&self) -> Result<(String, Vec<Value>)> {
         let columns_str = self
@@ -10,12 +66,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mode_modifier = match self.config.mode {
-            SearchMode::Natural => "",
-            SearchMode::Boolean => " IN BOOLEAN MODE",
-            SearchMode::Phrase => " WITH QUERY EXPANSION",
-            _ => "",
-        };
+        let mode_modifier = mysql_against_mode_modifier(self.config.mode);
 
         let mut params = Vec::new();
         let mut sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
@@ -42,12 +93,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mode_modifier = match self.config.mode {
-            SearchMode::Natural => "",
-            SearchMode::Boolean => " IN BOOLEAN MODE",
-            SearchMode::Phrase => " WITH QUERY EXPANSION",
-            _ => "",
-        };
+        let mode_modifier = mysql_against_mode_modifier(self.config.mode);
 
         let mut params = Vec::new();
         let rank_placeholder = crate::internal::push_param(
@@ -113,11 +159,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mode_modifier = match self.config.mode {
-            SearchMode::Natural => "",
-            SearchMode::Boolean => " IN BOOLEAN MODE",
-            _ => "",
-        };
+        let mode_modifier = mysql_against_mode_modifier(self.config.mode);
 
         let mut params = Vec::new();
         let sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
@@ -143,15 +185,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
 
         let mut params = Vec::new();
+        let operand = sqlite_match_operand(&self.query);
+        let predicate = sqlite_match_predicate(&fts_table_name, operand, &mut params);
         let mut sql = SqlBuilder::new(DatabaseType::SQLite, &mut params)
             .raw("SELECT t.* FROM ")
             .ident(table_name)
             .raw(" t INNER JOIN ")
             .ident(&fts_table_name)
             .raw(" fts ON t.rowid = fts.rowid WHERE ")
-            .ident(&fts_table_name)
-            .raw(" MATCH ")
-            .param(Value::String(Some(escape_fts5_query(&self.query))))
+            .raw(&predicate)
             .raw(" ")
             .into_sql();
 
@@ -165,36 +207,49 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
 
         let mut params = Vec::new();
+        let operand = sqlite_match_operand(&self.query);
+
+        // `bm25()` is only usable in a query that carries a `MATCH` operator, so
+        // a term-less query reports a constant rank over its empty result set
+        // instead of referencing the ranking function at all.
+        let rank_expr = operand.as_ref().map(|_| {
+            format!(
+                "bm25({})",
+                quote_ident(DatabaseType::SQLite, &fts_table_name)
+            )
+        });
+        let predicate = sqlite_match_predicate(&fts_table_name, operand, &mut params);
+
         let mut sql = SqlBuilder::new(DatabaseType::SQLite, &mut params)
-            .raw("SELECT t.*, bm25(")
-            .ident(&fts_table_name)
-            .raw(") AS _fts_rank FROM ")
+            .raw("SELECT t.*, ")
+            .raw(rank_expr.as_deref().unwrap_or("0.0"))
+            .raw(" AS _fts_rank FROM ")
             .ident(table_name)
             .raw(" t INNER JOIN ")
             .ident(&fts_table_name)
             .raw(" fts ON t.rowid = fts.rowid WHERE ")
-            .ident(&fts_table_name)
-            .raw(" MATCH ")
-            .param(Value::String(Some(escape_fts5_query(&self.query))))
+            .raw(&predicate)
             .raw(" ")
             .into_sql();
 
-        if let Some(min_rank) = self.min_rank {
+        if let (Some(rank_expr), Some(min_rank)) = (rank_expr.as_deref(), self.min_rank) {
             let min_rank_placeholder = crate::internal::push_param(
                 DatabaseType::SQLite,
                 &mut params,
                 Value::Double(Some(-min_rank)),
             );
-            sql.push_str("AND bm25(");
-            sql.push_str(&quote_ident(DatabaseType::SQLite, &fts_table_name));
-            sql.push_str(") <= ");
+            sql.push_str("AND ");
+            sql.push_str(rank_expr);
+            sql.push_str(" <= ");
             sql.push_str(&min_rank_placeholder);
             sql.push(' ');
         }
 
-        sql.push_str("ORDER BY bm25(");
-        sql.push_str(&quote_ident(DatabaseType::SQLite, &fts_table_name));
-        sql.push_str(") ");
+        if let Some(rank_expr) = rank_expr.as_deref() {
+            sql.push_str("ORDER BY ");
+            sql.push_str(rank_expr);
+            sql.push(' ');
+        }
 
         self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params)?;
 
@@ -206,15 +261,15 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let fts_table_name = format!("{}_fts", table_name);
 
         let mut params = Vec::new();
+        let operand = sqlite_match_operand(&self.query);
+        let predicate = sqlite_match_predicate(&fts_table_name, operand, &mut params);
         let sql = SqlBuilder::new(DatabaseType::SQLite, &mut params)
             .raw("SELECT COUNT(*) as count FROM ")
             .ident(table_name)
             .raw(" t INNER JOIN ")
             .ident(&fts_table_name)
             .raw(" fts ON t.rowid = fts.rowid WHERE ")
-            .ident(&fts_table_name)
-            .raw(" MATCH ")
-            .param(Value::String(Some(escape_fts5_query(&self.query))))
+            .raw(&predicate)
             .into_sql();
 
         Ok((sql, params))

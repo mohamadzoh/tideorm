@@ -1,4 +1,5 @@
 use super::*;
+use crate::internal::push_param;
 
 impl Seeder {
     /// Ensure the seeds table exists
@@ -55,11 +56,14 @@ impl Seeder {
             database.__internal_connection()?.get_database_backend(),
         );
         let quote = |identifier: &str| quote_ident_for_backend(backend, identifier);
+        // Order by the monotonic `id` rather than `executed_at`: the timestamp has
+        // whole-second resolution on MySQL and is plain TEXT on SQLite, so ties would
+        // roll back in an arbitrary (potentially FK-violating) order.
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {} ASC",
             quote("name"),
             quote("_seeds"),
-            quote("executed_at")
+            quote("id")
         );
         let statement = build_statement(backend, sql);
 
@@ -88,15 +92,21 @@ impl Seeder {
         );
         let quote = |identifier: &str| quote_ident_for_backend(backend, identifier);
 
-        let sql = format!(
-            "INSERT INTO {} ({}) VALUES (?)",
-            quote("_seeds"),
-            quote("name")
+        let mut params = Vec::new();
+        let placeholder = push_param(
+            detect_database_type(&database),
+            &mut params,
+            Value::String(Some(name.to_string())),
         );
 
-        database
-            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
-            .await?;
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            quote("_seeds"),
+            quote("name"),
+            placeholder
+        );
+
+        database.__execute_with_params(&sql, params).await?;
 
         Ok(())
     }
@@ -109,15 +119,21 @@ impl Seeder {
         );
         let quote = |identifier: &str| quote_ident_for_backend(backend, identifier);
 
-        let sql = format!(
-            "DELETE FROM {} WHERE {} = ?",
-            quote("_seeds"),
-            quote("name")
+        let mut params = Vec::new();
+        let placeholder = push_param(
+            detect_database_type(&database),
+            &mut params,
+            Value::String(Some(name.to_string())),
         );
 
-        database
-            .__execute_with_params(&sql, vec![Value::String(Some(name.to_string()))])
-            .await?;
+        let sql = format!(
+            "DELETE FROM {} WHERE {} = {}",
+            quote("_seeds"),
+            quote("name"),
+            placeholder
+        );
+
+        database.__execute_with_params(&sql, params).await?;
 
         Ok(())
     }

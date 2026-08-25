@@ -25,6 +25,19 @@
 //! - **TTL (Time To Live)** - Entries expire after a fixed duration
 //! - **LRU (Least Recently Used)** - Oldest entries are evicted when cache is full
 //!
+//! ## Global caches and late configuration
+//!
+//! Both caches expose a process-wide instance via `global()`, and both are
+//! created disabled with default settings the first time anything asks for one.
+//! Model writes reach for [`QueryCache::global`] on their own, so that default
+//! is frequently installed before application startup code runs.
+//!
+//! `init_global` therefore *reconfigures* an already-installed cache rather than
+//! failing to replace it: [`QueryCache::init_global`] and
+//! [`PreparedStatementCache::init_global`] both fall back to `apply_config`, so
+//! configuration passed after the first `global()` call still takes effect.
+//! Entries cached up to that point are kept.
+//!
 //! ## Thread Safety
 //!
 //! The cache types are shared and synchronized internally, so they can be used

@@ -10,7 +10,6 @@
 //! - `nested` for relation-aware saves
 //! - `serialization` when attributes are not loading or persisting as expected
 
-#[allow(missing_docs)]
 mod api;
 mod batch;
 mod builders;

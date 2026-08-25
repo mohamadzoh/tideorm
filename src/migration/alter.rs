@@ -1,5 +1,6 @@
 use super::table::{ColumnDefinition, IndexBuilder};
 use super::{ColumnType, DatabaseType, DefaultValue, quote_identifier_for_db};
+use crate::error::{Error, Result};
 
 /// Builder for ALTER TABLE operations
 pub struct AlterTableBuilder {
@@ -78,15 +79,15 @@ impl AlterTableBuilder {
         self
     }
 
-    pub(crate) fn build(&self) -> Vec<String> {
+    pub(crate) fn build(&self) -> Result<Vec<String>> {
         self.operations
             .iter()
             .map(|operation| self.build_operation(operation))
             .collect()
     }
 
-    fn build_operation(&self, operation: &AlterOperation) -> String {
-        match operation {
+    fn build_operation(&self, operation: &AlterOperation) -> Result<String> {
+        let sql = match operation {
             AlterOperation::AddColumn(column) => {
                 let column_definition = self.build_column_def(column);
                 format!(
@@ -102,24 +103,14 @@ impl AlterTableBuilder {
                     self.quote_identifier(name)
                 )
             }
-            AlterOperation::RenameColumn(from, to) => match self.database_type {
-                DatabaseType::Postgres | DatabaseType::SQLite => {
-                    format!(
-                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                        self.quote_identifier(&self.name),
-                        self.quote_identifier(from),
-                        self.quote_identifier(to)
-                    )
-                }
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    format!(
-                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                        self.quote_identifier(&self.name),
-                        self.quote_identifier(from),
-                        self.quote_identifier(to)
-                    )
-                }
-            },
+            AlterOperation::RenameColumn(from, to) => {
+                format!(
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    self.quote_identifier(&self.name),
+                    self.quote_identifier(from),
+                    self.quote_identifier(to)
+                )
+            }
             AlterOperation::ChangeColumnType(name, column_type) => {
                 let type_sql = self.type_to_sql(column_type);
                 match self.database_type {
@@ -139,11 +130,19 @@ impl AlterTableBuilder {
                             type_sql
                         )
                     }
+                    // Emitting a SQL comment here would let the migration be
+                    // recorded as applied while the column keeps its old type.
                     DatabaseType::SQLite => {
-                        format!(
-                            "-- SQLite does not support ALTER COLUMN TYPE; table recreation needed for {}",
-                            name
-                        )
+                        return Err(Error::backend_not_supported(
+                            format!(
+                                "SQLite cannot change the type of column '{}' on table '{}'. \
+                                 Rebuild the table instead: create a new table with the target \
+                                 definition, copy the rows across, drop the old table and rename \
+                                 the new one.",
+                                name, self.name
+                            ),
+                            "SQLite",
+                        ));
                     }
                 }
             }
@@ -177,7 +176,9 @@ impl AlterTableBuilder {
                 }
                 _ => format!("DROP INDEX {}", self.quote_identifier(name)),
             },
-        }
+        };
+
+        Ok(sql)
     }
 
     fn build_column_def(&self, column: &ColumnDefinition) -> String {

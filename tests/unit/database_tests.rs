@@ -272,3 +272,34 @@ async fn raw_json_preserves_count_aggregates_as_numbers() {
         })]
     );
 }
+
+#[test]
+fn database_builder_records_an_acquire_timeout_override() {
+    let default_debug = format!("{:?}", Database::builder());
+    assert!(
+        default_debug.contains("acquire_timeout: None"),
+        "{default_debug}"
+    );
+
+    let configured = Database::builder()
+        .url("sqlite::memory:")
+        .acquire_timeout(std::time::Duration::from_secs(23));
+    let configured_debug = format!("{configured:?}");
+    assert!(
+        configured_debug.contains("acquire_timeout: Some("),
+        "the acquire_timeout knob must reach the pool options: {configured_debug}"
+    );
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn database_builder_forwards_the_acquire_timeout_to_connect_options() {
+    let db = Database::builder()
+        .url("sqlite::memory:")
+        .acquire_timeout(std::time::Duration::from_millis(500))
+        .build()
+        .await
+        .expect("an in-memory sqlite connection with an acquire timeout should succeed");
+
+    drop(db);
+}

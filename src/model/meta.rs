@@ -53,6 +53,13 @@ impl IndexDefinition {
     }
 }
 
+/// Strips hidden attributes from one eager-loaded relation payload, in place.
+///
+/// The second argument is the globally hidden attribute list from
+/// [`crate::config`], applied on top of the payload model's own.
+/// See [`ModelMeta::relation_payload_filters`].
+pub type RelationPayloadFilter = fn(&mut serde_json::Value, &[String]);
+
 /// Metadata trait for model information.
 pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + serde::Serialize + 'static;
@@ -95,8 +102,64 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
             .find_map(|(field_name, column_name)| (field_name == name).then_some(column_name))
     }
 
+    /// Split an optionally table-qualified column reference into its qualifier
+    /// and this model's canonical database column name.
+    ///
+    /// `"user_name"`, `"display_name"`, `"users.user_name"` and
+    /// `"users.display_name"` all resolve to the column `user_name` on a model
+    /// whose table is `users`, so a Rust field name addresses the same column
+    /// whether or not it is written qualified. A qualifier naming some other
+    /// table is left untouched — only a join can resolve that — and a name this
+    /// model does not know is returned as written.
+    ///
+    /// Query validation canonicalizes a self-qualified reference this way
+    /// already, so every SQL renderer has to use this and not
+    /// [`canonical_column_name`](ModelMeta::canonical_column_name) alone, or a
+    /// reference that validates would be emitted as a column that does not
+    /// exist.
+    fn canonical_column_parts(name: &str) -> (Option<&str>, &str) {
+        match name.split_once('.') {
+            Some((table, column)) if table == Self::table_name() => (
+                Some(table),
+                Self::canonical_column_name(column).unwrap_or(column),
+            ),
+            Some((table, column)) => (Some(table), column),
+            None => (None, Self::canonical_column_name(name).unwrap_or(name)),
+        }
+    }
+
     fn hidden_attributes() -> Vec<&'static str> {
         vec!["deleted_at"]
+    }
+
+    /// Strip this model's hidden attributes out of one already-serialized
+    /// payload of it, in place.
+    ///
+    /// Handed out as a function pointer by `relation_payload_filters`. A
+    /// nested relation payload carries no type tag of its own, so this is the
+    /// only way the filter can reach the metadata of the model that actually
+    /// produced the payload.
+    #[doc(hidden)]
+    fn __strip_hidden_payload(value: &mut serde_json::Value, global_hidden: &[String]) {
+        crate::model::serialization::strip_model_payload::<Self>(value, global_hidden);
+    }
+
+    /// Hidden-attribute filters for this model's eager-loadable relation
+    /// payloads, keyed by the serde key each payload is serialized under.
+    ///
+    /// The derive emits one entry per typed relation field, pointing at the
+    /// **target** model's `__strip_hidden_payload`. Without
+    /// it `to_json` cannot tell which model a nested payload came from and
+    /// filters it with the parent's hidden list — which is how
+    /// `post.to_json(None)` after `.with("author")` used to ship the columns
+    /// `User` declares hidden.
+    ///
+    /// Defaults to empty so hand-written `ModelMeta` impls keep compiling; they
+    /// simply fall back to the parent's list. `MorphTo` fields stay empty for
+    /// the same reason even on generated impls: their target type is only known
+    /// at runtime.
+    fn relation_payload_filters() -> Vec<(&'static str, RelationPayloadFilter)> {
+        vec![]
     }
 
     fn default_presenter() -> &'static str {
@@ -104,18 +167,6 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     }
 
     fn searchable_fields() -> Vec<&'static str> {
-        vec![]
-    }
-
-    fn default_order() -> Vec<(&'static str, &'static str)> {
-        vec![(Self::primary_key_name(), "DESC")]
-    }
-
-    fn option_set_label() -> &'static str {
-        Self::primary_key_name()
-    }
-
-    fn option_set_search_fields() -> Vec<&'static str> {
         vec![]
     }
 
@@ -216,17 +267,5 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn has_indexes() -> bool {
         !Self::indexes().is_empty() || !Self::unique_indexes().is_empty()
-    }
-
-    fn tokenization_enabled() -> bool {
-        false
-    }
-
-    fn token_encoder() -> Option<crate::tokenization::TokenEncoder> {
-        None
-    }
-
-    fn token_decoder() -> Option<crate::tokenization::TokenDecoder> {
-        None
     }
 }

@@ -92,7 +92,7 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
     field_or_column: &str,
     value: UpdateValue,
 ) -> Result<UpdateValue> {
-    let Some((field_name, column_name)) = resolve_encrypted_field::<M>(field_or_column) else {
+    let Some((field_name, column_name)) = resolve_encrypted_field::<M>(field_or_column)? else {
         return Ok(value);
     };
 
@@ -134,14 +134,34 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
     }
 }
 
-fn resolve_encrypted_field<M: ModelMeta>(name: &str) -> Option<(&'static str, &'static str)> {
+/// Pair the encrypted field name with its column name.
+///
+/// The two `ModelMeta` lists are declared independently, so a mismatched length
+/// is possible in hand-written metadata. Zipping them would silently drop the
+/// trailing entries, and a dropped entry looks exactly like "this column is not
+/// encrypted" — which would write plaintext into an encrypted column. Refuse
+/// instead.
+fn resolve_encrypted_field<M: ModelMeta>(
+    name: &str,
+) -> Result<Option<(&'static str, &'static str)>> {
     let encrypted_fields = M::encrypted_fields();
     let encrypted_columns = M::encrypted_column_names();
 
-    encrypted_fields
+    if encrypted_fields.len() != encrypted_columns.len() {
+        return Err(Error::configuration(format!(
+            "Model '{}' declares {} encrypted field name(s) but {} encrypted column name(s); \
+             encrypted_fields() and encrypted_column_names() must describe the same columns in \
+             the same order, otherwise an encrypted column can be written as plaintext",
+            M::table_name(),
+            encrypted_fields.len(),
+            encrypted_columns.len()
+        )));
+    }
+
+    Ok(encrypted_fields
         .into_iter()
         .zip(encrypted_columns)
-        .find(|(field_name, column_name)| *field_name == name || *column_name == name)
+        .find(|(field_name, column_name)| *field_name == name || *column_name == name))
 }
 
 fn encrypt_batch_json_value(
@@ -209,6 +229,86 @@ fn annotate_crypto_error(
         Error::InsertReturningNotSupported { backend, .. } => {
             Error::insert_returning_not_supported(message, backend)
         }
+        // Authorization failures keep their own classification: the caller needs the
+        // 403 and the permission/resource pair, not a 500 with a decorated message.
+        Error::AccessDenied {
+            permission,
+            resource,
+        } => Error::access_denied(permission, resource),
+        Error::Rbac { .. } => Error::rbac(message),
         Error::Internal { .. } => Error::internal(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Metadata whose two encrypted lists disagree. Macro-generated models
+    /// cannot produce this, but the trait lets it be written by hand and the
+    /// failure mode is silent plaintext, so it has to be rejected.
+    #[derive(Clone)]
+    struct MismatchedEncryptedMeta;
+
+    impl ModelMeta for MismatchedEncryptedMeta {
+        type PrimaryKey = i64;
+
+        fn table_name() -> &'static str {
+            "mismatched_encrypted_models"
+        }
+
+        fn primary_key_names() -> &'static [&'static str] {
+            &["id"]
+        }
+
+        fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
+            primary_key.to_string()
+        }
+
+        fn column_names() -> &'static [&'static str] {
+            &["id", "secret_column", "other_column"]
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["id", "secret", "other"]
+        }
+
+        fn encrypted_fields() -> Vec<&'static str> {
+            vec!["secret", "other"]
+        }
+
+        fn encrypted_column_names() -> Vec<&'static str> {
+            vec!["secret_column"]
+        }
+    }
+
+    #[test]
+    fn mismatched_encrypted_metadata_is_rejected_instead_of_truncated() {
+        // `other` is the entry `zip` used to drop, which made it look like an
+        // unencrypted column and let plaintext through.
+        let error = prepare_batch_update_value::<MismatchedEncryptedMeta>(
+            "other",
+            UpdateValue::Value(serde_json::Value::String("plaintext".to_string())),
+        )
+        .expect_err("a metadata mismatch must not fall through to plaintext");
+
+        assert!(
+            error.to_string().contains("encrypted column name"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn mismatched_encrypted_metadata_is_rejected_for_unrelated_columns_too() {
+        let error = prepare_batch_update_value::<MismatchedEncryptedMeta>(
+            "id",
+            UpdateValue::Value(serde_json::Value::from(1)),
+        )
+        .expect_err("a metadata mismatch must be reported, not skipped");
+
+        assert!(
+            error.to_string().contains("encrypted field name"),
+            "unexpected error: {error}"
+        );
     }
 }

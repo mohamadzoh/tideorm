@@ -1,7 +1,5 @@
 error: #[tideorm(tokenize)] requires exactly one #[tideorm(primary_key)] field
- --> tests/ui/invalid_primary_key_composite_tokenize.rs:1:1
+ --> tests/ui/invalid_primary_key_composite_tokenize.rs:6:5
   |
-1 | #[tideorm::model(table = "user_roles", tokenize)]
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |
-  = note: this error originates in the derive macro `tideorm::Model` (in Nightly builds, run with -Z macro-backtrace for more info)
+6 |     role_id: i64,
+  |     ^^^^^^^

@@ -1,44 +1,67 @@
-//! Model Relations System
+//! Model relations.
 //!
-//! This module defines model relations using ORM-style field declarations.
-//! Relations are declared as struct fields with attributes that the macros turn
-//! into relation metadata.
+//! Relations are declared as *struct fields* — this is the defining shape of the
+//! library. A `#[tideorm(..)]` attribute on the field tells the derive which
+//! columns link the two models, and the derive's `with_relations()` rebuilds the
+//! wrapper from the model's own column values every time a model is loaded:
 //!
-//! ## Supported Relations
+//! ```ignore
+//! #[tideorm::model(table = "users")]
+//! pub struct User {
+//!     #[tideorm(primary_key, auto_increment)]
+//!     pub id: i64,
+//!     #[tideorm(has_one = "Profile", foreign_key = "user_id")]
+//!     pub profile: HasOne<Profile>,
+//!     #[tideorm(has_many = "Post", foreign_key = "user_id")]
+//!     pub posts: HasMany<Post>,
+//! }
 //!
-//! - `HasOne<E>`: One-to-one relation (e.g., User has_one Profile)
-//! - `HasMany<E>`: One-to-many relation (e.g., User has_many Posts)
-//! - `BelongsTo<E>`: Inverse of HasOne/HasMany (e.g., Post belongs_to User)
+//! let posts = user.posts.load().await?;
+//! ```
 //!
-//! ## Defining Relations Inside Models
+//! ## Choosing a wrapper
 //!
-//! Relations are declared as fields in your model struct using `#[tideorm(...)]` relation attributes:
+//! | Wrapper | Shape |
+//! |---|---|
+//! | [`HasOne`] / [`HasMany`] | The foreign key lives on the *related* table. |
+//! | [`BelongsTo`] | The foreign key lives on *this* table. |
+//! | [`HasManyThrough`](crate::relations::HasManyThrough) | Reached through a pivot table. |
+//! | [`MorphOne`](crate::relations::MorphOne) / [`MorphMany`](crate::relations::MorphMany) / [`MorphTo`](crate::relations::MorphTo) | Linked by a `(type, id)` column pair. |
+//! | [`SelfRef`](crate::relations::SelfRef) / [`SelfRefMany`](crate::relations::SelfRefMany) | Parent and children within one table. |
 //!
-//! Use `HasOne`, `HasMany`, and `BelongsTo` fields plus the relation attributes
-//! on your model structs to declare relationships.
+//! ## Loading
 //!
-//! ## Many-to-Many Relations
+//! Every wrapper has `load()`, and most also have `load_with(|q| ..)` to add
+//! ordering, paging or extra filters to the relation's own query. That is
+//! per-model — lazy loading in a loop is N+1. Eager loading
+//! (`User::query().with("posts.comments")`) resolves each level for all parents
+//! at once instead; see [`EagerQueryBuilder`](crate::relations::EagerQueryBuilder).
 //!
-//! Use `HasManyThrough` to model many-to-many relationships via a join model.
+//! ## Cross-cutting behaviour worth knowing
 //!
-//! ## Relation Constraints
-//!
-//! You can add constraints to relation queries:
-//!
-//! Use `load_with` to constrain relation queries with filters, ordering, and limits.
+//! - **Serde destroys the wrappers' runtime state.** Only the cached payload
+//!   survives a round trip; the keys and connection that make a relation
+//!   loadable do not. A model rebuilt from JSON has dead relations until
+//!   [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
+//!   re-derives them from the fresh column values, which is what TideORM's own
+//!   JSON paths do. Any new such path must call it too.
+//! - **`load()` is not uniform.** [`HasOne`], [`HasMany`], [`BelongsTo`] and
+//!   [`HasManyThrough`](crate::relations::HasManyThrough) prefer the database whenever a connection is reachable,
+//!   so a deserialized payload cannot pass itself off as database state. The
+//!   morph and self-referencing wrappers are cache-first: a cached value is
+//!   returned as-is. Each type's own documentation states which it is.
+//! - **Eager loading respects soft deletes**, applying the *related* model's
+//!   scope, and batches nested levels rather than recursing per parent.
+//! - **[`MorphTo`](crate::relations::MorphTo), [`SelfRef`](crate::relations::SelfRef) and [`SelfRefMany`](crate::relations::SelfRefMany) have no eager path.**
+//!   Requesting one with `.with(..)` is an error naming the limitation, not a
+//!   silent empty result.
 
-#[allow(missing_docs)]
 mod direct;
-#[allow(missing_docs)]
 mod eager;
 mod helpers;
-#[allow(missing_docs)]
 mod many_to_many;
-#[allow(missing_docs)]
 mod metadata;
-#[allow(missing_docs)]
 mod polymorphic;
-#[allow(missing_docs)]
 mod self_referencing;
 
 #[cfg(test)]
@@ -53,6 +76,12 @@ pub use direct::HasMany;
 #[cfg(feature = "entity-manager")]
 pub(crate) use direct::HasMany as DirectHasMany;
 pub use direct::{BelongsTo, HasOne};
+// `EagerLoadModel` is exported from this module and from nowhere else on
+// purpose: it is `#[doc(hidden)]` machinery whose only method is `__eager_load`,
+// and macro-generated code names it through the fully qualified
+// `::tideorm::relations::EagerLoadModel` path. It is deliberately absent from
+// the crate root and the prelude — see the matching note in `lib.rs` — so do not
+// "restore" it there for symmetry with the other relation exports.
 pub use eager::{
     EagerLoadExt, EagerLoadModel, EagerQueryBuilder, RelationConstraints, RelationExt,
     RelationPath, RelationTree, WithRelations,

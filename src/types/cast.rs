@@ -26,10 +26,11 @@ impl Castable for String {
 
 impl Castable for i32 {
     fn from_json(value: &serde_json::Value) -> Result<Self, String> {
-        value
+        let number = value
             .as_i64()
-            .map(|n| n as i32)
-            .ok_or_else(|| "Expected integer".to_string())
+            .ok_or_else(|| "Expected integer".to_string())?;
+
+        i32::try_from(number).map_err(|_| format!("Integer {} is out of range for i32", number))
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -217,8 +218,19 @@ impl CastValue {
                 serde_json::Value::Number(n) => {
                     if let Some(i) = n.as_i64() {
                         Ok(serde_json::json!(i))
+                    } else if let Some(u) = n.as_u64() {
+                        Err(format!("Integer {} is out of range for i64", u))
                     } else if let Some(f) = n.as_f64() {
-                        Ok(serde_json::json!(f as i64))
+                        // Truncate toward zero (the documented and test-pinned behavior for
+                        // fractional input) but refuse values that `as i64` would silently
+                        // saturate. `i64::MIN as f64` is exact, so `-(i64::MIN as f64)` is the
+                        // exclusive upper bound.
+                        let truncated = f.trunc();
+                        if truncated >= (i64::MIN as f64) && truncated < -(i64::MIN as f64) {
+                            Ok(serde_json::json!(truncated as i64))
+                        } else {
+                            Err(format!("Number {} is out of range for i64", f))
+                        }
                     } else {
                         Err("Invalid number".to_string())
                     }
@@ -268,13 +280,18 @@ impl CastValue {
             CastType::Json => Ok(value.clone()),
             CastType::Array | CastType::Collection => match value {
                 serde_json::Value::Array(_) => Ok(value.clone()),
-                serde_json::Value::String(s) => serde_json::from_str(s).or_else(|_| {
-                    Ok(serde_json::Value::Array(
-                        s.split(',')
-                            .map(|v| serde_json::Value::String(v.trim().to_string()))
-                            .collect(),
-                    ))
-                }),
+                // Only a JSON payload that really is an array may pass through as-is; a bare
+                // scalar such as "5" parses as JSON but must still cast to a one-element array.
+                serde_json::Value::String(s) => {
+                    match serde_json::from_str::<serde_json::Value>(s) {
+                        Ok(parsed @ serde_json::Value::Array(_)) => Ok(parsed),
+                        _ => Ok(serde_json::Value::Array(
+                            s.split(',')
+                                .map(|v| serde_json::Value::String(v.trim().to_string()))
+                                .collect(),
+                        )),
+                    }
+                }
                 serde_json::Value::Null => Ok(serde_json::Value::Array(vec![])),
                 _ => Err("Cannot cast to array".to_string()),
             },
@@ -322,9 +339,11 @@ impl CastValue {
             },
             CastType::Decimal => match value {
                 serde_json::Value::Number(_) => Ok(value.clone()),
-                serde_json::Value::String(s) => s
-                    .parse::<f64>()
-                    .map(|f| serde_json::json!(f))
+                // Money strings must not round-trip through `f64`. `rust_decimal` is what the
+                // raw-row decoder in `database/raw.rs` already uses for NUMERIC/DECIMAL columns,
+                // and it also renders back to a JSON string, so the two paths agree.
+                serde_json::Value::String(s) => rust_decimal::Decimal::from_str_exact(s)
+                    .map(|decimal| serde_json::Value::String(decimal.to_string()))
                     .map_err(|_| "Failed to parse decimal".to_string()),
                 serde_json::Value::Null => Ok(serde_json::Value::Null),
                 _ => Err("Cannot cast to decimal".to_string()),

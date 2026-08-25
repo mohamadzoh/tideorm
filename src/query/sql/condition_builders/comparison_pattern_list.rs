@@ -106,16 +106,13 @@ impl<M: Model> QueryBuilder<M> {
                 DatabaseType::Postgres => "$1",
                 DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?",
             };
-            let escape_clause = match db_type {
-                DatabaseType::Postgres => " ESCAPE '\\'",
-                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
-                    " ESCAPE '\\\\'"
-                }
-            };
             self.build_custom_expression(
                 format!(
                     "{} {} {}{}",
-                    column_sql, operator, placeholder, escape_clause
+                    column_sql,
+                    operator,
+                    placeholder,
+                    crate::columns::LIKE_ESCAPE_CLAUSE
                 ),
                 vec![Value::String(Some(pattern))],
             )
@@ -141,21 +138,14 @@ impl<M: Model> QueryBuilder<M> {
             self.format_preview_value(db_type, value)
         );
         if escaped {
-            sql.push_str(match db_type {
-                DatabaseType::Postgres => " ESCAPE '\\'",
-                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
-                    " ESCAPE '\\\\'"
-                }
-            });
+            sql.push_str(crate::columns::LIKE_ESCAPE_CLAUSE);
         }
         sql
     }
 
     pub(in crate::query::sql) fn build_list_expression(
         &self,
-        db_type: DatabaseType,
         column_expr: SimpleExpr,
-        column_sql: &str,
         operator: ListOperator,
         values: &[serde_json::Value],
     ) -> SimpleExpr {
@@ -163,25 +153,20 @@ impl<M: Model> QueryBuilder<M> {
         match operator {
             ListOperator::In => column_expr.is_in(sea_values),
             ListOperator::NotIn => column_expr.is_not_in(sea_values),
-            ListOperator::EqAny if matches!(db_type, DatabaseType::Postgres) => self
-                .build_custom_expression(
-                    format!(
-                        "{} = ANY(ARRAY[{}])",
-                        column_sql,
-                        Self::placeholder_list(values.len())
-                    ),
-                    sea_values,
-                ),
+            // An empty candidate set can never match, and rendering `ARRAY[]`
+            // would make PostgreSQL reject the statement outright.
+            ListOperator::EqAny if values.is_empty() => Expr::cust("0 = 1".to_string()),
+            // No PostgreSQL special case: `col = ANY(ARRAY[a, b])` is just
+            // `col IN (a, b)`, and sea-query binds `is_in` correctly on every
+            // backend. Rendering the ARRAY form by hand cannot work here —
+            // sea-query's fragment tokenizer treats `[` as a string delimiter
+            // running to `]`, so placeholders inside the brackets are never
+            // substituted and their values are dropped from the statement,
+            // leaving `$1`/`$2` pointing at whatever else the query bound.
             ListOperator::EqAny => column_expr.is_in(sea_values),
-            ListOperator::NeAll if matches!(db_type, DatabaseType::Postgres) => self
-                .build_custom_expression(
-                    format!(
-                        "{} <> ALL(ARRAY[{}])",
-                        column_sql,
-                        Self::placeholder_list(values.len())
-                    ),
-                    sea_values,
-                ),
+            // Nothing to differ from, so an empty candidate set always matches.
+            ListOperator::NeAll if values.is_empty() => Expr::cust("1 = 1".to_string()),
+            // Same reasoning as `EqAny`: `<> ALL(ARRAY[..])` is `NOT IN (..)`.
             ListOperator::NeAll => column_expr.is_not_in(sea_values),
         }
     }

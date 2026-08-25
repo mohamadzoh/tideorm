@@ -87,6 +87,82 @@ fn test_schema_generator_postgres() {
 }
 
 #[test]
+fn test_schema_generator_postgres_preserves_serial_width() {
+    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+    generator.add_table(
+        TableSchemaBuilder::new("small")
+            .column(
+                ColumnSchema::new("id", "INTEGER")
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .build(),
+    );
+    generator.add_table(
+        TableSchemaBuilder::new("tiny")
+            .column(
+                ColumnSchema::new("id", "SMALLINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .build(),
+    );
+
+    let sql = generator.generate();
+
+    assert!(
+        sql.contains("\"id\" SERIAL"),
+        "An INTEGER key must stay 4 bytes. Got: {}",
+        sql
+    );
+    assert!(
+        sql.contains("\"id\" SMALLSERIAL"),
+        "A SMALLINT key must stay 2 bytes. Got: {}",
+        sql
+    );
+    assert!(
+        !sql.contains("BIGSERIAL"),
+        "No declared width here widens to 8 bytes. Got: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_schema_generator_omits_index_if_not_exists_for_mysql() {
+    let table = TableSchemaBuilder::new("users")
+        .column(ColumnSchema::new("email", "TEXT").not_null())
+        .index(IndexDefinition::new(
+            "idx_users_email",
+            vec!["email".to_string()],
+            false,
+        ))
+        .build();
+
+    let mut mysql = SchemaGenerator::new(DatabaseType::MySQL);
+    mysql.add_table(table.clone());
+    let mysql_sql = mysql.generate();
+    assert!(
+        mysql_sql.contains("CREATE INDEX `idx_users_email`"),
+        "Got: {}",
+        mysql_sql
+    );
+    assert!(
+        !mysql_sql.contains("IF NOT EXISTS `idx_users_email`"),
+        "MySQL has no CREATE INDEX IF NOT EXISTS. Got: {}",
+        mysql_sql
+    );
+
+    let mut mariadb = SchemaGenerator::new(DatabaseType::MariaDB);
+    mariadb.add_table(table);
+    let mariadb_sql = mariadb.generate();
+    assert!(
+        mariadb_sql.contains("CREATE INDEX IF NOT EXISTS `idx_users_email`"),
+        "MariaDB does support it. Got: {}",
+        mariadb_sql
+    );
+}
+
+#[test]
 fn test_schema_generator_mysql() {
     let mut generator = SchemaGenerator::new(DatabaseType::MySQL);
 
@@ -307,11 +383,64 @@ fn test_rust_type_to_sql_postgres() {
 }
 
 #[test]
+fn test_rust_type_to_sql_maps_unsigned_types_to_what_postgres_reads_back() {
+    // PostgreSQL has no unsigned integers, so the mapping picks the signed type
+    // sea-orm's decoder actually accepts. `u32` is read as an `Oid` and then as
+    // an `i32`; widening it to BIGINT makes every read fail. `u64` is only
+    // decodable on MySQL, and the binder narrows it to `i64` on the way in, so
+    // an exact NUMERIC column buys nothing BIGINT does not already give.
+    let pg = DatabaseType::Postgres;
+    assert_eq!(rust_type_to_sql("u8", pg), "SMALLINT");
+    assert_eq!(rust_type_to_sql("u16", pg), "INTEGER");
+    assert_eq!(rust_type_to_sql("u32", pg), "INTEGER");
+    assert_eq!(rust_type_to_sql("u64", pg), "BIGINT");
+    assert_eq!(rust_type_to_sql("Option<u32>", pg), "INTEGER");
+
+    // MySQL does have unsigned column types, so nothing widens there.
+    let mysql = DatabaseType::MySQL;
+    assert_eq!(rust_type_to_sql("u32", mysql), "INT UNSIGNED");
+    assert_eq!(rust_type_to_sql("u64", mysql), "BIGINT UNSIGNED");
+
+    // SQLite has one integer storage class for all of them.
+    let sqlite = DatabaseType::SQLite;
+    assert_eq!(rust_type_to_sql("u32", sqlite), "INTEGER");
+    assert_eq!(rust_type_to_sql("u64", sqlite), "INTEGER");
+}
+
+#[test]
+fn test_rust_type_to_sql_keeps_decimals_readable() {
+    // TEXT would be the lossless target on SQLite, but sea-orm decodes both
+    // Decimal and BigDecimal there through `try_get::<Option<f64>>`, and sqlx
+    // only yields an f64 from a REAL-affinity column - a TEXT column cannot be
+    // read at all.
+    let pg = DatabaseType::Postgres;
+    let sqlite = DatabaseType::SQLite;
+    assert_eq!(rust_type_to_sql("Decimal", pg), "DECIMAL");
+    assert_eq!(rust_type_to_sql("Decimal", sqlite), "REAL");
+    assert_eq!(rust_type_to_sql("BigDecimal", sqlite), "REAL");
+    assert_eq!(rust_type_to_sql("rust_decimal::Decimal", sqlite), "REAL");
+}
+
+#[test]
+fn test_rust_type_to_sql_maps_128_bit_integers_per_backend() {
+    // i128/u128 map to Decimal { precision: 39, scale: 0 }, so they inherit the
+    // decimal rendering - including SQLite's REAL, which cannot hold the range.
+    let pg = DatabaseType::Postgres;
+    assert_eq!(rust_type_to_sql("i128", pg), "DECIMAL(39, 0)");
+    assert_eq!(rust_type_to_sql("u128", pg), "DECIMAL(39, 0)");
+    assert_eq!(
+        rust_type_to_sql("i128", DatabaseType::MySQL),
+        "DECIMAL(39, 0)"
+    );
+    assert_eq!(rust_type_to_sql("i128", DatabaseType::SQLite), "REAL");
+}
+
+#[test]
 fn test_rust_type_to_sql_mysql() {
     assert_eq!(rust_type_to_sql("i64", DatabaseType::MySQL), "BIGINT");
     assert_eq!(rust_type_to_sql("bool", DatabaseType::MySQL), "TINYINT(1)");
     assert_eq!(rust_type_to_sql("f64", DatabaseType::MySQL), "DOUBLE");
-    assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MySQL), "CHAR(36)");
+    assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MySQL), "BINARY(16)");
     assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MySQL), "JSON");
     assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MySQL), "JSON");
     assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MySQL), "JSON");
@@ -325,7 +454,10 @@ fn test_rust_type_to_sql_mariadb() {
         "TINYINT(1)"
     );
     assert_eq!(rust_type_to_sql("f64", DatabaseType::MariaDB), "DOUBLE");
-    assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MariaDB), "CHAR(36)");
+    assert_eq!(
+        rust_type_to_sql("Uuid", DatabaseType::MariaDB),
+        "BINARY(16)"
+    );
     assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MariaDB), "JSON");
     assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MariaDB), "JSON");
     assert_eq!(
@@ -341,6 +473,101 @@ fn test_rust_type_to_sql_sqlite() {
     assert_eq!(rust_type_to_sql("bool", DatabaseType::SQLite), "INTEGER");
     assert_eq!(rust_type_to_sql("f64", DatabaseType::SQLite), "REAL");
     assert_eq!(rust_type_to_sql("String", DatabaseType::SQLite), "TEXT");
+}
+
+#[test]
+fn test_rust_type_to_column_type_is_the_single_mapping_table() {
+    // `rust_type_to_sql` must be nothing but this lookup plus a render, so the
+    // schema writer, sync and migrations cannot drift apart.
+    for rust_type in ["i64", "u32", "Decimal", "DateTime<Utc>", "Vec<String>"] {
+        let mapped = rust_type_to_column_type(rust_type).expect("mapped type");
+        for db_type in [
+            DatabaseType::Postgres,
+            DatabaseType::MySQL,
+            DatabaseType::MariaDB,
+            DatabaseType::SQLite,
+        ] {
+            let rendered = rust_type_to_sql(rust_type, db_type);
+            assert_eq!(rendered, mapped.to_sql(db_type));
+        }
+    }
+}
+
+#[test]
+fn test_rust_type_to_column_type_reports_unknown_types() {
+    // The fallback belongs to the caller: schema export uses TEXT silently,
+    // sync warns first.
+    assert!(rust_type_to_column_type("MyCustomType").is_none());
+    assert_eq!(
+        rust_type_to_sql("MyCustomType", DatabaseType::Postgres),
+        "TEXT"
+    );
+}
+
+#[test]
+fn test_rust_type_normalization_strips_paths_lifetimes_and_options() {
+    let pg = DatabaseType::Postgres;
+    assert_eq!(
+        rust_type_to_sql("chrono::DateTime<chrono::Utc>", pg),
+        "TIMESTAMPTZ"
+    );
+    assert_eq!(rust_type_to_sql("&'static str", pg), "TEXT");
+    assert_eq!(rust_type_to_sql("Option < i32 >", pg), "INTEGER");
+    assert_eq!(rust_type_to_sql("Option<Option<String>>", pg), "TEXT");
+    assert_eq!(rust_type_to_sql("rust_decimal::Decimal", pg), "DECIMAL");
+    assert_eq!(rust_type_to_sql("Vec<serde_json::Value>", pg), "JSONB[]");
+}
+
+#[test]
+fn test_naive_and_aware_timestamps_get_different_columns() {
+    // A naive timestamp carries no offset, so it must not land in a column the
+    // server shifts by session timezone.
+    let mysql = DatabaseType::MySQL;
+    assert_eq!(rust_type_to_sql("NaiveDateTime", mysql), "DATETIME");
+    assert_eq!(rust_type_to_sql("DateTime<Utc>", mysql), "TIMESTAMP");
+
+    let pg = DatabaseType::Postgres;
+    assert_eq!(rust_type_to_sql("NaiveDateTime", pg), "TIMESTAMP");
+    assert_eq!(rust_type_to_sql("DateTime<Utc>", pg), "TIMESTAMPTZ");
+}
+
+#[test]
+fn test_migration_decimals_stay_readable_on_sqlite() {
+    // sea-orm decodes Decimal/BigDecimal on SQLite through
+    // `try_get::<Option<f64>>`, and sqlx only produces an f64 from a
+    // REAL-affinity column. A TEXT column is exact but unreadable, so REAL is
+    // forced - the precision loss is a documented limitation.
+    use crate::migration::ColumnType;
+
+    let scaled = ColumnType::Decimal {
+        precision: 12,
+        scale: 2,
+    };
+    assert_eq!(scaled.to_sqlite_sql(), "REAL");
+    assert_eq!(ColumnType::Numeric.to_sqlite_sql(), "REAL");
+    assert_eq!(scaled.to_postgres_sql(), "DECIMAL(12, 2)");
+    assert_eq!(ColumnType::Numeric.to_mysql_sql(), "DECIMAL(65,30)");
+
+    // Floats still render as floats.
+    assert_eq!(ColumnType::Double.to_sqlite_sql(), "REAL");
+}
+
+#[test]
+fn test_migration_column_type_to_sql_dispatches_per_backend() {
+    use crate::migration::ColumnType;
+
+    assert_eq!(
+        ColumnType::Unsigned.to_sql(DatabaseType::Postgres),
+        ColumnType::Unsigned.to_postgres_sql()
+    );
+    assert_eq!(
+        ColumnType::Unsigned.to_sql(DatabaseType::MariaDB),
+        ColumnType::Unsigned.to_mysql_sql()
+    );
+    assert_eq!(
+        ColumnType::Unsigned.to_sql(DatabaseType::SQLite),
+        ColumnType::Unsigned.to_sqlite_sql()
+    );
 }
 
 #[test]

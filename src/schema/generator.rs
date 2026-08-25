@@ -94,8 +94,8 @@ impl SchemaGenerator {
         if col.auto_increment {
             match self.database_type {
                 DatabaseType::Postgres => {
-                    if col.sql_type.to_uppercase().contains("INT") {
-                        def = format!("    {} BIGSERIAL", self.quote_identifier(&col.name));
+                    if let Some(serial_type) = postgres_serial_type(&col.sql_type) {
+                        def = format!("    {} {}", self.quote_identifier(&col.name), serial_type);
                     }
                 }
                 DatabaseType::MySQL | DatabaseType::MariaDB => {
@@ -119,6 +119,12 @@ impl SchemaGenerator {
     fn generate_indexes(&self, table: &TableSchema) -> String {
         let mut sql = String::new();
 
+        let exists_clause = if self.supports_create_index_if_not_exists() {
+            "IF NOT EXISTS "
+        } else {
+            ""
+        };
+
         for index in &table.indexes {
             let index_type = if index.unique {
                 "UNIQUE INDEX"
@@ -132,8 +138,9 @@ impl SchemaGenerator {
                 .collect();
 
             sql.push_str(&format!(
-                "CREATE {} IF NOT EXISTS {} ON {} ({});\n",
+                "CREATE {} {}{} ON {} ({});\n",
                 index_type,
+                exists_clause,
                 self.quote_identifier(&index.name),
                 self.quote_table_identifier(table),
                 columns.join(", ")
@@ -141,6 +148,12 @@ impl SchemaGenerator {
         }
 
         sql
+    }
+
+    /// MySQL rejects `CREATE INDEX IF NOT EXISTS`; MariaDB accepts it, so the
+    /// two backends cannot share one clause here.
+    fn supports_create_index_if_not_exists(&self) -> bool {
+        !matches!(self.database_type, DatabaseType::MySQL)
     }
 
     fn quote_identifier(&self, name: &str) -> String {
@@ -162,5 +175,20 @@ impl SchemaGenerator {
         }
 
         self.quote_identifier_reference(&table.name)
+    }
+}
+
+/// Map a declared PostgreSQL integer type to the matching serial pseudo-type.
+///
+/// The declared width is preserved: rewriting every auto-increment key to
+/// `BIGSERIAL` silently widens an `int4` identity column so the replayed schema
+/// no longer matches an `i32` model primary key. Types that have no serial form
+/// are left untouched.
+fn postgres_serial_type(sql_type: &str) -> Option<&'static str> {
+    match sql_type.trim().to_uppercase().as_str() {
+        "SMALLINT" | "INT2" => Some("SMALLSERIAL"),
+        "INTEGER" | "INT" | "INT4" => Some("SERIAL"),
+        "BIGINT" | "INT8" => Some("BIGSERIAL"),
+        _ => None,
     }
 }

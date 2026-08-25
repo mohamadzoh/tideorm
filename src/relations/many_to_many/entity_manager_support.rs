@@ -2,6 +2,11 @@ use super::*;
 
 #[cfg(feature = "entity-manager")]
 impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
+    /// Attach the identity the entity manager needs to track this relation.
+    ///
+    /// Called by macro-generated model code, not by hand. Without it the wrapper
+    /// has an empty `relation_name` and [`EntityManager`](crate::entity_manager::EntityManager)
+    /// cannot key its snapshot, so `load_in_entity_manager` fails.
     pub fn with_metadata(
         mut self,
         relation_name: &'static str,
@@ -14,6 +19,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         self
     }
 
+    /// Record the owning row's entity-manager key.
+    ///
+    /// Also macro-generated. The key identifies which parent row this relation
+    /// hangs off, so snapshots taken before and after a flush compare like for
+    /// like. An owner with no primary key yet has none, and the relation stays
+    /// untracked until it is saved.
     pub fn with_owner_key(mut self, owner_key: String) -> Self {
         self.owner_key = Some(owner_key);
         self
@@ -56,6 +67,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         Ok(entity_manager.database().clone())
     }
 
+    /// Entity-manager keys of the currently cached related models.
+    ///
+    /// This is the "after" side of the snapshot the entity manager diffs to work
+    /// out which pivot rows to attach and detach on flush. Reads only the cache —
+    /// it never queries — so a relation that has not been loaded yields an empty
+    /// list, and models with no primary key yet are skipped rather than erroring.
     pub fn current_keys(&self) -> Result<Vec<String>>
     where
         Related: crate::model::ModelMeta,
@@ -70,6 +87,16 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         Ok(keys)
     }
 
+    /// Load the relation through an [`EntityManager`](crate::entity_manager::EntityManager),
+    /// registering each related model in its identity map.
+    ///
+    /// Prefer this over [`load`](HasManyThrough::load) inside a unit of work: rows
+    /// come back as the same tracked instances the manager already holds, so edits
+    /// are seen at flush time. It also snapshots the current key set, which is what
+    /// lets the manager tell attached pivot rows from detached ones.
+    ///
+    /// Errors when the wrapper carries no owner key — i.e. the owning model has not
+    /// been saved, or the relation was built without [`with_metadata`](HasManyThrough::with_metadata).
     pub async fn load_in_entity_manager(
         &mut self,
         entity_manager: &std::sync::Arc<crate::entity_manager::EntityManager>,
@@ -95,9 +122,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                 ))
             })?;
             let ids = self.current_keys()?;
-            entity_manager
-                .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
-                .await;
+            entity_manager.snapshot::<Related>(
+                self.owner_table,
+                owner_key,
+                self.relation_name,
+                &ids,
+            );
             return self.cached.as_ref().ok_or_else(|| {
                 Error::internal(format!(
                     "relation cache missing for '{}' after entity manager snapshot",
@@ -145,9 +175,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         self.entity_manager = Some(entity_manager.clone());
 
         let ids = self.current_keys()?;
-        entity_manager
-            .snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids)
-            .await;
+        entity_manager.snapshot::<Related>(self.owner_table, owner_key, self.relation_name, &ids);
 
         self.cached.as_ref().ok_or_else(|| {
             Error::internal(format!(

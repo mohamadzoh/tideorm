@@ -91,6 +91,15 @@ pub(crate) fn soft_delete_clause<E: Model>(
     }
 }
 
+/// Build the recursive-CTE query that walks a self-referencing tree.
+///
+/// The recursive term uses `UNION ALL`, so a cycle in the foreign key (`a -> b -> a`)
+/// visits the same row once per level until `max_depth` stops it. The outer query
+/// therefore collapses the walk to one row per node, keeping the shallowest depth it
+/// was reached at, rather than emitting the node `max_depth` times. `GROUP BY` on the
+/// primary key is used instead of `DISTINCT` because `SELECT DISTINCT` cannot order by
+/// a column outside the select list on PostgreSQL, and because `DISTINCT` over
+/// `result_node.*` is not valid for JSON/BLOB columns on several backends.
 pub(crate) fn build_self_ref_tree_sql<E: Model>(
     foreign_key: &str,
     local_key: &str,
@@ -151,7 +160,11 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
          ) \
          SELECT {result}.* \
          FROM {table} {result} \
-         INNER JOIN {cte} {result_tree} ON {result_pk} = {result_tree}.{pk_alias} \
+         INNER JOIN ( \
+         SELECT {cte}.{pk_alias} AS {pk_alias}, MIN({cte}.{depth_alias}) AS {depth_alias} \
+         FROM {cte} \
+         GROUP BY {cte}.{pk_alias} \
+         ) {result_tree} ON {result_pk} = {result_tree}.{pk_alias} \
          ORDER BY {result_tree}.{depth_alias}",
         cte = cte,
         pk_alias = pk_alias,

@@ -304,6 +304,12 @@ pub(crate) fn base64_url_encode(data: &[u8]) -> String {
 }
 
 /// Base64-URL safe decoding
+///
+/// Only canonical unpadded base64url is accepted. A non-canonical spelling is
+/// treated as a tampered payload and reported as `None`, because otherwise every
+/// token would have several distinct spellings that all decode to the same bytes
+/// and all authenticate, which breaks any caller that uses the token string as an
+/// identity (cache key, rate-limit bucket, revocation list, unique index).
 pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
     fn char_to_value(c: char) -> Option<u8> {
         match c {
@@ -316,9 +322,15 @@ pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
         }
     }
 
-    let mut result = Vec::new();
+    // A 4k+1 length carries six leftover bits that encode no byte at all, so it
+    // can never be produced by the encoder.
+    if encoded.len() % 4 == 1 {
+        return None;
+    }
+
+    let mut result = Vec::with_capacity(encoded.len() / 4 * 3);
     let mut bits = 0u32;
-    let mut bit_count = 0;
+    let mut bit_count = 0u32;
 
     for c in encoded.chars() {
         let value = char_to_value(c)?;
@@ -328,6 +340,12 @@ pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
             bit_count -= 8;
             result.push((bits >> bit_count) as u8);
         }
+    }
+
+    // The encoder zero-fills the final partial group, so any leftover bit that is
+    // set means the input is a non-canonical re-spelling of the same bytes.
+    if bit_count > 0 && (bits & ((1u32 << bit_count) - 1)) != 0 {
+        return None;
     }
 
     Some(result)

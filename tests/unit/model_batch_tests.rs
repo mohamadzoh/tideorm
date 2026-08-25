@@ -163,17 +163,17 @@ fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
     assert!(matches!(
         &builder.conditions[0].value,
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"%100\%\_\\done%"
+            if value == r"%100!%!_\done%"
     ));
     assert!(matches!(
         &builder.conditions[1].value,
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"lead\%\_%"
+            if value == r"lead!%!_%"
     ));
     assert!(matches!(
         &builder.conditions[2].value,
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
-            if value == r"%tail\%\_"
+            if value == r"%tail!%!_"
     ));
 }
 

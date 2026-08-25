@@ -111,6 +111,34 @@ fn hash_condition_value<H: std::hash::Hasher>(value: &ConditionValue, hasher: &m
             5_u8.hash(hasher);
             expression.hash(hasher);
         }
+        ConditionValue::RawExprWithValues {
+            sql,
+            values,
+            preview_sql,
+        } => {
+            6_u8.hash(hasher);
+            sql.hash(hasher);
+            hash_bound_values(values, hasher);
+            preview_sql.hash(hasher);
+        }
+    }
+}
+
+/// Hash the values bound to a parameterized SQL fragment.
+///
+/// The bound values MUST participate in the key wherever a fragment is
+/// parameterized — raw expressions, union operands, CTE bodies. Two fragments
+/// that differ only in a bound parameter render byte-identical SQL, so hashing
+/// the text alone would let them share one cache entry and serve one caller's
+/// rows to another. sea-query's `Value` implements neither `Hash` nor `Eq`, but
+/// its `Debug` rendering is variant- and payload-distinct, which is what the key
+/// needs.
+pub(super) fn hash_bound_values<H: std::hash::Hasher>(values: &[Value], hasher: &mut H) {
+    use std::hash::Hash;
+
+    values.len().hash(hasher);
+    for value in values {
+        format!("{:?}", value).hash(hasher);
     }
 }
 
@@ -287,4 +315,51 @@ pub(super) fn hash_window_function<H: std::hash::Hasher>(
         0_u8.hash(hasher);
     }
     window_function.alias.hash(hasher);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_where_condition;
+    use crate::internal::Value;
+    use crate::query::{ConditionValue, Operator, WhereCondition};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+
+    fn hash_of(condition: &WhereCondition) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hash_where_condition(condition, &mut hasher);
+        hasher.finish()
+    }
+
+    fn subquery_condition(bound: &str) -> WhereCondition {
+        WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExprWithValues {
+                sql: "EXISTS (SELECT 1 FROM \"posts\" WHERE \"title\" = $1)".to_string(),
+                values: vec![Value::String(Some(bound.to_string()))],
+                preview_sql: format!(
+                    "EXISTS (SELECT 1 FROM \"posts\" WHERE \"title\" = '{}')",
+                    bound
+                ),
+            },
+        }
+    }
+
+    #[test]
+    fn test_bound_subquery_values_participate_in_the_cache_key() {
+        assert_ne!(
+            hash_of(&subquery_condition("alice")),
+            hash_of(&subquery_condition("bob")),
+            "two subqueries differing only in a bound value render identical SQL and must not share a cache entry"
+        );
+    }
+
+    #[test]
+    fn test_identical_bound_subquery_values_hash_identically() {
+        assert_eq!(
+            hash_of(&subquery_condition("alice")),
+            hash_of(&subquery_condition("alice"))
+        );
+    }
 }

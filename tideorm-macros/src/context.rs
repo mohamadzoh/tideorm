@@ -7,7 +7,8 @@ mod helpers;
 
 use crate::meta_support::{ExistingDerives, pluralize};
 use crate::parse::{
-    IndexDef, ModelField, ModelInput, parse_validation_attributes, relation_wrapper_name,
+    IndexDef, ModelField, ModelInput, column_variant_ident, parse_validation_attributes,
+    relation_wrapper_name, unraw_ident,
 };
 use crate::relation_gen::{build_relation_field_inits, build_relation_state_refreshes};
 use helpers::*;
@@ -82,12 +83,21 @@ impl BuildContext {
         existing_derives: &ExistingDerives,
     ) -> syn::Result<Self> {
         let struct_name = input.ident.clone();
-        let struct_name_str = struct_name.to_string();
+        let struct_name_str = unraw_ident(&struct_name);
         let table_name = input
             .table
             .clone()
             .unwrap_or_else(|| pluralize(&struct_name_str.to_case(Case::Snake)));
         let schema_name = input.schema.clone().unwrap_or_else(|| "public".to_string());
+        // `deleted_at_column` only means anything alongside `soft_delete`; without it the
+        // model silently compiles with hard-delete semantics and the override is dropped.
+        if input.deleted_at_column.is_some() && !input.soft_delete {
+            return Err(syn::Error::new_spanned(
+                &input.ident,
+                "#[tideorm(deleted_at_column = \"...\")] has no effect without #[tideorm(soft_delete)]; \
+                 add soft_delete, or drop deleted_at_column",
+            ));
+        }
         let soft_delete_key = input.deleted_at_column.as_deref().unwrap_or("deleted_at");
         let should_gen_debug =
             !input.skip_derives && !input.skip_debug && !existing_derives.has_debug;
@@ -132,14 +142,16 @@ impl BuildContext {
             .cloned()
             .collect();
 
-        validate_primary_key_fields(&db_fields, input.tokenize)?;
+        validate_primary_key_fields(&input.ident, &db_fields, input.tokenize)?;
         validate_relation_fields(&relation_fields)?;
+        validate_index_definitions(&indexes, &unique_indexes, &db_fields)?;
 
-        let resolved_encrypted_fields = resolve_encrypted_fields(&db_fields, &encrypted)?;
+        let resolved_encrypted_fields =
+            resolve_encrypted_fields(&input.ident, &db_fields, &encrypted)?;
         let encrypted_fields = resolved_encrypted_fields
             .iter()
             .filter_map(|field| field.ident.as_ref())
-            .map(ToString::to_string)
+            .map(unraw_ident)
             .collect();
         let encrypted_column_names = resolved_encrypted_fields
             .iter()
@@ -149,7 +161,7 @@ impl BuildContext {
         let validation_rules = db_fields
             .iter()
             .filter_map(|field| {
-                let field_name = field.ident.as_ref()?.to_string();
+                let field_name = unraw_ident(field.ident.as_ref()?);
                 Some((field_name, field))
             })
             .map(|(field_name, field)| {
@@ -186,23 +198,17 @@ impl BuildContext {
         let column_variants: Vec<_> = db_fields
             .iter()
             .filter_map(|field| field.ident.as_ref())
-            .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Pascal)))
+            .map(column_variant_ident)
             .collect();
         let column_type_defs = db_fields
             .iter()
             .filter_map(|field| {
-                let variant = format_ident!(
-                    "{}",
-                    field.ident.as_ref()?.to_string().to_case(Case::Pascal)
-                );
+                let variant = column_variant_ident(field.ident.as_ref()?);
                 let col_type_expr = field.column_type_expr();
                 Some(quote!(Self::#variant => #col_type_expr))
             })
             .collect();
-        let pk_column_variants: Vec<_> = pk_idents
-            .iter()
-            .map(|ident| format_ident!("{}", ident.to_string().to_case(Case::Pascal)))
-            .collect();
+        let pk_column_variants: Vec<_> = pk_idents.iter().map(column_variant_ident).collect();
         let pk_column_variant = pk_column_variants
             .first()
             .cloned()
@@ -214,7 +220,7 @@ impl BuildContext {
         let pk_column_name = pk_column_names
             .first()
             .cloned()
-            .unwrap_or_else(|| pk_ident.to_string().to_case(Case::Snake));
+            .unwrap_or_else(|| unraw_ident(&pk_ident).to_case(Case::Snake));
         let pk_auto_increment =
             pk_fields.len() == 1 && pk_field.map(|field| field.auto_increment).unwrap_or(false);
         let (soft_delete_field_ident, soft_delete_column_name) = if input.soft_delete {
@@ -258,8 +264,10 @@ impl BuildContext {
         let timestamps_enabled = input.timestamps || has_timestamp_pair(&db_fields);
         let sync_column_attrs = build_sync_column_attrs(&db_fields);
         let insert_active_model_setters = build_insert_active_model_setters(&db_fields);
-        let internal_entity_mod =
-            format_ident!("__tideorm_internal_{}", struct_name_str.to_lowercase());
+        let internal_entity_mod = format_ident!(
+            "__tideorm_internal_{}",
+            struct_name_str.to_case(Case::Snake)
+        );
         let sea_orm_field_defs = build_sea_orm_field_defs(&db_fields);
         let relation_field_defaults = build_relation_field_defaults(&relation_fields);
         let default_field_inits = fields
@@ -271,13 +279,13 @@ impl BuildContext {
             .iter()
             .filter_map(|field| field.ident.as_ref().cloned())
             .collect();
-        let derive_field_names_str = derive_field_names.iter().map(ToString::to_string).collect();
+        let derive_field_names_str = derive_field_names.iter().map(unraw_ident).collect();
         let serde_field_names: Vec<_> = fields
             .iter()
             .filter_map(|field| field.ident.as_ref().cloned())
             .collect();
         let serde_field_types = fields.iter().map(|field| field.ty.clone()).collect();
-        let serde_field_names_str = serde_field_names.iter().map(ToString::to_string).collect();
+        let serde_field_names_str = serde_field_names.iter().map(unraw_ident).collect();
         let columns_struct_name = format_ident!("{}Columns", struct_name);
         let columns_struct_fields = build_columns_struct_fields(&db_fields);
         let columns_field_inits = build_columns_field_inits(&db_fields);
@@ -429,8 +437,59 @@ impl BuildContext {
             field
                 .ident
                 .as_ref()
-                .map(|ident| ident.to_string().to_case(Case::Snake))
+                .map(|ident| unraw_ident(ident).to_case(Case::Snake))
                 .unwrap_or_default()
         })
+    }
+}
+
+/// Rejects malformed `#[index(..)]` / `#[unique_index(..)]` attributes and index
+/// definitions that reference columns the model does not declare.
+fn validate_index_definitions(
+    indexes: &[IndexDef],
+    unique_indexes: &[IndexDef],
+    db_fields: &[ModelField],
+) -> syn::Result<()> {
+    let mut errors: Option<syn::Error> = None;
+
+    for index in indexes.iter().chain(unique_indexes) {
+        if let Some(error) = &index.error {
+            combine_error(&mut errors, error.clone());
+            continue;
+        }
+
+        for column in &index.columns {
+            if !column_exists(db_fields, column) {
+                combine_error(&mut errors, unknown_column_error(index, column));
+            }
+        }
+    }
+
+    match errors {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn column_exists(db_fields: &[ModelField], column: &str) -> bool {
+    db_fields.iter().any(|field| {
+        let matches_field = match field.ident.as_ref() {
+            Some(ident) => unraw_ident(ident) == column,
+            None => false,
+        };
+        matches_field || BuildContext::column_name(field) == column
+    })
+}
+
+fn unknown_column_error(index: &IndexDef, column: &str) -> syn::Error {
+    let attribute = index.attribute_name();
+    let message = format!("#[{attribute}(..)] references unknown field or column '{column}'");
+    syn::Error::new(index.span, message)
+}
+
+fn combine_error(errors: &mut Option<syn::Error>, error: syn::Error) {
+    match errors {
+        Some(existing) => existing.combine(error),
+        None => *errors = Some(error),
     }
 }

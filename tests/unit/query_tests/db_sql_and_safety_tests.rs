@@ -162,17 +162,27 @@ fn test_json_path_exists_bound_postgres_uses_jsonpath_placeholder() {
     ));
 }
 
+fn json_values(values: &[&str]) -> Vec<serde_json::Value> {
+    values
+        .iter()
+        .map(|value| serde_json::Value::String((*value).to_string()))
+        .collect()
+}
+
 #[test]
 fn test_array_contains_postgres() {
-    let values = vec!["'admin'".to_string(), "'user'".to_string()];
+    let values = json_values(&["admin", "user"]);
     let sql = db_sql::array_contains(DatabaseType::Postgres, "roles", &values);
-    assert!(sql.contains("@>"));
-    assert!(sql.contains("ARRAY["));
+    assert_eq!(
+        sql,
+        "('admin' = ANY(\"roles\") AND 'user' = ANY(\"roles\"))"
+    );
+    assert!(!sql.contains("ARRAY["), "sql: {sql}");
 }
 
 #[test]
 fn test_array_contains_mysql() {
-    let values = vec!["'admin'".to_string(), "'user'".to_string()];
+    let values = json_values(&["admin", "user"]);
     let sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
     assert!(sql.contains("JSON_CONTAINS"));
 
@@ -182,22 +192,34 @@ fn test_array_contains_mysql() {
 
 #[test]
 fn test_array_contains_sqlite() {
-    let values = vec!["'admin'".to_string(), "'user'".to_string()];
+    let values = json_values(&["admin", "user"]);
     let sql = db_sql::array_contains(DatabaseType::SQLite, "roles", &values);
     assert!(sql.contains("json_each"));
 }
 
 #[test]
+fn test_array_contained_by_postgres_unnests_the_column() {
+    let values = json_values(&["admin", "user"]);
+    let sql = db_sql::array_contained_by(DatabaseType::Postgres, "roles", &values);
+    assert_eq!(
+        sql,
+        "NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS tideorm_array_element(element) \
+         WHERE tideorm_array_element.element NOT IN ('admin', 'user'))"
+    );
+    assert!(!sql.contains("ARRAY["), "sql: {sql}");
+}
+
+#[test]
 fn test_array_overlaps_postgres() {
-    let values = vec!["'a'".to_string(), "'b'".to_string()];
+    let values = json_values(&["a", "b"]);
     let sql = db_sql::array_overlaps(DatabaseType::Postgres, "tags", &values);
-    assert!(sql.contains("&&"));
-    assert!(sql.contains("ARRAY["));
+    assert_eq!(sql, "('a' = ANY(\"tags\") OR 'b' = ANY(\"tags\"))");
+    assert!(!sql.contains("ARRAY["), "sql: {sql}");
 }
 
 #[test]
 fn test_array_overlaps_mysql() {
-    let values = vec!["'a'".to_string(), "'b'".to_string()];
+    let values = json_values(&["a", "b"]);
     let sql = db_sql::array_overlaps(DatabaseType::MySQL, "tags", &values);
     assert!(sql.contains(" OR "));
 
@@ -207,9 +229,67 @@ fn test_array_overlaps_mysql() {
 
 #[test]
 fn test_array_overlaps_sqlite() {
-    let values = vec!["'a'".to_string(), "'b'".to_string()];
+    let values = json_values(&["a", "b"]);
     let sql = db_sql::array_overlaps(DatabaseType::SQLite, "tags", &values);
     assert!(sql.contains(" OR "));
+}
+
+#[test]
+fn test_array_preview_escapes_quotes_exactly_once() {
+    let values = json_values(&["it's"]);
+
+    assert_eq!(
+        db_sql::array_contains(DatabaseType::SQLite, "tags", &values),
+        "(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = 'it''s'))"
+    );
+    assert_eq!(
+        db_sql::array_contained_by(DatabaseType::SQLite, "tags", &values),
+        "NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN ('it''s'))"
+    );
+    assert_eq!(
+        db_sql::array_overlaps(DatabaseType::SQLite, "tags", &values),
+        "(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = 'it''s'))"
+    );
+    assert_eq!(
+        db_sql::array_contains(DatabaseType::Postgres, "tags", &values),
+        "('it''s' = ANY(\"tags\"))"
+    );
+}
+
+#[test]
+fn test_empty_array_predicates_are_valid_and_consistent() {
+    let empty: Vec<serde_json::Value> = Vec::new();
+
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::MariaDB,
+        DatabaseType::SQLite,
+    ] {
+        // An empty "contains all" is vacuously satisfied.
+        let contains = db_sql::array_contains(db_type, "tags", &empty);
+        assert!(!contains.contains("ARRAY[]"), "{db_type:?}: {contains}");
+        assert!(!contains.contains("()"), "{db_type:?}: {contains}");
+
+        // An empty "contains any" can never match.
+        assert_eq!(db_sql::array_overlaps(db_type, "tags", &empty), "0 = 1");
+
+        // An empty "contained by" only holds for an empty column.
+        let contained_by = db_sql::array_contained_by(db_type, "tags", &empty);
+        assert!(
+            !contained_by.contains("ARRAY[]"),
+            "{db_type:?}: {contained_by}"
+        );
+    }
+
+    assert_eq!(
+        db_sql::array_contains(DatabaseType::Postgres, "tags", &empty),
+        "1 = 1"
+    );
+    assert_eq!(
+        db_sql::array_contains(DatabaseType::SQLite, "tags", &empty),
+        "1 = 1"
+    );
 }
 
 #[test]
@@ -368,7 +448,13 @@ fn test_json_path_special_keys_are_quoted_safely() {
 
 #[test]
 fn test_mysql_array_literals_are_json_encoded() {
-    let values = vec!["'ad\"min'".to_string(), "'slash\\user'".to_string()];
+    // These take raw values now: the helpers render the SQL literal themselves
+    // rather than receiving one pre-rendered, so the escaping is exercised
+    // end to end.
+    let values = vec![
+        serde_json::json!("ad\"min"),
+        serde_json::json!("slash\\user"),
+    ];
 
     let contains_sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
     assert_eq!(
@@ -412,6 +498,30 @@ fn test_raw_sql_fragment_validation_rejects_injection_tokens() {
     let comment_err =
         db_sql::validate_raw_sql_fragment("WHERE raw SQL", "1 = 1 -- comment").unwrap_err();
     assert!(comment_err.contains("unsafe WHERE raw SQL"));
+}
+
+#[test]
+fn test_raw_sql_fragment_validation_rejects_mysql_hash_comment() {
+    let where_err =
+        db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"name\" = 'x' #").unwrap_err();
+    assert!(where_err.contains("unsafe WHERE raw SQL"), "{where_err}");
+
+    let having_err =
+        db_sql::validate_having_sql_fragment("HAVING raw SQL", "COUNT(*) > 1 #").unwrap_err();
+    assert!(having_err.contains("unsafe HAVING raw SQL"), "{having_err}");
+}
+
+#[test]
+fn test_raw_sql_fragment_validation_is_string_literal_aware() {
+    db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'issue #42 -- urgent'")
+        .expect("comment introducers inside a string literal are just characters");
+
+    let unterminated =
+        db_sql::validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'oops").unwrap_err();
+    assert!(
+        unterminated.contains("unsafe WHERE raw SQL"),
+        "{unterminated}"
+    );
 }
 
 #[test]

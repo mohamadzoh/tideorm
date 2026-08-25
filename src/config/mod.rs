@@ -7,13 +7,9 @@
 //! the global database handle, pool limits, languages, file URL generation, and
 //! related defaults before models start issuing queries.
 
-#[allow(missing_docs)]
 mod builder;
-#[allow(missing_docs)]
 mod database;
-#[allow(missing_docs)]
 mod registration;
-#[allow(missing_docs)]
 mod settings;
 mod state;
 

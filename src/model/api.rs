@@ -36,6 +36,11 @@ pub trait Model:
         crud::db()
     }
 
+    /// Load every row of this model's table.
+    ///
+    /// Soft-deleted rows are excluded. There is no limit and no streaming — the
+    /// whole table is materialised in memory, so use [`Model::query`] with a
+    /// filter or [`Model::paginate`] for anything that can grow.
     async fn all() -> Result<Vec<Self>>
     where
         Self: Sized,
@@ -43,6 +48,17 @@ pub trait Model:
         crud::all::<Self>().await
     }
 
+    /// Start a query for this model.
+    ///
+    /// This is the general entry point: filters, ordering, joins, aggregates,
+    /// and bulk deletes all hang off the returned builder, and soft-deleted rows
+    /// are scoped out unless `with_trashed()` asks for them. Reach for
+    /// [`Model::all`], [`Model::first`], or [`Model::find`] only when the query
+    /// really is that simple.
+    ///
+    /// The query runs against whichever connection is current when a terminal
+    /// method is awaited, so a builder created outside a transaction still joins
+    /// one if it is awaited inside the transaction closure.
     fn query() -> QueryBuilder<Self>
     where
         Self: Sized,
@@ -50,6 +66,18 @@ pub trait Model:
         QueryBuilder::new()
     }
 
+    /// Start a query pinned to a specific database handle.
+    ///
+    /// Use this for a replica, a second tenant database, or any case where the
+    /// global connection is not the one that should serve the query.
+    ///
+    /// **An ambient transaction still wins.** Inside
+    /// `Database::transaction(..)` every query runs on the transaction's
+    /// connection, including one pinned with `query_with`, because that is what
+    /// makes a plain `Model::find()` inside the closure join the transaction at
+    /// all. Rendering follows execution, so the SQL is at least built for the
+    /// backend it actually reaches. Run replica reads outside the transaction if
+    /// you need them to go to the replica.
     fn query_with(db: &crate::database::Database) -> QueryBuilder<Self>
     where
         Self: Sized,
@@ -57,6 +85,10 @@ pub trait Model:
         QueryBuilder::new().with_database(db.clone())
     }
 
+    /// Count the rows of this model's table.
+    ///
+    /// Soft-deleted rows are not counted. Counts the whole table; for a filtered
+    /// count use `Model::query().where_eq(..).count()`.
     async fn count() -> Result<u64>
     where
         Self: Sized,
@@ -64,6 +96,12 @@ pub trait Model:
         crud::count::<Self>().await
     }
 
+    /// Delete **every** row of this model's table.
+    ///
+    /// This is a hard `DELETE` with no `WHERE` clause: it does not honour soft
+    /// delete, does not run per-row callbacks, and cannot be undone. It exists
+    /// as a deliberate escape hatch precisely because the ordinary bulk paths
+    /// refuse to run without a filter. Returns the number of rows removed.
     async fn delete_all() -> Result<u64>
     where
         Self: Sized,
@@ -71,6 +109,10 @@ pub trait Model:
         Self::query().delete_all().await
     }
 
+    /// Return whether the table holds at least one row.
+    ///
+    /// Cheaper than [`Model::count`] on a large table: the statement stops at
+    /// the first row instead of scanning to produce an exact total.
     async fn exists_any() -> Result<bool>
     where
         Self: Sized,
@@ -93,10 +135,21 @@ pub trait Model:
         crud::insert_all::<Self>(models).await
     }
 
+    /// Insert a record, updating it instead when it collides on `conflict_columns`.
+    ///
+    /// `conflict_columns` must be covered by a unique constraint or unique index
+    /// — the database, not TideORM, decides what counts as a conflict. Every
+    /// non-conflict column is overwritten; use [`Model::on_conflict`] when only
+    /// some of them should be.
     async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>
     where
         Self: Sized;
 
+    /// Start an upsert whose conflict behaviour you want to narrow.
+    ///
+    /// The long form of [`Model::insert_or_update`]: the returned builder can
+    /// restrict which columns the update writes, which is how insert-only
+    /// columns such as `created_at` are protected.
     fn on_conflict(conflict_columns: Vec<&str>) -> OnConflictBuilder<Self>
     where
         Self: Sized,
@@ -109,6 +162,12 @@ pub trait Model:
         )
     }
 
+    /// Start a filtered bulk `UPDATE`.
+    ///
+    /// The returned builder requires at least one explicit filter, and — unlike
+    /// [`Model::query`] — it **includes soft-deleted rows by default**, so a
+    /// bulk restore or backfill reaches trashed rows. Call
+    /// [`BatchUpdateBuilder::without_trashed`] for the usual active-only scope.
     fn update_all() -> BatchUpdateBuilder<Self>
     where
         Self: Sized,
@@ -116,6 +175,21 @@ pub trait Model:
         BatchUpdateBuilder::new()
     }
 
+    /// Run `f` inside a database transaction, committing when it returns `Ok`.
+    ///
+    /// The transaction is installed as the ambient connection for the duration
+    /// of the closure, so plain calls such as `User::find(id)` or
+    /// `Post::query().get()` inside it join the transaction without being handed
+    /// a handle. A nested call opens a savepoint rather than a second
+    /// transaction.
+    ///
+    /// The handle must not outlive the closure: commit fails with "transaction
+    /// handle leaked outside the transaction scope" if a clone escaped. Any
+    /// `Err` return rolls back.
+    ///
+    /// The receiver type is incidental — this does not scope the transaction to
+    /// one model. `Database::transaction` is the same operation spelled without
+    /// an arbitrary model in front of it.
     async fn transaction<F, T>(f: F) -> Result<T>
     where
         Self: Sized,
@@ -129,6 +203,12 @@ pub trait Model:
         crud::transaction(f).await
     }
 
+    /// Return one row of this model's table, or `None` when it is empty.
+    ///
+    /// No `ORDER BY` is applied, so "first" means whichever row the database
+    /// hands back first — not the oldest or the lowest primary key. Add an
+    /// explicit order with `Model::query().order_asc(..).first()` when the
+    /// choice matters. Soft-deleted rows are excluded.
     async fn first() -> Result<Option<Self>>
     where
         Self: Sized,
@@ -136,6 +216,12 @@ pub trait Model:
         crud::first::<Self>().await
     }
 
+    /// Return the row with the highest primary key, or `None` when the table is empty.
+    ///
+    /// Unlike [`Model::first`] this is ordered: the primary key columns are
+    /// sorted descending. For an auto-increment key that is the most recently
+    /// inserted row, but for a natural or UUID key it is simply the largest one.
+    /// Soft-deleted rows are excluded.
     async fn last() -> Result<Option<Self>>
     where
         Self: Sized,
@@ -153,10 +239,22 @@ pub trait Model:
         crud::paginate::<Self>(page, per_page).await
     }
 
+    /// Look up a record by primary key.
+    ///
+    /// **This is the one read path that ignores soft delete**: a trashed row is
+    /// returned like any other. That is deliberate — it is what lets a soft-deleted
+    /// record be inspected or restored by id — but it means `find(id)` and
+    /// [`Model::exists`] can disagree for the same id. Use [`Model::exists`],
+    /// [`Model::find_or_fail`], or a filtered [`Model::query`] when trashed rows
+    /// should stay invisible.
     async fn find(id: Self::PrimaryKey) -> Result<Option<Self>>
     where
         Self: Sized;
 
+    /// Look up a record by primary key on a specific database handle.
+    ///
+    /// The handle-pinned counterpart of [`Model::find`], for replicas or
+    /// per-tenant connections; it shares the same soft-delete behaviour.
     async fn find_with(
         id: Self::PrimaryKey,
         db: &crate::database::Database,
@@ -164,12 +262,16 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Look up a record by primary key, returning a not-found error when it is missing.
+    ///
+    /// Soft-delete-enabled models only resolve rows that are not trashed. Use
+    /// `Model::find` when a trashed row should still be returned.
     async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self>
     where
         Self: Sized,
     {
         let id_display = Self::primary_key_display(&id);
-        Self::find(id).await?.ok_or_else(|| {
+        crud::find_active::<Self>(id).await?.ok_or_else(|| {
             Error::not_found(format!(
                 "{} with {} not found",
                 Self::table_name(),
@@ -178,11 +280,15 @@ pub trait Model:
         })
     }
 
+    /// Return whether a record with this primary key exists.
+    ///
+    /// Soft-delete-enabled models report trashed rows as not existing, matching
+    /// `all()`, `count()`, and `query()`.
     async fn exists(id: Self::PrimaryKey) -> Result<bool>
     where
         Self: Sized,
     {
-        Ok(Self::find(id).await?.is_some())
+        Ok(crud::find_active::<Self>(id).await?.is_some())
     }
 
     /// Insert a new record.
@@ -193,6 +299,15 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Delete the record with this primary key.
+    ///
+    /// The row is loaded first so `before_delete` and `after_delete` callbacks
+    /// run exactly as they would for [`Model::delete`]; a `before_delete` guard
+    /// therefore holds on both entry points. Returns `Ok(0)` when no such row
+    /// exists.
+    ///
+    /// This is a hard delete even on a soft-delete model — call
+    /// `SoftDelete::soft_delete` on the loaded model to only mark it.
     async fn destroy(id: Self::PrimaryKey) -> Result<u64>
     where
         Self: Sized;
@@ -212,6 +327,12 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Delete this record's row.
+    ///
+    /// A hard `DELETE` keyed on the primary key, even for a model that declares
+    /// `soft_delete` — use `SoftDelete::soft_delete` when the row should be
+    /// marked rather than removed. Runs the delete callbacks and returns the
+    /// number of rows removed, which is `0` if the row was already gone.
     async fn delete(self) -> Result<u64>
     where
         Self: Sized;
@@ -221,6 +342,12 @@ pub trait Model:
     where
         Self: Sized;
 
+    /// Re-read this record from the database and return the fresh copy.
+    ///
+    /// Returns a new value rather than mutating in place, so the stale one stays
+    /// available for comparison. Errors with a not-found error when the row has
+    /// been deleted in the meantime. Like [`Model::find`], it reads by primary
+    /// key and so still sees soft-deleted rows.
     async fn reload(&self) -> Result<Self>
     where
         Self: Sized,
@@ -237,8 +364,30 @@ pub trait Model:
 
     /// Return the persisted field names whose values differ from the last snapshot
     /// TideORM loaded or saved for this model.
+    ///
+    /// # Missing baseline versus no changes
+    ///
+    /// The outer `Option` reports whether there was anything to compare against:
+    ///
+    /// - `Ok(None)` — no baseline. A model built by hand, rebuilt from JSON, or
+    ///   whose baseline was evicted from the bounded snapshot store cannot say
+    ///   which fields differ from the row on disk.
+    /// - `Ok(Some(fields))` — a baseline exists, and `fields` lists exactly what
+    ///   changed. An empty vector here really does mean "nothing changed".
+    ///
+    /// That makes the "skip the write when nothing changed" gate explicit about
+    /// the unknown case instead of silently swallowing it:
+    ///
+    /// ```ignore
+    /// match model.changed_fields()? {
+    ///     // Nothing to compare against: save rather than guess.
+    ///     None => model.save().await?,
+    ///     Some(changed) if !changed.is_empty() => model.save().await?,
+    ///     Some(_) => model,
+    /// };
+    /// ```
     #[cfg(feature = "dirty-tracking")]
-    fn changed_fields(&self) -> Result<Vec<&'static str>>
+    fn changed_fields(&self) -> Result<Option<Vec<&'static str>>>
     where
         Self: Sized,
     {
@@ -249,14 +398,35 @@ pub trait Model:
     /// loaded or saved for this model.
     ///
     /// Accepts either the Rust field name or the database column name.
+    ///
+    /// The two `Option`s answer two different questions, matching
+    /// [`Model::changed_fields`]:
+    ///
+    /// - `Ok(None)` — no baseline exists, so no original value is known.
+    /// - `Ok(Some(None))` — a baseline exists but held no value for this field.
+    /// - `Ok(Some(Some(value)))` — the remembered value.
+    ///
+    /// Returns an error when `field` names neither a field nor a column of this
+    /// model, whether or not a baseline exists.
     #[cfg(feature = "dirty-tracking")]
-    fn original_value(&self, field: &str) -> Result<Option<serde_json::Value>>
+    fn original_value(&self, field: &str) -> Result<Option<Option<serde_json::Value>>>
     where
         Self: Sized,
     {
         dirty_tracking::original_value(self, field)
     }
 
+    /// Render this model as JSON for an API response.
+    ///
+    /// This is not plain `serde_json::to_value`: hidden attributes (the model's
+    /// own plus the global ones from `Config`) are dropped, attachment fields are
+    /// expanded into URLs, and translatable fields are resolved to one language.
+    /// Two option keys are understood — `"language"` picks the translation to
+    /// emit (default: the model's fallback language) and `"presenter"` picks a
+    /// named presenter (default: the model's default presenter).
+    ///
+    /// Serialization failures are logged and yield `{}` rather than an error,
+    /// because this sits on a rendering path.
     fn to_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value
     where
         Self: serde::Serialize,
@@ -264,6 +434,10 @@ pub trait Model:
         serialization::to_json::<Self>(self, options.as_ref())
     }
 
+    /// Expand one attachment field's stored metadata into its JSON representation.
+    ///
+    /// Called by [`Model::to_json`] for each attachment field; override the
+    /// `url_generator` through `Config` rather than calling this directly.
     #[inline]
     #[cfg(feature = "attachments")]
     fn process_file_for_json(
@@ -275,6 +449,10 @@ pub trait Model:
         serialization::process_file_for_json(field_name, file_data, hidden_attrs, url_generator)
     }
 
+    /// Render a list of models as a JSON array, applying [`Model::to_json`] to each.
+    ///
+    /// The same options apply to every element, so one language and one
+    /// presenter are used across the collection.
     fn collection_to_json(
         models: Vec<Self>,
         options: Option<HashMap<String, String>>,
@@ -285,6 +463,13 @@ pub trait Model:
         serialization::collection_to_json::<Self>(models, options)
     }
 
+    /// Flatten this model into string key/value pairs.
+    ///
+    /// Built on [`Model::to_json`] with no options, so hidden attributes stay
+    /// hidden. Every value is stringified — numbers and booleans become their
+    /// text form, `null` becomes `"null"`, and nested objects and arrays become
+    /// their JSON text. Intended for template context and form population, not
+    /// for round-tripping back into a model.
     fn to_hash_map(&self) -> HashMap<String, String>
     where
         Self: serde::Serialize,
@@ -292,30 +477,45 @@ pub trait Model:
         serialization::to_hash_map::<Self>(self)
     }
 
+    /// Replace this model's translatable fields in place with one language's values.
+    ///
+    /// Falls back to the model's fallback language for any field the requested
+    /// language does not define. Returns `Err` when the model declares no
+    /// translations.
     fn load_language_translations(&mut self, _language: &str) -> std::result::Result<(), String> {
         serialization::load_language_translations(self, _language)
     }
 
-    #[cfg(feature = "translations")]
+    /// Pull the translatable attributes out of a decoded attribute map.
+    ///
+    /// The `translations` feature is what decides whether anything is extracted;
+    /// that branch lives in `serialization::extract_translations`, so this method
+    /// is deliberately not feature-gated.
     fn extract_translations(
         data: &mut HashMap<String, serde_json::Value>,
     ) -> std::result::Result<serde_json::Value, String> {
         serialization::extract_translations::<Self>(data)
     }
 
-    #[cfg(not(feature = "translations"))]
-    fn extract_translations(
-        data: &mut HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<serde_json::Value, String> {
-        serialization::extract_translations::<Self>(data)
-    }
-
+    /// Read the raw attachment map keyed by relation name.
+    ///
+    /// Returns an empty map when nothing is attached yet, and `Err` when the
+    /// model declares no attachments. The higher-level
+    /// [`attach_file`](Model::attach_file) / [`detach_file`](Model::detach_file)
+    /// / [`sync_files`](Model::sync_files) helpers are usually what you want;
+    /// this is for inspecting the stored metadata directly.
     fn get_files_attribute(
         &self,
     ) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
         serialization::get_files_attribute(self)
     }
 
+    /// Overwrite the whole attachment map.
+    ///
+    /// Replaces every relation at once, so read with
+    /// [`get_files_attribute`](Model::get_files_attribute) and modify rather than
+    /// building a map from scratch. Only mutates the in-memory model — call
+    /// `save()` to persist. Returns `Err` when the model declares no attachments.
     fn set_files_attribute(
         &mut self,
         files: HashMap<String, serde_json::Value>,
@@ -323,6 +523,13 @@ pub trait Model:
         serialization::set_files_attribute(self, files)
     }
 
+    /// Attach one stored file to a relation.
+    ///
+    /// For a `has_one` relation this replaces whatever was attached; for a
+    /// `has_many` relation it appends. `file_key` is the storage key — the
+    /// filename is derived from its last path segment and the attachment is
+    /// stamped with the current time. Changes the in-memory model only; call
+    /// `save()` to persist. Returns `Err` for an unknown relation name.
     fn attach_file(
         &mut self,
         relation_type: &str,
@@ -334,6 +541,10 @@ pub trait Model:
         Ok(())
     }
 
+    /// Attach several stored files to a `has_many` relation, appending to it.
+    ///
+    /// Rejects a `has_one` relation rather than silently keeping only the last
+    /// key; use [`attach_file`](Model::attach_file) for those.
     fn attach_files(
         &mut self,
         relation_type: &str,
@@ -345,6 +556,12 @@ pub trait Model:
         Ok(())
     }
 
+    /// Detach one file from a relation, or all of them.
+    ///
+    /// `Some(key)` removes just that attachment; `None` clears the relation
+    /// entirely. Only the model's attachment metadata is updated — nothing is
+    /// deleted from the underlying storage, and nothing is persisted until
+    /// `save()`.
     fn detach_file(
         &mut self,
         relation_type: &str,
@@ -356,6 +573,13 @@ pub trait Model:
         Ok(())
     }
 
+    /// Make a relation hold exactly `file_keys` and nothing else.
+    ///
+    /// The declarative counterpart of [`attach_file`](Model::attach_file): keys
+    /// not in the list are dropped, and an empty list clears the relation. A
+    /// `has_one` relation takes the first key. Every entry is re-stamped with
+    /// the current time, so syncing an unchanged list still rewrites the
+    /// metadata.
     fn sync_files(
         &mut self,
         relation_type: &str,
@@ -367,6 +591,11 @@ pub trait Model:
         Ok(())
     }
 
+    /// Pull the attachment relations out of a decoded attribute map.
+    ///
+    /// The attachment counterpart of [`Model::extract_translations`], used while
+    /// rebuilding a model from raw attributes: the file relations are removed
+    /// from `data` and returned as one JSON value.
     #[cfg(feature = "attachments")]
     fn extract_files(
         data: &mut HashMap<String, serde_json::Value>,
@@ -374,6 +603,11 @@ pub trait Model:
         serialization::extract_files::<Self>(data)
     }
 
+    /// Pull the attachment relations out of a decoded attribute map.
+    ///
+    /// Without the `attachments` feature there are no file relations to remove,
+    /// so this leaves `data` alone. The method still exists in both builds so
+    /// macro-generated code does not have to branch on the feature.
     #[cfg(not(feature = "attachments"))]
     fn extract_files(
         data: &mut HashMap<String, serde_json::Value>,

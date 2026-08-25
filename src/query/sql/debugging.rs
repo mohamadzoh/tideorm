@@ -45,12 +45,22 @@ impl<M: Model> QueryBuilder<M> {
             ConditionValue::None => "NULL".to_string(),
             ConditionValue::Subquery(query_sql) => query_sql.clone(),
             ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
+            // The debug description is for humans, so it shows the inline-literal
+            // rendering rather than the placeholders the executable form carries.
+            ConditionValue::RawExprWithValues { preview_sql, .. } => preview_sql.clone(),
         }
     }
 
     fn describe_condition(condition: &WhereCondition) -> String {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => raw_sql.clone(),
+            (Operator::Raw, ConditionValue::RawExprWithValues { preview_sql, .. }) => {
+                if condition.column.is_empty() {
+                    preview_sql.clone()
+                } else {
+                    format!("{} {}", condition.column, preview_sql)
+                }
+            }
             (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
                 format!(
                     "{} {}",
@@ -203,7 +213,14 @@ impl<M: Model> QueryBuilder<M> {
         context
     }
 
-    pub(super) fn log_query(&self, sql: &str) {
+    /// Emit the pre-execution trace and start measuring this statement.
+    ///
+    /// The returned timer must be handed to [`Self::finish_query_log`] once the
+    /// statement has completed, so the recorded entry carries the real elapsed
+    /// time and the real outcome instead of a `None` duration and an assumed
+    /// success. `None` means nothing is observing this query — two atomic loads
+    /// decide that, and no timer or SQL copy is allocated.
+    pub(super) fn start_query_log(&self, sql: &str) -> Option<crate::logging::QueryTimer> {
         if std::env::var("TIDE_LOG_QUERIES")
             .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
             .unwrap_or(false)
@@ -211,10 +228,42 @@ impl<M: Model> QueryBuilder<M> {
             crate::tide_debug!("Query: {}", sql);
         }
 
-        if crate::logging::QueryLogger::is_enabled() {
-            let entry = crate::logging::QueryLogEntry::new(sql).with_table(M::table_name());
-            crate::logging::QueryLogger::log(entry);
+        if crate::logging::QueryLogger::is_enabled()
+            || crate::cache::PreparedStatementCache::global().is_enabled()
+        {
+            Some(crate::logging::QueryTimer::start(sql).with_table(M::table_name()))
+        } else {
+            None
         }
+    }
+
+    /// Record a finished statement with its measured duration and real outcome.
+    ///
+    /// A failed statement is recorded as a failure, which is what makes
+    /// `LogLevel::Error`/`Warn` emit anything at all, and the measured duration
+    /// is what feeds the slow-query threshold and the aggregate timing counters.
+    /// The same measurement is handed to the prepared-statement cache so its
+    /// statistics describe real traffic.
+    pub(super) fn finish_query_log<T>(
+        timer: Option<crate::logging::QueryTimer>,
+        result: &Result<T>,
+        row_count: impl FnOnce(&T) -> u64,
+    ) {
+        let Some(timer) = timer else {
+            return;
+        };
+
+        let entry = match result {
+            Ok(value) => timer.finish_with_rows(row_count(value)),
+            Err(error) => timer.finish_with_error(error.to_string()),
+        };
+
+        if let Some(duration) = entry.duration {
+            crate::cache::PreparedStatementCache::global()
+                .observe_execution(&entry.sql, duration.as_micros() as u64);
+        }
+
+        crate::logging::QueryLogger::log(entry);
     }
 
     pub fn debug(&self) -> crate::logging::QueryDebugInfo {

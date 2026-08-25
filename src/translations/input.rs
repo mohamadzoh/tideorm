@@ -22,6 +22,10 @@ impl TranslationInput {
     /// Create from JSON value
     ///
     /// Expected format: `{"field": {"lang": "value", ...}, ...}`
+    ///
+    /// This only reshapes the payload; field and language keys are not checked
+    /// here because the allowlists live on the model. `ApplyTranslations::apply_translations`
+    /// performs that validation before anything is stored.
     pub fn from_json(value: &serde_json::Value) -> Result<Self, TranslationError> {
         match value {
             serde_json::Value::Object(map) => {
@@ -61,11 +65,22 @@ impl Default for TranslationInput {
 /// Extension trait for applying translation input to models
 pub trait ApplyTranslations: HasTranslations {
     /// Apply a batch of parsed translations to the model payload.
+    ///
+    /// Every field is checked against `translatable_fields()` and every language
+    /// against `allowed_languages()`, exactly like `set_translation()`. This
+    /// matters because `TranslationInput::from_json` is the documented entry
+    /// point for API and form payloads, so the keys are usually attacker
+    /// controlled.
+    ///
+    /// Nothing is written when any key is rejected: the payload is only stored
+    /// once the whole batch validates.
     fn apply_translations(&mut self, input: TranslationInput) -> Result<(), TranslationError> {
         let mut data = self.get_translations_data()?;
 
         for (field, translations) in input.fields {
+            self.validate_field(&field)?;
             for (lang, value) in translations {
+                self.validate_language(&lang)?;
                 data.set(&field, &lang, value);
             }
         }
