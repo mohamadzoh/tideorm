@@ -31,8 +31,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
         quote_ident(db_type, name)
     }
 
+    /// A batch update needs at least one filter that can actually exclude a row.
+    ///
+    /// Counting conditions is not enough: an empty candidate list for a negative
+    /// membership test renders constant-true, so a caller whose filter list came
+    /// back empty would silently rewrite the whole table. Shared with the
+    /// `QueryBuilder` mutation terminals so both paths reject the same shapes.
     pub(crate) fn has_explicit_filters(&self) -> bool {
-        !self.conditions.is_empty()
+        self.conditions
+            .iter()
+            .any(|condition| !crate::query::condition_is_vacuous(condition))
     }
 
     pub(crate) fn ensure_explicit_filters(&self, operation: &str) -> Result<()> {
@@ -40,7 +48,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             Ok(())
         } else {
             Err(Error::invalid_query(format!(
-                "{} requires at least one explicit filter; unfiltered bulk mutations are blocked",
+                "{} requires at least one explicit filter that can exclude a row; unfiltered bulk mutations are blocked",
                 operation
             )))
         }

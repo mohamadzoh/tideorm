@@ -241,16 +241,31 @@ fn postgres_array_element_match(
 ///
 /// An empty operand list leaves only the empty array contained, which is exactly
 /// what the element-free `NOT EXISTS` renders.
+///
+/// Both NULL guards are load-bearing, because `NOT EXISTS` inverts what `<@`
+/// does with unknowns:
+///
+/// - `unnest(NULL::text[])` yields zero rows, so a bare `NOT EXISTS` is TRUE for
+///   a NULL column — where `NULL <@ ARRAY[..]` is NULL and matches nothing. The
+///   explicit `IS NOT NULL` restores that.
+/// - a NULL *element* makes `element NOT IN (..)` evaluate to NULL rather than
+///   TRUE, so the offending row is not counted and `NOT EXISTS` again reports
+///   containment. `element IS NULL OR ..` counts it instead.
+///
+/// Without them a NULL array column silently matches, which widens a SELECT and,
+/// on a mutation terminal, widens the set of rows written or deleted.
 pub(crate) fn postgres_array_contained_by(column: &str, operands: &[String]) -> String {
     let alias = POSTGRES_ARRAY_ELEMENT_ALIAS;
     let source = format!("unnest({}) AS {}(element)", column, alias);
 
     if operands.is_empty() {
-        return format!("NOT EXISTS (SELECT 1 FROM {})", source);
+        return format!("({column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {source}))");
     }
 
     let elements = operands.join(", ");
-    format!("NOT EXISTS (SELECT 1 FROM {source} WHERE {alias}.element NOT IN ({elements}))")
+    format!(
+        "({column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {source} WHERE {alias}.element IS NULL OR {alias}.element NOT IN ({elements})))"
+    )
 }
 
 /// Render non-executable preview SQL for an array contains expression.

@@ -269,7 +269,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.19", features = ["postgres", "attachments"] }
+tideorm = { version = "0.10.0", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -282,7 +282,7 @@ pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
-    pub files: Option<Json>,  // JSONB column storing attachments
+    pub files: Option<JsonValue>,  // JSONB column storing attachments
 }
 ```
 
@@ -612,7 +612,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.19", features = ["postgres", "translations"] }
+tideorm = { version = "0.10.0", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup
@@ -631,7 +631,7 @@ pub struct Product {
     pub price: f64,
     
     // JSONB column for translations
-    pub translations: Option<Json>,
+    pub translations: Option<JsonValue>,
 }
 ```
 
@@ -819,8 +819,8 @@ pub struct Product {
     pub name: String,
     pub description: String,
     pub price: f64,
-    pub translations: Option<Json>,
-    pub files: Option<Json>,
+    pub translations: Option<JsonValue>,
+    pub files: Option<JsonValue>,
 }
 
 // Use both features

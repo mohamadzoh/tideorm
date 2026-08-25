@@ -422,8 +422,9 @@ fn test_build_select_sql_with_params_parameterizes_postgres_array_predicates() {
     );
     assert!(
         sql.contains(
-            "NOT EXISTS (SELECT 1 FROM unnest(\"tags\") AS tideorm_array_element(element) \
-             WHERE tideorm_array_element.element NOT IN ($3, $4))"
+            "(\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"tags\") AS \
+             tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
+             tideorm_array_element.element NOT IN ($3, $4)))"
         ),
         "sql: {sql}"
     );

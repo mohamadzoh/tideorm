@@ -91,10 +91,30 @@ Roughly 160 individual defects from the audit. Grouped by theme:
 - **Destructive mutations.** An `update_all()`/`delete_all()` chain whose filters were all dropped
   or unresolvable could render an unfiltered `DELETE`/`UPDATE`. The explicit-filter guard now
   covers those paths, so a whole-table mutation must be asked for explicitly.
+
+  A filter that *renders* constant-true counts for nothing. An empty candidate set for a negative
+  membership test (`where_not_in(col, [])`, `ne_all(col, [])`) or for `array_contains` matches every
+  row, and a caller reaches that by accident whenever a filter list comes back empty from a form or
+  an upstream query. `delete`, `force_delete`, `soft_delete`, `restore` and `update_all` all reject
+  it now. The check is structural — on the operator and its operand — because the rendered SQL
+  cannot be pattern-matched for it: sea-query emits an empty `NOT IN` as the bound pair `? = ?`
+  rather than the literal `1 = 1`, and a soft-delete model appends its own `deleted_at IS NULL`
+  conjunct to whatever the caller declared. One real predicate alongside a vacuous one is still
+  enough, and the positive duals (`IN ()`, `= ANY ()`, `&& ()`) stay accepted because they render
+  constant-*false* and so match nothing.
 - **SQL parameterization.** Subquery, `EXISTS`/`NOT EXISTS`, `IN (subquery)`, `UNION`, CTE, and
   PostgreSQL array operands were rendered with inlined literals rather than bound parameters.
   They are now parameterized end to end, with the placeholder numbering carried correctly across
   composed fragments.
+
+  Parameterizing the PostgreSQL array operators meant dropping the `ARRAY[..]` constructor, since
+  sea-query's fragment tokenizer treats `[` as a string delimiter and never substitutes a
+  placeholder inside one. `where_array_contained_by` therefore renders as `NOT EXISTS` over
+  `unnest(column)`, which needs two explicit NULL guards to keep matching what `<@` matched:
+  `unnest(NULL)` yields no rows (so a bare `NOT EXISTS` is true for a NULL column), and a NULL
+  element makes `element NOT IN (..)` unknown rather than true (so the offending row goes
+  uncounted). Both are in place; the rewrite agrees with native `<@` on NULL columns, NULL
+  elements, and empty arrays.
 - **`ORDER BY` / `GROUP BY`.** Both are now validated against the model's resolvable columns
   instead of being pasted through. `QueryBuilder::order_by_raw(expr, direction)` is the new,
   explicitly-trusted escape hatch for real SQL expressions — never pass user input to it.
@@ -118,6 +138,25 @@ Roughly 160 individual defects from the audit. Grouped by theme:
 - **Migrations.** Migration runs take a database advisory lock, so two processes starting at once
   no longer both apply the same migration.
 - **Seeding.** Seeding works on PostgreSQL.
+- **A raw-identifier field declared `encrypted` was written in plaintext.** The attribute's field
+  list is stored un-raw'd (`type` for a `r#type` field) while five call sites compared the raw
+  `r#type`. They never matched, so the generated setters took the plaintext branch and the column
+  was never encrypted — silently, with no error. Reads did not decrypt either, while the batch
+  `update_all()` path resolved against the un-raw'd list and *did* encrypt, so rows written both
+  ways disagreed.
+- **`Json` and `DateTime` could not be named in a model.** The generated entity module glob-imported
+  both the user's module and sea-orm's entity prelude, and both export those names, so a field typed
+  `Option<Json>` or `DateTime<Utc>` — the spellings this project's own docs use — raised an
+  ambiguous-glob error (rust-lang/rust#114095, a future hard error). The module now imports what it
+  needs from that prelude by name, leaving the user's `super::*` as the only glob in scope.
+- **`ModelMeta::relation_payload_filters`** spelled its function-pointer type longhand through
+  `::serde_json::Value`. It uses the crate's own `RelationPayloadFilter` alias instead, which is now
+  re-exported from `tideorm::model` as the trait's signature always implied.
+
+  Note that generated models still require `serde` and `serde_json` as direct dependencies of the
+  consuming crate; 0.9.11 removed that requirement only for the `json!` macro in relation state
+  helpers. `tideorm init` writes both into a scaffolded project, and the README now states the
+  contract for hand-written ones.
 
 ### Internal
 
@@ -132,6 +171,16 @@ Roughly 160 individual defects from the audit. Grouped by theme:
   feature so they actually run.
 - Refreshed the main crate version, macro-crate version, macro-crate dependency version, README,
   and mdBook chapters to `0.10.0`.
+- The `HasAttachments` and `HasTranslations` rustdoc asserted both halves of a contradiction:
+  generating those impls from the derive was tried, reverted, and the correction was added without
+  removing the original claim. Only the accurate half remains — you implement them yourself.
+- `docs/models.md` showed the pre-0.10.0 dirty-tracking signatures. `changed_fields()` and
+  `original_value()` return an outer `Option` distinguishing "no baseline" from "unchanged", and the
+  example now uses it.
+- The README states what a consuming crate needs beyond `tideorm` itself: `serde`, `serde_json`, and
+  a locally declared feature for every TideORM feature enabled — a derive's `#[cfg(feature = ..)]`
+  is evaluated against the *downstream* crate, so an undeclared one silently selects the
+  feature-off branch and warns `unexpected cfg condition value`.
 - As with every release, `cargo package`/`cargo publish` for `tideorm` stays blocked until
   `tideorm-macros 0.10.0` is on crates.io, because packaging strips the `path` dependency and
   resolves through the registry index.

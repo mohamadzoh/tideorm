@@ -25,11 +25,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn has_explicit_mutation_filters(&self) -> bool {
-        !self.conditions.is_empty()
-            || self
-                .or_groups
-                .iter()
-                .any(|group| group.condition_count() > 0)
+        self.conditions
+            .iter()
+            .any(|condition| !crate::query::condition_is_vacuous(condition))
+            || self.or_groups.iter().any(OrGroup::is_restrictive)
     }
 
     pub(crate) fn ensure_mutation_has_explicit_filters(&self, operation: &str) -> Result<()> {
@@ -37,7 +36,7 @@ impl<M: Model> QueryBuilder<M> {
             Ok(())
         } else {
             Err(Error::invalid_query(format!(
-                "{} requires at least one explicit filter; unfiltered bulk mutations are blocked",
+                "{} requires at least one explicit filter that can exclude a row; unfiltered bulk mutations are blocked",
                 operation
             )))
         }

@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::meta_support::auto_updated_at_value;
+use crate::parse::unraw_ident;
 
 pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
@@ -113,7 +114,7 @@ fn build_try_update_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
             let column_name = BuildContext::column_name(field);
-            let field_name = ident.to_string();
+            let field_name = unraw_ident(ident);
 
             if field.primary_key {
                 quote!(#ident: ActiveValue::Unchanged(self.#ident))

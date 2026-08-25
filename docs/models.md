@@ -103,7 +103,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.9.19", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.10.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -210,15 +210,30 @@ Requires the `dirty-tracking` feature.
 
 Persisted models loaded or saved through TideORM keep a baseline of their last known persisted column values. Use `changed_fields()` to inspect which persisted fields differ from that baseline, and `original_value()` to inspect the previous value before saving.
 
+Both return an outer `Option` that distinguishes **"no baseline is known"** (`None`) from **"a baseline exists and nothing changed"** (`Some(vec![])`). Treat `None` as unknown rather than unchanged — otherwise a model with no snapshot silently skips its write.
+
 ```rust
 let mut user = User::find(1).await?.unwrap();
 user.name = "Jane Doe".to_string();
 
-assert_eq!(user.changed_fields()?, vec!["name"]);
+assert_eq!(user.changed_fields()?, Some(vec!["name"]));
+
+// The inner `Option` is the column's own value, which may itself be NULL.
 assert_eq!(
     user.original_value("name")?,
-    Some(serde_json::json!("John Doe"))
+    Some(Some(serde_json::json!("John Doe")))
 );
+```
+
+The usual gate reads:
+
+```rust
+match user.changed_fields()? {
+    // Nothing to compare against: save rather than guess.
+    None => user.save().await?,
+    Some(changed) if !changed.is_empty() => user.save().await?,
+    Some(_) => user,
+};
 ```
 
 `changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.

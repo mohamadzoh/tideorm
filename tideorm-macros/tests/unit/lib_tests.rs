@@ -487,6 +487,46 @@ fn raw_identifier_fields_expand_without_panicking() {
 }
 
 #[test]
+fn raw_identifier_field_declared_encrypted_is_actually_encrypted() {
+    // `encrypted_fields` is built with `unraw_ident`, so it holds "type" for a
+    // `r#type` field. Every consumer must un-raw the same way before comparing:
+    // matching against the raw "r#type" silently selects the plaintext branch and
+    // writes a field the user declared encrypted straight to the column.
+    let input: DeriveInput = parse_quote! {
+        #[tideorm(table = "docs", encrypted = "type")]
+        struct Doc {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            r#type: String,
+        }
+    };
+
+    let ctx = build_context_for(&input).expect("raw identifier fields should be supported");
+    assert!(
+        ctx.encrypted_fields.contains(&"type".to_string()),
+        "producer should store the un-raw'd name"
+    );
+
+    let existing_derives = detect_existing_derives(&input.attrs);
+    let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
+    let generated =
+        generate_model_impl(&model_input, vec![], vec![], &existing_derives).to_string();
+    let normalized = normalize_tokens(&generated);
+
+    // The plaintext branch for this field would be `r#type: ActiveValue::Set(self.r#type)`.
+    // Its absence is what distinguishes the fix: matching the raw name against the
+    // un-raw'd list silently selects exactly that branch.
+    assert!(
+        !normalized.contains("r#type:ActiveValue::Set(self.r#type)"),
+        "raw-identifier encrypted field was written in plaintext"
+    );
+    assert!(
+        normalized.contains("__encrypt_model_field(self.r#type"),
+        "a raw-identifier encrypted field must take the encryption branch"
+    );
+}
+
+#[test]
 fn internal_entity_module_name_is_snake_cased() {
     let input: DeriveInput = parse_quote! {
         struct ApiKey {

@@ -3,6 +3,7 @@ use super::*;
 use std::collections::HashSet;
 
 use crate::meta_support::auto_timestamp_value;
+use crate::parse::unraw_ident;
 
 pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
@@ -172,7 +173,7 @@ fn build_try_insert_active_model_setters(ctx: &BuildContext) -> Vec<TokenStream2
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
             let column_name = BuildContext::column_name(field);
-            let field_name = ident.to_string();
+            let field_name = unraw_ident(ident);
             if field.primary_key && field.auto_increment {
                 quote!(#ident: ActiveValue::NotSet)
             } else if let Some(value) = auto_timestamp_value(field) {
@@ -208,7 +209,7 @@ fn build_unencrypted_insert_active_model_setters(ctx: &BuildContext) -> Vec<Toke
                 quote!(#ident: ActiveValue::NotSet)
             } else if let Some(value) = auto_timestamp_value(field) {
                 quote!(#ident: ActiveValue::Set(#value))
-            } else if ctx.encrypted_fields.contains(&ident.to_string()) {
+            } else if ctx.encrypted_fields.contains(&unraw_ident(ident)) {
                 quote!(#ident: ActiveValue::NotSet)
             } else {
                 quote!(#ident: ActiveValue::Set(self.#ident))
@@ -246,7 +247,7 @@ fn build_try_from_entity_model_fields(ctx: &BuildContext) -> Vec<TokenStream2> {
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
             let column_name = BuildContext::column_name(field);
-            let field_name = ident.to_string();
+            let field_name = unraw_ident(ident);
             if ctx
                 .encrypted_fields
                 .iter()
@@ -275,7 +276,7 @@ fn build_try_to_entity_model_fields(ctx: &BuildContext) -> Vec<TokenStream2> {
         .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
         .map(|(field, ident)| {
             let column_name = BuildContext::column_name(field);
-            let field_name = ident.to_string();
+            let field_name = unraw_ident(ident);
             if ctx
                 .encrypted_fields
                 .iter()

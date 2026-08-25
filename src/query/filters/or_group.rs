@@ -44,6 +44,31 @@ impl OrGroup {
         self.conditions.is_empty() && self.nested_groups.is_empty()
     }
 
+    /// True when this group still restricts the row set.
+    ///
+    /// The two combinators are not symmetric. An `And` group survives as long as
+    /// one member restricts; a single vacuous member of an `Or` group makes the
+    /// whole group true, so an `Or` group only counts when *every* member
+    /// restricts. See [`condition_is_vacuous`](super::condition_is_vacuous).
+    pub(crate) fn is_restrictive(&self) -> bool {
+        match self.combine_with {
+            LogicalOp::And => {
+                self.conditions
+                    .iter()
+                    .any(|condition| !super::condition_is_vacuous(condition))
+                    || self.nested_groups.iter().any(OrGroup::is_restrictive)
+            }
+            LogicalOp::Or => {
+                !self.is_empty()
+                    && self
+                        .conditions
+                        .iter()
+                        .all(|condition| !super::condition_is_vacuous(condition))
+                    && self.nested_groups.iter().all(OrGroup::is_restrictive)
+            }
+        }
+    }
+
     pub fn condition_count(&self) -> usize {
         let nested_count: usize = self.nested_groups.iter().map(|g| g.condition_count()).sum();
         self.conditions.len() + nested_count

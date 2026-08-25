@@ -25,7 +25,7 @@ mod serialization;
 pub use api::Model;
 pub use batch::{BatchUpdateBuilder, UpdateValue};
 pub use builders::{CreateBuilder, OnConflictBuilder, UpdateBuilder};
-pub use meta::{IndexDefinition, ModelMeta};
+pub use meta::{IndexDefinition, ModelMeta, RelationPayloadFilter};
 pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
 
 #[doc(hidden)]

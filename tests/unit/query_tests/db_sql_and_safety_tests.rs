@@ -201,10 +201,16 @@ fn test_array_contains_sqlite() {
 fn test_array_contained_by_postgres_unnests_the_column() {
     let values = json_values(&["admin", "user"]);
     let sql = db_sql::array_contained_by(DatabaseType::Postgres, "roles", &values);
+    // Both NULL guards are part of the contract, because `NOT EXISTS` over
+    // `unnest` inverts what `<@` does with unknowns: it is TRUE for a NULL
+    // column (zero rows to find) and for a NULL element (`NULL NOT IN (..)`
+    // is unknown, so the offending row goes uncounted), where `<@` matches
+    // neither.
     assert_eq!(
         sql,
-        "NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS tideorm_array_element(element) \
-         WHERE tideorm_array_element.element NOT IN ('admin', 'user'))"
+        "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
+         tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
+         tideorm_array_element.element NOT IN ('admin', 'user')))"
     );
     assert!(!sql.contains("ARRAY["), "sql: {sql}");
 }

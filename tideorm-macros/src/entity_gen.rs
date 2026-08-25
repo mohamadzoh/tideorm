@@ -116,8 +116,21 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         mod #internal_entity_mod {
             use super::*;
             use ::tideorm::orm as sea_orm;
-            use ::tideorm::orm::entity::prelude::*;
-            use ::tideorm::orm::{ActiveValue, DeriveActiveModel, DeriveEntity, DeriveModel};
+            // Deliberately NOT `use ::tideorm::orm::entity::prelude::*;`. That glob
+            // and the `use super::*;` above both bring `Json` and `DateTime` into
+            // scope, so any model field spelled with one of those names became an
+            // ambiguous-glob error (rust-lang #114095, a future hard error) even
+            // though the code was correct. Importing what this module actually
+            // needs by name keeps the user's `super::*` the only glob in scope.
+            use ::tideorm::orm::entity::prelude::{
+                ActiveModelBehavior, ColumnDef, ColumnTrait, ColumnType, ColumnTypeTrait,
+                DeriveActiveModelBehavior, DeriveColumn, DerivePrimaryKey, EntityName,
+                EntityTrait, EnumIter, IdenStatic, PrimaryKeyTrait, Related, RelationDef,
+                RelationTrait,
+            };
+            use ::tideorm::orm::{
+                ActiveValue, DeriveActiveModel, DeriveEntity, DeriveModel, Iterable,
+            };
 
             #[derive(Copy, Clone, Default, Debug, DeriveEntity)]
             pub struct Entity;
@@ -183,7 +196,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             fn column_names() -> &'static [&'static str] { &[#(#column_names),*] }
             fn field_names() -> &'static [&'static str] { &[#(stringify!(#field_names)),*] }
             fn hidden_attributes() -> Vec<&'static str> { vec![#(#hidden_attrs),*] }
-            fn relation_payload_filters() -> Vec<(&'static str, fn(&mut ::serde_json::Value, &[::std::string::String]))> {
+            fn relation_payload_filters() -> Vec<(&'static str, ::tideorm::model::RelationPayloadFilter)> {
                 vec![#(#relation_payload_filters),*]
             }
             fn searchable_fields() -> Vec<&'static str> { vec![#(#searchable_fields),*] }
@@ -309,7 +322,7 @@ fn build_relation_payload_filters(ctx: &BuildContext) -> Vec<TokenStream2> {
                 (
                     #field_name,
                     <#target as ::tideorm::model::ModelMeta>::__strip_hidden_payload
-                        as fn(&mut ::serde_json::Value, &[::std::string::String])
+                        as ::tideorm::model::RelationPayloadFilter
                 )
             })
         })

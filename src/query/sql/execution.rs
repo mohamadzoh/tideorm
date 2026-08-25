@@ -978,6 +978,62 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_negative_list_does_not_count_as_an_explicit_filter() {
+        // An empty candidate set for a negative membership test renders
+        // constant-true, so it must not satisfy the explicit-filter requirement.
+        // Reaching this by accident is easy -- a filter list that came back empty
+        // from a form -- and the rendered-SQL check cannot catch it: sea-query
+        // emits an empty `NOT IN` as the bound pair `? = ?`, and a soft-delete
+        // model appends `deleted_at IS NULL` to whatever the caller declared.
+        for query in [
+            CacheKeyTestUser::query().where_not_in("id", Vec::<i64>::new()),
+            CacheKeyTestUser::query().ne_all("name", Vec::<&str>::new()),
+            CacheKeyTestUser::query()
+                .ne_all("name", Vec::<&str>::new())
+                .where_not_in("id", Vec::<i64>::new()),
+        ] {
+            let err = query
+                .ensure_mutation_has_explicit_filters("delete")
+                .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("unfiltered bulk mutations are blocked"),
+                "vacuous filter was accepted: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_real_filter_still_counts_alongside_a_vacuous_one() {
+        // The guard rejects only queries where *every* declared filter is
+        // vacuous; one real predicate is enough, and it still applies.
+        assert!(
+            CacheKeyTestUser::query()
+                .where_eq("name", "alice")
+                .where_not_in("id", Vec::<i64>::new())
+                .ensure_mutation_has_explicit_filters("delete")
+                .is_ok()
+        );
+
+        // A non-empty candidate set is a real filter on its own.
+        assert!(
+            CacheKeyTestUser::query()
+                .where_not_in("id", vec![1i64])
+                .ensure_mutation_has_explicit_filters("delete")
+                .is_ok()
+        );
+
+        // The positive duals render constant-FALSE, which matches nothing and is
+        // safe for a mutation, so they are deliberately still accepted.
+        assert!(
+            CacheKeyTestUser::query()
+                .where_in("id", Vec::<i64>::new())
+                .ensure_mutation_has_explicit_filters("delete")
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn test_cache_tags_cover_joined_tables() {
         let tables = CacheKeyTestPost::query()
             .inner_join(

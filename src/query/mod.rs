@@ -28,6 +28,7 @@ mod predicates;
 mod sql;
 mod structure;
 
+pub(crate) use filters::condition_is_vacuous;
 pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order, WhereCondition,
 };

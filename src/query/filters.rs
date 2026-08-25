@@ -370,3 +370,32 @@ impl LogicalOp {
         }
     }
 }
+
+/// True when a declared condition cannot exclude any row.
+///
+/// These are the operand shapes that render constant-true: an empty candidate
+/// set for a *negative* membership test, and an empty "contains all of these"
+/// array test. A caller reaches them by accident — a filter list that came back
+/// empty from a form or an upstream query — and the resulting predicate silently
+/// widens a targeted mutation into a whole-table one.
+///
+/// Their positive duals (`IN ()`, `= ANY ()`, `&& ()`) render constant-*false*
+/// and are deliberately absent: a mutation that matches nothing is safe.
+///
+/// The check is structural on purpose. Inspecting the rendered SQL cannot
+/// replace it: sea-query emits an empty `NOT IN` as the bound pair `? = ?`
+/// rather than the literal `1 = 1`, and a soft-delete model appends its own
+/// `deleted_at IS NULL` conjunct to whatever the caller declared — so neither
+/// shape survives a comparison against a fixed set of constant-true spellings.
+pub(crate) fn condition_is_vacuous(condition: &WhereCondition) -> bool {
+    matches!(
+        (&condition.operator, &condition.value),
+        (
+            Operator::NotIn
+                | Operator::NeAll
+                | Operator::ArrayContains
+                | Operator::ArrayContainsAll,
+            ConditionValue::List(values),
+        ) if values.is_empty()
+    )
+}

@@ -2,22 +2,6 @@ use super::{AttachmentError, FileAttachment, FilesData};
 
 /// Trait for models with file attachments
 ///
-/// **The derive generates this impl.** `#[tideorm(has_one_files = ...)]` or
-/// `#[tideorm(has_many_files = ...)]` populate `ModelMeta` *and* emit a
-/// `HasAttachments` impl, so `attach()`, `detach()` and `sync()` are available
-/// on the model as soon as the attribute is declared:
-///
-/// ```ignore
-/// #[tideorm::model(table = "products", has_one_files = "thumbnail")]
-/// pub struct Product {
-///     #[tideorm(primary_key, auto_increment)]
-///     pub id: i64,
-///     pub files: Option<Json>,
-/// }
-///
-/// product.attach("thumbnail", "uploads/thumb.jpg")?;
-/// ```
-///
 /// **You implement this yourself** — the derive does not generate it. Declaring
 /// `has_one_files` / `has_many_files` populates [`ModelMeta`](crate::model::ModelMeta)
 /// so the field names are queryable, but the read/write half needs a body only you

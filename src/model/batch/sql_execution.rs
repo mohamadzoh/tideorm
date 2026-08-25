@@ -411,6 +411,34 @@ mod tests {
         deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     }
 
+    #[test]
+    fn empty_negative_list_does_not_count_as_an_explicit_filter() {
+        // Same hazard as the QueryBuilder mutation terminals: an empty candidate
+        // set for a negative membership test renders constant-true, so counting
+        // conditions would let a caller whose filter list came back empty rewrite
+        // every row in the table.
+        let err = BatchUpdateBuilder::<BatchSqlUser>::new()
+            .set("name", "updated")
+            .where_not_in("id", Vec::<i64>::new())
+            .ensure_explicit_filters("update")
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unfiltered bulk mutations are blocked"),
+            "vacuous filter was accepted: {err}"
+        );
+
+        // One real predicate alongside it is still enough.
+        assert!(
+            BatchUpdateBuilder::<BatchSqlUser>::new()
+                .set("name", "updated")
+                .where_eq("name", "alice")
+                .where_not_in("id", Vec::<i64>::new())
+                .ensure_explicit_filters("update")
+                .is_ok()
+        );
+    }
+
     fn filtered_builder() -> BatchUpdateBuilder<BatchSqlUser> {
         BatchUpdateBuilder::<BatchSqlUser>::new()
             .set("name", "updated")

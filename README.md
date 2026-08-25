@@ -212,6 +212,33 @@ tideorm = { version = "0.10.0", default-features = false, features = ["postgres"
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
 
+### What else your crate needs
+
+`#[tideorm::model]` expands into your crate, so a few things have to be reachable
+from *there* rather than from TideORM. `tideorm init` writes all of them into a
+scaffolded project; add them by hand if you are wiring TideORM into an existing one.
+
+```toml
+[dependencies]
+tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"          # only if you use date/time columns
+
+# Declare locally every TideORM feature you enable. A derive's `#[cfg(feature = ..)]`
+# is evaluated against YOUR crate's features, not TideORM's, so without this the
+# generated code silently takes the feature-off branch and rustc warns
+# `unexpected cfg condition value`.
+[features]
+entity-manager = ["tideorm/entity-manager"]
+```
+
+`serde` and `serde_json` are not optional: the derive emits `::serde` and
+`::serde_json` paths, so a model will not compile without both as direct
+dependencies. `chrono` is only needed if you spell a column type with an explicit
+`chrono::` path — the `DateTime<Utc>` re-exported from `tideorm::prelude` works
+without it.
+
 ### Feature Flags
 
 | Feature | Description |

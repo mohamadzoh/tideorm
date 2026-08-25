@@ -172,23 +172,6 @@ impl TranslationsData {
 
 /// Trait for models with translations
 ///
-/// **The derive generates this impl.** `#[tideorm(translatable = ...)]`
-/// populates `ModelMeta` *and* emits a `HasTranslations` impl, so
-/// `set_translation()` and `get_translated()` are available on the model as soon
-/// as the attribute is declared:
-///
-/// ```ignore
-/// #[tideorm::model(table = "products", translatable = "name")]
-/// pub struct Product {
-///     #[tideorm(primary_key, auto_increment)]
-///     pub id: i64,
-///     pub name: String,
-///     pub translations: Option<Json>,
-/// }
-///
-/// product.set_translation("name", "fr", "Nom du produit")?;
-/// ```
-///
 /// **You implement this yourself** — the derive does not generate it. Declaring
 /// `translatable` populates [`ModelMeta`](crate::model::ModelMeta) so the field
 /// names are queryable, but the read/write half needs a body only you can supply:
