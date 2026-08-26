@@ -1,13 +1,13 @@
 [package]
 name = "tideorm-macros"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
 repository = "https://github.com/mohamadzoh/tideorm"
 homepage = "https://tideorm.com"
 readme = "README.md"
-rust-version = "1.88"
+rust-version = "1.94"
 exclude = ["tests/**"]
 
 [lib]

@@ -17,15 +17,28 @@ Before contributing, please read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development Setup
 
-- Both manifests declare `rust-version = "1.85"` (the Rust 2024 edition floor). Treat that as the
-  supported minimum. The `msrv` CI job installs exactly 1.85.0 and runs `cargo check --workspace`,
-  so a post-1.85 API in the library or the proc-macro crate fails the build. If you knowingly need
-  a newer API, raise `rust-version` in `Cargo.toml` and `tideorm-macros/Cargo.toml` **and** the
-  `dtolnay/rust-toolchain@1.85.0` ref in `.github/workflows/ci.yml` in the same change.
+- Both manifests declare `rust-version = "1.94"`. Treat that as the supported minimum. The `msrv` CI
+  job installs exactly 1.94.0 and runs `cargo check --workspace`, so a post-1.94 API in the library
+  or the proc-macro crate fails the build.
+- The MSRV is not a free choice — it is the ceiling of the dependency tree, and `resolver = "3"`
+  enforces it. `sea-orm` 2.x declares `rust-version = "1.94.0"`, so cargo refuses to build this
+  workspace on anything older regardless of what our own code uses. Raising the floor is what
+  tracking a sea-orm release costs; lowering it means not tracking one.
+- Raising the MSRV touches **five** places, and they must move in the same change. Missing one
+  leaves the crate advertising support it does not have:
+  1. `rust-version` in `Cargo.toml`
+  2. `rust-version` in `tideorm-macros/Cargo.toml`
+  3. the `dtolnay/rust-toolchain@<ver>` ref in `.github/workflows/ci.yml` (and the comment above the
+     `msrv` job, which repeats the literal)
+  4. the `rust-<ver>+` badge at the top of `README.md`
+  5. this section of `CONTRIBUTING.md`
 - The MSRV covers the published crates only. The `msrv` job intentionally omits `--all-targets`, so
-  dev-dependencies (criterion, trybuild, tokio) are free to require a newer toolchain than 1.85.
+  dev-dependencies (criterion, trybuild, tokio) are free to require a newer toolchain.
+- Raising `rust-version` also raises the floor clippy lints against, so lints that were suppressed
+  as MSRV-incompatible switch on. Re-run `cargo clippy --workspace --all-targets -- -D warnings`
+  after any MSRV change; a bump is not lint-neutral.
 - There is deliberately **no `rust-toolchain.toml`**. It would pin every contributor's `cargo` in
-  this tree to a single toolchain: pinned to 1.85 you would lint and format with a three-year-old
+  this tree to a single toolchain: pinned to the MSRV you would lint and format with an old
   clippy/rustfmt and drift from the `stable` CI jobs; pinned to `stable` it would not check the
   MSRV at all. Develop on `stable` and let the `msrv` job be the gate.
 - Install dependencies with standard Rust tooling; no extra bootstrap script is required.

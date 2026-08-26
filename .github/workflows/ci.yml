@@ -46,9 +46,14 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # `rust-version = "1.88"` in both manifests is a promise to downstream
+  # `rust-version = "1.94"` in both manifests is a promise to downstream
   # resolvers, and every other job installs `stable`, so nothing else here would
-  # notice a post-1.88 API landing. This job is the only thing that checks it.
+  # notice a post-1.94 API landing. This job is the only thing that checks it.
+  #
+  # The floor is not ours to pick: `sea-orm` 2.x declares `rust-version =
+  # "1.94.0"`, and `resolver = "3"` refuses to build a tree whose dependencies
+  # require more than the running toolchain. This job therefore fails on a
+  # dependency bump just as readily as on our own code.
   #
   # Deliberately `cargo check` and not `--all-targets`: the MSRV covers the
   # published library and proc-macro crate, not the dev-dependencies
@@ -57,7 +62,8 @@ jobs:
   # never compiles.
   #
   # When this job fails, the fix is to raise `rust-version` in `Cargo.toml` and
-  # `tideorm-macros/Cargo.toml` together, not to relax the job.
+  # `tideorm-macros/Cargo.toml` together, not to relax the job. CONTRIBUTING.md
+  # lists the five places that have to move in the same change.
   msrv:
     runs-on: ubuntu-latest
     env:
@@ -69,7 +75,7 @@ jobs:
 
       - name: Install Rust
         # Keep this literal in sync with `rust-version` in both manifests.
-        uses: dtolnay/rust-toolchain@1.88.0
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

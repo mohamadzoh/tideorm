@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -10,12 +10,14 @@ homepage = "https://tideorm.com"
 keywords = ["orm", "database", "postgres", "mysql", "sqlite"]
 categories = ["database"]
 readme = "README.md"
-# Declared MSRV. It is the edition-2024 floor and is what downstream resolvers
-# see. The `msrv` job in .github/workflows/ci.yml pins this exact toolchain and
-# runs `cargo check`, so a post-1.85 API cannot land unnoticed. Raising this
-# means raising it in tideorm-macros/Cargo.toml and in the CI job's
-# `dtolnay/rust-toolchain@` ref in the same change.
-rust-version = "1.88"
+# Declared MSRV, and what downstream resolvers see. It is set by the dependency
+# tree, not by the edition floor: sea-orm 2.x requires 1.94.0, and `resolver = "3"`
+# refuses to build against a dependency that wants more than the running toolchain.
+# The `msrv` job in .github/workflows/ci.yml pins this exact toolchain and runs
+# `cargo check`, so a post-1.94 API cannot land unnoticed. Raising this touches
+# five places — see the MSRV bullet in CONTRIBUTING.md, which lists them; a bump
+# also switches on MSRV-gated clippy lints, so re-run clippy after one.
+rust-version = "1.94"
 # `tests/unit/**` and `tests/support/**` are `#[path]`-included into `src/`, so a
 # blanket `tests/**` exclusion makes `cargo test --lib` fail inside an extracted
 # `.crate`. Keep those two trees and drop only the standalone integration
@@ -63,12 +65,16 @@ dirty-tracking = []
 encrypted-fields = []
 
 [dependencies]
-# Pinned exactly, not as a caret range. `src/orm.rs` re-exports all of sea-orm
-# and macro-generated models resolve `sea_orm::` paths through it, so a resolver
-# bump to a later 2.0.0 release candidate (or to final 2.0.0) surfaces as errors
-# inside macro expansion in downstream crates. Relax this to a caret range only
-# once sea-orm 2.0.0 is stable and the generated-entity surface is verified.
-sea-orm = { version = "=2.0.0-rc.38", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
+# A caret range now that 2.x is stable. `src/orm.rs` re-exports all of sea-orm and
+# macro-generated models resolve `sea_orm::` paths through it, so a resolver bump
+# used to surface as errors inside macro expansion in downstream crates — which is
+# what the old `=2.0.0-rc.38` pin existed to prevent. Within a stable major, semver
+# is what rules that out, so the pin is no longer carrying its weight.
+#
+# This crate's MSRV is downstream of this line: sea-orm 2.x declares
+# `rust-version = "1.94.0"`, and `resolver = "3"` enforces it. Raising this range
+# can therefore raise the toolchain floor without any of our own code changing.
+sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
 
 # Async runtime
 async-trait = "0.1.89"
@@ -86,7 +92,7 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.10.2", path = "tideorm-macros" }
+tideorm-macros = { version = "0.11.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"

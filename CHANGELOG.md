@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-26
+
+Tracks the stable SeaORM 2.x line. The upgrade itself needs no code change; what moves the minor
+version is the toolchain floor it brings with it.
+
+### Changed
+
+- **SeaORM now tracks stable `2.x`** as a caret range (`2.0.2`) instead of the exact pin
+  `=2.0.0-rc.38`. Every 2.0.0 breaking change had already landed during the release-candidate
+  series, so TideORM needed no source edit: the raw-SQL split (`query_all_raw` / `query_one_raw` /
+  `execute_raw`), the `DatabaseConnection` enum-to-struct refactor, and the `Arc`-wrapped
+  `RuntimeErr::SqlxError` were all present in rc.38 already. The exact pin existed because a
+  resolver bump *within* the RC series could surface as errors inside macro expansion in downstream
+  crates; inside a stable major that is precisely what semver rules out, so the pin is now a caret.
+- **Minimum supported Rust version raised from 1.88 to 1.94.** This is not a preference. Every
+  stable `sea-orm 2.x` declares `rust-version = "1.94.0"`, as do `sqlx` 0.9 and `sea-query-sqlx`
+  0.9, and `resolver = "3"` *enforces* a dependency's declared MSRV rather than warning about it —
+  so there is no stable SeaORM that builds on 1.88. The floor is the dependency tree's, not ours.
+  This is what moves the minor version rather than the patch: shipped as a patch it would pull every
+  existing `tideorm = "0.10"` dependent onto the new floor on their next `cargo update`, with a hard
+  resolver error and no opt-in.
+
+### Upgrade notes
+
+- **A large `async fn` may now need `#![recursion_limit = "256"]`.** rustc computes the layout of an
+  async fn body as one generator type, and SeaORM 2.x (through sqlx 0.9) nests deeply enough that a
+  function awaiting a long chain of TideORM calls can cross the default limit of 128. It surfaces as
+  `error: queries overflow the depth limit!` naming `computing layout of {async fn body of ...}`,
+  which reads like a fault in your own code and is not one. Add the attribute to the crate root of
+  the crate that fails; the limit is per-crate and does not inherit from a dependency. `tideorm-cli`
+  hit exactly this and carries the attribute now. Scaffolded projects and the example suite do not.
+
+### Fixed
+
+- The README badge and `CONTRIBUTING.md` still advertised `rust-1.85`, stale since 0.10.1 raised the
+  real floor to 1.88 without updating them — the crate documented a minimum two releases below the
+  one it actually required. `CONTRIBUTING.md` now lists all five places an MSRV bump has to touch
+  (it previously listed three, which is how both it and the README badge were missed) and records
+  that raising `rust-version` also raises the floor clippy lints against, so a bump is not
+  lint-neutral and needs a clippy re-run.
+
 ## [0.10.2] - 2026-08-25
 
 Three defects behind the `entity-manager` feature and the schema type mapper.
