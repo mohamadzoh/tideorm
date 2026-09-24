@@ -57,11 +57,25 @@ User::query().where_between("age", 18, 65)
 User::query().where_between(User::columns.age, 18, 65)
 ```
 
+Values are anything `serde::Serialize`, and they are bound as the column's own type, so pass the native value: a `Uuid`, a `chrono` date or timestamp, or a `Decimal` compares correctly on every backend (`where_eq("id", user_id)`, `where_gt("created_at", since)`). A few rules worth knowing:
+
+- **NULL.** `where_eq(col, None::<T>)` is `IS NULL`. `where_not` and `where_not_in` follow SQL and never match a NULL column. A `None` inside `where_in` also matches NULL rows, and one inside `where_not_in` keeps the non-NULL rows outside the list.
+- **Columns are identifiers.** The column argument is a column, `table.column`, or a typed column; anything else is rejected when the query runs. SQL expressions go through `where_raw()`, whose SQL you vouch for — never pass user input to it.
+- **Long lists.** A `where_in`/`where_not_in` list of more than 1,000 integers is rendered inline instead of bound, so an id list of any length works. Other values are bound one parameter each, which caps them at the backend's limit: 32,766 on SQLite, 65,535 on PostgreSQL and MySQL.
+- **`LIKE` and case.** `where_contains`/`where_starts_with`/`where_ends_with` escape `%` and `_`, so they are safe for user input. Whether they are case-sensitive is the backend's: PostgreSQL is, MySQL (with its default collations) and SQLite (for ASCII) are not.
+- **Text equality follows the collation.** MySQL's default collation ignores case and accents, so there `where_eq("email", "ada@example.com")` finds `Ada@Example.com`, `"cafe"` finds `café`, and a unique index refuses both spellings; MariaDB's default collations also ignore trailing spaces, so `"a "` finds `"a"`. PostgreSQL and SQLite compare text exactly. Normalize values you look up, such as lowercasing emails before saving, to get the same answer everywhere.
+
 ### OR Conditions
 
 OR clauses are available as simple query-level helpers or grouped `begin_or()` / `end_or()` blocks. Both accept string column names and typed columns.
 
 #### Simple OR Methods
+
+All `or_where_*` calls on one query are combined into one OR group, ANDed with
+the rest of the query: `.where_eq("active", true).or_where_eq("role", "admin").or_where_eq("role", "moderator")`
+matches `active = true AND (role = 'admin' OR role = 'moderator')`. Use
+`or_where(|group| ..)` or `begin_or()` / `end_or()` for further, separate OR
+groups.
 
 ```rust
 // Basic OR conditions (applied at query level)
@@ -274,6 +288,18 @@ User::query().latest()                              // ORDER BY created_at DESC
 User::query().oldest()                              // ORDER BY created_at ASC
 ```
 
+A model named `Order` shadows the prelude's `Order` enum; write `SortOrder::Desc` instead, the same enum under a second name.
+
+Where NULLs sort is the backend's: PostgreSQL puts them last in ascending order and first in descending order, MySQL and SQLite the other way round. Sort on `IS NULL` first to get one order everywhere:
+
+```rust
+User::query()
+    .order_by_raw("last_login_at IS NULL", Order::Asc) // NULLs last on every backend
+    .order_asc(User::columns.last_login_at)
+    .get()
+    .await?;
+```
+
 ### Pagination
 
 ```rust
@@ -286,6 +312,7 @@ User::query()
 
 // Page-based pagination
 User::query()
+    .order_asc(User::columns.id)
     .page(3, 25)  // Page 3, 25 per page
     .get()
     .await?;
@@ -293,6 +320,8 @@ User::query()
 // Aliases
 User::query().take(10).skip(20)  // Same as limit(10).offset(20)
 ```
+
+Give a paged query a unique order, such as one ending in the primary key. Without one, PostgreSQL returns rows in storage order, which an `UPDATE` changes, so consecutive pages can repeat one row and skip another. `Model::paginate(page, per_page)` orders by the primary key for you.
 
 ### Chunked Processing
 
@@ -351,7 +380,54 @@ let deleted = User::query()
     .where_eq("status", "inactive")
     .delete()
     .await?;  // u64 (rows affected)
+
+// Rows as JSON, for projections that are not a whole model
+let rows = User::query()
+    .select(vec!["id", "email"])
+    .get_json()
+    .await?;  // Vec<serde_json::Value>
+
+// Lock the rows read until the transaction ends (SELECT ... FOR UPDATE)
+let user = User::query()
+    .where_eq("id", 1)
+    .lock_for_update()
+    .first()
+    .await?;
 ```
+
+Use `lock_for_update()` inside a transaction before changing what you read; see [Concurrent Updates](models.md#concurrent-updates).
+
+A query reads the model's columns by name rather than `SELECT *`, so a column added to the table while the application runs does not disturb it.
+
+`get()` builds complete models, so it refuses a `select()` that leaves model columns out: the missing ones would read as `None` or a default, and saving such a model would write those back over the stored values. Read a partial row with `get_json()`.
+
+`get_json()` returns each model column exactly as the model's own JSON has it, on every backend — SQLite stores booleans as integers and JSON and dates as text, and the model's types are what put them back. Other columns (aliases, aggregates, window values) are decoded by the type the database declares: text comes back verbatim, binary as an array of bytes, `NUMERIC`/`DECIMAL` as a decimal string. `Database::raw_json` has no model, so it reports what the database stores: on SQLite a boolean is `0`/`1` and a JSON column is its text, as it is on MariaDB, which declares JSON columns as text, and a MySQL `DATETIME` has no offset.
+
+### Joins
+
+Name both sides of a join as `table.column` (or `alias.column`); a bare column name invalidates the query, and the error surfaces when it runs:
+
+```rust
+let posts = Post::query()
+    .inner_join("users", "posts.user_id", "users.id")
+    .where_eq("users.active", true)
+    .get()
+    .await?;
+```
+
+### Aggregates
+
+`sum`, `avg`, `min`, `max` and `count_distinct` each run one statement. `aggregates()` computes several over the same rows in one, returning them in order:
+
+```rust
+let stats = Sale::query()
+    .where_eq("region", "EU")
+    .aggregates(&[Aggregate::count(), Aggregate::sum("amount"), Aggregate::max("amount")])
+    .await?; // Vec<f64>
+let (orders, revenue, largest) = (stats[0], stats[1], stats[2]);
+```
+
+`count()` ignores `limit()` and `offset()`, so a paged query counts its total across every page; the aggregates, `Aggregate::count()` included, work on the rows the limit and offset leave.
 
 ### UNION Queries
 
@@ -391,44 +467,44 @@ use tideorm::prelude::*;
 // ROW_NUMBER - assign sequential numbers
 let products = Product::query()
     .row_number("row_num", Some("category"), "price", Order::Desc)
-    .get_raw()
+    .get_json()
     .await?;
 // SQL: ROW_NUMBER() OVER (PARTITION BY "category" ORDER BY "price" DESC) AS "row_num"
 
 // RANK - rank with gaps for ties
 let employees = Employee::query()
     .rank("salary_rank", Some("department_id"), "salary", Order::Desc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // DENSE_RANK - rank without gaps
 let students = Student::query()
     .dense_rank("score_rank", None, "score", Order::Desc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // Running totals with SUM window
 let sales = Sale::query()
     .running_sum("running_total", "amount", "date", Order::Asc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // LAG - access previous row value
 let orders = Order::query()
     .lag("prev_total", "total", 1, Some("0"), "user_id", "created_at", Order::Asc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // LEAD - access next row value
 let appointments = Appointment::query()
     .lead("next_date", "date", 1, None, "patient_id", "date", Order::Asc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // NTILE - distribute into buckets
 let products = Product::query()
     .ntile("price_quartile", 4, "price", Order::Asc)
-    .get_raw()
+    .get_json()
     .await?;
 
 // Custom window function with full control
@@ -439,7 +515,7 @@ let results = Order::query()
             .order_by("month", Order::Asc)
             .frame(FrameType::Rows, FrameBound::UnboundedPreceding, FrameBound::CurrentRow)
     )
-    .get_raw()
+    .get_json()
     .await?;
 ```
 
@@ -511,7 +587,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.10.0", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.12.0", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -521,6 +597,7 @@ use tideorm::prelude::*;
 
 // Simple full-text search
 let results = Article::search(&["title", "content"], "rust programming")
+    .get()
     .await?;
 
 // Search with ranking (ordered by relevance)
@@ -554,7 +631,7 @@ let first = Article::search(&["title"], "rust")
 use tideorm::fulltext::{SearchMode, FullTextConfig};
 
 // Natural language search (default)
-Article::search(&["content"], "learn rust programming").await?;
+Article::search(&["content"], "learn rust programming").get().await?;
 
 // Boolean search with operators
 Article::search(&["content"], "+rust +async -javascript")
@@ -575,6 +652,10 @@ Article::search(&["title"], "prog")
     .await?;
 ```
 
+Every mode builds the backend's syntax from the words of the search text, so an operator a user types is never parsed as syntax. In `Boolean` mode each term is required and one written `-term` or `-"a phrase"` is left out; MySQL also reads its `~ < > *` operators, and a MySQL term without `+` is optional. SQLite's `NOT` needs something to subtract from, so there a search of exclusions only matches nothing. `Phrase` matches the words in order, `Prefix` words beginning with each search word, and `Proximity(n)` the words within `n` words of each other in either order (on PostgreSQL at most 64 apart). A search with no word left to search for matches nothing on every backend.
+
+On PostgreSQL the text search configuration (`language`, `english` by default) is written into the statement as a constant, the way `FullTextIndex` writes it into the index, so a search can use that index; it must therefore be a configuration name. On SQLite a search runs over every column of the table's FTS5 index, and `get_ranked()` reports the negated `bm25()` score, so a higher rank is a better match on every backend.
+
 ### Search Configuration
 
 ```rust
@@ -583,8 +664,6 @@ use tideorm::fulltext::{FullTextConfig, SearchMode, SearchWeights};
 let config = FullTextConfig::new()
     .language("english")        // Text analysis language
     .mode(SearchMode::Boolean)  // Search mode
-    .min_word_length(3)         // Minimum word length to index
-    .max_word_length(50)        // Maximum word length
     // Custom weights for ranking (title > summary > content)
     .weights(SearchWeights::new(1.0, 0.5, 0.3, 0.1));
 
@@ -595,7 +674,35 @@ let results = Article::search_with_config(
 ).get().await?;
 ```
 
+`stop_words`, `min_word_length` and `max_word_length` leave terms out of the search text before it is sent, on every backend; the index is untouched. A search whose every term is left out matches nothing, and a `SearchMode::Phrase` search is sent as written.
+
+```rust
+let config = FullTextConfig::new()
+    .stop_words(vec!["the".into(), "a".into()])
+    .min_word_length(3);
+// Searches for "rust" and "ownership" only.
+let results = Article::search_with_config(&["content"], "the rust of ownership", config)
+    .get()
+    .await?;
+```
+
 ### Text Highlighting
+
+`highlight()` marks the whole-word matches in the searched columns of each `get_ranked()` result. The record's text is HTML-escaped around the tags, so a stored `<script>` reaches the page as text; set `escape_html: false` for tags that are not HTML:
+
+```rust
+use tideorm::fulltext::HighlightConfig;
+
+let ranked = Article::search(&["title", "content"], "rust async")
+    .highlight(HighlightConfig::default()) // `<mark>` tags, 10 words around the first match
+    .get_ranked()
+    .await?;
+for field in &ranked[0].highlights {
+    println!("{}: {}", field.field, field.highlighted);
+}
+```
+
+The same marking is available on any text, without the escaping:
 
 ```rust
 use tideorm::fulltext::{highlight_text, generate_snippet};
@@ -627,17 +734,23 @@ let index = FullTextIndex::new(
 .language("english")
 .pg_index_type(PgFullTextIndexType::GIN);
 
-// Generate SQL for your database
-let sql = index.to_sql(DatabaseType::Postgres);
-// PostgreSQL: CREATE INDEX "idx_articles_search" ON "articles" 
+// Generate the statements for your database, then run each in order
+let statements = index.to_sql(DatabaseType::Postgres);
+// PostgreSQL: CREATE INDEX "idx_articles_search" ON "articles"
 //             USING GIN ((to_tsvector('english', ...)))
 
-let sql = index.to_sql(DatabaseType::MySQL);
+let statements = index.to_sql(DatabaseType::MySQL);
 // MySQL: CREATE FULLTEXT INDEX `idx_articles_search` ON `articles`(`title`, `content`)
 
-let sql = index.to_sql(DatabaseType::SQLite);
-// SQLite: Creates FTS5 virtual table + sync triggers
+let statements = index.to_sql(DatabaseType::SQLite);
+// SQLite: the FTS5 virtual table, then the triggers that keep it in sync
+
+for statement in &statements {
+    Database::execute(statement).await?;
+}
 ```
+
+MySQL's boolean-mode operators (`+ - < > ( ) ~ * " @`) are sanitized before a query reaches `MATCH ... AGAINST`: each term keeps one leading operator and a trailing `*`, a quoted phrase stays a phrase, and a query left with no searchable term matches nothing instead of failing with a syntax error. In natural-language mode the operators are dropped.
 
 ### PostgreSQL-Specific Features
 
@@ -694,44 +807,24 @@ TideConfig::init()
 
 ### Database Feature Detection
 
-Check which features are supported by the current database:
+JSON, upsert, window functions, and CTEs work on every backend. The two
+capabilities that differ are worth checking:
 
 ```rust
 let db_type = require_db()?.backend();
 
-// Feature checks
-if db_type.supports_json() {
-    // JSON/JSONB operations available
-}
-
 if db_type.supports_arrays() {
-    // Native array operations (PostgreSQL only)
+    // Native array columns (PostgreSQL only); elsewhere arrays are JSON
 }
 
 if db_type.supports_returning() {
-    // RETURNING clause for INSERT/UPDATE
-}
-
-if db_type.supports_upsert() {
-    // ON CONFLICT / ON DUPLICATE KEY support
-}
-
-if db_type.supports_window_functions() {
-    // OVER(), ROW_NUMBER(), etc.
-}
-
-if db_type.supports_cte() {
-    // WITH ... AS (Common Table Expressions)
-}
-
-if db_type.supports_fulltext_search() {
-    // Full-text search capabilities
+    // `BatchUpdateBuilder::execute_returning()` works (PostgreSQL and SQLite)
 }
 ```
 
 ### Database-Specific JSON Operations
 
-automatically translates JSON queries to the appropriate syntax:
+TideORM translates JSON filters to each backend's syntax:
 
 ```rust
 // This query works on all databases with JSON support
@@ -745,9 +838,13 @@ Product::query()
 
 | Operation | PostgreSQL | MySQL | SQLite |
 |-----------|------------|-------|--------|
-| JSON Contains | `col @> '{"key":1}'` | `JSON_CONTAINS(col, '{"key":1}')` | `json_each(col)` + subquery |
-| Key Exists | `col ? 'key'` | `JSON_CONTAINS_PATH(col, 'one', '$.key')` | `json_extract(col, '$.key') IS NOT NULL` |
-| Path Exists | `col @? '$.path'` | `JSON_CONTAINS_PATH(col, 'one', '$.path')` | `json_extract(col, '$.path') IS NOT NULL` |
+| JSON Contains | `(col)::jsonb @> '{"key":1}'` | `JSON_CONTAINS(col, '{"key":1}')` | `json_each(col)` + subquery |
+| Key Exists | `(col)::jsonb ? 'key'` | `JSON_CONTAINS_PATH(col, 'one', '$.key')` | `json_extract(col, '$.key') IS NOT NULL` |
+| Path Exists | `(col)::jsonb @? '$.path'` | `JSON_CONTAINS_PATH(col, 'one', '$.path')` | `json_extract(col, '$.path') IS NOT NULL` |
+
+PostgreSQL's JSON operators exist only for `jsonb`, so the column is cast: they work on a `json` column (what `t.json(..)` creates) too, and on a `jsonb` column the cast is dropped at planning, so its GIN index still applies.
+
+SQLite has no containment operators, so TideORM rebuilds PostgreSQL's `@>` and `<@` from `json_each`: an object matches key by key, an array element by element, and a bare scalar matches a top-level array that holds it. MySQL's `JSON_CONTAINS` lets a value match an array holding it at any depth, so on its own `{"tags": "a"}` would match `{"tags": ["a", "b"]}`; TideORM adds a type check for each path of the document you pass, so MySQL and MariaDB follow PostgreSQL there too. Below an array the paths are not known in advance, so MySQL's reading stays there: `[{"k": [1, 2]}]` contains `[{"k": 1}]` on MySQL and not on PostgreSQL.
 
 ### Database-Specific Array Operations
 
@@ -775,7 +872,6 @@ applies optimizations based on your database:
 
 | Feature | PostgreSQL | MySQL | SQLite |
 |---------|------------|-------|--------|
-| Optimal Batch Size | 1000 | 1000 | 500 |
 | Parameter Style | `$1, $2, ...` | `?, ?, ...` | `?, ?, ...` |
 | Identifier Quoting | `"column"` | `` `column` `` | `"column"` |
 | Float Casting | `FLOAT8` | `DOUBLE` | `REAL` |
@@ -824,6 +920,8 @@ let affected = Database::execute_with_params(
 ).await?;
 ```
 
+Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection, and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
+
 ---
 
 ## Query Logging
@@ -835,7 +933,7 @@ Enable SQL query logging for development/debugging:
 TIDE_LOG_QUERIES=true cargo run
 ```
 
-When enabled, all SQL queries will be logged to stderr.
+When enabled, every statement is printed to stderr: query-builder and migration statements before they run, the rest — `find`, `save`, `update`, `delete`, upserts and raw SQL — once they complete. The variable is read once, when the first statement runs. `QueryLogger` records them too, except the migrator's, with the query builder's tagged by table. `TIDE_LOG_LEVEL` (`error`, `warn`, `info`, `debug`, `trace`) and `TIDE_SLOW_QUERY_MS` configure the structured `QueryLogger` the way `QueryLogger::global()` does in code; settings made in code take precedence.
 
 ---
 
@@ -863,6 +961,23 @@ let ctx = ErrorContext::new()
 
 return Err(Error::not_found("User not found").with_context(ctx));
 ```
+
+### Classifying Database Failures
+
+`failure_kind()` says what the database reported, independent of backend and message wording, and `is_retryable()` whether running the operation again can succeed:
+
+```rust
+use tideorm::error::DbFailureKind;
+
+match User::create(user).await {
+    Ok(user) => { /* created */ }
+    Err(e) if e.failure_kind() == DbFailureKind::UniqueViolation => { /* email taken */ }
+    Err(e) if e.is_retryable() => { /* deadlock, lock timeout, dropped connection: retry */ }
+    Err(e) => return Err(e),
+}
+```
+
+Constraint violations (`UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation`) are never retryable, and neither is `InvalidValue`: a value too long for its column, out of its range, or not valid for its type. SQLite checks none of that, so a string longer than its `VARCHAR(255)` is stored there and refused by PostgreSQL and MySQL; `#[validate(max_length = 255)]` keeps the backends in step. `Deadlock`, `SerializationFailure`, `LockNotAvailable` (including MySQL's lock wait timeout and a busy SQLite database), `StatementTimeout`, `ConnectionTimeout` and `ConnectionClosed` are. A connection the server closes under a statement — a restart, a failover, MySQL's `KILL` — is `ConnectionClosed`; the pool replaces it, so the next call gets a fresh one.
 
 ---
 

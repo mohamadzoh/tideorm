@@ -1,19 +1,6 @@
 use super::*;
 
-use tideorm::tokenization::{TokenConfig, default_decode, default_encode};
-
-#[test]
-fn test_encode_decode_roundtrip() {
-    init_test_env();
-
-    let id = "12345";
-    let model = "User";
-
-    let token = default_encode(id, model).unwrap();
-    let decoded = default_decode(&token, model).unwrap();
-
-    assert_eq!(decoded, Some(id.to_string()));
-}
+use tideorm::tokenization::{default_decode, default_encode};
 
 #[test]
 fn test_encode_decode_various_ids() {
@@ -213,17 +200,4 @@ fn test_token_length() {
             token.len()
         );
     }
-}
-
-#[test]
-fn test_token_config_encode_decode() {
-    init_test_env();
-
-    let id = "123";
-    let model = "TestModel";
-
-    let token = TokenConfig::encode(id, model).unwrap();
-    let decoded = TokenConfig::decode(&token, model).unwrap();
-
-    assert_eq!(decoded, Some(id.to_string()));
 }

@@ -1,23 +1,5 @@
 use super::*;
 
-struct CustomValidatedUser {
-    email: String,
-}
-
-impl Validate for CustomValidatedUser {
-    fn validate(&self) -> Result<(), ValidationErrors> {
-        self.custom_validations()
-    }
-
-    fn custom_validations(&self) -> Result<(), ValidationErrors> {
-        let mut errors = ValidationErrors::new();
-        if self.email.ends_with("@blocked.com") {
-            errors.add("email", "This email domain is not allowed");
-        }
-        errors.to_result()
-    }
-}
-
 #[test]
 fn test_email_validation() {
     assert!(Validator::is_valid_email("test@example.com"));
@@ -76,6 +58,24 @@ fn test_range() {
 }
 
 #[test]
+fn numeric_rules_refuse_nan() {
+    for rule in [
+        ValidationRule::Min(0.0),
+        ValidationRule::Max(10.0),
+        ValidationRule::Range(0.0, 10.0),
+    ] {
+        assert!(
+            Validator::validate_rule(&f64::NAN, &rule, "score").is_some(),
+            "{rule:?}"
+        );
+        assert!(
+            Validator::validate_rule(&5.0, &rule, "score").is_none(),
+            "{rule:?}"
+        );
+    }
+}
+
+#[test]
 fn test_regex_validation() {
     let rule = ValidationRule::Regex(r"^[a-z]+$".to_string());
 
@@ -85,11 +85,81 @@ fn test_regex_validation() {
 }
 
 #[test]
-fn test_invalid_regex_rule_is_ignored_consistently() {
+fn test_invalid_regex_rule_fails_with_an_error_naming_the_pattern() {
     let rule = ValidationRule::Regex("[".to_string());
 
-    assert!(Validator::validate_rule(&"alice".to_string(), &rule, "name").is_none());
-    assert!(Validator::validate_rule(&"bob".to_string(), &rule, "name").is_none());
+    for value in ["alice", "bob", ""] {
+        let error = Validator::validate_rule(&value.to_string(), &rule, "name")
+            .expect("an invalid pattern must not accept any value");
+        assert!(
+            error.contains("`[`") && error.contains("not a valid regular expression"),
+            "unexpected error: {error}"
+        );
+    }
+
+    assert!(
+        Validator::validate_rule(&None::<String>, &rule, "name").is_some(),
+        "an invalid pattern is reported even when the value is absent"
+    );
+}
+
+mod derived_model_validation {
+    use crate::validation::Validate;
+
+    #[tideorm::model(table = "validation_invalid_pattern_users")]
+    struct InvalidPatternUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        #[validate(regex = "[")]
+        code: String,
+    }
+
+    #[test]
+    fn an_invalid_regex_attribute_rejects_the_model_instead_of_accepting_it() {
+        let user = InvalidPatternUser {
+            id: 0,
+            code: "anything".to_string(),
+        };
+
+        let errors = user
+            .validate()
+            .expect_err("an invalid pattern must fail validation");
+        let messages = errors.field_errors("code");
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("`[`"), "{messages:?}");
+    }
+}
+
+/// A `skip` field is never stored but its rules still run, so a model that is
+/// loaded, and holds `None` there, still passes.
+mod skip_field_validation {
+    use crate::validation::Validate;
+
+    #[tideorm::model(table = "validation_signups")]
+    struct Signup {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        #[tideorm(skip)]
+        #[validate(min_length = 8)]
+        password: Option<String>,
+    }
+
+    fn signup(password: Option<&str>) -> Signup {
+        Signup {
+            id: 0,
+            password: password.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_rule_on_a_skip_field_runs() {
+        let errors = signup(Some("short"))
+            .validate()
+            .expect_err("a short password fails");
+        assert_eq!(errors.field_errors("password").len(), 1, "{errors:?}");
+        assert!(signup(Some("long enough")).validate().is_ok());
+        assert!(signup(None).validate().is_ok());
+    }
 }
 
 #[test]
@@ -122,30 +192,31 @@ fn test_validation_builder() {
     assert_eq!(rules.len(), 3);
 }
 
-#[test]
-fn test_custom_rule_is_deferred_to_model_level() {
-    let rule = ValidationRule::Custom("blocked domain".to_string());
+/// A module that imports TideORM's one-parameter `Result`, as `use tideorm::*;`
+/// does, still compiles the `validate` its models get.
+mod models_beside_the_crate_result {
+    use crate::Result;
+    use crate::validation::Validate;
 
-    assert!(Validator::validate_rule(&"allowed@example.com".to_string(), &rule, "email").is_none());
-    assert!(Validator::validate_rule(&"blocked@blocked.com".to_string(), &rule, "email").is_none());
+    #[tideorm::model(table = "result_alias_rows")]
+    pub struct ResultAliasRow {
+        #[tideorm(primary_key, auto_increment)]
+        pub id: i64,
+        #[validate(min_length = 2)]
+        pub name: String,
+    }
+
+    pub fn validates(name: &str) -> Result<bool> {
+        let row = ResultAliasRow {
+            id: 1,
+            name: name.to_string(),
+        };
+        Ok(row.validate().is_ok())
+    }
 }
 
 #[test]
-fn test_custom_validations_still_report_errors() {
-    let allowed = CustomValidatedUser {
-        email: "allowed@example.com".to_string(),
-    };
-    assert!(allowed.validate().is_ok());
-
-    let blocked = CustomValidatedUser {
-        email: "blocked@blocked.com".to_string(),
-    };
-    let errors = blocked
-        .validate()
-        .expect_err("blocked domain should fail custom validation");
-
-    assert_eq!(
-        errors.field_errors("email"),
-        vec!["This email domain is not allowed".to_string()]
-    );
+fn a_model_beside_the_crate_result_alias_validates() {
+    assert!(models_beside_the_crate_result::validates("ok").unwrap());
+    assert!(!models_beside_the_crate_result::validates("x").unwrap());
 }

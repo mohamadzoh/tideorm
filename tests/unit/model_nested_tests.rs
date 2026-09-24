@@ -50,6 +50,30 @@ struct NestedTestStringChild {
     name: String,
 }
 
+/// Refuses to be deleted while `locked`, so a nested delete can have a child
+/// that fails after an earlier one was already deleted.
+#[derive(tideorm::Model, PartialEq)]
+#[tideorm(table = "nested_test_locked_children")]
+struct NestedTestLockedChild {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    parent_id: i64,
+    locked: bool,
+}
+
+impl crate::callbacks::Callbacks for NestedTestLockedChild {
+    fn before_delete(&self) -> crate::Result<()> {
+        if self.locked {
+            return Err(crate::Error::validation(
+                "locked",
+                "a locked child cannot be deleted",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 async fn setup_nested_test_db() -> Database {
     Database::reset_global();
     TideConfig::reset();
@@ -93,6 +117,12 @@ async fn setup_nested_test_db() -> Database {
                 parent_id TEXT NOT NULL,
                 name TEXT NOT NULL
             );
+
+            CREATE TABLE nested_test_locked_children (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                parent_id INTEGER NOT NULL,
+                locked BOOLEAN NOT NULL
+            );
             "#,
         )
         .await
@@ -118,6 +148,29 @@ fn nested_profile() -> NestedTestProfile {
         user_id: 0,
         bio: "profile".to_string(),
     }
+}
+
+fn aliased_child(name: &str) -> NestedTestAliasedChild {
+    NestedTestAliasedChild {
+        id: 0,
+        owner_id: 0,
+        name: name.to_string(),
+    }
+}
+
+fn nested_parent() -> NestedTestParent {
+    NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    }
+}
+
+async fn stored_parent_name(id: i64) -> String {
+    NestedTestParent::find(id)
+        .await
+        .expect("parent lookup should succeed")
+        .expect("the parent row should still exist")
+        .name
 }
 
 #[tokio::test]
@@ -261,8 +314,8 @@ async fn nested_save_builder_can_be_spawned() {
 
 #[test]
 fn saved_relation_rejects_wrong_shape_conversions() {
-    let one = SavedRelation::test_one(serde_json::json!({"id": 1, "user_id": 1, "bio": "x"}));
-    let many = SavedRelation::test_many(vec![
+    let one = SavedRelation::one(serde_json::json!({"id": 1, "user_id": 1, "bio": "x"}));
+    let many = SavedRelation::many(vec![
         serde_json::json!({"id": 1, "parent_id": 1, "name": "x"}),
     ]);
 
@@ -410,7 +463,109 @@ async fn save_with_many_rolls_back_the_parent_when_a_child_fails() {
 }
 
 #[tokio::test]
-async fn delete_with_many_uses_bulk_delete_for_related_models() {
+async fn update_with_one_rolls_back_the_parent_when_the_child_fails() {
+    let _db = setup_nested_test_db().await;
+
+    let (parent, mut children) = nested_parent()
+        .save_with_many(
+            vec![aliased_child("alpha"), aliased_child("beta")],
+            "parent_id",
+        )
+        .await
+        .expect("save_with_many should seed nested children");
+    let parent_id = parent.id;
+    let beta = children.pop().expect("two children were saved");
+
+    // `name` is UNIQUE, so renaming "beta" onto "alpha" fails the child update.
+    NestedTestParent {
+        name: "renamed".to_string(),
+        ..parent
+    }
+    .update_with_one(NestedTestAliasedChild {
+        name: "alpha".to_string(),
+        ..beta
+    })
+    .await
+    .expect_err("the clashing child must fail the whole nested update");
+
+    assert_eq!(stored_parent_name(parent_id).await, "parent");
+}
+
+#[tokio::test]
+async fn update_with_many_rolls_back_the_parent_when_a_child_fails() {
+    let _db = setup_nested_test_db().await;
+
+    let (parent, children) = nested_parent()
+        .save_with_many(
+            vec![aliased_child("alpha"), aliased_child("beta")],
+            "parent_id",
+        )
+        .await
+        .expect("save_with_many should seed nested children");
+    let parent_id = parent.id;
+    let clashing_children = children
+        .into_iter()
+        .map(|child| NestedTestAliasedChild {
+            name: "alpha".to_string(),
+            ..child
+        })
+        .collect();
+
+    NestedTestParent {
+        name: "renamed".to_string(),
+        ..parent
+    }
+    .update_with_many(clashing_children)
+    .await
+    .expect_err("the clashing child must fail the whole nested update");
+
+    assert_eq!(stored_parent_name(parent_id).await, "parent");
+}
+
+#[tokio::test]
+async fn delete_with_many_rolls_back_every_delete_when_a_child_fails() {
+    let _db = setup_nested_test_db().await;
+
+    let unlocked = NestedTestLockedChild {
+        id: 0,
+        parent_id: 0,
+        locked: false,
+    };
+    let locked = NestedTestLockedChild {
+        locked: true,
+        ..unlocked.clone()
+    };
+    let (parent, children) = nested_parent()
+        .save_with_many(vec![unlocked, locked], "parent_id")
+        .await
+        .expect("save_with_many should seed nested children");
+
+    parent
+        .delete_with_many(children)
+        .await
+        .expect_err("the locked child must fail the whole nested delete");
+
+    assert_eq!(
+        NestedTestLockedChild::query()
+            .get()
+            .await
+            .expect("child query should succeed")
+            .len(),
+        2,
+        "the unlocked child's delete must be rolled back"
+    );
+    assert_eq!(
+        NestedTestParent::query()
+            .get()
+            .await
+            .expect("parent query should succeed")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn delete_with_many_deletes_each_child_then_the_parent() {
     let _db = setup_nested_test_db().await;
 
     let parent = NestedTestParent {

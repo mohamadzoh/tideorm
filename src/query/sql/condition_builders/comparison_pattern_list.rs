@@ -1,70 +1,42 @@
 use super::*;
 
-#[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
-    pub(crate) fn preview_values(
-        &self,
-        db_type: DatabaseType,
-        values: &[serde_json::Value],
-    ) -> Vec<String> {
-        values
-            .iter()
-            .map(|value| self.format_preview_value(db_type, value))
-            .collect()
-    }
-
-    pub(crate) fn pattern_value(value: &serde_json::Value) -> String {
+    fn pattern_value(value: &serde_json::Value) -> String {
         match value {
             serde_json::Value::String(text) => text.clone(),
             _ => value.to_string(),
         }
     }
 
-    pub(in crate::query::sql) fn comparison_sql(operator: ComparisonOperator) -> &'static str {
-        match operator {
-            ComparisonOperator::Eq => "=",
-            ComparisonOperator::NotEq => "!=",
-            ComparisonOperator::Gt => ">",
-            ComparisonOperator::Gte => ">=",
-            ComparisonOperator::Lt => "<",
-            ComparisonOperator::Lte => "<=",
-        }
-    }
-
+    /// A raw fragment, optionally prefixed with the column it constrains.
+    ///
+    /// A fragment carrying `values` already uses the backend's own placeholder
+    /// marker, so sea-query renumbers those tokens into the surrounding
+    /// statement and binds `values` against them.
     pub(crate) fn build_raw_condition_expression(
         &self,
         db_type: DatabaseType,
         column: &str,
         raw_sql: &str,
+        values: Vec<Value>,
     ) -> SimpleExpr {
-        if column.is_empty() {
-            Expr::cust(raw_sql.to_string())
-        } else {
-            let column = self.format_column_for_db(db_type, column);
-            Expr::cust(format!("{} {}", column, raw_sql))
-        }
-    }
-
-    pub(crate) fn build_raw_condition_sql(
-        &self,
-        db_type: DatabaseType,
-        column: &str,
-        raw_sql: &str,
-    ) -> String {
-        if column.is_empty() {
+        let sql = if column.is_empty() {
             raw_sql.to_string()
         } else {
             format!("{} {}", self.format_column_for_db(db_type, column), raw_sql)
-        }
+        };
+
+        self.build_custom_expression(sql, values)
     }
 
     pub(in crate::query::sql) fn build_compare_expression(
         &self,
+        column: &str,
         column_expr: SimpleExpr,
         operator: ComparisonOperator,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        let value = crate::internal::json_to_db_value(value);
+        let value = self.column_value(column, value);
         match operator {
             ComparisonOperator::Eq => column_expr.eq(value),
             ComparisonOperator::NotEq => column_expr.ne(value),
@@ -75,26 +47,10 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    pub(in crate::query::sql) fn build_compare_sql(
-        &self,
-        db_type: DatabaseType,
-        column: &str,
-        operator: ComparisonOperator,
-        value: &serde_json::Value,
-    ) -> String {
-        format!(
-            "{} {} {}",
-            column,
-            Self::comparison_sql(operator),
-            self.format_preview_value(db_type, value)
-        )
-    }
-
     pub(crate) fn build_pattern_expression(
         &self,
         db_type: DatabaseType,
-        column_expr: SimpleExpr,
-        column_sql: &str,
+        column: &str,
         negated: bool,
         escaped: bool,
         value: &serde_json::Value,
@@ -102,54 +58,129 @@ impl<M: Model> QueryBuilder<M> {
         let pattern = Self::pattern_value(value);
         if escaped {
             let operator = if negated { "NOT LIKE" } else { "LIKE" };
-            let placeholder = match db_type {
-                DatabaseType::Postgres => "$1",
-                DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => "?",
-            };
             self.build_custom_expression(
                 format!(
                     "{} {} {}{}",
-                    column_sql,
+                    self.format_column_for_db(db_type, column),
                     operator,
-                    placeholder,
+                    db_sql::placeholder(db_type, 1),
                     crate::columns::LIKE_ESCAPE_CLAUSE
                 ),
                 vec![Value::String(Some(pattern))],
             )
         } else if negated {
-            column_expr.not_like(pattern)
+            self.sea_column_expr(db_type, column).not_like(pattern)
         } else {
-            column_expr.like(pattern)
+            self.sea_column_expr(db_type, column).like(pattern)
         }
-    }
-
-    pub(crate) fn build_pattern_sql(
-        &self,
-        db_type: DatabaseType,
-        column: &str,
-        negated: bool,
-        escaped: bool,
-        value: &serde_json::Value,
-    ) -> String {
-        let mut sql = format!(
-            "{} {}LIKE {}",
-            column,
-            if negated { "NOT " } else { "" },
-            self.format_preview_value(db_type, value)
-        );
-        if escaped {
-            sql.push_str(crate::columns::LIKE_ESCAPE_CLAUSE);
-        }
-        sql
     }
 
     pub(in crate::query::sql) fn build_list_expression(
         &self,
+        db_type: DatabaseType,
+        column: &str,
         column_expr: SimpleExpr,
         operator: ListOperator,
         values: &[serde_json::Value],
     ) -> SimpleExpr {
-        let sea_values = Self::sea_value_list(values);
+        // A NULL member reads as "or the column is NULL" (negated: "and it is
+        // not"), the same reading `where_eq`/`where_not` give NULL. Taken
+        // literally, `IN (.., NULL)` never matches a NULL row and
+        // `NOT IN (.., NULL)` never matches any row at all.
+        let (nulls, values): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
+            values.iter().partition(|value| value.is_null());
+        let listed = self.build_non_null_list_expression(
+            db_type,
+            column,
+            column_expr.clone(),
+            operator,
+            &values,
+        );
+        if nulls.is_empty() {
+            return listed;
+        }
+        match operator {
+            ListOperator::In | ListOperator::EqAny if values.is_empty() => column_expr.is_null(),
+            ListOperator::In | ListOperator::EqAny => listed.or(column_expr.is_null()),
+            ListOperator::NotIn | ListOperator::NeAll if values.is_empty() => {
+                column_expr.is_not_null()
+            }
+            ListOperator::NotIn | ListOperator::NeAll => listed.and(column_expr.is_not_null()),
+        }
+    }
+
+    fn build_non_null_list_expression(
+        &self,
+        db_type: DatabaseType,
+        column: &str,
+        column_expr: SimpleExpr,
+        operator: ListOperator,
+        values: &[&serde_json::Value],
+    ) -> SimpleExpr {
+        let sea_values: Vec<Value> = values
+            .iter()
+            .map(|value| self.column_value(column, value))
+            .collect();
+        // PostgreSQL takes a long list as one array parameter, so any length
+        // fits in a statement and every length shares one prepared statement.
+        #[cfg(feature = "postgres")]
+        if db_type == DatabaseType::Postgres
+            && sea_values.len() > INLINE_INTEGER_LIST_AFTER
+            && let Some(array) = postgres_array(&sea_values)
+        {
+            use crate::orm::sea_query::extension::postgres::PgFunc;
+
+            let array = Expr::val(array);
+            return match operator {
+                ListOperator::In | ListOperator::EqAny => column_expr.eq(PgFunc::any(array)),
+                ListOperator::NotIn | ListOperator::NeAll => column_expr.ne(PgFunc::all(array)),
+            };
+        }
+        // SQLite reads a long text list from one JSON parameter. Other types
+        // keep their bound form: a UUID is stored as a blob, and a timestamp
+        // as text in a format its JSON form does not share.
+        if db_type == DatabaseType::SQLite
+            && sea_values.len() > INLINE_INTEGER_LIST_AFTER
+            && let Some(texts) = sea_values
+                .iter()
+                .map(|value| match value {
+                    Value::String(Some(text)) => Some(serde_json::Value::String(text.clone())),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        {
+            let operator_sql = match operator {
+                ListOperator::In | ListOperator::EqAny => "IN",
+                ListOperator::NotIn | ListOperator::NeAll => "NOT IN",
+            };
+            return self.build_custom_expression(
+                format!(
+                    "{} {} (SELECT value FROM json_each({}))",
+                    self.format_column_for_db(db_type, column),
+                    operator_sql,
+                    db_sql::placeholder(db_type, 1)
+                ),
+                vec![Value::String(Some(
+                    serde_json::Value::Array(texts).to_string(),
+                ))],
+            );
+        }
+        // Every backend caps one statement at 32,766 or 65,535 bind parameters,
+        // so a long id list could not be sent at all. Integers rendered by
+        // Rust carry nothing but digits and a sign, so a long all-integer list
+        // is written as literals instead.
+        if sea_values.len() > INLINE_INTEGER_LIST_AFTER
+            && let Some(literals) = sea_values
+                .iter()
+                .map(integer_literal)
+                .collect::<Option<Vec<_>>>()
+        {
+            let literals = literals.into_iter().map(Expr::cust);
+            return match operator {
+                ListOperator::In | ListOperator::EqAny => column_expr.is_in(literals),
+                ListOperator::NotIn | ListOperator::NeAll => column_expr.is_not_in(literals),
+            };
+        }
         match operator {
             ListOperator::In => column_expr.is_in(sea_values),
             ListOperator::NotIn => column_expr.is_not_in(sea_values),
@@ -170,20 +201,33 @@ impl<M: Model> QueryBuilder<M> {
             ListOperator::NeAll => column_expr.is_not_in(sea_values),
         }
     }
+}
 
-    pub(in crate::query::sql) fn build_list_sql(
-        &self,
-        db_type: DatabaseType,
-        column: &str,
-        operator: ListOperator,
-        values: &[serde_json::Value],
-    ) -> String {
-        let rendered = self.preview_values(db_type, values);
-        match operator {
-            ListOperator::In => format!("{} IN ({})", column, rendered.join(", ")),
-            ListOperator::NotIn => format!("{} NOT IN ({})", column, rendered.join(", ")),
-            ListOperator::EqAny => db_sql::eq_any(db_type, column, &rendered),
-            ListOperator::NeAll => db_sql::ne_all(db_type, column, &rendered),
-        }
+/// Lists longer than this bind no parameters when every value is an integer,
+/// and one array parameter on PostgreSQL.
+const INLINE_INTEGER_LIST_AFTER: usize = 1_000;
+
+/// `values` as one PostgreSQL array value, when they share a type.
+#[cfg(feature = "postgres")]
+fn postgres_array(values: &[Value]) -> Option<Value> {
+    let array_type = values.first()?.array_type();
+    values
+        .iter()
+        .all(|value| value.array_type() == array_type)
+        .then(|| Value::Array(array_type, Some(Box::new(values.to_vec()))))
+}
+
+/// The SQL literal of an integer value, or `None` for anything else.
+fn integer_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::TinyInt(Some(n)) => Some(n.to_string()),
+        Value::SmallInt(Some(n)) => Some(n.to_string()),
+        Value::Int(Some(n)) => Some(n.to_string()),
+        Value::BigInt(Some(n)) => Some(n.to_string()),
+        Value::TinyUnsigned(Some(n)) => Some(n.to_string()),
+        Value::SmallUnsigned(Some(n)) => Some(n.to_string()),
+        Value::Unsigned(Some(n)) => Some(n.to_string()),
+        Value::BigUnsigned(Some(n)) => Some(n.to_string()),
+        _ => None,
     }
 }

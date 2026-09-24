@@ -2,7 +2,7 @@ use super::{hash_map_output_key, to_json};
 use serde_json::json;
 
 #[test]
-fn hash_map_output_key_hides_structured_presenter_params() {
+fn hash_map_output_key_hides_structured_params() {
     assert_eq!(
         hash_map_output_key("params", &json!({"view": "minimal"})),
         None
@@ -161,4 +161,33 @@ fn to_json_filters_every_element_of_a_has_many_payload() {
         "each element must be filtered by SerializationPost::hidden_attributes()"
     );
     assert_eq!(posts[0].get("title"), Some(&json!("Hello")));
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(
+    table = "serialization_test_hidden_translations",
+    translatable = "title",
+    hidden = "title"
+)]
+struct HiddenTranslatableModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    translations: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "translations")]
+#[test]
+fn to_json_keeps_a_hidden_translatable_field_hidden() {
+    let model = HiddenTranslatableModel {
+        id: 1,
+        title: "internal".to_string(),
+        translations: Some(json!({"title": {"en": "internal, translated"}})),
+    };
+
+    let payload = to_json(&model, None);
+
+    assert!(payload.get("title").is_none(), "{payload}");
+    assert!(payload.get("translations").is_none(), "{payload}");
+    assert_eq!(payload["id"], json!(1));
 }

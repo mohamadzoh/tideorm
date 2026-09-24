@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -255,7 +256,148 @@ fn test_query_cache_apply_config_replaces_configuration() {
     });
 
     assert!(cache.is_enabled());
-    assert_eq!(cache.config().unwrap().max_entries, 5);
+    assert_eq!(cache.config().max_entries, 5);
+}
+
+#[test]
+fn test_query_cache_byte_budget_is_part_of_the_configuration() {
+    let cache = QueryCache::new();
+    cache.set_max_size_bytes(64);
+    assert_eq!(cache.config().max_size_bytes, 64);
+
+    cache.apply_config(CacheConfig {
+        enabled: true,
+        max_size_bytes: 10,
+        ..CacheConfig::default()
+    });
+    cache
+        .set("too_big", &"x".repeat(20), None, "model")
+        .unwrap();
+    assert!(
+        !cache.contains("too_big"),
+        "the configured byte budget must apply"
+    );
+}
+
+#[test]
+fn test_query_cache_stats_follow_evictions_and_expiry() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set_strategy(CacheStrategy::FIFO);
+    cache.set_max_entries(2);
+
+    cache.set("first", &"a", None, "model").unwrap();
+    cache.set("second", &"b", None, "model").unwrap();
+    cache.set("third", &"c", None, "model").unwrap();
+    cache
+        .set("expiring", &"d", Some(Duration::from_millis(1)), "model")
+        .unwrap();
+    thread::sleep(Duration::from_millis(5));
+    cache.evict_expired();
+
+    let stats = cache.stats();
+    assert_eq!(stats.entries, cache.len());
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.evictions, 3);
+    assert_eq!(stats.size_bytes, serde_json::to_vec(&"c").unwrap().len());
+    assert!(!cache.contains("first"));
+    assert!(cache.contains("third"));
+}
+
+#[test]
+fn init_global_applies_config_after_a_default_cache_was_installed() {
+    // Reaching for the global cache is what a macro-generated model write
+    // does; it installs the disabled default that `init_global` used to be
+    // unable to replace.
+    let previous = QueryCache::global().config();
+
+    let installed = QueryCache::init_global(CacheConfig {
+        enabled: true,
+        max_entries: 17,
+        key_prefix: Some("late-init".to_string()),
+        ..CacheConfig::default()
+    });
+
+    assert!(
+        installed.is_enabled(),
+        "a late init_global must apply instead of being silently dropped"
+    );
+    let config = installed.config();
+    assert_eq!(config.max_entries, 17);
+    assert_eq!(config.key_prefix.as_deref(), Some("late-init"));
+
+    // Leave the process-wide cache as it was found.
+    QueryCache::init_global(previous);
+}
+
+/// A read that started before a write to one of its tables is not stored: its
+/// rows may predate the write and would outlive it for the whole TTL.
+#[test]
+fn a_fill_that_started_before_an_invalidation_is_dropped() {
+    let cache = QueryCache::new();
+    cache.enable();
+    let tables = vec!["orders".to_string()];
+
+    let point = cache.fill_point();
+    cache.invalidate_model("orders");
+    cache
+        .fill_tagged(point, "k", &vec![1], None, &tables)
+        .unwrap();
+    assert_eq!(cache.get::<Vec<i32>>("k"), None);
+
+    // A write to a table the read did not touch leaves the fill alone.
+    let point = cache.fill_point();
+    cache.invalidate_model("customers");
+    cache
+        .fill_tagged(point, "k", &vec![2], None, &tables)
+        .unwrap();
+    assert_eq!(cache.get::<Vec<i32>>("k"), Some(vec![2]));
+
+    let point = cache.fill_point();
+    cache.clear();
+    cache
+        .fill_tagged(point, "k", &vec![3], None, &tables)
+        .unwrap();
+    assert_eq!(cache.get::<Vec<i32>>("k"), None);
+}
+
+/// Entries other requests cache while a transaction is open are dropped when
+/// it commits, a savepoint's writes included: its commit hands them to the
+/// enclosing transaction, which replays them at its own commit.
+#[test]
+fn a_transaction_replays_its_invalidations_when_it_commits() {
+    let previous = QueryCache::global().config();
+    let cache = QueryCache::init_global(CacheConfig {
+        enabled: true,
+        ..CacheConfig::default()
+    });
+    let tables = vec!["replayed_rows".to_string()];
+    let cached = || cache.get::<Vec<i32>>("replayed").is_some();
+    let fill = || {
+        cache
+            .set_tagged("replayed", &vec![1], None, &tables)
+            .unwrap()
+    };
+
+    let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+    let savepoint = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+    {
+        let _outer = install_pending_invalidations(&outer);
+        {
+            let _savepoint = install_pending_invalidations(&savepoint);
+            cache.invalidate_model("replayed_rows");
+        }
+        // Another request caches the committed rows meanwhile.
+        fill();
+        std::mem::take(&mut *savepoint.lock()).replay();
+        assert!(!cached());
+        fill();
+    }
+    assert!(cached(), "only the outer commit replays what is left");
+    std::mem::take(&mut *outer.lock()).replay();
+    assert!(!cached());
+
+    QueryCache::init_global(previous);
 }
 
 #[test]
@@ -360,7 +502,24 @@ fn test_prepared_statement_apply_config_replaces_configuration() {
     });
 
     assert!(cache.is_enabled());
-    assert_eq!(cache.config().unwrap().max_statements, 7);
+    assert_eq!(cache.config().max_statements, 7);
+}
+
+#[test]
+fn test_prepared_statement_cached_count_follows_a_statement_dropped_without_replacement() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+    cache.get_or_prepare("SELECT 1");
+    assert_eq!(cache.stats().cached_count, 1);
+
+    // The expired statement is dropped and a zero budget registers nothing in
+    // its place; the reported count used to stay at 1 over an empty cache.
+    cache.set_max_age(Duration::ZERO);
+    cache.set_max_statements(0);
+    cache.get_or_prepare("SELECT 1");
+
+    assert!(cache.is_empty());
+    assert_eq!(cache.stats().cached_count, 0);
 }
 
 #[test]

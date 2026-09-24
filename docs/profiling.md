@@ -97,5 +97,5 @@ Use this alongside `Profiler` when you want human-readable guidance about indexi
 ## Related Features
 
 - Query logging is covered in [Queries](queries.md).
-- Slow-query thresholds for logs and profiler statistics are separate settings.
+- Slow-query thresholds for logs and profiler statistics are separate settings, both 100ms by default. `ProfileReport::suggestions()` counts slow queries against the profiler's threshold (`GlobalProfiler::set_slow_threshold`).
 - The global profiler is process-wide, so reset it between tests when you need deterministic assertions.

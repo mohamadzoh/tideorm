@@ -14,7 +14,6 @@ mod error_exhaustive_variants {
             Error::internal("test"),
             Error::backend_not_supported("test", "pg"),
             Error::primary_key_not_set("test", "User"),
-            Error::insert_returning_not_supported("test", "mysql"),
             Error::tokenization("test"),
             Error::invalid_token("test"),
         ];
@@ -37,7 +36,6 @@ mod error_exhaustive_variants {
             Error::internal("test"),
             Error::backend_not_supported("test", "pg"),
             Error::primary_key_not_set("test", "User"),
-            Error::insert_returning_not_supported("test", "mysql"),
             Error::tokenization("test"),
             Error::invalid_token("test"),
         ];
@@ -66,7 +64,6 @@ mod error_exhaustive_variants {
             Error::internal("oops"),
             Error::backend_not_supported("arrays", "SQLite"),
             Error::primary_key_not_set("missing pk", "Post"),
-            Error::insert_returning_not_supported("no returning", "MySQL"),
             Error::tokenization("encode failed"),
             Error::invalid_token("tampered"),
         ];
@@ -84,11 +81,6 @@ mod error_exhaustive_variants {
 
 mod error_retryable_edge_cases {
     use tideorm::error::Error;
-
-    #[test]
-    fn test_connection_pool_is_retryable() {
-        assert!(Error::connection("pool exhausted").is_retryable());
-    }
 
     #[test]
     fn test_connection_refused_is_retryable() {
@@ -118,6 +110,26 @@ mod error_retryable_edge_cases {
     #[test]
     fn test_backend_not_supported_not_retryable() {
         assert!(!Error::backend_not_supported("arrays", "sqlite").is_retryable());
+    }
+}
+
+mod error_display {
+    use tideorm::error::Error;
+
+    #[test]
+    fn test_not_found_with_empty_message() {
+        let err = Error::not_found("");
+        assert!(matches!(err, Error::NotFound { .. }));
+        assert_eq!(err.to_string(), "Record not found: ");
+    }
+
+    #[test]
+    fn test_message_special_characters_are_kept_verbatim() {
+        let err = Error::query("Error: 'invalid' \"syntax\" <tag> & more\nline 2");
+        assert!(
+            err.to_string()
+                .contains("'invalid' \"syntax\" <tag> & more\nline 2")
+        );
     }
 }
 

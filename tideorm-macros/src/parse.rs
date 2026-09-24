@@ -1,9 +1,10 @@
-use convert_case::{Case, Casing};
 use darling::{FromDeriveInput, FromField, ast::Data};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::ext::IdentExt;
-use syn::{GenericArgument, Ident, PathArguments, Type};
+use syn::{GenericArgument, Ident, PathArguments, PathSegment, Type};
+
+use crate::case::{to_pascal_case, to_snake_case};
 
 mod indexes;
 mod validation;
@@ -20,16 +21,88 @@ pub(crate) fn unraw_ident(ident: &Ident) -> String {
     ident.unraw().to_string()
 }
 
-/// Builds the PascalCase `Column` enum variant identifier for a model field.
+/// Builds the PascalCase enum variant identifier (`Column`, `PrimaryKey`,
+/// `Relation`) for a model field.
 ///
 /// Handles raw identifiers, so a `r#type` field yields the `Type` variant
 /// instead of panicking on the invalid identifier `R#type`.
-pub(crate) fn column_variant_ident(ident: &Ident) -> Ident {
-    format_ident!("{}", unraw_ident(ident).to_case(Case::Pascal))
+pub(crate) fn variant_ident(ident: &Ident) -> Ident {
+    format_ident!("{}", to_pascal_case(&unraw_ident(ident)))
+}
+
+/// The relation wrapper types a model field can be declared with.
+///
+/// The wrapper type is what decides the relation kind; the `has_one = ".."`
+/// style attributes only have to agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelationKind {
+    HasOne,
+    HasMany,
+    BelongsTo,
+    HasManyThrough,
+    MorphOne,
+    MorphMany,
+    MorphTo,
+    SelfRef,
+    SelfRefMany,
+}
+
+impl RelationKind {
+    const ALL: [Self; 9] = [
+        Self::HasOne,
+        Self::HasMany,
+        Self::BelongsTo,
+        Self::HasManyThrough,
+        Self::MorphOne,
+        Self::MorphMany,
+        Self::MorphTo,
+        Self::SelfRef,
+        Self::SelfRefMany,
+    ];
+
+    /// The wrapper type's name.
+    pub(crate) fn wrapper(self) -> &'static str {
+        match self {
+            Self::HasOne => "HasOne",
+            Self::HasMany => "HasMany",
+            Self::BelongsTo => "BelongsTo",
+            Self::HasManyThrough => "HasManyThrough",
+            Self::MorphOne => "MorphOne",
+            Self::MorphMany => "MorphMany",
+            Self::MorphTo => "MorphTo",
+            Self::SelfRef => "SelfRef",
+            Self::SelfRefMany => "SelfRefMany",
+        }
+    }
+
+    /// The `#[tideorm(..)]` key that may name this kind explicitly.
+    ///
+    /// Only the kinds SeaORM models as an entity relation have one; the others
+    /// are declared by their wrapper type alone.
+    pub(crate) fn attribute(self) -> Option<&'static str> {
+        match self {
+            Self::HasOne => Some("has_one"),
+            Self::HasMany => Some("has_many"),
+            Self::BelongsTo => Some("belongs_to"),
+            Self::HasManyThrough => Some("has_many_through"),
+            _ => None,
+        }
+    }
+
+    /// Whether the relation maps onto a SeaORM `Relation` variant and `Related`
+    /// impl. The polymorphic and self-referencing kinds cannot: their joins need
+    /// a type discriminator or point back at the same entity.
+    pub(crate) fn is_entity_relation(self) -> bool {
+        self.attribute().is_some()
+    }
+
+    fn from_wrapper(ident: &Ident) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| ident == kind.wrapper())
+    }
 }
 
 #[derive(Debug, Clone, FromField)]
-#[darling(attributes(tideorm), forward_attrs(validate))]
+#[darling(attributes(tideorm), forward_attrs(validate, serde))]
 pub(crate) struct ModelField {
     pub(crate) ident: Option<Ident>,
     pub(crate) ty: Type,
@@ -69,29 +142,108 @@ pub(crate) struct ModelField {
 }
 
 impl ModelField {
-    fn validation_base_ty(&self) -> &Type {
-        validation_base_type(&self.ty)
+    /// The field's identifier. Models are structs with named fields
+    /// (`supports(struct_named)`), so every field has one.
+    pub(crate) fn ident(&self) -> &Ident {
+        self.ident
+            .as_ref()
+            .expect("model fields are named struct fields")
     }
 
-    pub(crate) fn validation_base_type(&self) -> String {
-        let ty = self.validation_base_ty();
-        quote!(#ty)
-            .to_string()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect()
+    /// The field name as serde, `ModelMeta::field_names` and every name lookup
+    /// spell it: without a raw identifier's `r#`.
+    pub(crate) fn name(&self) -> String {
+        unraw_ident(self.ident())
+    }
+
+    /// The database column: `#[tideorm(column = "..")]`, else the snake-cased
+    /// field name.
+    pub(crate) fn column_name(&self) -> String {
+        self.column
+            .clone()
+            .unwrap_or_else(|| to_snake_case(&self.name()))
+    }
+
+    /// Whether `name` is this field's name or its column name.
+    pub(crate) fn is_named(&self, name: &str) -> bool {
+        self.name() == name || self.column_name() == name
+    }
+
+    /// The relation this field declares, taken from its wrapper type.
+    pub(crate) fn relation_kind(&self) -> Option<RelationKind> {
+        relation_wrapper(&self.ty).map(|(kind, _)| kind)
+    }
+
+    /// The relation kinds the field's `has_one = ".."` style attributes name.
+    pub(crate) fn declared_relation_kinds(&self) -> impl Iterator<Item = RelationKind> + '_ {
+        [
+            (RelationKind::HasOne, &self.has_one),
+            (RelationKind::HasMany, &self.has_many),
+            (RelationKind::BelongsTo, &self.belongs_to),
+            (RelationKind::HasManyThrough, &self.has_many_through),
+        ]
+        .into_iter()
+        .filter(|(_, declared)| declared.is_some())
+        .map(|(kind, _)| kind)
+    }
+
+    /// The relation wrapper's type arguments: the related model, then the
+    /// pivot model for `HasManyThrough`.
+    pub(crate) fn related_types(&self) -> Vec<Type> {
+        relation_wrapper(&self.ty)
+            .map(|(_, segment)| type_arguments(segment).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether the field is a `Uuid` (not an `Option` of one), in any qualified
+    /// spelling.
+    pub(crate) fn is_uuid(&self) -> bool {
+        option_inner_type(&self.ty).is_none()
+            && canonical_schema_type(&type_string(&self.ty)) == "Uuid"
+    }
+
+    /// Whether the field is a persisted column: neither skipped nor a relation.
+    pub(crate) fn is_column(&self) -> bool {
+        !self.skip && self.relation_kind().is_none()
+    }
+
+    /// The field's type with any `Option` removed: what validation rules and
+    /// encryption apply to.
+    pub(crate) fn validation_base_type(&self) -> &Type {
+        option_inner_type(&self.ty).unwrap_or(&self.ty)
+    }
+
+    /// The field's integer type when a backend's driver cannot store it and read
+    /// it back: `i8`, `u8` and `u16` on PostgreSQL, `u64` there and on SQLite.
+    pub(crate) fn driver_limited_integer(&self) -> Option<&'static str> {
+        match terminal_ident(self.validation_base_type()).as_deref() {
+            Some("i8") => Some("i8"),
+            Some("u8") => Some("u8"),
+            Some("u16") => Some("u16"),
+            Some("u64") => Some("u64"),
+            _ => None,
+        }
     }
 
     pub(crate) fn supports_string_validations(&self) -> bool {
         matches!(
-            terminal_type_ident(self.validation_base_ty()).as_deref(),
+            terminal_ident(self.validation_base_type()).as_deref(),
             Some("String" | "str")
+        )
+    }
+
+    /// Whether an encrypted column can hold the field: `String` or `Text`,
+    /// optionally inside an `Option`.
+    pub(crate) fn supports_encryption(&self) -> bool {
+        matches!(
+            terminal_ident(self.validation_base_type()).as_deref(),
+            Some("String" | "Text")
         )
     }
 
     pub(crate) fn supports_numeric_validations(&self) -> bool {
         matches!(
-            terminal_type_ident(self.validation_base_ty()).as_deref(),
+            terminal_ident(self.validation_base_type()).as_deref(),
             Some(
                 "i8" | "i16"
                     | "i32"
@@ -112,122 +264,89 @@ impl ModelField {
         )
     }
 
-    pub(crate) fn is_relation(&self) -> bool {
-        self.has_one.is_some()
-            || self.has_many.is_some()
-            || self.belongs_to.is_some()
-            || self.has_many_through.is_some()
-    }
-
-    pub(crate) fn is_relation_type(&self) -> bool {
-        relation_wrapper_name(&self.ty)
-            .map(|name| {
-                matches!(
-                    name,
-                    "HasOne"
-                        | "HasMany"
-                        | "BelongsTo"
-                        | "HasManyThrough"
-                        | "MorphOne"
-                        | "MorphMany"
-                        | "MorphTo"
-                        | "SelfRef"
-                        | "SelfRefMany"
-                )
-            })
-            .unwrap_or(false)
-    }
-    pub(crate) fn column_type_expr(&self) -> TokenStream2 {
+    /// The field's column definition, or an error on its type when TideORM
+    /// cannot store that type.
+    pub(crate) fn column_type_expr(&self) -> syn::Result<TokenStream2> {
         let inner_ty = option_inner_type(&self.ty);
-        let is_nullable = inner_ty.is_some();
         let base_ty = inner_ty.unwrap_or(&self.ty);
-        let base_type: String = quote!(#base_ty)
-            .to_string()
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let base_type = canonical_schema_type(&base_type);
 
-        let column_type = match base_type.as_str() {
-            "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
-            "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
-            "i64" | "u64" => quote!(::tideorm::orm::ColumnType::BigInteger),
-            "f32" => quote!(::tideorm::orm::ColumnType::Float),
-            "f64" => quote!(::tideorm::orm::ColumnType::Double),
-            "bool" => quote!(::tideorm::orm::ColumnType::Boolean),
-            // `Text` is `tideorm::types::Text`, a `String` alias exported for
-            // exactly this use. `canonical_schema_type` has always recognised the
-            // name, but without an arm here it fell through to the catch-all and
-            // a model using it failed to compile.
-            "String" | "&str" | "str" | "Text" => quote!(::tideorm::orm::ColumnType::Text),
-            "Uuid" | "uuid::Uuid" => quote!(::tideorm::orm::ColumnType::Uuid),
-            s if s.contains("DateTime<Utc>")
-                || s.contains("DateTime<chrono::Utc>")
-                || s.contains("chrono::DateTime<Utc>")
-                || s.contains("chrono::DateTime<chrono::Utc>") =>
-            {
-                quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
-            }
-            "DateTime" | "NaiveDateTime" | "chrono::NaiveDateTime" => {
-                quote!(::tideorm::orm::ColumnType::DateTime)
-            }
-            "NaiveDate" | "chrono::NaiveDate" => quote!(::tideorm::orm::ColumnType::Date),
-            "NaiveTime" | "chrono::NaiveTime" => quote!(::tideorm::orm::ColumnType::Time),
-            "Decimal" | "rust_decimal::Decimal" => {
-                quote!(::tideorm::orm::ColumnType::Decimal(None))
-            }
-            "Json" | "JsonValue" | "Value" | "serde_json::Value" | "Jsonb" => {
-                quote!(::tideorm::orm::ColumnType::Json)
-            }
-            "Vec<u8>" => quote!(::tideorm::orm::ColumnType::Binary(
-                ::tideorm::orm::sea_query::BlobSize::Blob(None)
-            )),
-            "Vec<i32>" | "IntArray" => quote!(::tideorm::orm::ColumnType::Array(
-                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Integer)
-            )),
-            "Vec<i64>" | "BigIntArray" => quote!(::tideorm::orm::ColumnType::Array(
-                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::BigInteger)
-            )),
-            "Vec<String>" | "TextArray" => quote!(::tideorm::orm::ColumnType::Array(
-                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Text)
-            )),
-            "Vec<bool>" | "BoolArray" => quote!(::tideorm::orm::ColumnType::Array(
-                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Boolean)
-            )),
-            "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
-                ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
-            )),
-            // Same gap as `Text`: recognised by `canonical_schema_type`, but with
-            // no arm it reached the catch-all and failed to compile.
-            "Vec<serde_json::Value>" | "Vec<Json>" | "Vec<JsonValue>" | "JsonArray" => {
-                quote!(::tideorm::orm::ColumnType::Array(
-                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Json)
-                ))
-            }
-            _ => {
-                let message = format!(
-                    "unsupported TideORM column type '{}' in schema generation; set an explicit column type or use a supported Rust type",
-                    base_type
-                );
-                quote!({
-                    ::core::compile_error!(#message);
-                    ::tideorm::orm::ColumnType::Text
-                })
+        let column_type = if is_utc_datetime_type(base_ty) {
+            quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
+        } else {
+            let base_type = type_string(base_ty);
+            match canonical_schema_type(&base_type) {
+                "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
+                "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
+                "i64" | "u64" => quote!(::tideorm::orm::ColumnType::BigInteger),
+                "f32" => quote!(::tideorm::orm::ColumnType::Float),
+                "f64" => quote!(::tideorm::orm::ColumnType::Double),
+                "bool" => quote!(::tideorm::orm::ColumnType::Boolean),
+                "String" | "&str" | "str" | "Text" => quote!(::tideorm::orm::ColumnType::Text),
+                "Uuid" => quote!(::tideorm::orm::ColumnType::Uuid),
+                "DateTime" | "NaiveDateTime" => quote!(::tideorm::orm::ColumnType::DateTime),
+                "NaiveDate" => quote!(::tideorm::orm::ColumnType::Date),
+                "NaiveTime" => quote!(::tideorm::orm::ColumnType::Time),
+                "Decimal" => quote!(::tideorm::orm::ColumnType::Decimal(None)),
+                "Json" | "JsonValue" | "Value" | "serde_json::Value" | "Jsonb" => {
+                    quote!(::tideorm::orm::ColumnType::Json)
+                }
+                "Vec<u8>" => quote!(::tideorm::orm::ColumnType::Blob),
+                "Vec<i32>" | "IntArray" => quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Integer)
+                )),
+                "Vec<i64>" | "BigIntArray" => quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::BigInteger)
+                )),
+                "Vec<String>" | "TextArray" => quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Text)
+                )),
+                "Vec<bool>" | "BoolArray" => quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Boolean)
+                )),
+                "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
+                    ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
+                )),
+                "Vec<serde_json::Value>" | "Vec<Json>" | "Vec<JsonValue>" | "JsonArray" => {
+                    quote!(::tideorm::orm::ColumnType::Array(
+                        ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Json)
+                    ))
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        &self.ty,
+                        format!(
+                            "unsupported TideORM column type '{base_type}': a model field can be \
+                             bool, i8-i64, u8-u64, f32, f64, String, Text, Uuid, Decimal, \
+                             DateTime<Utc>, NaiveDateTime, NaiveDate, NaiveTime, \
+                             Json (serde_json::Value), Vec<u8>, a PostgreSQL array \
+                             (Vec<i32>, Vec<i64>, Vec<f64>, Vec<bool>, Vec<String>, Vec<Json>), \
+                             or an Option of one. Store an enum as a String, and mark a field \
+                             that is not a column #[tideorm(skip)]"
+                        ),
+                    ));
+                }
             }
         };
 
-        if is_nullable || self.nullable {
+        Ok(if inner_ty.is_some() || self.nullable {
             quote!(#column_type.def().nullable())
         } else {
             quote!(#column_type.def())
-        }
+        })
     }
 }
 
-fn canonical_schema_type(ty: &str) -> String {
-    let normalized = ty.trim();
+/// The field `name` refers to, by field name or column name.
+pub(crate) fn find_db_field<'a>(fields: &'a [ModelField], name: &str) -> Option<&'a ModelField> {
+    fields.iter().find(|field| field.is_named(name))
+}
 
-    for alias in [
+/// Maps a path to one of the crate's exported column-type aliases, or to
+/// `String`, onto the bare name, so `tideorm::types::Json` and `Json` pick the
+/// same arm, as do `std::string::String` and `String`.
+fn canonical_schema_type(ty: &str) -> &str {
+    const ALIASES: [&str; 16] = [
+        "String",
         "Json",
         "JsonValue",
         "JsonArray",
@@ -243,157 +362,115 @@ fn canonical_schema_type(ty: &str) -> String {
         "NaiveTime",
         "NaiveDateTime",
         "Text",
-    ] {
-        if normalized == alias || normalized.ends_with(&format!("::{}", alias)) {
-            return alias.to_string();
-        }
-    }
+    ];
 
-    normalized.to_string()
+    ALIASES
+        .into_iter()
+        .find(|alias| {
+            ty == *alias
+                || ty
+                    .strip_suffix(alias)
+                    .is_some_and(|prefix| prefix.ends_with("::"))
+        })
+        .unwrap_or(ty)
 }
 
-fn validation_base_type(ty: &Type) -> &Type {
-    if let Some(inner) = option_inner_type(ty) {
-        inner
-    } else {
-        ty
+/// `ty` as compact source text, without the spaces `quote!` puts between
+/// tokens: `Option<chrono::DateTime<chrono::Utc>>`.
+pub(crate) fn type_string(ty: &Type) -> String {
+    quote!(#ty)
+        .to_string()
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
+/// The last path segment `ty` names, seen through references, parentheses and
+/// the invisible groups macro substitution wraps types in.
+fn path_segment(ty: &Type) -> Option<&PathSegment> {
+    match ty {
+        Type::Group(group) => path_segment(&group.elem),
+        Type::Paren(paren) => path_segment(&paren.elem),
+        Type::Reference(reference) => path_segment(&reference.elem),
+        Type::Path(type_path) => type_path.path.segments.last(),
+        _ => None,
     }
 }
 
-/// Returns the `T` of an `Option<T>` type, honouring parenthesised, grouped and
-/// fully qualified spellings such as `std::option::Option<T>`.
+/// The type arguments of one path segment: `T` in `Option<T>`.
+fn type_arguments(segment: &PathSegment) -> impl Iterator<Item = &Type> {
+    let arguments = match &segment.arguments {
+        PathArguments::AngleBracketed(arguments) => Some(&arguments.args),
+        _ => None,
+    };
+
+    arguments
+        .into_iter()
+        .flatten()
+        .filter_map(|argument| match argument {
+            GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+}
+
+/// The name of the last path segment of `ty`.
+fn terminal_ident(ty: &Type) -> Option<String> {
+    path_segment(ty).map(|segment| segment.ident.to_string())
+}
+
+/// Returns the `T` of an `Option<T>` type, for any spelling of `Option`
+/// (`std::option::Option<T>`, a macro-substituted type, ...).
 ///
 /// This is the only supported nullability test: a textual `contains("Option")`
 /// check misfires on names such as `OptionalMode` or `Vec<Option<String>>`.
 pub(crate) fn option_inner_type(ty: &Type) -> Option<&Type> {
-    match ty {
-        Type::Group(group) => option_inner_type(&group.elem),
-        Type::Paren(paren) => option_inner_type(&paren.elem),
-        Type::Path(type_path) => {
-            let segment = type_path.path.segments.last()?;
-            if segment.ident != "Option" {
-                return None;
-            }
-
-            match &segment.arguments {
-                PathArguments::AngleBracketed(args) => args.args.iter().find_map(|arg| match arg {
-                    GenericArgument::Type(inner) => Some(inner),
-                    _ => None,
-                }),
-                _ => None,
-            }
-        }
-        _ => None,
+    let segment = path_segment(ty)?;
+    if segment.ident != "Option" {
+        return None;
     }
+
+    type_arguments(segment).next()
 }
 
-fn terminal_type_ident(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Group(group) => terminal_type_ident(&group.elem),
-        Type::Paren(paren) => terminal_type_ident(&paren.elem),
-        Type::Reference(reference) => terminal_type_ident(&reference.elem),
-        Type::Path(type_path) => type_path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string()),
-        _ => None,
-    }
+/// Whether `ty` is an `Option<..>` and therefore maps to a nullable column.
+pub(crate) fn is_optional_type(ty: &Type) -> bool {
+    option_inner_type(ty).is_some()
 }
 
-pub(crate) fn relation_wrapper_name(ty: &Type) -> Option<&str> {
-    match ty {
-        Type::Group(group) => relation_wrapper_name(&group.elem),
-        Type::Paren(paren) => relation_wrapper_name(&paren.elem),
-        Type::Reference(reference) => relation_wrapper_name(&reference.elem),
-        Type::Path(type_path) => {
-            let segment = type_path.path.segments.last()?;
-            let ident = segment.ident.to_string();
-            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc")
-                && let PathArguments::AngleBracketed(arguments) = &segment.arguments
-            {
-                for argument in &arguments.args {
-                    if let GenericArgument::Type(inner_ty) = argument
-                        && let Some(name) = relation_wrapper_name(inner_ty)
-                    {
-                        return Some(name);
-                    }
-                }
-            }
-            Some(match ident.as_str() {
-                "HasOne" => "HasOne",
-                "HasMany" => "HasMany",
-                "BelongsTo" => "BelongsTo",
-                "HasManyThrough" => "HasManyThrough",
-                "MorphOne" => "MorphOne",
-                "MorphMany" => "MorphMany",
-                "MorphTo" => "MorphTo",
-                "SelfRef" => "SelfRef",
-                "SelfRefMany" => "SelfRefMany",
-                _ => return None,
-            })
-        }
-        _ => None,
-    }
+/// Whether `ty` spells `chrono::NaiveDateTime` in any qualified form.
+pub(crate) fn is_naive_datetime_type(ty: &Type) -> bool {
+    path_segment(ty).is_some_and(|segment| segment.ident == "NaiveDateTime")
 }
 
-pub(crate) fn relation_generic_types(ty: &Type) -> Vec<Type> {
-    match ty {
-        Type::Group(group) => relation_generic_types(&group.elem),
-        Type::Paren(paren) => relation_generic_types(&paren.elem),
-        Type::Reference(reference) => relation_generic_types(&reference.elem),
-        Type::Path(type_path) => {
-            let Some(segment) = type_path.path.segments.last() else {
-                return Vec::new();
-            };
+/// Whether `ty` spells `chrono::DateTime<chrono::Utc>` in any qualified form.
+pub(crate) fn is_utc_datetime_type(ty: &Type) -> bool {
+    path_segment(ty).is_some_and(|segment| {
+        segment.ident == "DateTime"
+            && type_arguments(segment)
+                .any(|argument| terminal_ident(argument).as_deref() == Some("Utc"))
+    })
+}
 
-            let ident = segment.ident.to_string();
-            if matches!(ident.as_str(), "Option" | "Box" | "Rc" | "Arc") {
-                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
-                    for argument in &arguments.args {
-                        if let GenericArgument::Type(inner_ty) = argument {
-                            return relation_generic_types(inner_ty);
-                        }
-                    }
-                }
-                return Vec::new();
-            }
-
-            if !matches!(
-                ident.as_str(),
-                "HasOne"
-                    | "HasMany"
-                    | "BelongsTo"
-                    | "HasManyThrough"
-                    | "MorphOne"
-                    | "MorphMany"
-                    | "MorphTo"
-                    | "SelfRef"
-                    | "SelfRefMany"
-            ) {
-                return Vec::new();
-            }
-
-            match &segment.arguments {
-                PathArguments::AngleBracketed(arguments) => arguments
-                    .args
-                    .iter()
-                    .filter_map(|argument| match argument {
-                        GenericArgument::Type(inner_ty) => Some(inner_ty.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            }
-        }
-        _ => Vec::new(),
+/// The relation wrapper `ty` names, seen through `Option`, `Box`, `Rc` and
+/// `Arc`, together with the wrapper's own path segment.
+fn relation_wrapper(ty: &Type) -> Option<(RelationKind, &PathSegment)> {
+    let segment = path_segment(ty)?;
+    if matches!(
+        segment.ident.to_string().as_str(),
+        "Option" | "Box" | "Rc" | "Arc"
+    ) {
+        return type_arguments(segment).find_map(relation_wrapper);
     }
+
+    RelationKind::from_wrapper(&segment.ident).map(|kind| (kind, segment))
 }
 
 #[derive(Debug, FromDeriveInput)]
-#[darling(attributes(tideorm), supports(struct_named))]
+#[darling(attributes(tideorm), supports(struct_named), forward_attrs(serde))]
 pub(crate) struct ModelInput {
     pub(crate) ident: Ident,
+    /// The struct's `#[serde(..)]` attributes.
+    pub(crate) attrs: Vec<syn::Attribute>,
     pub(crate) data: Data<(), ModelField>,
     #[darling(default)]
     pub(crate) table: Option<String>,

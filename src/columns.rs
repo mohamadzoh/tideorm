@@ -14,10 +14,6 @@ use std::marker::PhantomData;
 
 mod impls;
 
-// =============================================================================
-// TYPED COLUMN
-// =============================================================================
-
 /// Trait for types that can be used as column names in queries.
 ///
 /// This allows both string literals and typed `Column<T>` to be used
@@ -76,74 +72,17 @@ impl<T> Column<T> {
     }
 }
 
-// =============================================================================
-// COLUMN CONDITIONS
-// =============================================================================
-
-/// A type-safe column condition for WHERE clauses
+/// A type-safe column condition for WHERE clauses, applied with
+/// [`QueryBuilder::where_col`](crate::query::QueryBuilder::where_col).
 #[derive(Debug, Clone)]
 pub struct ColumnCondition {
     /// The column name
     pub column: String,
-    /// The operator
-    pub operator: ColumnOperator,
-    /// The value (as JSON for flexibility)
+    /// The comparison to apply
+    pub operator: crate::query::Operator,
+    /// The value (as JSON for flexibility). A list for `In`/`NotIn`, a
+    /// `[low, high]` pair for `Between`, and ignored for the NULL checks.
     pub value: serde_json::Value,
-}
-
-/// Operators for column conditions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnOperator {
-    /// Equal to (=)
-    Eq,
-    /// Not equal to (<>)
-    NotEq,
-    /// Greater than (>)
-    Gt,
-    /// Greater than or equal (>=)
-    Gte,
-    /// Less than (<)
-    Lt,
-    /// Less than or equal (<=)
-    Lte,
-    /// LIKE pattern match
-    Like,
-    /// LIKE pattern match using an escaped literal pattern
-    LikeEscaped,
-    /// NOT LIKE pattern match
-    NotLike,
-    /// IN list
-    In,
-    /// NOT IN list
-    NotIn,
-    /// IS NULL
-    IsNull,
-    /// IS NOT NULL
-    IsNotNull,
-    /// BETWEEN range
-    Between,
-}
-
-impl ColumnOperator {
-    /// Convert to SQL operator string
-    pub fn to_sql(&self) -> &'static str {
-        match self {
-            Self::Eq => "=",
-            Self::NotEq => "<>",
-            Self::Gt => ">",
-            Self::Gte => ">=",
-            Self::Lt => "<",
-            Self::Lte => "<=",
-            Self::Like => "LIKE",
-            Self::LikeEscaped => "LIKE",
-            Self::NotLike => "NOT LIKE",
-            Self::In => "IN",
-            Self::NotIn => "NOT IN",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
-            Self::Between => "BETWEEN",
-        }
-    }
 }
 
 /// The escape character used by every generated `LIKE ... ESCAPE` clause.
@@ -171,10 +110,6 @@ pub(crate) fn escape_like_literal(value: &str) -> String {
     }
     escaped
 }
-
-// =============================================================================
-// COLUMN EXPRESSION TRAITS
-// =============================================================================
 
 /// Trait for types that can be compared for equality
 pub trait ColumnEq<T> {

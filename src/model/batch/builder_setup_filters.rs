@@ -22,6 +22,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             _marker: std::marker::PhantomData,
             updates: std::collections::HashMap::new(),
             conditions: Vec::new(),
+            or_group: OrGroup::new(),
             returning: false,
             limit_value: None,
             // Batch updates are scoped like `with_trashed()` unless the caller
@@ -57,12 +58,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// The value is bound as a parameter. Setting the same column twice keeps
     /// the last assignment.
     #[must_use]
-    pub fn set(mut self, field: impl IntoColumnName, value: impl Into<serde_json::Value>) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::Value(value.into()),
-        );
-        self
+    pub fn set(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
+        self.assign(field, UpdateValue::Value(crate::query::filter_value(value)))
     }
 
     /// Assign a raw SQL expression, spliced into the `SET` clause verbatim.
@@ -75,12 +72,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// other computed setters first; they cover the common cases safely and
     /// portably.
     #[must_use]
-    pub fn set_trusted_raw(mut self, field: impl IntoColumnName, expression: &str) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::UnsafeRaw(expression.to_string()),
-        );
-        self
+    pub fn set_trusted_raw(self, field: impl IntoColumnName, expression: &str) -> Self {
+        self.assign(field, UpdateValue::UnsafeRaw(expression.to_string()))
     }
 
     /// Assign a value only when `condition` holds, otherwise leave the column alone.
@@ -90,18 +83,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// assignments left, and executing it is a no-op that reports zero rows.
     #[must_use]
     pub fn set_if(
-        mut self,
+        self,
         field: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
+        value: impl serde::Serialize,
         condition: bool,
     ) -> Self {
         if condition {
-            self.updates.insert(
-                field.column_name().to_string(),
-                UpdateValue::Value(value.into()),
-            );
+            self.set(field, value)
+        } else {
+            self
         }
-        self
     }
 
     /// Add `by` to the column's current value in the database.
@@ -109,10 +100,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// The arithmetic happens server-side, so concurrent increments do not lose
     /// updates the way a read-modify-write from Rust would.
     #[must_use]
-    pub fn increment(mut self, field: impl IntoColumnName, by: i64) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Increment(by));
-        self
+    pub fn increment(self, field: impl IntoColumnName, by: i64) -> Self {
+        self.assign(field, UpdateValue::Increment(by))
     }
 
     /// Subtract `by` from the column's current value in the database.
@@ -120,29 +109,27 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Nothing clamps the result: the column can go negative unless a check
     /// constraint or an added `where_gte` filter prevents it.
     #[must_use]
-    pub fn decrement(mut self, field: impl IntoColumnName, by: i64) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Decrement(by));
-        self
+    pub fn decrement(self, field: impl IntoColumnName, by: i64) -> Self {
+        self.assign(field, UpdateValue::Decrement(by))
     }
 
     /// Multiply the column's current value by `by` in the database.
+    ///
+    /// On an integer column the product is rounded to the nearest integer, as
+    /// PostgreSQL and MySQL do when they store it.
     #[must_use]
-    pub fn multiply(mut self, field: impl IntoColumnName, by: f64) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Multiply(by));
-        self
+    pub fn multiply(self, field: impl IntoColumnName, by: f64) -> Self {
+        self.assign(field, UpdateValue::Multiply(by))
     }
 
     /// Divide the column's current value by `by` in the database.
     ///
-    /// A zero divisor is passed through to the backend, which normally raises a
+    /// On an integer column the quotient is rounded to the nearest integer. A
+    /// zero divisor is passed through to the backend, which normally raises a
     /// division-by-zero error for the whole statement.
     #[must_use]
-    pub fn divide(mut self, field: impl IntoColumnName, by: f64) -> Self {
-        self.updates
-            .insert(field.column_name().to_string(), UpdateValue::Divide(by));
-        self
+    pub fn divide(self, field: impl IntoColumnName, by: f64) -> Self {
+        self.assign(field, UpdateValue::Divide(by))
     }
 
     /// Append a value to an array or JSON array column.
@@ -151,15 +138,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// array type on PostgreSQL and a JSON array elsewhere.
     #[must_use]
     pub fn array_append(
-        mut self,
+        self,
         field: impl IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::ArrayAppend(value.into()),
-        );
-        self
+        self.assign(field, UpdateValue::ArrayAppend(value.into()))
     }
 
     /// Remove a value from an array or JSON array column.
@@ -168,15 +151,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// match per row.
     #[must_use]
     pub fn array_remove(
-        mut self,
+        self,
         field: impl IntoColumnName,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::ArrayRemove(value.into()),
-        );
-        self
+        self.assign(field, UpdateValue::ArrayRemove(value.into()))
     }
 
     /// Set one path inside a JSON column, leaving the rest of the document intact.
@@ -187,16 +166,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// back, which would clobber concurrent edits to other keys.
     #[must_use]
     pub fn json_set(
-        mut self,
+        self,
         field: impl IntoColumnName,
         path: &str,
         value: impl Into<serde_json::Value>,
     ) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::JsonSet(path.to_string(), value.into()),
-        );
-        self
+        self.assign(field, UpdateValue::JsonSet(path.to_string(), value.into()))
     }
 
     /// Fill the column with `default` only where it is currently `NULL`.
@@ -204,16 +179,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// This is the backfill setter: rows that already hold a value keep it, so
     /// the update is safe to re-run.
     #[must_use]
-    pub fn coalesce(
-        mut self,
-        field: impl IntoColumnName,
-        default: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.updates.insert(
-            field.column_name().to_string(),
-            UpdateValue::Coalesce(default.into()),
-        );
-        self
+    pub fn coalesce(self, field: impl IntoColumnName, default: impl serde::Serialize) -> Self {
+        self.assign(
+            field,
+            UpdateValue::Coalesce(crate::query::filter_value(default)),
+        )
     }
 
     /// Cap how many rows the update may touch.
@@ -241,388 +211,26 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
-    /// Match rows where `column` equals `value`.
-    #[must_use]
-    pub fn where_eq(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Eq,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
+    fn assign(mut self, field: impl IntoColumnName, value: UpdateValue) -> Self {
+        self.updates.insert(field.column_name().to_string(), value);
         self
     }
 
-    /// Match rows where `column` differs from `value`.
-    ///
-    /// This is SQL `<>`, so rows where the column is `NULL` do not match. Add
-    /// [`or_where_null`](Self::or_where_null) when they should.
-    #[must_use]
-    pub fn where_not(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::NotEq,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
+    fn push_condition(mut self, condition: WhereCondition) -> Self {
+        self.conditions.push(condition);
         self
     }
 
-    /// Match rows where `column` is greater than `value`.
-    #[must_use]
-    pub fn where_gt(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Gt,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
+    fn push_or_condition(mut self, condition: WhereCondition) -> Self {
+        self.or_group.conditions.push(condition);
         self
     }
+}
 
-    /// Match rows where `column` is greater than or equal to `value`.
-    #[must_use]
-    pub fn where_gte(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Gte,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Match rows where `column` is less than `value`.
-    #[must_use]
-    pub fn where_lt(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Lt,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Match rows where `column` is less than or equal to `value`.
-    #[must_use]
-    pub fn where_lte(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Lte,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Match rows where `column` is one of `values`.
-    ///
-    /// Every value is bound as its own parameter, so a very large list can hit
-    /// the backend's parameter limit; chunk the update if that happens.
-    #[must_use]
-    pub fn where_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::In,
-            value: crate::query::ConditionValue::List(
-                values.into_iter().map(|v| v.into()).collect(),
-            ),
-        });
-        self
-    }
-
-    /// Match rows where `column` is none of `values`.
-    ///
-    /// Like `NOT IN` in SQL, rows where the column is `NULL` do not match.
-    #[must_use]
-    pub fn where_not_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::NotIn,
-            value: crate::query::ConditionValue::List(
-                values.into_iter().map(|v| v.into()).collect(),
-            ),
-        });
-        self
-    }
-
-    /// Match rows where `column` is `NULL`.
-    #[must_use]
-    pub fn where_null(mut self, column: impl IntoColumnName) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::IsNull,
-            value: crate::query::ConditionValue::None,
-        });
-        self
-    }
-
-    /// Match rows where `column` holds a value.
-    #[must_use]
-    pub fn where_not_null(mut self, column: impl IntoColumnName) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::IsNotNull,
-            value: crate::query::ConditionValue::None,
-        });
-        self
-    }
-
-    /// Match rows where `column` falls between `min` and `max`, inclusive.
-    #[must_use]
-    pub fn where_between(
-        mut self,
-        column: impl IntoColumnName,
-        min: impl Into<serde_json::Value>,
-        max: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Between,
-            value: crate::query::ConditionValue::Range(min.into(), max.into()),
-        });
-        self
-    }
-
-    /// Match rows against a raw `LIKE` pattern.
-    ///
-    /// `pattern` is used as written, so `%` and `_` in it stay wildcards. When
-    /// the text comes from a user, reach for [`where_contains`](Self::where_contains),
-    /// [`where_starts_with`](Self::where_starts_with), or
-    /// [`where_ends_with`](Self::where_ends_with) instead — those escape the
-    /// wildcards for you.
-    #[must_use]
-    pub fn where_like(mut self, column: impl IntoColumnName, pattern: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::Like,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(
-                pattern.to_string(),
-            )),
-        });
-        self
-    }
-
-    /// Match rows where `column` contains `value` as a literal substring.
-    ///
-    /// Wildcards in `value` are escaped, so it is safe for user input.
-    #[must_use]
-    pub fn where_contains(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
-    }
-
-    /// Match rows where `column` starts with `value` as a literal prefix.
-    ///
-    /// Wildcards in `value` are escaped, so it is safe for user input.
-    #[must_use]
-    pub fn where_starts_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
-    }
-
-    /// Match rows where `column` ends with `value` as a literal suffix.
-    ///
-    /// Wildcards in `value` are escaped, so it is safe for user input.
-    #[must_use]
-    pub fn where_ends_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: column.column_name().to_string(),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
-    }
-
-    /// Add `column = value` to this update's `OR` group.
-    ///
-    /// Every `or_where_*` call joins one shared `OR` group, and that group is
-    /// `AND`ed with the plain `where_*` filters.
-    #[must_use]
-    pub fn or_where_eq(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::Eq,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Add `column <> value` to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_not(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::NotEq,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Add `column > value` to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_gt(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::Gt,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Add `column < value` to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_lt(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::Lt,
-            value: crate::query::ConditionValue::Single(value.into()),
-        });
-        self
-    }
-
-    /// Add `column IN (values)` to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::In,
-            value: crate::query::ConditionValue::List(
-                values.into_iter().map(|v| v.into()).collect(),
-            ),
-        });
-        self
-    }
-
-    /// Add `column IS NULL` to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_null(mut self, column: impl IntoColumnName) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::IsNull,
-            value: crate::query::ConditionValue::None,
-        });
-        self
-    }
-
-    /// Add a raw `LIKE` pattern to this update's `OR` group.
-    ///
-    /// The pattern is used as written; see [`where_like`](Self::where_like).
-    #[must_use]
-    pub fn or_where_like(mut self, column: impl IntoColumnName, pattern: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::Like,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(
-                pattern.to_string(),
-            )),
-        });
-        self
-    }
-
-    /// Add a literal substring match to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_contains(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
-    }
-
-    /// Add a literal prefix match to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_starts_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "{}%",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
-    }
-
-    /// Add a literal suffix match to this update's `OR` group.
-    #[must_use]
-    pub fn or_where_ends_with(mut self, column: impl IntoColumnName, value: &str) -> Self {
-        self.conditions.push(crate::query::WhereCondition {
-            column: format!("__OR__{}", column.column_name()),
-            operator: crate::query::Operator::LikeEscaped,
-            value: crate::query::ConditionValue::Single(serde_json::Value::String(format!(
-                "%{}",
-                crate::columns::escape_like_literal(value)
-            ))),
-        });
-        self
+crate::query::condition_methods! {
+    impl[M: Model] BatchUpdateBuilder<M> {
+        where => push_condition, "The condition is ANDed with the update's other filters.";
+        or_where => push_or_condition,
+            "Every `or_where_*` call joins one shared OR group, which is ANDed with the plain `where_*` filters.";
     }
 }

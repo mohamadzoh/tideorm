@@ -75,68 +75,21 @@ impl From<Backend> for OrmBackend {
     }
 }
 
-pub(crate) trait StatementBackend {
-    fn into_statement_backend(self) -> OrmBackend;
+pub(crate) fn build_statement(
+    backend: impl Into<OrmBackend>,
+    sql: impl Into<String>,
+) -> OrmStatement {
+    OrmStatement::from_string(backend.into(), sql.into())
 }
 
-impl StatementBackend for Backend {
-    fn into_statement_backend(self) -> OrmBackend {
-        self.into()
-    }
-}
-
-impl StatementBackend for OrmBackend {
-    fn into_statement_backend(self) -> OrmBackend {
-        self
-    }
-}
-
-pub(crate) fn build_statement<B>(backend: B, sql: impl Into<String>) -> OrmStatement
-where
-    B: StatementBackend,
-{
-    OrmStatement::from_string(backend.into_statement_backend(), sql.into())
-}
-
-pub(crate) fn build_statement_with_values<B>(
-    backend: B,
+pub(crate) fn build_statement_with_values(
+    backend: impl Into<OrmBackend>,
     sql: &str,
     params: Vec<Value>,
-) -> OrmStatement
-where
-    B: StatementBackend,
-{
-    OrmStatement::from_sql_and_values(backend.into_statement_backend(), sql, params)
+) -> OrmStatement {
+    OrmStatement::from_sql_and_values(backend.into(), sql, params)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Backend, OrmBackend};
-
-    #[test]
-    fn known_engine_backends_map_without_guessing() {
-        assert_eq!(
-            Backend::from_orm_backend(OrmBackend::Postgres),
-            Some(Backend::Postgres)
-        );
-        assert_eq!(
-            Backend::from_orm_backend(OrmBackend::MySql),
-            Some(Backend::MySql)
-        );
-        assert_eq!(
-            Backend::from_orm_backend(OrmBackend::Sqlite),
-            Some(Backend::Sqlite)
-        );
-    }
-
-    #[test]
-    fn every_backend_round_trips_through_the_engine_enum() {
-        for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
-            assert_eq!(Backend::from(OrmBackend::from(backend)), backend);
-            assert_eq!(
-                Backend::from_orm_backend(OrmBackend::from(backend)),
-                Some(backend)
-            );
-        }
-    }
-}
+#[path = "../../tests/unit/internal_backend_tests.rs"]
+mod tests;

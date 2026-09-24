@@ -1,21 +1,28 @@
-use super::{ColumnType, DatabaseType, DefaultValue, quote_identifier_for_db};
+use crate::internal::sql_safety::quote_ident;
+use crate::model::IndexDefinition;
 
-mod sql_building;
+use super::ddl::{self, ColumnDefinition};
+use super::{ColumnType, DatabaseType, DefaultValue};
 
-/// Definition of a composite unique constraint
+/// A multi-column `UNIQUE` table constraint.
 #[derive(Debug, Clone)]
-pub struct UniqueConstraint {
-    /// Optional name for the constraint
-    pub name: Option<String>,
-    /// Columns that form the unique constraint
-    pub columns: Vec<String>,
+struct UniqueConstraint {
+    name: Option<String>,
+    columns: Vec<String>,
 }
 
-/// Definition of a composite primary key
-#[derive(Debug, Clone)]
-pub struct CompositePrimaryKey {
-    /// Columns that form the composite primary key
-    pub columns: Vec<String>,
+impl UniqueConstraint {
+    fn to_sql(&self, db_type: DatabaseType) -> String {
+        let columns = ddl::column_list(db_type, &self.columns);
+        match &self.name {
+            Some(name) => format!(
+                "CONSTRAINT {} UNIQUE ({})",
+                quote_ident(db_type, name),
+                columns
+            ),
+            None => format!("UNIQUE ({})", columns),
+        }
+    }
 }
 
 /// Builder for creating tables
@@ -23,10 +30,10 @@ pub struct TableBuilder {
     name: String,
     database_type: DatabaseType,
     columns: Vec<ColumnDefinition>,
-    indexes: Vec<IndexBuilder>,
+    indexes: Vec<IndexDefinition>,
     primary_key: Option<String>,
     unique_constraints: Vec<UniqueConstraint>,
-    composite_primary_key: Option<CompositePrimaryKey>,
+    composite_primary_key: Option<Vec<String>>,
 }
 
 impl TableBuilder {
@@ -50,35 +57,19 @@ impl TableBuilder {
 
     /// Add an auto-incrementing big integer column
     pub fn big_increments(&mut self, name: &str) -> &mut Self {
-        let column = ColumnDefinition {
-            name: name.to_string(),
-            column_type: ColumnType::BigInteger,
-            nullable: false,
-            default: None,
-            primary_key: true,
-            auto_increment: true,
-            unique: false,
-            check: None,
-            extra: None,
-        };
-        self.columns.push(column);
-        self.primary_key = Some(name.to_string());
-        self
+        self.increments_column(name, ColumnType::BigInteger)
     }
 
     /// Add an auto-incrementing integer column
     pub fn increments(&mut self, name: &str) -> &mut Self {
-        let column = ColumnDefinition {
-            name: name.to_string(),
-            column_type: ColumnType::Integer,
-            nullable: false,
-            default: None,
-            primary_key: true,
-            auto_increment: true,
-            unique: false,
-            check: None,
-            extra: None,
-        };
+        self.increments_column(name, ColumnType::Integer)
+    }
+
+    fn increments_column(&mut self, name: &str, column_type: ColumnType) -> &mut Self {
+        let mut column = ColumnDefinition::new(name, column_type);
+        column.nullable = false;
+        column.primary_key = true;
+        column.auto_increment = true;
         self.columns.push(column);
         self.primary_key = Some(name.to_string());
         self
@@ -86,6 +77,16 @@ impl TableBuilder {
 
     pub fn string(&mut self, name: &str) -> ColumnBuilder<'_> {
         self.column(name, ColumnType::String)
+    }
+
+    /// A `VARCHAR(length)` column; [`string`](Self::string) is `VARCHAR(255)`.
+    ///
+    /// SQLite ignores the length, so a migration it accepts can still fail
+    /// elsewhere: `length` must be at least 1, at most 10,485,760 on PostgreSQL,
+    /// and at most 16,383 on MySQL and MariaDB, whose tables TideORM declares
+    /// `utf8mb4`; a unique or indexed one at most 768 there.
+    pub fn string_with(&mut self, name: &str, length: u32) -> ColumnBuilder<'_> {
+        self.column(name, ColumnType::Varchar(length))
     }
 
     pub fn text(&mut self, name: &str) -> ColumnBuilder<'_> {
@@ -201,20 +202,11 @@ impl TableBuilder {
     }
 
     pub fn column(&mut self, name: &str, column_type: ColumnType) -> ColumnBuilder<'_> {
-        ColumnBuilder {
-            table: self,
-            definition: ColumnDefinition {
-                name: name.to_string(),
-                column_type,
-                nullable: true,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-                unique: false,
-                check: None,
-                extra: None,
-            },
-        }
+        ColumnBuilder::new(
+            self,
+            ColumnDefinition::new(name, column_type),
+            |table, column| table.columns.push(column),
+        )
     }
 
     pub fn foreign_id(&mut self, name: &str) -> ColumnBuilder<'_> {
@@ -222,155 +214,179 @@ impl TableBuilder {
     }
 
     pub fn index(&mut self, columns: &[&str]) -> &mut Self {
-        let index = IndexBuilder {
-            name: format!("idx_{}_{}", self.name, columns.join("_")),
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-            unique: false,
-        };
-        self.indexes.push(index);
-        self
+        let name = format!("idx_{}_{}", self.name, columns.join("_"));
+        self.push_index(name, columns, false)
     }
 
     pub fn unique_index(&mut self, columns: &[&str]) -> &mut Self {
-        let index = IndexBuilder {
-            name: format!("idx_{}_{}_unique", self.name, columns.join("_")),
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-            unique: true,
-        };
-        self.indexes.push(index);
+        let name = format!("idx_{}_{}_unique", self.name, columns.join("_"));
+        self.push_index(name, columns, true)
+    }
+
+    fn push_index(&mut self, name: String, columns: &[&str], unique: bool) -> &mut Self {
+        self.indexes.push(IndexDefinition::new(
+            name,
+            columns.iter().map(|column| column.to_string()).collect(),
+            unique,
+        ));
         self
     }
 
     pub fn unique(&mut self, columns: &[&str]) -> &mut Self {
-        self.unique_constraints.push(UniqueConstraint {
-            name: None,
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-        });
-        self
+        self.push_unique_constraint(None, columns)
     }
 
     pub fn unique_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
+        self.push_unique_constraint(Some(name.to_string()), columns)
+    }
+
+    fn push_unique_constraint(&mut self, name: Option<String>, columns: &[&str]) -> &mut Self {
         self.unique_constraints.push(UniqueConstraint {
-            name: Some(name.to_string()),
-            columns: columns.iter().map(|value| value.to_string()).collect(),
+            name,
+            columns: columns.iter().map(|column| column.to_string()).collect(),
         });
         self
     }
 
     pub fn primary_key(&mut self, columns: &[&str]) -> &mut Self {
-        self.composite_primary_key = Some(CompositePrimaryKey {
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-        });
+        self.composite_primary_key =
+            Some(columns.iter().map(|column| column.to_string()).collect());
         self
     }
 
-    pub fn index_named(&mut self, name: &str, columns: &[&str]) -> &mut Self {
-        let index = IndexBuilder {
-            name: name.to_string(),
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-            unique: false,
+    pub(crate) fn build_create(&self, if_not_exists: bool) -> String {
+        // A table carries exactly one PRIMARY KEY clause. When both a
+        // column-level key (`id()`, `.primary_key()`) and an explicit composite
+        // key are declared, the explicit composite one wins - emitting both
+        // produces SQL every backend rejects.
+        let primary_key = match (&self.composite_primary_key, &self.primary_key) {
+            (Some(columns), _) => columns.clone(),
+            (None, Some(column)) => vec![column.clone()],
+            (None, None) => Vec::new(),
         };
-        self.indexes.push(index);
-        self
+        let constraints: Vec<String> = self
+            .unique_constraints
+            .iter()
+            .map(|constraint| constraint.to_sql(self.database_type))
+            .collect();
+
+        ddl::create_table(
+            self.database_type,
+            &quote_ident(self.database_type, &self.name),
+            if_not_exists,
+            &self.columns,
+            &primary_key,
+            &constraints,
+        )
+    }
+
+    pub(crate) fn build_indexes(&self, if_not_exists: bool) -> Vec<String> {
+        let table = quote_ident(self.database_type, &self.name);
+
+        self.indexes
+            .iter()
+            .map(|index| {
+                ddl::create_index(
+                    self.database_type,
+                    &index.name,
+                    &table,
+                    &index.columns,
+                    index.unique,
+                    if_not_exists,
+                )
+            })
+            .collect()
     }
 }
 
 /// Builder for column definitions (fluent API)
-pub struct ColumnBuilder<'a> {
-    table: &'a mut TableBuilder,
-    definition: ColumnDefinition,
+///
+/// The column is added when the builder drops, so a chain such as
+/// `t.string("email").unique().not_null();` needs no terminating call.
+pub struct ColumnBuilder<'a, T = TableBuilder> {
+    target: &'a mut T,
+    definition: Option<ColumnDefinition>,
+    add: fn(&mut T, ColumnDefinition),
 }
 
-impl<'a> ColumnBuilder<'a> {
+impl<'a, T> ColumnBuilder<'a, T> {
+    pub(super) fn new(
+        target: &'a mut T,
+        definition: ColumnDefinition,
+        add: fn(&mut T, ColumnDefinition),
+    ) -> Self {
+        Self {
+            target,
+            definition: Some(definition),
+            add,
+        }
+    }
+
+    fn definition(&mut self) -> &mut ColumnDefinition {
+        self.definition
+            .as_mut()
+            .expect("the definition is only taken when the builder drops")
+    }
+
     /// Mark the column as NOT NULL
     pub fn not_null(mut self) -> Self {
-        self.definition.nullable = false;
+        self.definition().nullable = false;
         self
     }
 
     /// Mark the column as nullable
     pub fn nullable(mut self) -> Self {
-        self.definition.nullable = true;
+        self.definition().nullable = true;
         self
     }
 
     /// Set a default value
     pub fn default(mut self, value: impl Into<DefaultValue>) -> Self {
-        self.definition.default = Some(value.into().to_sql());
+        self.definition().default = Some(value.into().to_sql());
         self
     }
 
     /// Set default to current timestamp
     pub fn default_now(mut self) -> Self {
-        self.definition.default = Some("CURRENT_TIMESTAMP".to_string());
+        self.definition().default = Some("CURRENT_TIMESTAMP".to_string());
         self
     }
 
     /// Mark the column as unique
     pub fn unique(mut self) -> Self {
-        self.definition.unique = true;
+        self.definition().unique = true;
         self
     }
+}
 
+impl ColumnBuilder<'_, TableBuilder> {
     /// Mark as primary key
     pub fn primary_key(mut self) -> Self {
-        self.definition.primary_key = true;
-        self.definition.nullable = false;
-        self.table.primary_key = Some(self.definition.name.clone());
+        let definition = self.definition();
+        definition.primary_key = true;
+        definition.nullable = false;
+        let name = definition.name.clone();
+        self.target.primary_key = Some(name);
         self
     }
 
     /// Add a CHECK constraint to the column
     pub fn check(mut self, expression: &str) -> Self {
-        self.definition.check = Some(expression.to_string());
+        self.definition().check = Some(expression.to_string());
         self
     }
 
     /// Add extra SQL to the column definition
     pub fn extra(mut self, sql: &str) -> Self {
-        self.definition.extra = Some(sql.to_string());
+        self.definition().extra = Some(sql.to_string());
         self
     }
 }
 
-impl<'a> Drop for ColumnBuilder<'a> {
+impl<T> Drop for ColumnBuilder<'_, T> {
     fn drop(&mut self) {
-        let definition = std::mem::replace(
-            &mut self.definition,
-            ColumnDefinition {
-                name: String::new(),
-                column_type: ColumnType::String,
-                nullable: true,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-                unique: false,
-                check: None,
-                extra: None,
-            },
-        );
-        if !definition.name.is_empty() {
-            self.table.columns.push(definition);
+        if let Some(definition) = self.definition.take() {
+            (self.add)(self.target, definition);
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ColumnDefinition {
-    pub(super) name: String,
-    pub(super) column_type: ColumnType,
-    pub(super) nullable: bool,
-    pub(super) default: Option<String>,
-    pub(super) primary_key: bool,
-    pub(super) auto_increment: bool,
-    pub(super) unique: bool,
-    pub(super) check: Option<String>,
-    pub(super) extra: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct IndexBuilder {
-    pub(super) name: String,
-    pub(super) columns: Vec<String>,
-    pub(super) unique: bool,
 }

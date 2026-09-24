@@ -1,5 +1,5 @@
 /// Extra rendered context attached to query-oriented errors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ErrorContext {
     /// Table name, if known.
     pub table: Option<String>,
@@ -38,13 +38,7 @@ impl std::fmt::Display for ErrorContext {
 impl ErrorContext {
     /// Start building extra table, column, and query details for an error.
     pub fn new() -> Self {
-        Self {
-            table: None,
-            column: None,
-            conditions: Vec::new(),
-            operator_chain: None,
-            query: None,
-        }
+        Self::default()
     }
 
     /// Attach the table name involved in the failure.
@@ -81,11 +75,5 @@ impl ErrorContext {
     pub fn query(mut self, query: impl Into<String>) -> Self {
         self.query = Some(query.into());
         self
-    }
-}
-
-impl Default for ErrorContext {
-    fn default() -> Self {
-        Self::new()
     }
 }

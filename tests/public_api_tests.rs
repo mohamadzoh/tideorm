@@ -15,9 +15,6 @@ mod core;
 #[path = "public_api_tests/edge_cases.rs"]
 mod edge_cases;
 
-#[path = "public_api_tests/migration_and_builders.rs"]
-mod migration_and_builders;
-
 #[path = "public_api_tests/optional_features.rs"]
 mod optional_features;
 

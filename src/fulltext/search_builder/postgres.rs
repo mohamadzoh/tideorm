@@ -1,255 +1,181 @@
 use super::*;
-use crate::internal::sql_builder::SqlBuilder;
+
+const PG: DatabaseType = DatabaseType::Postgres;
 
 impl<T: Model> FullTextSearchBuilder<T> {
     pub(super) fn build_postgres_sql(&self) -> Result<(String, Vec<Value>)> {
-        let mut params = Vec::new();
-        let language_placeholder = crate::internal::push_param(
-            DatabaseType::Postgres,
-            &mut params,
-            Value::String(Some(
-                self.config
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "english".to_string()),
-            )),
-        );
-
-        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
-        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
-
-        let mut sql = SqlBuilder::new(DatabaseType::Postgres, &mut params)
-            .raw("SELECT * FROM ")
-            .ident(T::table_name())
-            .raw(" WHERE ")
-            .raw(&tsvector_expr)
-            .raw(" @@ ")
-            .raw(&tsquery_expr)
-            .into_sql();
-
         if self.with_ranking {
-            let weights_placeholder = self.pg_weights_placeholder(&mut params);
-            sql = SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                .raw("SELECT *, ts_rank_cd(CAST(")
-                .placeholder(&weights_placeholder)
-                .raw(" AS real[]), ")
-                .raw(&tsvector_expr)
-                .raw(", ")
-                .raw(&tsquery_expr)
-                .raw(") AS _fts_rank FROM ")
-                .ident(T::table_name())
-                .raw(" WHERE ")
-                .raw(&tsvector_expr)
-                .raw(" @@ ")
-                .raw(&tsquery_expr)
-                .raw(" ORDER BY _fts_rank DESC")
-                .into_sql();
+            return self.build_pg_ranked_sql(None);
         }
 
-        self.append_limit_offset(DatabaseType::Postgres, &mut sql, &mut params)?;
+        let mut params = Vec::new();
+        let predicate = self.pg_predicate(&mut params)?;
+        let mut sql = SqlBuilder::new(PG, &mut params)
+            .raw("SELECT ")
+            .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
+            .raw(" FROM ")
+            .raw(&crate::query::db_sql::quote_table::<T>(PG))
+            .raw(" WHERE ")
+            .raw(&predicate)
+            .into_sql();
+
+        self.append_limit_offset(PG, &mut sql, &mut params)?;
 
         Ok((sql, params))
     }
 
     pub(super) fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
-        let mut params = Vec::new();
-        let language_placeholder = crate::internal::push_param(
-            DatabaseType::Postgres,
-            &mut params,
-            Value::String(Some(
-                self.config
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "english".to_string()),
-            )),
-        );
-
-        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
-        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
-        let weights_placeholder = self.pg_weights_placeholder(&mut params);
-
-        let mut sql = SqlBuilder::new(DatabaseType::Postgres, &mut params)
-            .raw("SELECT *, ts_rank_cd(CAST(")
-            .placeholder(&weights_placeholder)
-            .raw(" AS real[]), ")
-            .raw(&tsvector_expr)
-            .raw(", ")
-            .raw(&tsquery_expr)
-            .raw(") AS _fts_rank FROM ")
-            .ident(T::table_name())
-            .raw(" WHERE ")
-            .raw(&tsvector_expr)
-            .raw(" @@ ")
-            .raw(&tsquery_expr)
-            .into_sql();
-
-        if let Some(min_rank) = self.min_rank {
-            let min_rank_placeholder = crate::internal::push_param(
-                DatabaseType::Postgres,
-                &mut params,
-                Value::Double(Some(min_rank)),
-            );
-            sql.push_str(" AND ts_rank_cd(CAST(");
-            sql.push_str(&weights_placeholder);
-            sql.push_str(" AS real[]), ");
-            sql.push_str(&tsvector_expr);
-            sql.push_str(", ");
-            sql.push_str(&tsquery_expr);
-            sql.push_str(") >= ");
-            sql.push_str(&min_rank_placeholder);
-        }
-
-        sql.push_str(" ORDER BY _fts_rank DESC");
-        self.append_limit_offset(DatabaseType::Postgres, &mut sql, &mut params)?;
-
-        Ok((sql, params))
+        self.build_pg_ranked_sql(self.min_rank)
     }
 
     pub(super) fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
         let mut params = Vec::new();
-        let language_placeholder = crate::internal::push_param(
-            DatabaseType::Postgres,
-            &mut params,
-            Value::String(Some(
-                self.config
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "english".to_string()),
-            )),
-        );
-
-        let tsvector_expr = self.build_pg_tsvector_expr(&language_placeholder);
-        let tsquery_expr = self.build_pg_tsquery_expr(&language_placeholder, &mut params);
-
-        let sql = SqlBuilder::new(DatabaseType::Postgres, &mut params)
+        let predicate = self.pg_predicate(&mut params)?;
+        let sql = SqlBuilder::new(PG, &mut params)
             .raw("SELECT COUNT(*) as count FROM ")
-            .ident(T::table_name())
+            .raw(&crate::query::db_sql::quote_table::<T>(PG))
             .raw(" WHERE ")
-            .raw(&tsvector_expr)
-            .raw(" @@ ")
-            .raw(&tsquery_expr)
+            .raw(&predicate)
             .into_sql();
 
         Ok((sql, params))
     }
 
-    fn build_pg_tsvector_expr(&self, language_placeholder: &str) -> String {
-        if self.columns.len() == 1 {
-            let mut params = Vec::new();
-            SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                .raw("to_tsvector(CAST(")
-                .placeholder(language_placeholder)
-                .raw(" AS regconfig), COALESCE(")
-                .ident(&self.columns[0])
-                .raw(", ''))")
-                .into_sql()
+    /// Every column plus its `_fts_rank`, best match first, leaving out rows
+    /// that score below `min_rank`.
+    fn build_pg_ranked_sql(&self, min_rank: Option<f64>) -> Result<(String, Vec<Value>)> {
+        let mut params = Vec::new();
+        let Some((tsvector, tsquery)) = self.pg_match_parts(&mut params)? else {
+            // No word to rank by, and no row to rank.
+            let sql = SqlBuilder::new(PG, &mut params)
+                .raw("SELECT ")
+                .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
+                .raw(", CAST(0 AS double precision) AS _fts_rank FROM ")
+                .raw(&crate::query::db_sql::quote_table::<T>(PG))
+                .raw(" WHERE ")
+                .raw(MATCH_NOTHING)
+                .into_sql();
+            return Ok((sql, params));
+        };
+        let weights = self.config.weights.clone().unwrap_or_default().pg_array();
+        let rank = SqlBuilder::new(PG, &mut params)
+            .raw("ts_rank_cd(CAST(")
+            .param(Value::String(Some(weights)))
+            .raw(" AS real[]), ")
+            .raw(&tsvector)
+            .raw(", ")
+            .raw(&tsquery)
+            .raw(")")
+            .into_sql();
+
+        // `ts_rank_cd` returns `real`, which does not decode as the `f64` rank.
+        let mut sql = SqlBuilder::new(PG, &mut params)
+            .raw("SELECT ")
+            .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
+            .raw(", CAST(")
+            .raw(&rank)
+            .raw(" AS double precision) AS _fts_rank FROM ")
+            .raw(&crate::query::db_sql::quote_table::<T>(PG))
+            .raw(" WHERE ")
+            .raw(&tsvector)
+            .raw(" @@ ")
+            .raw(&tsquery)
+            .into_sql();
+
+        if let Some(min_rank) = min_rank {
+            let threshold = push_param(PG, &mut params, Value::Double(Some(min_rank)));
+            sql.push_str(" AND ");
+            sql.push_str(&rank);
+            sql.push_str(" >= ");
+            sql.push_str(&threshold);
+        }
+
+        sql.push_str(" ORDER BY _fts_rank DESC");
+        self.append_limit_offset(PG, &mut sql, &mut params)?;
+
+        Ok((sql, params))
+    }
+
+    /// `tsvector @@ tsquery`, binding the query, or a predicate that matches
+    /// nothing when the search text holds no word, where `plainto_tsquery('')`
+    /// would read the whole table to match nothing.
+    fn pg_predicate(&self, params: &mut Vec<Value>) -> Result<String> {
+        Ok(match self.pg_match_parts(params)? {
+            Some((tsvector, tsquery)) => format!("{tsvector} @@ {tsquery}"),
+            None => MATCH_NOTHING.to_string(),
+        })
+    }
+
+    /// The `tsvector` and `tsquery` expressions, binding the query, or `None`
+    /// when the search text holds no word.
+    fn pg_match_parts(&self, params: &mut Vec<Value>) -> Result<Option<(String, String)>> {
+        if !self.has_search_terms() {
+            return Ok(None);
+        }
+        let language = self.pg_language()?;
+        let tsvector = format!(
+            "to_tsvector({language}, {})",
+            pg_search_document(&self.columns)
+        );
+        let tsquery = self.build_pg_tsquery_expr(&language, params);
+        Ok(Some((tsvector, tsquery)))
+    }
+
+    /// The text search configuration, written into the SQL as a constant.
+    ///
+    /// An index built by [`FullTextIndex`] names its configuration as a
+    /// constant, and only an expression naming the same constant can use it: a
+    /// bound configuration is cast when the statement runs, which the planner
+    /// cannot match to the index, so every search read the whole table. The
+    /// name is checked to be one, which keeps the constant safe to write.
+    fn pg_language(&self) -> Result<String> {
+        let language = self.config.language.as_deref().unwrap_or("english");
+        if language.split('.').all(is_safe_identifier_segment) {
+            Ok(format!("'{language}'"))
         } else {
-            let cols: Vec<String> = self
-                .columns
-                .iter()
-                .map(|c| {
-                    let mut params = Vec::new();
-                    SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                        .raw("COALESCE(")
-                        .ident(c)
-                        .raw(", '')")
-                        .into_sql()
-                })
-                .collect();
-            let mut params = Vec::new();
-            SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                .raw("to_tsvector(CAST(")
-                .placeholder(language_placeholder)
-                .raw(" AS regconfig), ")
-                .raw(&cols.join(" || ' ' || "))
-                .raw(")")
-                .into_sql()
+            Err(Error::invalid_query(format!(
+                "'{language}' is not a text search configuration name"
+            )))
         }
     }
 
-    fn build_pg_tsquery_expr(&self, language_placeholder: &str, params: &mut Vec<Value>) -> String {
-        match self.config.mode {
-            SearchMode::Natural => SqlBuilder::new(DatabaseType::Postgres, params)
-                .raw("plainto_tsquery(CAST(")
-                .placeholder(language_placeholder)
-                .raw(" AS regconfig), ")
-                .param(Value::String(Some(self.query.clone())))
-                .raw(")")
-                .into_sql(),
+    fn build_pg_tsquery_expr(&self, language: &str, params: &mut Vec<Value>) -> String {
+        let query = self.query_text();
+        let (function, text) = match self.config.mode {
+            SearchMode::Natural => ("plainto_tsquery", query),
+            SearchMode::Phrase => ("phraseto_tsquery", query),
             SearchMode::Boolean => {
-                let tsquery = sanitize_postgres_tsquery(&self.query, false);
-                let use_plain = tsquery.is_empty();
-                let value = if use_plain {
-                    self.query.clone()
-                } else {
-                    tsquery
-                };
-                SqlBuilder::new(DatabaseType::Postgres, params)
-                    .raw(if use_plain {
-                        "plainto_tsquery(CAST("
-                    } else {
-                        "to_tsquery(CAST("
-                    })
-                    .placeholder(language_placeholder)
-                    .raw(" AS regconfig), ")
-                    .param(Value::String(Some(value)))
-                    .raw(")")
-                    .into_sql()
+                let tsquery = sanitize_postgres_boolean_tsquery(&query);
+                Self::pg_to_tsquery(tsquery, query)
             }
-            SearchMode::Phrase => SqlBuilder::new(DatabaseType::Postgres, params)
-                .raw("phraseto_tsquery(CAST(")
-                .placeholder(language_placeholder)
-                .raw(" AS regconfig), ")
-                .param(Value::String(Some(self.query.clone())))
-                .raw(")")
-                .into_sql(),
             SearchMode::Prefix => {
-                let prefixed = sanitize_postgres_tsquery(&self.query, true);
-                let use_plain = prefixed.is_empty();
-                let value = if use_plain {
-                    self.query.clone()
-                } else {
-                    prefixed
-                };
-                SqlBuilder::new(DatabaseType::Postgres, params)
-                    .raw(if use_plain {
-                        "plainto_tsquery(CAST("
-                    } else {
-                        "to_tsquery(CAST("
-                    })
-                    .placeholder(language_placeholder)
-                    .raw(" AS regconfig), ")
-                    .param(Value::String(Some(value)))
-                    .raw(")")
-                    .into_sql()
+                let tsquery = sanitize_postgres_tsquery(&query, true);
+                Self::pg_to_tsquery(tsquery, query)
             }
-            SearchMode::Fuzzy => SqlBuilder::new(DatabaseType::Postgres, params)
-                .raw("plainto_tsquery(CAST(")
-                .placeholder(language_placeholder)
-                .raw(" AS regconfig), ")
-                .param(Value::String(Some(self.query.clone())))
-                .raw(")")
-                .into_sql(),
             SearchMode::Proximity(distance) => {
-                let proximity = sanitize_postgres_proximity_tsquery(&self.query, distance);
-                let use_plain = proximity.is_empty();
-                let value = if use_plain {
-                    self.query.clone()
-                } else {
-                    proximity
-                };
-                SqlBuilder::new(DatabaseType::Postgres, params)
-                    .raw(if use_plain {
-                        "plainto_tsquery(CAST("
-                    } else {
-                        "to_tsquery(CAST("
-                    })
-                    .placeholder(language_placeholder)
-                    .raw(" AS regconfig), ")
-                    .param(Value::String(Some(value)))
-                    .raw(")")
-                    .into_sql()
+                let tsquery = sanitize_postgres_proximity_tsquery(&query, distance);
+                Self::pg_to_tsquery(tsquery, query)
             }
+        };
+
+        SqlBuilder::new(PG, params)
+            .raw(function)
+            .raw("(")
+            .raw(language)
+            .raw(", ")
+            .param(Value::String(Some(text)))
+            .raw(")")
+            .into_sql()
+    }
+
+    /// Parse sanitized literal terms with `to_tsquery`, or fall back to
+    /// `plainto_tsquery` over the search text when sanitizing left no lexeme,
+    /// since `to_tsquery` rejects an empty query.
+    fn pg_to_tsquery(tsquery: String, text: String) -> (&'static str, String) {
+        if tsquery.is_empty() {
+            ("plainto_tsquery", text)
+        } else {
+            ("to_tsquery", tsquery)
         }
     }
 }

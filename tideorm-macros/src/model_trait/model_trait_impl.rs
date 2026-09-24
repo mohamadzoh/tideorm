@@ -8,54 +8,64 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_auto_increment = ctx.pk_auto_increment;
     let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
-    let field_names = &ctx.field_names;
-    let pk_contains_conflict_check = build_pk_conflict_check(ctx);
-    let pk_exclusion_check = build_pk_exclusion_check(ctx, quote!(column));
+    let field_idents = &ctx.field_idents;
+    let name_patterns = build_name_patterns(ctx);
+    let is_pk_column = build_is_pk_column(ctx, quote!(column));
     let encrypted_conflict_column_check = build_encrypted_conflict_column_check(ctx);
+    let pk_idents = &ctx.pk_idents;
+    // An upsert keys a nil `Uuid` key before copying the model it looks the
+    // row up by afterwards; the insert conversion would key only the insert.
+    let uuid_key_idents: Vec<_> = ctx
+        .db_fields
+        .iter()
+        .filter(|field| field.primary_key && field.is_uuid())
+        .map(|field| field.ident())
+        .collect();
+    let key_uuid_keys = (!uuid_key_idents.is_empty()).then(|| {
+        quote! {
+            let mut model = model;
+            #(model.#uuid_key_idents = ::tideorm::model::__uuid_key(model.#uuid_key_idents);)*
+        }
+    });
+    let managed_created_at_columns: Vec<String> = ctx
+        .db_fields
+        .iter()
+        .filter(|field| crate::meta_support::is_managed_created_at(field))
+        .map(|field| field.column_name())
+        .collect();
 
     // `find` and `find_with` share an identical primary-key lookup; they differ
     // only in how the connection is acquired. Interpolate that one expression so
     // the shared body — including the `__profile_future` wrapper — stays single-source.
+    // The connection is resolved before the profiled statement so a missing or
+    // unreachable database keeps its `Error::Connection` class. A key matches at
+    // most one row, so the lookup reads with `all()`: `one()` adds a bound
+    // `LIMIT`, which recent SQLite releases recompile the statement for on every run.
     let find_body = |connection_expr: TokenStream2| {
         quote! {
-            use ::tideorm::database::Connection;
-            use ::tideorm::internal::InternalModel;
             use ::tideorm::orm::{EntityTrait, QueryFilter};
-            let error_context = Self::__primary_key_error_context(&id)
-                .query(format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
-            let result = ::tideorm::profiling::__profile_future(async move {
-                let connection = #connection_expr;
-                match connection {
-                    ::tideorm::database::ConnectionRef::Database(conn) => {
-                        #internal_entity_mod::Entity::find()
-                            .filter(<Self as InternalModel>::primary_key_condition(&id))
-                            .one(conn.connection())
-                            .await
-                    }
-                    ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                        #internal_entity_mod::Entity::find()
-                            .filter(<Self as InternalModel>::primary_key_condition(&id))
-                            .one(tx.as_ref())
-                            .await
-                    }
-                }
-            })
+            let error_context = || ::tideorm::internal::primary_key_error_context::<Self>(
+                &id,
+                format!("find({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)),
+            );
+            let connection = #connection_expr;
+            let rows = ::tideorm::profiling::__profile_future(
+                #internal_entity_mod::Entity::find()
+                    .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
+                    .all(&connection.executor()),
+            )
                 .await
                 .map_err(::tideorm::Error::from)
-                .map_err(|err| err.with_context(error_context))?;
-            result
-                .map(<Self as InternalModel>::try_from_entity_model)
+                .map_err(|err| err.with_context(error_context()))?;
+            rows.into_iter()
+                .next()
+                .map(<Self as ::tideorm::internal::InternalModel>::try_from_entity_model)
                 .transpose()
         }
     };
-    let find_impl = find_body(quote! {
-        ::tideorm::database::__current_connection()
-            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?
-    });
-    let find_with_impl = find_body(quote! {
-        db.__get_connection()
-            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?
-    });
+    let ensure_fields_storable = ctx.ensure_fields_storable();
+    let find_impl = find_body(quote! { ::tideorm::database::__current_connection()? });
+    let find_with_impl = find_body(quote! { db.__get_connection()? });
 
     quote! {
         #[::tideorm::async_trait::async_trait]
@@ -76,16 +86,12 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
-                use ::tideorm::database::Connection;
                 use ::tideorm::orm::{EntityTrait, QueryFilter};
                 use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
-                let error_context = Self::__primary_key_error_context(&id)
-                    .query(format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)));
-                let dirty_tracking_id = if ::tideorm::model::__dirty_tracking_enabled() {
-                    Some(id.clone())
-                } else {
-                    None
-                };
+                let error_context = || ::tideorm::internal::primary_key_error_context::<Self>(
+                    &id,
+                    format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)),
+                );
                 // Load the row first so `destroy(id)` runs the same delete callbacks as
                 // `delete(self)`; a `before_delete` guard must hold on both entry points.
                 let model = match <Self as ::tideorm::model::Model>::find(id.clone()).await? {
@@ -93,46 +99,29 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     None => return Ok(0),
                 };
                 (&model).run_before_delete()?;
-                let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = ::tideorm::database::__current_connection()
-                        .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                    match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::delete_many()
-                                .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
-                                .exec(conn.connection())
-                                .await
-                        }
-                        ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::delete_many()
-                                .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
-                                .exec(tx.as_ref())
-                                .await
-                        }
-                    }
-                })
+                let connection = ::tideorm::database::__current_connection()?;
+                let result = ::tideorm::profiling::__profile_future(
+                    #internal_entity_mod::Entity::delete_many()
+                        .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
+                        .exec(&connection.executor()),
+                )
                     .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
+                    .map_err(|err| err.with_context(error_context()))?;
                 if result.rows_affected > 0 {
                     ::tideorm::QueryCache::global().invalidate_model(#table_name);
-                    if let Some(dirty_tracking_id) = dirty_tracking_id.as_ref() {
-                        let _ = ::tideorm::model::__forget_dirty_snapshot_by_pk::<Self>(dirty_tracking_id);
-                    }
+                    ::tideorm::model::__forget_dirty_snapshot_by_pk::<Self>(&id);
                 }
                 (&model).run_after_delete()?;
                 Ok(result.rows_affected)
             }
 
             async fn create(model: Self) -> ::tideorm::Result<Self> {
-                use ::tideorm::database::Connection;
                 use ::tideorm::callbacks::{
                     AfterCreateDispatch, AfterValidationDispatch, BeforeCreateOnlyDispatch,
                     BeforeSaveDispatch, BeforeValidationDispatch,
                 };
-                use ::tideorm::internal::InternalModel;
                 use ::tideorm::orm::ActiveModelTrait;
-                use ::tideorm::validation::Validate;
                 let mut model = model;
                 (&mut model).run_before_validation()?;
                 ::tideorm::validation::Validate::validate(&model)
@@ -140,53 +129,46 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&model).run_after_validation()?;
                 (&mut model).run_before_save()?;
                 (&mut model).run_before_create_only()?;
-                let error_context = Self::__base_error_context().query(format!("insert into {}", #table_name));
-                let active = <Self as InternalModel>::try_into_active_model(model)?;
-                let result = ::tideorm::profiling::__profile_future(
-                    async move {
-                        let connection = ::tideorm::database::__current_connection()
-                            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                        match connection {
-                            ::tideorm::database::ConnectionRef::Database(conn) => active.insert(conn.connection()).await,
-                            ::tideorm::database::ConnectionRef::Transaction(tx) => active.insert(tx.as_ref()).await,
-                        }
-                    }
-                )
+                let error_context = || ::tideorm::internal::model_error_context::<Self>(
+                    format!("insert into {}", #table_name),
+                );
+                let active = <Self as ::tideorm::internal::InternalModel>::try_into_active_model(model)?;
+                let connection = ::tideorm::database::__current_connection()?;
+                #ensure_fields_storable
+                let result = ::tideorm::profiling::__profile_future(active.insert(&connection.executor()))
                     .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
-                let model = <Self as InternalModel>::try_from_entity_model(result)?;
+                    .map_err(|err| err.with_context(error_context()))?;
+                let model = <Self as ::tideorm::internal::InternalModel>::try_from_entity_model(result)?;
                 ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_create()?;
                 Ok(model)
             }
 
             async fn delete(self) -> ::tideorm::Result<u64> {
-                use ::tideorm::database::Connection;
-                use ::tideorm::orm::ActiveModelTrait;
+                use ::tideorm::orm::{EntityTrait, QueryFilter};
                 use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
                 let model = self;
                 (&model).run_before_delete()?;
                 let primary_key = model.primary_key();
-                let error_context = Self::__primary_key_error_context(&primary_key)
-                    .query(format!("delete where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));
-                let active = model.clone().__into_delete_active_model();
-                let result = ::tideorm::profiling::__profile_future(async move {
-                    let connection = ::tideorm::database::__current_connection()
-                        .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                    match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => active.delete(conn.connection()).await,
-                        ::tideorm::database::ConnectionRef::Transaction(tx) => active.delete(tx.as_ref()).await,
-                    }
-                })
+                let error_context = || ::tideorm::internal::primary_key_error_context::<Self>(
+                    &primary_key,
+                    format!("delete where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)),
+                );
+                let connection = ::tideorm::database::__current_connection()?;
+                // The key condition binds a `u64` past `i64::MAX` as a decimal,
+                // where the model's own value would panic the driver.
+                let result = ::tideorm::profiling::__profile_future(
+                    #internal_entity_mod::Entity::delete_many()
+                        .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&primary_key))
+                        .exec(&connection.executor()),
+                )
                     .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
+                    .map_err(|err| err.with_context(error_context()))?;
                 if result.rows_affected > 0 {
                     ::tideorm::QueryCache::global().invalidate_model(#table_name);
-                    if ::tideorm::model::__dirty_tracking_enabled() {
-                        let _ = ::tideorm::model::__forget_dirty_snapshot(&model);
-                    }
+                    ::tideorm::model::__forget_dirty_snapshot(&model);
                 }
                 (&model).run_after_delete()?;
                 Ok(result.rows_affected)
@@ -213,14 +195,11 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn update(self) -> ::tideorm::Result<Self> {
-                use ::tideorm::database::Connection;
                 use ::tideorm::callbacks::{
                     AfterUpdateDispatch, AfterValidationDispatch, BeforeSaveDispatch,
                     BeforeUpdateOnlyDispatch, BeforeValidationDispatch,
                 };
-                use ::tideorm::internal::InternalModel;
                 use ::tideorm::orm::ActiveModelTrait;
-                use ::tideorm::validation::Validate;
                 let mut model = self;
                 (&mut model).run_before_validation()?;
                 ::tideorm::validation::Validate::validate(&model)
@@ -229,23 +208,18 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&mut model).run_before_save()?;
                 (&mut model).run_before_update_only()?;
                 let primary_key = model.primary_key();
-                let error_context = Self::__primary_key_error_context(&primary_key)
-                    .query(format!("update where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)));
+                let error_context = || ::tideorm::internal::primary_key_error_context::<Self>(
+                    &primary_key,
+                    format!("update where {}", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)),
+                );
                 let active = model.__into_update_active_model()?;
-                let result = ::tideorm::profiling::__profile_future(
-                    async move {
-                        let connection = ::tideorm::database::__current_connection()
-                            .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                        match connection {
-                            ::tideorm::database::ConnectionRef::Database(conn) => active.update(conn.connection()).await,
-                            ::tideorm::database::ConnectionRef::Transaction(tx) => active.update(tx.as_ref()).await,
-                        }
-                    }
-                )
+                let connection = ::tideorm::database::__current_connection()?;
+                #ensure_fields_storable
+                let result = ::tideorm::profiling::__profile_future(active.update(&connection.executor()))
                     .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
-                let model = <Self as InternalModel>::try_from_entity_model(result)?;
+                    .map_err(|err| err.with_context(error_context()))?;
+                let model = <Self as ::tideorm::internal::InternalModel>::try_from_entity_model(result)?;
                 ::tideorm::QueryCache::global().invalidate_model(#table_name);
                 (&model).run_after_update()?;
                 Ok(model)
@@ -261,15 +235,17 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 model: Self,
                 builder: ::tideorm::model::OnConflictBuilder<Self>,
             ) -> ::tideorm::Result<Self> {
-                use ::tideorm::database::Connection;
                 use ::tideorm::internal::InternalModel;
-                use ::tideorm::orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter};
+                use ::tideorm::orm::{ColumnTrait, EntityTrait, QueryFilter};
                 use ::tideorm::orm::sea_query::OnConflict;
 
+                ::tideorm::validation::Validate::validate(&model)
+                    .map_err(::tideorm::Error::from)?;
+                #key_uuid_keys
                 let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
                 #encrypted_conflict_column_check
-                let include_pk = #pk_contains_conflict_check || !#pk_auto_increment;
+                let include_pk = conflict_cols.iter().any(|column| #is_pk_column) || !#pk_auto_increment;
                 let insertable_columns: Vec<&str> = vec![#(#column_names),*]
                     .into_iter()
                     .filter(|column| !(*column == <Self as ::tideorm::model::ModelMeta>::primary_key_name() && #pk_auto_increment && !include_pk))
@@ -286,18 +262,25 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                         })
                     })
                     .collect::<::tideorm::Result<Vec<_>>>()?;
+                // Unless named explicitly, a managed `created_at` keeps the stored
+                // row's creation time when the insert turns into an update.
+                let managed_created_at: &[&str] = &[#(#managed_created_at_columns),*];
                 let update_cols: Vec<String> = if let Some(cols) = builder.update_columns {
                     cols
                 } else if let Some(exclude) = builder.exclude_columns {
                     insertable_columns
                         .iter()
-                        .filter(|column| !exclude.contains(&column.to_string()))
+                        .filter(|column| {
+                            !exclude.contains(&column.to_string()) && !managed_created_at.contains(column)
+                        })
                         .map(|column| column.to_string())
                         .collect()
                 } else {
                     insertable_columns.iter().filter(|column| {
-                        let column = column.to_string();
-                        !conflict_cols.contains(&column) && !#pk_exclusion_check
+                        !managed_created_at.contains(column) && {
+                            let column = column.to_string();
+                            !conflict_cols.contains(&column) && !#is_pk_column
+                        }
                     }).map(|column| column.to_string()).collect()
                 };
                 let update_columns: Vec<_> = update_cols
@@ -323,47 +306,35 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                         .to_owned()
                 };
 
-                let sql = format!(
+                let error_context = || ::tideorm::internal::model_error_context::<Self>(format!(
                     "insert_or_update into {} on conflict ({})",
                     #table_name,
                     conflict_cols.join(", ")
-                );
-                let error_context = Self::__base_error_context().query(sql.clone());
+                ));
 
-                let entity_model = <Self as InternalModel>::try_to_entity_model(&model)?;
-                let active_model = if include_pk {
-                    entity_model.into_active_model()
-                } else {
-                    <Self as InternalModel>::try_into_active_model(model)?
-                };
+                // The insert half stamps managed timestamps like `create()` does; a
+                // conflict on the key needs the key in the insert as well.
+                let mut active_model = <Self as InternalModel>::try_into_active_model(model)?;
+                if include_pk && #pk_auto_increment {
+                    #(active_model.#pk_idents = ::tideorm::orm::ActiveValue::Set(model_for_lookup.#pk_idents.clone());)*
+                }
 
-                ::tideorm::profiling::__profile_future(async move {
-                    let connection = ::tideorm::database::__current_connection()
-                        .map_err(|error| ::tideorm::orm::OrmError::Custom(error.to_string()))?;
-                    match connection {
-                        ::tideorm::database::ConnectionRef::Database(conn) => {
-                            #internal_entity_mod::Entity::insert(active_model)
-                                .on_conflict(on_conflict)
-                                .exec(conn.connection())
-                                .await
-                        }
-                        ::tideorm::database::ConnectionRef::Transaction(tx) => {
-                            #internal_entity_mod::Entity::insert(active_model)
-                                .on_conflict(on_conflict)
-                                .exec(tx.as_ref())
-                                .await
-                        }
-                    }
-                })
+                let connection = ::tideorm::database::__current_connection()?;
+                #ensure_fields_storable
+                ::tideorm::profiling::__profile_future(
+                    #internal_entity_mod::Entity::insert(active_model)
+                        .on_conflict(on_conflict)
+                        .exec(&connection.executor()),
+                )
                     .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context.clone()))?;
+                    .map_err(|err| err.with_context(error_context()))?;
                 ::tideorm::QueryCache::global().invalidate_model(#table_name);
 
                 let mut finder = #internal_entity_mod::Entity::find();
                 for conflict_column in &conflict_cols {
                     finder = match conflict_column.as_str() {
-                        #(#column_names | stringify!(#field_names) => finder.filter(#internal_entity_mod::Column::#column_variants.eq(model_for_lookup.#field_names.clone())),)*
+                        #(#name_patterns => finder.filter(#internal_entity_mod::Column::#column_variants.eq(model_for_lookup.#field_idents.clone())),)*
                         _ => {
                             return Err(::tideorm::Error::invalid_query(format!(
                                 "unknown conflict column '{}' for {}",
@@ -374,15 +345,15 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     };
                 }
 
-                let result = match ::tideorm::database::__current_connection()? {
-                    ::tideorm::database::ConnectionRef::Database(conn) => finder.one(conn.connection()).await,
-                    ::tideorm::database::ConnectionRef::Transaction(tx) => finder.one(tx.as_ref()).await,
-                }
+                // MySQL accepts conflict columns no unique key covers, so this
+                // reads one row, with a literal `LIMIT 1` rather than `one()`'s
+                // bound one.
+                let row = ::tideorm::internal::first_row(finder, &connection.executor())
+                    .await
                     .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context))?;
+                    .map_err(|err| err.with_context(error_context()))?;
 
-                result
-                    .map(<Self as InternalModel>::try_from_entity_model)
+                row.map(<Self as InternalModel>::try_from_entity_model)
                     .transpose()?
                     .ok_or_else(|| ::tideorm::Error::query("upsert completed but no matching row could be reloaded".to_string()))
             }

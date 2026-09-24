@@ -5,7 +5,502 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-09-24
+
+A second repository-wide cleanup. Dead, duplicated and misleading code was removed, unused public
+API was deleted outright rather than deprecated, and the defects the audit turned up are fixed.
+This release is breaking: read the upgrade notes and the removal list before upgrading.
+
+### Upgrading — Action Required
+
+- **Query-level `or_where_*` calls now form one OR group.** They used to push one single-condition
+  group per call, and groups are ANDed, so `.or_where_gt("price", 1000).or_where_lt("price", 50)`
+  rendered `price > 1000 AND price < 50` and matched nothing. Every `or_where_*` call on a query now
+  joins the same OR group, which is ANDed with the rest of the query — the model
+  `BatchUpdateBuilder` already used. `.where_x(a).or_where_y(b)` therefore means `a AND (b)`; put
+  both alternatives in `or_where_*`, or use `or_where(|g| ..)` / `begin_or()`, for `a OR b`.
+- **`#[validate(custom = "..")]` is a compile error.** It compiled to a marker nothing evaluated,
+  so it accepted every value. Put model-level checks in `Callbacks::before_validation` or
+  `Callbacks::after_validation` and return `Err(Error::validation(field, message))`.
+- **`#[validate]` rules on a `#[tideorm(skip)]` field run, and on a relation field are a compile
+  error.** Both were never read. A loaded model holds a skip field's `Default`, so give a field
+  with rules an `Option` type: `None` passes every rule except `required`.
+- **Relation declarations are checked against the wrapper type.** The relation kind now comes from
+  the field's wrapper (`HasOne<T>`, `HasMany<T>`, ...). A kind attribute that disagrees with the
+  wrapper, or a missing `foreign_key` on `HasOne`/`HasMany`/`BelongsTo`, is a compile error; a
+  `HasOne<T>` field without a kind attribute used to be silently left unwired.
+- **`MorphOne`, `MorphMany`, `SelfRef` and `SelfRefMany` prefer the database.** Like the direct
+  wrappers, `load()` now queries whenever a connection is reachable and serves its cache only
+  without one, so a payload deserialized from a request body is never reported as stored rows.
+  Read an eager-loaded value with `get_cached()`.
+- **`connect()` fails when the MySQL/MariaDB version probe fails** instead of silently assuming
+  MySQL.
+- **`BatchUpdateBuilder::execute_returning()` on MySQL and MariaDB returns
+  `Error::BackendNotSupported`** (501) before anything runs, instead of a generic query error on
+  MySQL and a syntax error on MariaDB, which has `UPDATE .. RETURNING` only from 13.0.
+  `DatabaseType::MariaDB.supports_returning()` is `false` accordingly.
+- **`CacheConfig` has a new `max_size_bytes` field**, so struct literals must set it (or end with
+  `..CacheConfig::default()`).
+- **`HighlightConfig` has a new `escape_html` field**, `true` by default: the record's text is
+  HTML-escaped around the tags, so a stored `<script>` reaches the page as text. Struct literals
+  must set it; set it `false` for tags that are not HTML.
+- **A PostgreSQL full-text `language` must be a text search configuration name.** It is written
+  into the statement as a constant, as `FullTextIndex` writes it into the index, so that searches
+  can use the index at all; a name with other characters is refused.
+- **Log lines use one prefix, `[TideORM]`** (query logs previously used `[TIDE]`).
+- **`ModelMeta::field_names()` drops the `r#` of raw identifiers**, matching serde.
+- Hand-written `InternalModel` implementations must implement `try_from_entity_model`; the
+  infallible `from_entity_model` is gone. Generated models are unaffected.
+- **`select()` and the column of every `where_*` take identifiers only.** `select()` accepts a
+  column, `table.column`, `column AS alias`, `*` or `table.*`; a filter column, including a batch
+  update's, is a column or `table.column`. Both slots were spliced in verbatim, so
+  `where_eq("1=1 OR name", x)` matched every row and `select(vec!["(SELECT password FROM users
+  LIMIT 1)"])` read another table. Move SQL expressions to `select_raw()` / `where_raw()`.
+- **`get()` refuses a `select()` that leaves model columns out.** An unselected `Option` column
+  decoded as `None`, and saving that model wrote the `None` back over the stored value. Read a
+  partial row with `get_json()`, or select every column.
+- **A `None` in an `IN` list means NULL.** `where_in(col, [a, None])` also matches NULL rows, and
+  `where_not_in(col, [a, None])` keeps the non-NULL rows other than `a`. Taken literally,
+  `IN (.., NULL)` never matched a NULL and `NOT IN (.., NULL)` matched nothing at all. A
+  `where_not_in` of NULLs alone keeps every row of a `NOT NULL` column, so like an empty one it
+  counts as no filter for `delete()` and `update_all()`.
+- **`insert_all()` and upserts validate.** They wrote models that failed their `#[validate]`
+  rules; the batch is now refused before anything is written, naming the failing model's position.
+  Callbacks still do not run on those paths. `Validate` is a supertrait of `Model` for this;
+  generated models implement it already, a hand-written `Model` impl needs one.
+- **`NaiveDateTime` timestamps are managed.** A `created_at`/`updated_at` field of that type was
+  written as the caller left it — `1970-01-01 00:00:00` for a default-constructed model, even on a
+  `timestamps_naive()` table. It is set to the current UTC time like a `DateTime<Utc>` one, so a
+  value set by hand is replaced.
+- **A managed `created_at` is written once.** `update()` no longer writes it, and an upsert that
+  finds the row already there keeps it unless `update_columns` names it. Code that changed a
+  creation time through either should use `update_all().set("created_at", ..)`.
+- **`get_json()` and `Database::raw_json` decode by declared type.** Text comes back verbatim:
+  PostgreSQL and MySQL rows had numeric-looking text rewritten (`"00123"` became `"123"`, `"1e3"`
+  became `1000.0`, `"null"` became `null`). `BYTEA`, MySQL `BLOB`/`BINARY` and PostgreSQL arrays,
+  which came back `null`, are arrays; MySQL unsigned integers — every `ROW_NUMBER()` and `RANK()`
+  value — are numbers instead of strings. `get_json()` returns a model's own columns as the
+  model's JSON has them on every backend, so SQLite booleans, JSON and timestamps no longer arrive
+  in storage form; raw SQL, which has no model, still reports what the database stores. MariaDB
+  declares a JSON column as text, so raw SQL returns its text, which used to be parsed.
+
+### Removed — Breaking
+
+- **Query builder:** `QueryBuilder::{cache_with_options, begin_or_where_eq, begin_or_where_gt,
+  begin_or_where_gte, begin_or_where_lt, begin_or_where_lte, begin_or_where_like,
+  begin_or_where_contains, begin_or_where_starts_with, begin_or_where_ends_with, begin_or_where_in,
+  begin_or_where_null, begin_or_where_not_null, begin_or_where_between, having_count_gte,
+  having_count_lt, having_count_lte, group_by_columns, left_join_as, right_join, right_join_as,
+  where_column_raw, where_json_path_not_exists, has_no_related, without_trashed, running_avg,
+  last_value}` (use `begin_or().or_where_*()` and the general helpers);
+  `OrBranchBuilder::{branch_count, total_conditions}`; `query::OrBranch` (an AND-combined
+  `OrGroup` now); `AggregateFunction`; `columns::ColumnOperator` (`ColumnCondition.operator` is a
+  `query::Operator`); `WindowFunctionType::as_sql`, `WindowFunction::to_sql`, `CTE::to_sql`;
+  `Operator::{SubqueryIn, SubqueryNotIn, ArrayContainsAny, ArrayContainsAll}`,
+  `ConditionValue::Subquery` and the `RawExprWithValues.preview_sql` field.
+- **Models and types:** `types::{Castable, CastType, CastValue}`; `model::{CreateBuilder,
+  UpdateBuilder}`; `IndexDefinition::parse`; `ModelMeta::{default_presenter, all_indexes,
+  has_indexes}`; `Model::{db, database, extract_translations, extract_files,
+  process_file_for_json}`; the ignored `"presenter"` option of `to_json`; `UnixTimestamp` /
+  `UnixTimestampMillis` `is_past`, `is_future`, `From<i64>` and the public tuple field.
+- **Validation and callbacks:** `ValidationRule::{Confirmed, Custom}`, `ValidationBuilder::custom`,
+  `ValidationErrors::into_error`, `Validate::{validate_all, custom_validations, validation_rules}`;
+  `CallbackRunner::{run_create_callbacks, run_update_callbacks}` and the unused
+  `BeforeCreateDispatch`/`BeforeUpdateDispatch`.
+- **Relations and the entity manager:** `relations::{RelationInfo, RelationType,
+  RelationConstraints, MorphResult, MorphResult3, MorphResult4, WithPivot}`;
+  `RelationPath::{full_path, is_nested, depth}`; `RelationTree::has_nested`;
+  `EagerQueryBuilder::get_relation_tree`; `WithRelations::with_relation`;
+  `EagerLoadExt::with_relation`; `HasManyThrough::{items, current_keys, related_table}`;
+  `HasOne::{with_entity_manager, current_key, child_table}`; `BelongsTo::with_entity_manager`;
+  `MorphTo::{get_cached, set_cached}`; `TrackedHasMany::{items, child_table}`; the third
+  (`related_table`) argument of `with_metadata`.
+- **Errors and configuration:** `Error::InsertReturningNotSupported` and
+  `Error::{insert_returning_not_supported, not_found_with_context, is_not_found,
+  is_connection_error, is_validation_error, is_query_error, is_transaction_error,
+  is_configuration_error, is_backend_not_supported, is_primary_key_not_set,
+  is_insert_returning_not_supported, is_unique_violation, is_not_null_violation,
+  is_check_violation, is_constraint_violation}` (match the variant, or use `failure_kind()` /
+  `sqlstate()`); `config::{RegisterMigrations, RegisterSeeds}` and `TideConfig::{migrations, seeds,
+  soft_delete_by_default, db, try_db, is_postgres, is_mysql, is_mariadb, is_mysql_compatible,
+  is_sqlite, current, pool_config, write_schema_with_generator, write_schema_sql}`;
+  `Config::{new, is_soft_delete_default, get_file_base_url}` and the `soft_delete_by_default`
+  field (it was never read); `DatabaseType::{supports_native_json_operators,
+  supports_fulltext_search, supports_schemas, is_mysql_compatible, default_port, url_scheme}`.
+- **Database handle:** the `database::Connection` trait, `Database::try_global` (use `try_db`),
+  `Transaction::__internal_transaction` (use `connection()`), `database::__current_backend`.
+- **Migrations, schema and sync:** `SyncRegistry::{register_entity, build_schema_builder,
+  entity_count}`, `sync::{EntityRegistrationFn, normalize_rust_type}`, `schema::rust_type_to_sql`;
+  `SchemaWriter::{register_schema, get_registered_schemas, clear_registry, write_schema_from_db}`;
+  the 18 typed `TableSchemaBuilder` helpers (`bigint` through `double`) — use
+  `.column(ColumnSchema::new(..))`; `TableSchema.primary_key`; `AlterTableBuilder::{add_index,
+  drop_index}` (use `Schema::create_index` / `drop_index`); `Schema::{rename_table,
+  database_type}`; `TableBuilder::index_named`; `MigrationResult::has_rolled_back`;
+  `SeedResult::{has_rolled_back, total}`; `ModelSchema::columns`;
+  `Migrator::migrations_table_name`; the public `CompositePrimaryKey` / `UniqueConstraint`;
+  `RegisterModels` for tuples longer than 16. The `schema-sync` SeaORM feature is no longer
+  enabled, so `sea-schema` is no longer compiled.
+- **Full text, cache, logging, profiling, attachments, translations:**
+  `FullTextSearch::search_highlighted` and `FullTextSearchBuilder::{with_highlights,
+  highlight_config}` (they never produced highlights); `CacheOptions::{key, with_key}` and
+  `QueryCache::set_key_prefix`; `QueryLogger::{log_timed, log_error, init_from_env}` (the
+  environment is read on first use now); `QueryDebugInfo::{with_operation, with_params}`;
+  `QueryOperation::Raw`; `QueryTimer::stop`; `QueryStats::{total_time_ms, threshold_ms,
+  avg_query_time_ms, slow_query_percentage}` in favour of `total_time_ns`, `slow_threshold_ms`,
+  `total_time()`, `avg_query_time()` and `slow_percentage()`; `AttachmentError::{ParseError,
+  NotSupported}` and `TranslationError::NotSupported`; `SoftDelete::deleted_at_column` (use
+  `ModelMeta::deleted_at_column`); `Tokenizable::tokenization_enabled`.
+- **Full text:** `SearchMode::Fuzzy`, which searched exactly like `Natural`: no backend has a fuzzy
+  match TideORM could rely on. Use `SearchMode::Natural`.
+
+### Added
+
+- **`QueryBuilder::lock_for_update()`** renders `SELECT ... FOR UPDATE` on PostgreSQL, MySQL and
+  MariaDB, so a read-check-write inside a transaction can lock the rows it is about to change.
+  Without it two concurrent transactions read the same row and the last `update()` wins: two
+  orders of 3 against a stock of 4 both shipped. `count()`, `exists()` and the aggregates lock the
+  rows they read too, a locked read never uses the query cache, and fragments keep the lock.
+  SQLite has no row locks and renders nothing: the first write of a transaction locks the whole
+  database, so the second of two competing transactions fails with a retryable
+  `LockNotAvailable` error instead.
+- **`QueryBuilder::aggregates(&[Aggregate::count(), Aggregate::sum("amount"), ..])`** computes
+  several aggregates over the same rows in one statement and returns them in order, where five
+  metrics used to take five queries.
+- **`SortOrder`**, the `Order` enum under a second name, for a crate whose own `Order` type (an
+  `Order` model) shadows the prelude's.
+- **`t.string_with(name, length)` and `ColumnType::Varchar(n)`** declare a `VARCHAR(n)` column;
+  `t.string` stays `VARCHAR(255)`.
+- **Full text:** `highlight(HighlightConfig)` marks the whole-word matches in each `get_ranked()`
+  result's searched columns, filling `SearchResult::highlights`, and `stop_words`,
+  `min_word_length` and `max_word_length` leave terms out of the search text on every backend,
+  leaving quoted phrases as written. All of these existed and did nothing.
+- **`Seeder::names()`** lists the seeds a seeder holds without a database, so a seed name can be
+  checked before anything runs; the CLI checks `--seeder` against it before dropping tables.
+
+### Fixed
+
+- **Queries.** `debug()` and `build_sql_preview()` came from a second, hand-written renderer that
+  had drifted from the executed SQL (`eq_any` previewed as `= ANY(ARRAY[..])` but ran as `IN (..)`,
+  union and CTE operands showed bare placeholders); the preview is now the executed statement with
+  its values inlined. `select_subquery` executed display-only SQL with inlined literals rendered for
+  the subquery's backend; it binds parameters now. The typed `count_distinct`/aggregate path
+  dropped conditions it could not render — aggregating over more rows than asked — skipped query
+  logging, and returned `0` for a count it could not decode. The batch-update OR guard accepted a
+  group with a vacuous member.
+- **Models.** An invalid `#[validate(regex = "..")]` pattern accepted every value; it now fails
+  validation naming the pattern. `ValidationRule::Confirmed` passed any value. `update_with_one`,
+  `update_with_many` and `delete_with_many` were not atomic; they run in a transaction like
+  `save_with_*`. `to_json` put a hidden field back when it was also translatable. Raw-identifier
+  fields such as `r#type` broke builders and `#[validate]`. The soft-delete column check rejected
+  qualified `Option`/`chrono` spellings, and `Vec<DateTime<Utc>>` was treated as a timestamp
+  column. `Model::deleted_at_column()` was ambiguous (E0034) with the prelude in scope. A failed
+  dirty-tracking bookkeeping step was silently discarded; it is logged now.
+- **Connection errors.** Generated `find`/`create`/`update`/`delete`/upsert reported a missing or
+  unreachable database as `Error::Internal`; it is `Error::Connection` again. Connect and ping
+  failures keep their SQLSTATE and source chain, and a failed rollback after a failed transaction
+  closure is logged instead of swallowed. The "not initialized" error now tells you to initialize
+  the connection instead of suggesting the URL is malformed.
+- **Relations and the entity manager.** The eager-cache branches of `HasOne`, `BelongsTo` and
+  `HasManyThrough` `load_in_entity_manager` overwrote the tracked instance with a possibly stale
+  copy — the bug 0.10.0 fixed only for `TrackedHasMany`. `em.load` on a `HasManyThrough` returned
+  duplicate rows for duplicate pivot links. `TrackedHasMany` kept two copies of its rows, so edits
+  through `as_mut()` were invisible to `load()` without a connection. `SelfRef`/`SelfRefMany` (and
+  now `MorphOne`/`MorphMany`) served deserialized payloads as stored rows. Rebuilding a `MorphTo`
+  overwrote the discriminator and id just read from its columns. `attach` ignored the ambient
+  transaction. `RelationPath::parse("")` produced an empty relation name. Each bad relation key
+  was reported twice at compile time, and `MorphTo` targets were forced to implement
+  `InternalModel`.
+- **Migrations, schema and seeding.** Seeder priority was ignored for seeds that became ready
+  after their dependencies (a FIFO queue behind a comment promising a heap). Schema sync rendered
+  different DDL from migrations (`IDENTITY`/`AUTOINCREMENT` versus `BIGSERIAL`); both use one
+  renderer now. `SchemaWriter` exported indexes in random order, collapsed composite primary keys
+  to their first column, turned catalog decode failures into empty strings, used the configured
+  instead of the connected backend, and exported SQLite auto-indexes under names SQLite rejects.
+  Thirty-one database errors in the migrator, schema writer, seeder and sync were stringified,
+  losing their SQLSTATE; they keep it now, with the SQL as context. `Schema::execute` joins the
+  ambient transaction and flushes the query cache after DDL.
+- **Full text.** `get`/`get_ranked`/`first`/`count` required `T: FromQueryResult`, which generated
+  models do not implement, so they could not be called on a model at all; rows that failed to
+  decode were dropped and undecodable ranks and counts became `0`. PostgreSQL's `real` rank was
+  never decoded (always `0.0`), and MySQL bound the query and the `min_rank` threshold in swapped
+  positions.
+- **Logging, profiling and cache.** `TIDE_LOG_LEVEL` and `TIDE_SLOW_QUERY_MS` were never read, and
+  `TIDE_LOG_QUERIES=false` turned query logging *on*. `tide_debug!` printed unconditionally and the
+  internal macros ignored the logger level. `LogLevel::Info` behaved exactly like `Warn`.
+  `QueryLoggerBuilder::disable()` discarded the builder's other settings. Query-time statistics
+  truncated sub-millisecond queries to zero, the analyzer's id-versus-string check could never
+  match, the profile report ignored the configured slow threshold, and the prepared-statement
+  cache's entry count went stale.
+- **Typed filter values.** Filter, batch-update and relation values travel as JSON, where a UUID,
+  a timestamp or a decimal is a string. Bound as text, `where_eq("id", uuid)` failed on PostgreSQL
+  (`uuid = text`) and matched nothing on SQLite and MySQL, which store a UUID as 16 bytes; the same
+  broke `HasManyThrough` and eager loads on UUID keys. Values are bound as their column's type, and
+  every `where_*`, `set()`, `attach()` and friend takes any `impl Serialize`.
+- **Statements past the bind-parameter limit.** A `where_in` of more than 65,535 ids, an eager load
+  over that many parents, and an `insert_all` whose rows × columns passed the limit (32,766 on
+  SQLite) failed. Long integer lists are rendered inline, eager loads query in chunks of 5,000, and
+  `insert_all` splits into several statements inside a transaction.
+- **Types.** A `Vec<u8>` field did not compile, and neither did a `std::string::String` one.
+  SQLite's `where_json_contains` compared documents as text, so `{"a": 1}` never matched, and its
+  `where_json_contained_by` matched when the column's text appeared inside the operand's (`1` was
+  "contained by" `{"a": 1}`, and a `%` in the column was a wildcard); both are rebuilt from
+  `json_each` with PostgreSQL's `@>` and `<@` semantics. `min`, `max` and `range` validation
+  accepted `NaN`.
+- **JSON filters failed on a PostgreSQL `json` column.** `where_json_contains`,
+  `where_json_contained_by`, `where_json_key_exists`, `where_json_key_not_exists`,
+  `where_json_path_exists` and `update_all().json_set(..)` use operators only `jsonb` has, so on a
+  `json` column, which `t.json(..)` creates, each failed with "operator does not exist". They cast
+  the column to `jsonb`, which PostgreSQL drops for a `jsonb` column, so its indexes still apply.
+- **A model deriving `Serialize` itself with renamed keys** (`#[serde(rename_all = "camelCase")]`)
+  leaked its hidden fields through `to_json()`, which removed them by field name while serde had
+  written `passwordHash`, and `save_with_many` stored every child under the foreign key it already
+  had (0), because the parent's key was written under the field name too. `to_json()` finds fields
+  under the keys serde writes, and nested saves, attachments and translations set the one field
+  directly instead of round-tripping the model through serde. The model docs now say where such a
+  derive must go: below `#[tideorm::model]`, since TideORM cannot see one above it or in the same
+  list as `Model`, and the two impls then conflict.
+- **An unset `Uuid` primary key was stored as the nil UUID.** The first such insert kept
+  `00000000-0000-0000-0000-000000000000` as a real key, the second failed as a duplicate, and a
+  database default such as `gen_random_uuid()` never applied because the nil value was sent. A
+  `Uuid` key still nil at insert now gets a random (v4) key on every insert path, upserts
+  included; a key the caller set is kept.
+- **A connection error could leak the database password.** A URL the engine could not parse (a
+  port past 65535, say) or had no driver for (a mistyped scheme, or a backend whose feature is not
+  compiled in) was quoted whole in the error, password included, and `DatabaseBuilder`'s `Debug`
+  printed it too. Both mask the URL's credentials now (`postgres://***@db:5432/app`).
+- **Upserts and request bodies broke managed timestamps.** `insert_or_update()` and
+  `on_conflict().insert()` overwrote an existing row's `created_at` with the time of the upsert,
+  and with a natural (non-auto-increment) key they wrote `1970-01-01` into both `created_at` and
+  `updated_at`, because that insert skipped the stamping `create()` does. `update()` wrote
+  whatever `created_at` the model carried, so a request body could rewrite a row's creation time,
+  while deserializing a model required both timestamps, so a create body without them was
+  rejected. The insert half of an upsert is stamped like `create()`, a stored `created_at` is only
+  ever written by the insert that created the row, and a body may leave out the managed timestamps
+  and `#[tideorm(skip)]` fields.
+- **A field of an unsupported type** (an enum, `i128`, a `HashMap`) failed with an error on the
+  derive that said to "set an explicit column type", which no attribute does, followed by a page
+  of SeaORM trait-bound errors. It is now one error on the field's type that lists the supported
+  types and suggests a `String` for an enum and `#[tideorm(skip)]` for a field that is not a
+  column.
+- **MySQL full text.** Boolean-mode operators reached `AGAINST(..)` as typed, so a search for
+  `c++` or a dangling `-` failed with a syntax error. The query is sanitized, and one with no
+  searchable term left matches nothing.
+- **`#[tideorm(schema = "..")]` only reached schema sync.** Every query, insert, update and delete
+  named the bare table, so on PostgreSQL it went wherever the search path found a table of that
+  name — a same-named table in `public` silently received the writes and served the reads. The
+  engine's entity and every statement TideORM renders now name `schema.table` (a database, on
+  MySQL, where sync creates the table there too), and joins accept `"schema.table"`.
+- **Feature gates in generated code.** A model's entity-manager items were gated by
+  `#[cfg(feature = "entity-manager")]`, which rustc evaluates against the crate defining the
+  model: every crate without such a feature warned `unexpected cfg condition value` once per model
+  (an error under `-D warnings`), and one that enabled `tideorm/entity-manager` without declaring
+  the feature itself silently lost `find_in_entity_manager` and the rest. They follow TideORM's
+  own feature now, so no crate has to declare it.
+- **`multiply()`/`divide()` on an integer column** left SQLite holding a REAL
+  (`price_cents * 1.1`), after which every read of the table failed to decode. The result is
+  rounded back to an integer, as PostgreSQL and MySQL do when they store it.
+- **A seed that failed part way kept what it had written.** A seed and its `_seeds` entry were
+  separate statements, so a failure left the rows written so far and no ledger entry, and the next
+  run wrote them again (or failed on a unique key). Each seed now runs in one transaction with its
+  entry, and so does each rollback.
+- **`.cache(ttl)` against the disabled default cache** did nothing without a word; the first such
+  query now logs a warning naming `QueryCache::global().enable()`.
+- **The query cache served rows a committed transaction had replaced.** A write invalidated its
+  table's cached reads when it ran, but until the transaction committed other requests still read
+  the old rows, and one that cached them in the meantime served them for the rest of the TTL. A
+  read that a plain write overtook was cached the same way. A transaction now invalidates its
+  writes' tables again once it commits (a savepoint's at its enclosing transaction's commit), and a
+  read is not cached when a write to one of its tables landed while it ran.
+- **Failure classification.** Beyond constraint violations, SQLite failures were unclassified; a
+  busy or locked database is now `LockNotAvailable`, and a missing table, a missing column and a
+  syntax error are told apart.
+  MySQL's lock wait timeout (`HY000`) and a missing privilege (`42000`, which read as a syntax
+  error) are classified by error number, and its deadlock is `Deadlock`. A connection closed under a
+  statement without an error packet — MySQL's `KILL`, a server restart — was unclassified and not
+  retryable; it is `ConnectionClosed`. A value that does not fit its column (SQLSTATE class `22`:
+  too long, out of range, invalid for the type, and MySQL's "Incorrect string value") was
+  unclassified; it is the new `InvalidValue`.
+- **A `u64` past `i64::MAX` panicked on SQLite and PostgreSQL.** Their drivers panic converting
+  such a value to their signed integer, so `where_eq("id", u64::MAX)`, `where_in`, a comparison,
+  `update_all().set(..)`, `Model::paginate(1, u64::MAX)`, or a `u64` key passed to `find()` or
+  held by a model passed to `delete()`, crashed the task instead of returning. A value past `i64::MAX` is bound as an exact decimal now, which
+  matches nothing an integer column holds, and `paginate()` rejects a page size or offset past
+  `i64::MAX` with a validation error.
+- **A model field the driver cannot read back was written first.** A `u64` field on SQLite or
+  PostgreSQL, or an `i8`, `u8` or `u16` field on PostgreSQL, was inserted and then failed the
+  read-back, so the caller got an error for a stored row and a retry stored it twice; a `u64` past
+  `i64::MAX` panicked the driver instead. `save()`, `create()`, `update()`, upserts, `insert_all()`
+  and `update_all().execute_returning()` refuse such a model before writing, naming every such
+  field and the type to use.
+- **Concurrent `attach()` calls failed against a unique pivot key**, and without one could store a
+  pair twice: `attach` checked for the row and then inserted it. On PostgreSQL and SQLite it is one
+  statement now, which inserts the row only when it is missing and treats a key conflict as already
+  attached; MySQL and MariaDB, where InnoDB locks what that statement reads and two of them
+  deadlock, check with a plain read and insert with `ON DUPLICATE KEY UPDATE`. A pivot named with
+  its schema (`pivot = "billing.user_roles"`) is quoted part by part, where the insert named one
+  identifier `"billing.user_roles"`.
+- **`only_trashed().force_delete()` also deleted live rows** matching its other filters, because
+  `force_delete()` widened the scope to every row; it keeps the trashed-only scope now. And
+  `only_trashed()` counts as the filter `restore()` and `force_delete()` require, so the whole
+  trash can be restored or emptied. On a model without soft delete, which has no trash, it is
+  refused there instead of being dropped.
+- **One typo in a `#[validate]` rule buried its error under a page of others**, because the derive
+  then generated nothing for the model. The model is generated without that rule, and the rule's
+  error is the only one.
+- **`QueryLogger` and `TIDE_LOG_QUERIES` missed every statement the query builder does not render:**
+  `find`, `save`, `update`, `delete`, upserts and raw SQL, `Database::execute` included. They are
+  logged as they complete; query-builder and migration statements are still logged once, before
+  they run.
+- **A crate defining a model needed `serde` and `serde_json` as direct dependencies**, because the
+  generated code named both; it reaches them through `tideorm` now.
+- **A model in a module that imports `tideorm::Result` did not compile**, and `use tideorm::*;`
+  imports it: the engine's derives and the generated `validate()` write a bare `Result<_, _>`,
+  which resolved to TideORM's one-parameter alias.
+- **Full text:** an `offset()` without a `limit()` rendered a bare `OFFSET`, a syntax error on SQLite
+  and MySQL, and `highlight_text` marked text inside the tags it had inserted when a search term was
+  part of one (`b` in `<b>`), and marked `rust` in `rust-lang` when both were searched for.
+- **Full-text search modes meant different things per backend.** A boolean `-javascript` was a
+  required term on PostgreSQL and SQLite, which stripped the operator: `+rust -javascript` found
+  only the articles it meant to leave out. It excludes now, as on MySQL, and so does a `-` written
+  before a quoted phrase. MySQL ran `SearchMode::Phrase` as `WITH QUERY
+  EXPANSION`, which widens a search instead of matching a phrase, and searched `Prefix` and
+  `Proximity` in natural-language mode; PostgreSQL read `Proximity(n)` as exactly `n` words apart,
+  in order; SQLite ignored the mode altogether. Each mode is built from the search's words on
+  every backend now. SQLite's `get_ranked()` reported raw `bm25()`
+  scores, where a better match is lower and negative, so `min_rank(r)` kept only the rows
+  scoring below `-r`; the rank is negated now, higher is better everywhere, and `min_rank` means
+  the same on every backend.
+- **PostgreSQL full-text searches never used their index.** The text search configuration was a
+  bound parameter, cast when the statement ran, which the planner cannot match to the constant in
+  the index `FullTextIndex` builds, so every search read the whole table. A search left with no
+  word, which the term filters make common, read it too, to match nothing; it matches nothing
+  without reading it now, as on the other backends.
+- **A union operand and a `with_query()` CTE lost their ordering and limit**, so
+  `a.union(b.order_desc("score").limit(10))` returned every row of `b`. They keep them now: on
+  SQLite, which takes no parenthesized operand, a limited one is read through a derived table.
+- **MySQL's JSON containment disagreed with PostgreSQL's.** `JSON_CONTAINS` lets a value match an
+  array holding it at any depth, so `where_json_contains("metadata", {"tags": "a"})` matched
+  `{"tags": ["a", "b"]}` on MySQL only, and `where_json_contained_by` had the mirror case. A type
+  check for each path of the document passed makes MySQL and MariaDB answer as PostgreSQL does,
+  except below an array, where MySQL's reading stays. On MariaDB, which has no `CAST(.. AS JSON)`,
+  these filters and `where_array_*` failed with a syntax error; the document is bound as JSON text
+  now.
+- **`where_in` with more non-integer values than one statement binds failed** (32,766 on SQLite,
+  65,535 elsewhere). Past 1,000 values PostgreSQL takes the list as one array parameter and SQLite
+  a text list as one JSON value; MySQL keeps its limit.
+- **`insert_all()` of two or more rows failed on MariaDB** with `BackendNotSupported`: it asked the
+  engine for a multi-row `INSERT .. RETURNING`, which the engine renders for PostgreSQL and SQLite
+  only. MariaDB batches like MySQL now. A batch whose `INSERT .. RETURNING` gives back fewer rows
+  than it sent, because a trigger skipped some, is an error instead of a shorter result that no
+  longer lines up with the models passed in.
+- **MariaDB stored a `DateTime<Utc>` outside its `TIMESTAMP` range as NULL**: before 1970, or after
+  2038 (2106 from 11.5), so saving one failed on a `NOT NULL` column and filtering by one matched
+  nothing. The driver binds a zoned timestamp as a `TIMESTAMP` parameter, which MariaDB checks
+  against that type's range even for a `DATETIME` column. TideORM binds it as the UTC `DATETIME`
+  it is stored as, on MySQL too, where the stored value does not change.
+- **`update_all().json_set()` failed on MariaDB** with a syntax error on `CAST(.. AS JSON)`; the
+  value is read with `JSON_EXTRACT(?, '$')` on both servers.
+- **`lag()` and `lead()` with a default failed on MariaDB** with a syntax error: its `LAG` and
+  `LEAD` take no default. On MySQL and MariaDB a `CASE` around the call supplies it, exactly where
+  no row is that far away, as the three-argument form does; a NULL value one row away stays NULL.
+
+### Changed — Breaking
+
+- The crate root re-exports the whole prelude, plus `Result`, `chrono`, `async_trait` and
+  `inventory`, so `tideorm::X` and `tideorm::prelude::X` can no longer drift apart.
+- `profiling::GlobalStats` is a type alias of `QueryStats`, so `GlobalProfiler::stats()` prints in
+  the `QueryStats` format; `QueryCache::config()` and `PreparedStatementCache::config()` return the
+  configuration instead of an always-`Some` option.
+
+### Changed
+
+- **Model queries name their columns.** The default projection is the model's column list instead
+  of `table.*`, so an `ALTER TABLE .. ADD COLUMN` under a running application no longer breaks
+  every cached model query (PostgreSQL's "cached plan must not change result type", SQLite's stale
+  column list), and `get_json()` returns the model's columns only. A `union_raw()` query keeps
+  `table.*` so its operand still lines up.
+- **New MySQL and MariaDB tables use types that hold Rust's values.** Timestamps are `DATETIME(6)`
+  (`TIMESTAMP` spans only 1970–2038, and neither kept microseconds), times `TIME(6)`, text and
+  binary `LONGTEXT`/`LONGBLOB` (`TEXT` and `BLOB` stop at 64 KB), and tables are declared
+  `DEFAULT CHARSET=utf8mb4`, so a latin1 database default no longer rejects `日本語` or emoji.
+  `CURRENT_TIMESTAMP` defaults become `CURRENT_TIMESTAMP(6)`, and defaults on text, JSON, binary and
+  array columns (JSON there) are the parenthesized expressions MySQL requires. Existing tables are
+  untouched.
+- **Schema sync creates the indexes a model declares** (`#[index]`, `#[unique_index]`); it used
+  to create the table alone. On MySQL a keyed or indexed string column is a `VARCHAR(255)`.
+- **`Model::paginate()` orders by primary key.** Without an order, PostgreSQL returned rows in heap
+  order, which an `UPDATE` changes, so consecutive pages repeated one row and skipped another.
+- **SQLite writes take one statement.** The `sqlite` feature turns on the engine's `RETURNING`
+  support, which the bundled SQLite (3.46 or later) has, so `save()`, `create()` and `update()` get
+  the stored row back from the write itself instead of a second `SELECT`, in about half the time.
+  `insert_all()` of a model keyed by one auto-increment column sends multi-row
+  `INSERT .. RETURNING` statements, split at SQLite's 32,766 bind parameters, instead of one insert
+  per row, and puts the rows back in input order: 1,000 rows take one statement instead of 2,000,
+  about 12 times faster.
+- **Single-row reads keep their prepared statement on current SQLite.** `find()`, `find_with()`,
+  `exists()`, `find_or_fail()`, `reload()`, `first()`, `last()`, `count()`, `exists_any()` and the
+  upsert reload bound a `LIMIT` parameter, and SQLite 3.50 and later — what a fresh build gets, as
+  sqlx accepts libsqlite3-sys up to 0.37 (SQLite 3.51) — recompiles a statement with a bound
+  `LIMIT` every time it runs. Key lookups and `count()` need no limit, the others write `LIMIT 1`
+  into the SQL, and `Model::paginate()` writes its page size and binds the offset, so one statement
+  serves every page: 15–30% faster per call on SQLite, and unchanged elsewhere.
+- Query rendering allocates less (identifiers and column lists are quoted in place), and generated
+  models build an error's context only when an error occurs. `TIDE_LOG_QUERIES` is read once, when
+  the first statement runs, like `TIDE_LOG_LEVEL`, instead of before every statement.
+- `DatabaseType::{supports_json, supports_upsert, supports_window_functions, supports_cte}` are
+  documented as always true.
+- **Paging binds its offset.** `limit()`/`offset()`/`page()` write the page size into the SQL and
+  bind the offset, so every page of a query shares one prepared statement on PostgreSQL and MySQL
+  instead of preparing one per page, and full-text search does the same; a bound `LIMIT` is what
+  SQLite 3.50+ recompiles on every run.
+- **`insert_all()` batches models that set their own keys** on SQLite, MySQL and MariaDB. A key the
+  model sets is known before the insert, so the rows SQLite's `INSERT .. RETURNING` gives back are
+  matched to their models by key, and MySQL and MariaDB insert an integer- or `Uuid`-keyed batch in
+  statements of up to 1 MB of values, reading each one's rows back with one `SELECT`. 1,000
+  UUID-keyed rows on SQLite take one statement instead of 1,000. A batch that repeats a key is still
+  inserted a row at a time, so the database's own constraint decides it.
+- `get_json()` works out how to decode each column once per result instead of once per row.
+
+### Internal
+
+- One `ConnectionRef::executor()` replaces the copy-pasted connection-or-transaction `match`
+  blocks across the runtime and the generated code; the `where_*` builder family is generated once
+  for every builder; migrations and seeding share one DDL renderer and one ledger; the generated
+  code per model shrank by 10–27%.
+- The SQLite, MySQL and PostgreSQL integration suites share one body per scenario, as do the three
+  entity-manager suites, so upserts, transactions, `insert_all`/`update_all`, restore and
+  `force_delete` — and all 28 entity-manager scenarios — now run on every backend. Tests that
+  asserted nothing were deleted. `seaorm2_features_tests` is now `typed_columns_and_join_tests`;
+  `query_builder_tests` and `entity_manager_tests` were folded into other targets. A backend that
+  is enabled but unreachable now fails the run instead of reporting green, and `SKIP_MYSQL_TESTS`
+  (documented, never read) works.
+- The shared integration scenarios cover typed values, JSON rows, bind-parameter limits, bulk
+  validation, naive timestamps, paging order, JSON containment, integer scaling and a column added
+  under a running query, on all three backends.
+- Three fewer dependencies, with no change in behaviour. The global connection slot is a
+  `parking_lot::RwLock` instead of `arc-swap`. Token and encrypted-field nonces come from
+  `chacha20poly1305`'s own `OsRng` instead of `rand`, in the same format, so existing tokens and
+  ciphertexts still decode. `tideorm-macros` derives names with its own function instead of
+  `convert_case`, keeping the same word boundaries over the same grapheme clusters, so no table or
+  column name changes. `arc-swap`, `rustversion` and `convert_case` leave every build; `rand` and
+  the crates only it needed leave SQLite- and MySQL-only builds (sqlx's PostgreSQL driver still
+  uses `rand`).
+- The PostgreSQL test suites and benchmarks are opt-in, like the MySQL ones: they run when
+  `POSTGRESQL_DATABASE_URL`, `TEST_DATABASE_URL` or `RUN_POSTGRES_TESTS` is set, so a bare
+  `cargo test` or `cargo bench` passes without a server; an enabled but unreachable one still
+  fails the run.
+- CI runs the live-database suites, the integration, advanced and entity-manager ones, against
+  PostgreSQL, MySQL and MariaDB 10.11 and 12.3 service containers, and runs the SQLite suites
+  instead of only compiling them. The MariaDB suites (`mariadb_integration_tests`,
+  `mariadb_entity_manager_tests`) are new and opt in through `MARIADB_DATABASE_URL` or
+  `RUN_MARIADB_TESTS`; they run the shared scenarios, and the MySQL-family ones both servers share.
+- The lockfile takes libsqlite3-sys 0.37 (SQLite 3.51), what a fresh build of TideORM resolves, so
+  the tests run the SQLite users get, and replaces the yanked `chacha20` 0.10.0 and `spin` 0.9.8.
+- docs.rs documents the six module features, which it used to leave out.
+- `cargo test` runs from both published tarballs: `tideorm-macros` ships the unit tests its
+  library includes, and `tideorm` ships `.cargo/config.toml`, which runs its tests on one thread.
+- CI also runs the unit tests that need the SQLite driver together with a module feature, and the
+  public API's feature-gated tests, which no job built before.
 
 ## [0.11.0] - 2026-08-26
 
@@ -1257,7 +1752,10 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
-[Unreleased]: https://github.com/mohamadzoh/tideorm/compare/v0.10.0...HEAD
+[0.12.0]: https://github.com/mohamadzoh/tideorm/compare/v0.11.0...v0.12.0
+[0.11.0]: https://github.com/mohamadzoh/tideorm/compare/v0.10.2...v0.11.0
+[0.10.2]: https://github.com/mohamadzoh/tideorm/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/mohamadzoh/tideorm/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/mohamadzoh/tideorm/compare/v0.9.19...v0.10.0
 [0.9.19]: https://github.com/mohamadzoh/tideorm/compare/v0.9.18...v0.9.19
 [0.9.18]: https://github.com/mohamadzoh/tideorm/compare/v0.9.17...v0.9.18

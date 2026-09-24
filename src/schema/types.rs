@@ -1,4 +1,3 @@
-use crate::config::DatabaseType;
 use crate::migration::ColumnType;
 use crate::model::IndexDefinition;
 
@@ -13,9 +12,7 @@ pub struct TableSchema {
     pub columns: Vec<ColumnSchema>,
     /// Index definitions (regular and unique)
     pub indexes: Vec<IndexDefinition>,
-    /// Primary key column name
-    pub primary_key: String,
-    /// Primary key column names, in declaration order.
+    /// Primary key column names, in key order.
     pub primary_keys: Vec<String>,
 }
 
@@ -36,13 +33,12 @@ pub struct ColumnSchema {
     pub auto_increment: bool,
 }
 
-/// Builder for table schemas from model metadata
+/// Builder for table schemas
 pub struct TableSchemaBuilder {
     name: String,
     schema_name: Option<String>,
     columns: Vec<ColumnSchema>,
     indexes: Vec<IndexDefinition>,
-    primary_key: String,
     primary_keys: Vec<String>,
 }
 
@@ -54,7 +50,6 @@ impl TableSchemaBuilder {
             schema_name: None,
             columns: Vec::new(),
             indexes: Vec::new(),
-            primary_key: String::new(),
             primary_keys: Vec::new(),
         }
     }
@@ -68,111 +63,10 @@ impl TableSchemaBuilder {
     /// Add a column
     pub fn column(mut self, schema: ColumnSchema) -> Self {
         if schema.primary_key {
-            if self.primary_key.is_empty() {
-                self.primary_key = schema.name.clone();
-            }
             self.primary_keys.push(schema.name.clone());
         }
         self.columns.push(schema);
         self
-    }
-
-    /// Add a BIGINT column
-    pub fn bigint(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "BIGINT"))
-    }
-
-    /// Add an INTEGER column
-    pub fn integer(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "INTEGER"))
-    }
-
-    /// Add a SMALLINT column
-    pub fn smallint(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "SMALLINT"))
-    }
-
-    /// Add a TEXT column
-    pub fn text(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "TEXT"))
-    }
-
-    /// Add a VARCHAR column with specified length
-    pub fn varchar(self, name: impl Into<String>, length: u32) -> Self {
-        self.column(ColumnSchema::new(name, format!("VARCHAR({})", length)))
-    }
-
-    /// Add a BOOLEAN column
-    pub fn boolean(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "BOOLEAN"))
-    }
-
-    /// Add a TIMESTAMP column (without time zone)
-    pub fn timestamp(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "TIMESTAMP"))
-    }
-
-    /// Add a TIMESTAMPTZ column (timestamp with time zone) - use for `DateTime<Utc>`
-    pub fn timestamptz(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "TIMESTAMPTZ"))
-    }
-
-    /// Add a DATE column
-    pub fn date(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "DATE"))
-    }
-
-    /// Add a TIME column
-    pub fn time(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "TIME"))
-    }
-
-    /// Add a UUID column
-    pub fn uuid(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "UUID"))
-    }
-
-    /// Add a DECIMAL column
-    pub fn decimal(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "DECIMAL"))
-    }
-
-    /// Add a DECIMAL column with precision and scale
-    pub fn decimal_with_precision(
-        self,
-        name: impl Into<String>,
-        precision: u32,
-        scale: u32,
-    ) -> Self {
-        self.column(ColumnSchema::new(
-            name,
-            format!("DECIMAL({},{})", precision, scale),
-        ))
-    }
-
-    /// Add a JSONB column (PostgreSQL)
-    pub fn jsonb(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "JSONB"))
-    }
-
-    /// Add a JSON column
-    pub fn json(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "JSON"))
-    }
-
-    /// Add a BYTEA column (PostgreSQL binary)
-    pub fn bytea(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "BYTEA"))
-    }
-
-    /// Add an REAL (single precision float) column
-    pub fn real(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "REAL"))
-    }
-
-    /// Add a DOUBLE PRECISION column
-    pub fn double(self, name: impl Into<String>) -> Self {
-        self.column(ColumnSchema::new(name, "DOUBLE PRECISION"))
     }
 
     /// Add an index
@@ -194,7 +88,6 @@ impl TableSchemaBuilder {
             schema_name: self.schema_name,
             columns: self.columns,
             indexes: self.indexes,
-            primary_key: self.primary_key,
             primary_keys: self.primary_keys,
         }
     }
@@ -241,11 +134,10 @@ impl ColumnSchema {
 
 /// Map a Rust type spelling onto TideORM's logical column type.
 ///
-/// This is the **single** Rust-to-column mapping in the crate. Schema export
-/// ([`rust_type_to_sql`]) and `DB_SYNC` (`crate::sync`) both go through it, and
-/// the returned [`ColumnType`] renders to SQL through
-/// [`ColumnType::to_sql`] - so the two cannot disagree about what a field
-/// becomes, and migrations name the same vocabulary by hand.
+/// This is the **single** Rust-to-column mapping in the crate: schema sync
+/// (`crate::sync`) types every model column through it, and the returned
+/// [`ColumnType`] renders to SQL through [`ColumnType::to_sql`] - the renderer
+/// migrations use for the variants they name by hand.
 ///
 /// The spelling is normalized first: whitespace, references and lifetimes are
 /// dropped, module paths are stripped from the type and its generic arguments
@@ -254,8 +146,7 @@ impl ColumnSchema {
 /// a type.
 ///
 /// Returns `None` for a type the mapping does not know, leaving the fallback to
-/// the caller: [`rust_type_to_sql`] falls back to `TEXT` silently, while `sync`
-/// warns first.
+/// the caller; sync warns and creates a `TEXT` column.
 ///
 /// ```
 /// use tideorm::config::DatabaseType;
@@ -314,18 +205,6 @@ pub fn rust_type_to_column_type(rust_type: &str) -> Option<ColumnType> {
     };
 
     Some(mapped)
-}
-
-/// Utility to map Rust types to SQL types.
-///
-/// Thin sugar over [`rust_type_to_column_type`] plus [`ColumnType::to_sql`];
-/// unknown types fall back to `TEXT`. Because `sync` and the migration builders
-/// render through the same pair, the SQL a model exports here is the SQL
-/// `DB_SYNC` creates.
-pub fn rust_type_to_sql(rust_type: &str, db_type: DatabaseType) -> String {
-    rust_type_to_column_type(rust_type)
-        .unwrap_or(ColumnType::Text)
-        .to_sql(db_type)
 }
 
 /// Reduce a Rust type spelling to the key the mapping table is written in.

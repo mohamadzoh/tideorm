@@ -81,10 +81,6 @@ impl<M: Model> QueryBuilder<M> {
         self.order_asc("created_at")
     }
 
-    // =========================================================================
-    // PAGINATION
-    // =========================================================================
-
     /// Limit the number of results
     #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
@@ -104,6 +100,10 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Paginate results using 1-based page numbers.
+    ///
+    /// Give the query a unique order, such as one ending in the primary key:
+    /// without one PostgreSQL returns rows in heap order, which an UPDATE
+    /// changes, so consecutive pages can repeat one row and skip another.
     ///
     /// A zero page or page size, or a `(page - 1) * per_page` product that does
     /// not fit in a `u64`, invalidates the query instead of panicking in debug
@@ -149,45 +149,5 @@ impl<M: Model> QueryBuilder<M> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::model::Model;
-
-    #[tideorm::model(table = "pagination_users")]
-    struct PaginationUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-    }
-
-    #[test]
-    fn test_page_rejects_an_overflowing_offset() {
-        let err = PaginationUser::query()
-            .page(u64::MAX, 2)
-            .ensure_query_is_valid()
-            .expect_err("an overflowing offset must invalidate the query");
-
-        assert!(
-            err.to_string().contains("overflows the maximum offset"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_page_rejects_zero_page_number() {
-        let err = PaginationUser::query()
-            .page(0, 10)
-            .ensure_query_is_valid()
-            .expect_err("page 0 must invalidate the query");
-
-        assert!(err.to_string().contains("at least 1"), "{err}");
-    }
-
-    #[test]
-    fn test_page_sets_limit_and_offset() {
-        let query = PaginationUser::query().page(3, 25);
-
-        assert!(query.ensure_query_is_valid().is_ok());
-        assert_eq!(query.limit_value, Some(25));
-        assert_eq!(query.offset_value, Some(50));
-    }
-}
+#[path = "../../../tests/unit/query_ordering_pagination_tests.rs"]
+mod tests;

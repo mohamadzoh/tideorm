@@ -11,11 +11,12 @@ pub enum LogLevel {
     Error = 1,
     /// Errors and slow queries
     Warn = 2,
-    /// Errors, slow queries, and query summaries
+    /// Errors, slow queries, and a one-line summary of every other query
     Info = 3,
     /// All queries with timing
     Debug = 4,
-    /// All queries with parameters and execution plan hints
+    /// All queries with timing, row counts, and any parameters attached to the
+    /// entry
     Trace = 5,
 }
 
@@ -63,8 +64,6 @@ pub enum QueryOperation {
     Update,
     /// DELETE query
     Delete,
-    /// Raw SQL query
-    Raw,
     /// Transaction operation
     Transaction,
     /// Unknown operation
@@ -100,7 +99,6 @@ impl QueryOperation {
             Self::Insert => "INSERT",
             Self::Update => "UPDATE",
             Self::Delete => "DELETE",
-            Self::Raw => "RAW",
             Self::Transaction => "TRANSACTION",
             Self::Unknown => "UNKNOWN",
         }
@@ -194,26 +192,7 @@ impl QueryLogEntry {
 
     /// Render the entry in the multiline console format used by trace logging.
     pub fn format_console(&self) -> String {
-        let mut output = format!("[TIDE][{}]", self.operation);
-
-        if let Some(ref table) = self.table {
-            output.push_str(&format!(" {}", table));
-        }
-
-        if let Some(duration) = self.duration {
-            output.push_str(&format!(" ({}ms)", duration.as_millis()));
-        }
-
-        if let Some(rows) = self.rows {
-            output.push_str(&format!(" [{} rows]", rows));
-        }
-
-        if !self.success {
-            output.push_str(" FAILED");
-            if let Some(ref err) = self.error {
-                output.push_str(&format!(": {}", err));
-            }
-        }
+        let mut output = super::format::format_summary(self);
 
         output.push_str(&format!("\n  SQL: {}", self.sql));
 
@@ -248,11 +227,6 @@ impl QueryTimer {
         self
     }
 
-    /// Return elapsed time without building a log entry.
-    pub fn stop(&self) -> Duration {
-        self.start.elapsed()
-    }
-
     /// Stop timing and build a successful log entry.
     pub fn finish(self) -> QueryLogEntry {
         let duration = self.start.elapsed();
@@ -274,31 +248,39 @@ impl QueryTimer {
     }
 }
 
-/// Query statistics
+/// Aggregate counters over recorded queries
+///
+/// [`QueryLogger::stats`](super::QueryLogger::stats) returns one, and so does
+/// [`GlobalProfiler::stats`](crate::profiling::GlobalProfiler::stats); each
+/// keeps its own counters and its own slow-query threshold.
 #[derive(Debug, Clone, Copy)]
 pub struct QueryStats {
-    /// Total number of queries executed
+    /// Number of recorded queries.
     pub total_queries: u64,
-    /// Number of slow queries
+    /// Number of queries at or above the slow threshold.
     pub slow_queries: u64,
-    /// Total time spent in queries (milliseconds)
-    pub total_time_ms: u64,
-    /// Slow query threshold (milliseconds)
-    pub threshold_ms: u64,
+    /// Sum of recorded query time in nanoseconds.
+    pub total_time_ns: u64,
+    /// Slow-query threshold in milliseconds.
+    pub slow_threshold_ms: u64,
 }
 
 impl QueryStats {
-    /// Average duration in milliseconds, or zero when nothing has run.
-    pub fn avg_query_time_ms(&self) -> f64 {
-        if self.total_queries == 0 {
-            0.0
-        } else {
-            self.total_time_ms as f64 / self.total_queries as f64
-        }
+    /// Convert the accumulated nanoseconds into a `Duration`.
+    pub fn total_time(&self) -> Duration {
+        Duration::from_nanos(self.total_time_ns)
     }
 
-    /// Percentage of recorded queries that counted as slow.
-    pub fn slow_query_percentage(&self) -> f64 {
+    /// Average duration per recorded query, or zero when nothing ran.
+    pub fn avg_query_time(&self) -> Duration {
+        self.total_time_ns
+            .checked_div(self.total_queries)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// Percentage of recorded queries that crossed the slow-query threshold.
+    pub fn slow_percentage(&self) -> f64 {
         if self.total_queries == 0 {
             0.0
         } else {
@@ -309,6 +291,8 @@ impl QueryStats {
 
 impl fmt::Display for QueryStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let millis = |duration: Duration| duration.as_secs_f64() * 1000.0;
+
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "TIDEORM QUERY STATISTICS")?;
         writeln!(f, "═══════════════════════════════════════════════════")?;
@@ -317,11 +301,15 @@ impl fmt::Display for QueryStats {
             f,
             "Slow Queries:      {} ({:.1}%)",
             self.slow_queries,
-            self.slow_query_percentage()
+            self.slow_percentage()
         )?;
-        writeln!(f, "Total Time:        {}ms", self.total_time_ms)?;
-        writeln!(f, "Avg Query Time:    {:.2}ms", self.avg_query_time_ms())?;
-        writeln!(f, "Slow Threshold:    {}ms", self.threshold_ms)?;
+        writeln!(f, "Total Time:        {:.2}ms", millis(self.total_time()))?;
+        writeln!(
+            f,
+            "Avg Query Time:    {:.2}ms",
+            millis(self.avg_query_time())
+        )?;
+        writeln!(f, "Slow Threshold:    {}ms", self.slow_threshold_ms)?;
         write!(f, "═══════════════════════════════════════════════════")
     }
 }

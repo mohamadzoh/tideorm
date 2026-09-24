@@ -2,18 +2,18 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
-#[cfg(feature = "entity-manager")]
-use std::sync::Arc;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
 #[cfg(feature = "entity-manager")]
 mod entity_manager_support;
 
-use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value, quote_ident};
-use super::require_scalar_relation_key;
+use super::helpers::{
+    QuerySource, ensure_relation_configured, preserve_cached_value, quote_ident,
+    require_scalar_relation_key, required_key,
+};
 
 /// A many-to-many relation: rows of `Related` reached by joining `Pivot`'s
 /// table.
@@ -83,18 +83,12 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
     /// Table of the model owning the relation.
     #[cfg(feature = "entity-manager")]
     pub owner_table: &'static str,
-    /// Table of `Related`.
-    #[cfg(feature = "entity-manager")]
-    pub related_table: &'static str,
     cached: Option<Vec<Related>>,
     parent_pk: Option<serde_json::Value>,
     #[cfg(feature = "entity-manager")]
     owner_key: Option<String>,
-    #[cfg(feature = "entity-manager")]
-    entity_manager: Option<Arc<crate::entity_manager::EntityManager>>,
-    #[cfg(feature = "entity-manager")]
-    query_db: Option<crate::database::Database>,
-    _marker: PhantomData<(Related, Pivot)>,
+    source: QuerySource,
+    _pivot: PhantomData<Pivot>,
 }
 
 impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
@@ -109,6 +103,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                 self.pivot_table,
             ],
         )
+    }
+
+    fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
+        self.ensure_configured()?;
+        required_key(&self.parent_pk, "Parent primary key", context)
     }
 
     /// Declare the four columns and the join table.
@@ -131,21 +130,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             local_key,
             related_local_key,
             pivot_table,
-            #[cfg(feature = "entity-manager")]
-            relation_name: "",
-            #[cfg(feature = "entity-manager")]
-            owner_table: "",
-            #[cfg(feature = "entity-manager")]
-            related_table: "",
-            cached: None,
-            parent_pk: None,
-            #[cfg(feature = "entity-manager")]
-            owner_key: None,
-            #[cfg(feature = "entity-manager")]
-            entity_manager: None,
-            #[cfg(feature = "entity-manager")]
-            query_db: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -173,19 +158,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             && self.local_key == previous.local_key
             && self.related_local_key == previous.related_local_key
             && self.pivot_table == previous.pivot_table
-            && self.parent_pk == previous.parent_pk
-            && {
-                #[cfg(feature = "entity-manager")]
-                {
-                    self.relation_name == previous.relation_name
-                        && self.owner_table == previous.owner_table
-                        && self.related_table == previous.related_table
-                }
-                #[cfg(not(feature = "entity-manager"))]
-                {
-                    true
-                }
-            };
+            && self.parent_pk == previous.parent_pk;
+        #[cfg(feature = "entity-manager")]
+        let same_relation = same_relation
+            && self.relation_name == previous.relation_name
+            && self.owner_table == previous.owner_table;
 
         preserve_cached_value(
             &mut self.cached,
@@ -196,38 +173,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
         #[cfg(feature = "entity-manager")]
         if same_relation {
+            self.source.preserve_from(&previous.source);
             if self.owner_key.is_none() {
                 self.owner_key = previous.owner_key.clone();
             }
-            if self.entity_manager.is_none() {
-                self.entity_manager = previous.entity_manager.clone();
-            }
-            if self.query_db.is_none() {
-                self.query_db = previous.query_db.clone();
-            }
         }
-    }
-
-    /// Whether `load` should hit the database instead of serving `cached`.
-    ///
-    /// `cached` is also populated by the generated `Deserialize` impl, so a
-    /// request body can plant relation contents. Whenever a connection is
-    /// reachable the database wins, mirroring `HasMany::load`. The entity
-    /// manager is the exception: it owns the cached instances (identity map),
-    /// so its cache stays authoritative.
-    fn should_requery(&self) -> bool {
-        #[cfg(feature = "entity-manager")]
-        {
-            if self.entity_manager.is_some() {
-                return false;
-            }
-
-            if self.query_db.is_some() {
-                return true;
-            }
-        }
-
-        crate::database::__current_db().is_ok()
     }
 
     /// Apply the pivot join and the owner filter that both load paths read the
@@ -251,8 +201,9 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
         let query = query
+            .bind_columns_of::<Pivot>()
             .inner_join(
-                self.pivot_table,
+                &self.pivot_table_reference(),
                 &pivot_related_column,
                 &related_local_column,
             )
@@ -268,20 +219,22 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         }
     }
 
-    async fn query_related(&self, pk: &serde_json::Value) -> Result<Vec<Related>> {
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                let db = self.scoped_database()?;
-                Related::query_with(&db)
+    /// The pivot table as a statement names it: with the `Pivot` model's schema
+    /// when the relation's pivot is that model's table.
+    fn pivot_table_reference(&self) -> String {
+        match Pivot::schema_name() {
+            Some(schema) if self.pivot_table == Pivot::table_name() => {
+                format!("{}.{}", schema, self.pivot_table)
             }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                Related::query()
-            }
-        };
+            _ => self.pivot_table.to_string(),
+        }
+    }
 
-        self.scope_to_pivot(query, pk, true).get().await
+    /// The query `load` reads the related rows through, one row per related
+    /// model.
+    fn load_query(&self, context: &str) -> Result<QueryBuilder<Related>> {
+        let pk = self.parent_key(context)?;
+        Ok(self.scope_to_pivot(self.source.query(), pk, true))
     }
 
     /// Fetch every related row joined through the pivot table.
@@ -290,30 +243,21 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// twice still yields one row — which is what makes this agree with
     /// [`count`](Self::count). Queries whenever a connection is reachable and
     /// falls back to the cache otherwise; the result is not stored back, so each
-    /// call is a fresh read. Use [`load_with`](Self::load_with) when you need
-    /// ordering, paging, or the pivot's own columns.
+    /// call is a fresh read. Under the `entity-manager` feature an attached
+    /// manager owns the cached instances, so its cache wins. Use
+    /// [`load_with`](Self::load_with) when you need ordering, paging, or the
+    /// pivot's own columns.
     pub async fn load(&self) -> Result<Vec<Related>> {
-        if self.should_requery()
-            && self.ensure_configured().is_ok()
-            && let Some(pk) = self.parent_pk.as_ref()
+        let can_query = self.source.prefers_database()
+            && self.parent_pk.is_some()
+            && self.ensure_configured().is_ok();
+        if let Some(cached) = &self.cached
+            && !can_query
         {
-            let pk = require_scalar_relation_key(pk, "HasManyThrough::load")?;
-            return self.query_related(pk).await;
-        }
-
-        if let Some(cached) = &self.cached {
             return Ok(cached.clone());
         }
 
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::load")?;
-
-        self.query_related(pk).await
+        self.load_query("HasManyThrough::load")?.get().await
     }
 
     /// Load the relation through a caller-supplied constraint on the join query.
@@ -329,27 +273,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::load_with")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                let db = self.scoped_database()?;
-                Related::query_with(&db)
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                Related::query()
-            }
-        };
-
-        constraint_fn(self.scope_to_pivot(query, pk, false))
+        let pk = self.parent_key("HasManyThrough::load_with")?;
+        constraint_fn(self.scope_to_pivot(self.source.query(), pk, false))
             .get()
             .await
     }
@@ -362,29 +287,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// pointing at a deleted `Related` row still counts. Always queries; the
     /// cache is not consulted.
     pub async fn count(&self) -> Result<u64> {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::count")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                let db = self.scoped_database()?;
-                Pivot::query_with(&db)
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                Pivot::query()
-            }
-        };
+        let pk = self.parent_key("HasManyThrough::count")?;
 
         // Counted over distinct related keys so that a duplicated pivot row does
         // not report more associations than `load` returns.
-        query
+        self.source
+            .query::<Pivot>()
             .where_eq(
                 format!("{}.{}", self.pivot_table, self.foreign_key),
                 pk.clone(),
@@ -395,65 +303,42 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Associate `related_id` with the owner by inserting a pivot row.
     ///
-    /// Idempotent: an existence check runs first and an already-attached id is a
-    /// silent no-op, so the pair cannot be duplicated. That costs one extra
-    /// round trip, and it is a check-then-insert rather than an upsert —
-    /// `ON CONFLICT` is spelled differently per backend and the backend is only
-    /// known at runtime — so two concurrent `attach` calls can still race past it
-    /// unless the pivot table has a unique constraint.
+    /// Idempotent: attaching an already-attached id is a silent no-op. The row
+    /// is inserted only when it is missing, and a unique-key conflict counts as
+    /// already attached, so concurrent calls for the same pair store one row:
+    /// on SQLite always, since the insert runs under its write lock, and
+    /// elsewhere when the pivot table has a unique key on the two columns.
+    /// Without that key, PostgreSQL and MySQL can still let a concurrent pair
+    /// through twice. PostgreSQL and SQLite check and insert in one statement;
+    /// MySQL and MariaDB read first, because InnoDB locks what an
+    /// `INSERT .. SELECT` reads and two such attaches can deadlock.
     ///
     /// Only the two key columns are written. A pivot table with extra
     /// `NOT NULL` columns and no defaults needs a direct `Pivot::create`
     /// instead.
-    pub async fn attach(&self, related_id: impl Into<serde_json::Value>) -> Result<()> {
-        self.ensure_configured()?;
-
-        let db = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.scoped_database()?
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                crate::database::require_db()?
-            }
-        };
-        let db_type = db.backend();
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::attach")?;
-        let related_id = related_id.into();
+    pub async fn attach(&self, related_id: impl serde::Serialize) -> Result<()> {
+        let pk = self.parent_key("HasManyThrough::attach")?;
+        let related_id = crate::query::filter_value(related_id);
         let related_id = require_scalar_relation_key(&related_id, "HasManyThrough::attach")?;
+        let db = self.source.database()?;
+        let db_type = db.backend();
 
-        // Attaching an already attached id is a no-op. A bare INSERT would add a
-        // second pivot row, which duplicates the rows returned by `load` and
-        // inflates `count`. `ON CONFLICT` is spelled differently per backend and
-        // the backend is only known at runtime, so guard with an existence check
-        // instead of a dialect-specific clause.
-        let pivot_query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                Pivot::query_with(&db)
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                Pivot::query()
-            }
-        };
-
-        let already_attached = pivot_query
+        if matches!(
+            db_type,
+            crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB
+        ) && self
+            .source
+            .query::<Pivot>()
+            .with_trashed()
             .where_eq(self.foreign_key, pk.clone())
             .where_eq(self.related_key, related_id.clone())
             .exists()
-            .await?;
-
-        if already_attached {
+            .await?
+        {
             return Ok(());
         }
 
-        let (sql, params) = build_pivot_insert(
+        let (sql, params) = build_pivot_insert::<Pivot>(
             db_type,
             self.pivot_table,
             self.foreign_key,
@@ -476,30 +361,13 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     ///
     /// Deletes pivot rows only — neither the owner nor the related row is
     /// touched.
-    pub async fn detach(&self, related_id: impl Into<serde_json::Value>) -> Result<u64> {
-        self.ensure_configured()?;
+    pub async fn detach(&self, related_id: impl serde::Serialize) -> Result<u64> {
+        let pk = self.parent_key("HasManyThrough::detach")?;
 
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::detach")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                let db = self.scoped_database()?;
-                Pivot::query_with(&db)
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                Pivot::query()
-            }
-        };
-
-        query
+        self.source
+            .query::<Pivot>()
             .where_eq(self.foreign_key, pk.clone())
-            .where_eq(self.related_key, related_id.into())
+            .where_eq(self.related_key, related_id)
             .delete()
             .await
     }
@@ -516,47 +384,27 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// through would otherwise leave the associations permanently deleted. It
     /// joins an ambient transaction as a SAVEPOINT rather than opening a second
     /// top-level one.
-    pub async fn sync(&self, related_ids: Vec<serde_json::Value>) -> Result<()> {
-        self.ensure_configured()?;
+    pub async fn sync<V: serde::Serialize>(&self, related_ids: Vec<V>) -> Result<()> {
+        let pk = self.parent_key("HasManyThrough::sync")?.clone();
 
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasManyThrough::sync")?.clone();
-
-        // Reject every id up front: a bad id must not be discovered halfway
-        // through the re-attach loop.
         let mut seen = std::collections::HashSet::new();
         let mut wanted = Vec::with_capacity(related_ids.len());
-        for id in related_ids {
+        for id in related_ids.into_iter().map(crate::query::filter_value) {
             require_scalar_relation_key(&id, "HasManyThrough::sync")?;
             if seen.insert(id.to_string()) {
                 wanted.push(id);
             }
         }
 
-        let db = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.scoped_database()?
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                crate::database::__current_db()?
-            }
-        };
-
+        let db = self.source.database()?;
         let pivot_table = self.pivot_table;
         let foreign_key = self.foreign_key;
         let related_key = self.related_key;
         let scoped_db = db.clone();
 
-        // The delete and the re-attaches are one unit of work: without a
-        // transaction a failure part way through leaves the associations
-        // permanently deleted. `Database::transaction` defers to an ambient
-        // transaction installed by the caller, so this nests as a SAVEPOINT
-        // instead of opening a second, independent top-level transaction.
+        // `Database::transaction` defers to an ambient transaction installed by
+        // the caller, so this nests as a SAVEPOINT instead of opening a second,
+        // independent top-level transaction.
         db.transaction(move |_| {
             Box::pin(async move {
                 Pivot::query_with(&scoped_db)
@@ -566,8 +414,14 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
                 let db_type = scoped_db.backend();
                 for id in &wanted {
-                    let (sql, params) =
-                        build_pivot_insert(db_type, pivot_table, foreign_key, related_key, &pk, id);
+                    let (sql, params) = build_pivot_insert::<Pivot>(
+                        db_type,
+                        pivot_table,
+                        foreign_key,
+                        related_key,
+                        &pk,
+                        id,
+                    );
                     scoped_db.__execute_with_params(&sql, params).await?;
                 }
 
@@ -592,7 +446,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// contained the key — not by [`load`](Self::load), which does not write its
     /// result back.
     pub fn get_cached(&self) -> Option<&[Related]> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 
     /// Mutable access to the cached rows.
@@ -603,13 +457,6 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// association itself.
     pub fn as_mut(&mut self) -> Option<&mut Vec<Related>> {
         self.cached.as_mut()
-    }
-
-    /// The cached rows as a `&Vec`. Identical to
-    /// [`get_cached`](Self::get_cached) apart from the return type; prefer
-    /// `get_cached` unless a caller specifically needs `Vec`'s own methods.
-    pub fn items(&self) -> Option<&Vec<Related>> {
-        self.cached.as_ref()
     }
 
     /// Whether the cache has been populated. `true` for a loaded-but-empty
@@ -647,8 +494,14 @@ fn deduplicate_by_identity<E: Model>(query: QueryBuilder<E>) -> QueryBuilder<E> 
     })
 }
 
-/// Build the parameterized pivot-row INSERT shared by `attach` and `sync`.
-fn build_pivot_insert(
+/// Build the parameterized pivot-row INSERT shared by `attach` and `sync`, with
+/// each key bound as the type of its `Pivot` column.
+///
+/// On PostgreSQL and SQLite it inserts the row only when it is missing. On
+/// MySQL and MariaDB it inserts unconditionally, and the caller checks first:
+/// InnoDB takes shared next-key locks for the reads inside an
+/// `INSERT .. SELECT`, which two concurrent attaches turn into a deadlock.
+fn build_pivot_insert<Pivot: Model>(
     db_type: crate::config::DatabaseType,
     pivot_table: &str,
     foreign_key: &str,
@@ -656,25 +509,47 @@ fn build_pivot_insert(
     parent_pk: &serde_json::Value,
     related_id: &serde_json::Value,
 ) -> (String, Vec<crate::internal::Value>) {
-    let mut params = Vec::with_capacity(2);
-    let parent_placeholder = crate::internal::push_param(
-        db_type,
-        &mut params,
-        crate::internal::json_to_db_value(parent_pk),
-    );
-    let related_placeholder = crate::internal::push_param(
-        db_type,
-        &mut params,
-        crate::internal::json_to_db_value(related_id),
-    );
-    let sql = format!(
-        "INSERT INTO {} ({}, {}) VALUES ({}, {})",
-        quote_ident(db_type, pivot_table),
-        quote_ident(db_type, foreign_key),
-        quote_ident(db_type, related_key),
-        parent_placeholder,
-        related_placeholder
-    );
+    use crate::config::DatabaseType;
+    use crate::internal::push_param;
+
+    let mut params = Vec::with_capacity(4);
+    let key_value = |column: &str, value: &serde_json::Value| {
+        crate::internal::json_to_column_value(
+            value,
+            crate::internal::column_type_of::<Pivot>(column).as_ref(),
+        )
+    };
+    let parent = key_value(foreign_key, parent_pk);
+    let related = key_value(related_key, related_id);
+    let new_parent = push_param(db_type, &mut params, parent.clone());
+    let new_related = push_param(db_type, &mut params, related.clone());
+    let table = if pivot_table == Pivot::table_name() {
+        crate::query::db_sql::quote_table::<Pivot>(db_type)
+    } else {
+        crate::internal::sql_safety::format_identifier_reference(db_type, pivot_table)
+            .unwrap_or_else(|| quote_ident(db_type, pivot_table))
+    };
+    let foreign_key = quote_ident(db_type, foreign_key);
+    let related_key = quote_ident(db_type, related_key);
+    let sql = match db_type {
+        // The conflict clause makes losing a race on a unique key a no-op
+        // instead of an error.
+        DatabaseType::MySQL | DatabaseType::MariaDB => format!(
+            "INSERT INTO {table} ({foreign_key}, {related_key}) VALUES ({new_parent}, {new_related}) \
+             ON DUPLICATE KEY UPDATE {foreign_key} = {foreign_key}"
+        ),
+        // `NOT EXISTS` keeps a pivot table without a unique key free of
+        // duplicates, and the conflict clause covers a race on one with a key.
+        DatabaseType::Postgres | DatabaseType::SQLite => {
+            let existing_parent = push_param(db_type, &mut params, parent);
+            let existing_related = push_param(db_type, &mut params, related);
+            format!(
+                "INSERT INTO {table} ({foreign_key}, {related_key}) SELECT {new_parent}, {new_related} \
+                 WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE {foreign_key} = {existing_parent} \
+                 AND {related_key} = {existing_related}) ON CONFLICT DO NOTHING"
+            )
+        }
+    };
 
     (sql, params)
 }
@@ -691,22 +566,17 @@ impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
             relation_name: "",
             #[cfg(feature = "entity-manager")]
             owner_table: "",
-            #[cfg(feature = "entity-manager")]
-            related_table: "",
             cached: None,
             parent_pk: None,
             #[cfg(feature = "entity-manager")]
             owner_key: None,
-            #[cfg(feature = "entity-manager")]
-            entity_manager: None,
-            #[cfg(feature = "entity-manager")]
-            query_db: None,
-            _marker: PhantomData,
+            source: QuerySource::default(),
+            _pivot: PhantomData,
         }
     }
 }
 
-impl<Related: Model + Serialize, Pivot: Model> Serialize for HasManyThrough<Related, Pivot> {
+impl<Related: Model, Pivot: Model> Serialize for HasManyThrough<Related, Pivot> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -728,192 +598,10 @@ impl<'de, Related: Model, Pivot: Model> Deserialize<'de> for HasManyThrough<Rela
     }
 }
 
+#[cfg(test)]
+#[path = "../../tests/unit/many_to_many_tests.rs"]
+mod tests;
+
 #[cfg(all(test, feature = "entity-manager"))]
 #[path = "../../tests/unit/many_to_many_entity_manager_tests.rs"]
 mod entity_manager_tests;
-
-/// A related model paired with the pivot row that linked it in.
-///
-/// [`HasManyThrough::load`] discards the pivot columns; this is the container to
-/// carry them when the join table holds data of its own (a role's `granted_at`,
-/// a cart line's `quantity`). Nothing constructs it for you — build it in a
-/// [`load_with`](HasManyThrough::load_with) closure that selects the pivot
-/// columns, and remember `load_with` does not deduplicate, which is what you
-/// want here since each pivot row is a distinct pairing.
-///
-/// Derefs to `M`, and serializes with the model flattened and the pivot under a
-/// `"pivot"` key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WithPivot<M, P> {
-    /// The related model. Also reachable through `Deref`.
-    #[serde(flatten)]
-    pub model: M,
-    /// The pivot row's own data.
-    pub pivot: P,
-}
-
-impl<M, P> WithPivot<M, P> {
-    /// Pair a related model with its pivot data.
-    pub fn new(model: M, pivot: P) -> Self {
-        Self { model, pivot }
-    }
-
-    /// Take the model and drop the pivot data.
-    pub fn into_model(self) -> M {
-        self.model
-    }
-
-    /// Borrow the pivot data. Needed because `Deref` resolves to `M`, so
-    /// `.pivot` on a method-call chain would otherwise be ambiguous to read.
-    pub fn pivot(&self) -> &P {
-        &self.pivot
-    }
-
-    /// Split into the model and the pivot data.
-    pub fn into_parts(self) -> (M, P) {
-        (self.model, self.pivot)
-    }
-}
-
-impl<M, P> std::ops::Deref for WithPivot<M, P> {
-    type Target = M;
-
-    fn deref(&self) -> &Self::Target {
-        &self.model
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::HasManyThrough;
-    use crate::config::DatabaseType;
-    use crate::model::Model;
-    use serde_json::json;
-
-    #[tideorm::model(table = "m2m_render_tags")]
-    struct M2mRenderTag {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-    }
-
-    #[tideorm::model(table = "m2m_render_post_tags")]
-    struct M2mRenderPostTag {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        post_id: i64,
-        tag_id: i64,
-    }
-
-    /// A related model carrying a `json` column — the type PostgreSQL has no
-    /// equality operator for, and therefore cannot `SELECT DISTINCT` over.
-    #[tideorm::model(table = "m2m_render_documents")]
-    struct M2mRenderDocument {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        metadata: serde_json::Value,
-    }
-
-    /// A related model whose identity spans two columns, so the grouping has to
-    /// name both.
-    #[tideorm::model(table = "m2m_render_regions")]
-    struct M2mRenderRegion {
-        #[tideorm(primary_key)]
-        country_id: i64,
-        #[tideorm(primary_key)]
-        region_id: i64,
-        name: String,
-    }
-
-    fn relation() -> HasManyThrough<M2mRenderTag, M2mRenderPostTag> {
-        HasManyThrough::new("post_id", "tag_id", "id", "id", "m2m_render_post_tags")
-    }
-
-    /// The projection and the join `load` reads the relation through.
-    const EXPECTED_LOAD_PREFIX: &str = "SELECT \"m2m_render_tags\".* FROM \"m2m_render_tags\" INNER JOIN \"m2m_render_post_tags\" ON \"m2m_render_post_tags\".\"tag_id\" = \"m2m_render_tags\".\"id\"";
-
-    #[test]
-    fn test_load_collapses_duplicate_pivot_rows_in_sql() {
-        let sql = relation()
-            .scope_to_pivot(M2mRenderTag::query(), &json!(1), true)
-            .build_select_sql_for_db(DatabaseType::Postgres);
-
-        assert!(sql.starts_with(EXPECTED_LOAD_PREFIX), "{sql}");
-        assert!(
-            sql.contains("\"m2m_render_post_tags\".\"post_id\""),
-            "{sql}"
-        );
-        assert!(
-            sql.contains("GROUP BY \"m2m_render_tags\".\"id\""),
-            "duplicate pivot rows are collapsed by grouping on the related primary key: {sql}"
-        );
-    }
-
-    /// PostgreSQL has no equality operator for `json`, so `SELECT DISTINCT` over
-    /// a projection containing one aborts the statement with "could not identify
-    /// an equality operator for type json". Deduplication must therefore never
-    /// compare whole rows.
-    #[test]
-    fn test_load_does_not_distinct_over_a_json_column() {
-        let relation: HasManyThrough<M2mRenderDocument, M2mRenderPostTag> =
-            HasManyThrough::new("post_id", "tag_id", "id", "id", "m2m_render_post_tags");
-
-        let sql = relation
-            .scope_to_pivot(M2mRenderDocument::query(), &json!(1), true)
-            .build_select_sql_for_db(DatabaseType::Postgres);
-
-        assert!(
-            !sql.contains("DISTINCT"),
-            "SELECT DISTINCT over \"m2m_render_documents\".* cannot compare its json column: {sql}"
-        );
-        assert!(
-            sql.starts_with("SELECT \"m2m_render_documents\".* FROM"),
-            "{sql}"
-        );
-        assert!(
-            sql.contains("GROUP BY \"m2m_render_documents\".\"id\""),
-            "{sql}"
-        );
-    }
-
-    #[test]
-    fn test_load_groups_by_every_primary_key_column() {
-        let relation: HasManyThrough<M2mRenderRegion, M2mRenderPostTag> = HasManyThrough::new(
-            "post_id",
-            "tag_id",
-            "id",
-            "country_id",
-            "m2m_render_post_tags",
-        );
-
-        let sql = relation
-            .scope_to_pivot(M2mRenderRegion::query(), &json!(1), true)
-            .build_select_sql_for_db(DatabaseType::Postgres);
-
-        let expected_grouping = concat!(
-            "GROUP BY \"m2m_render_regions\".\"country_id\", ",
-            "\"m2m_render_regions\".\"region_id\""
-        );
-
-        assert!(
-            sql.contains(expected_grouping),
-            "a composite identity needs every column to stay a functional dependency: {sql}"
-        );
-    }
-
-    #[test]
-    fn test_constrained_load_is_left_undeduplicated() {
-        let sql = relation()
-            .scope_to_pivot(M2mRenderTag::query(), &json!(1), false)
-            .build_select_sql_for_db(DatabaseType::Postgres);
-
-        assert!(
-            sql.starts_with("SELECT \"m2m_render_tags\".* FROM"),
-            "load_with() leaves the projection to its closure: {sql}"
-        );
-        assert!(
-            !sql.contains("GROUP BY"),
-            "load_with() leaves deduplication to its closure: {sql}"
-        );
-    }
-}

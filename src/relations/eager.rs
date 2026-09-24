@@ -53,134 +53,6 @@ fn apply_primary_key_filter<M: Model>(
     Ok(query)
 }
 
-/// A reusable, storable bundle of constraints to narrow a relation query with.
-///
-/// `load_with` takes a closure, which is convenient inline but cannot be stored,
-/// cloned, or built up conditionally. `RelationConstraints` is the value form:
-/// assemble it anywhere, keep it in a struct, then hand it to
-/// [`apply`](Self::apply) inside the closure.
-///
-/// It is deliberately a small, declarative subset — equality filters, one
-/// ordering, paging, soft-delete scope — not a second query builder. Anything
-/// outside that (joins, raw SQL, `OR` groups) belongs in the closure directly.
-///
-/// ```ignore
-/// let recent = RelationConstraints::new().order_by("created_at", Order::Desc).limit(5);
-/// let posts = user.posts.load_with(|q| recent.apply(q)).await?;
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct RelationConstraints {
-    /// Accumulated `column = value` filters, applied in insertion order and
-    /// always `AND`-ed together.
-    pub conditions: Vec<(String, serde_json::Value)>,
-    /// The single ordering, if one was set. Calling
-    /// [`order_by`](Self::order_by) twice replaces rather than appends.
-    pub order_by: Option<(String, Order)>,
-    /// Maximum rows to return.
-    pub limit: Option<u64>,
-    /// Rows to skip. Set without a `limit` this still emits an `OFFSET`, which
-    /// some backends reject on its own — pair the two.
-    pub offset: Option<u64>,
-    /// Include soft-deleted rows alongside live ones.
-    pub with_trashed: bool,
-    /// Restrict to soft-deleted rows only.
-    pub only_trashed: bool,
-}
-
-impl RelationConstraints {
-    /// An empty constraint set that leaves a query exactly as it found it.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add an equality filter. Repeated calls accumulate and are `AND`-ed.
-    ///
-    /// Accepts either a string column name or a typed column
-    /// (`Post::columns.published`); the typed form is checked at compile time
-    /// and is the better default.
-    pub fn where_eq(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions
-            .push((column.column_name().to_string(), value.into()));
-        self
-    }
-
-    /// Set the ordering. Last call wins — this is a single slot, not a list, so
-    /// multi-column ordering needs the closure form.
-    pub fn order_by(mut self, column: impl IntoColumnName, order: Order) -> Self {
-        self.order_by = Some((column.column_name().to_string(), order));
-        self
-    }
-
-    /// Cap the number of related rows returned.
-    ///
-    /// This limits the *whole* query, so it is only meaningful for a relation
-    /// loaded one parent at a time — applying it to a batched eager load would
-    /// truncate across parents rather than per parent.
-    pub fn limit(mut self, n: u64) -> Self {
-        self.limit = Some(n);
-        self
-    }
-
-    /// Skip `n` rows. Only meaningful together with an
-    /// [`order_by`](Self::order_by), since row order is otherwise unspecified.
-    pub fn offset(mut self, n: u64) -> Self {
-        self.offset = Some(n);
-        self
-    }
-
-    /// Include soft-deleted rows. No-op on a model without soft deletes.
-    pub fn with_trashed(mut self) -> Self {
-        self.with_trashed = true;
-        self
-    }
-
-    /// Return *only* soft-deleted rows.
-    ///
-    /// Setting this alongside [`with_trashed`](Self::with_trashed) is not
-    /// rejected here; both are forwarded to the query builder, and the narrower
-    /// scope applied last is what the query ends up with.
-    pub fn only_trashed(mut self) -> Self {
-        self.only_trashed = true;
-        self
-    }
-
-    /// Fold every recorded constraint into `query` and hand it back.
-    ///
-    /// Order of application is fixed — filters, ordering, limit, offset, then
-    /// soft-delete scope — regardless of the order the setters were called in.
-    pub fn apply<M: Model>(self, mut query: QueryBuilder<M>) -> QueryBuilder<M> {
-        for (column, value) in self.conditions {
-            query = query.where_eq(&column, value);
-        }
-
-        if let Some((column, order)) = self.order_by {
-            query = query.order_by(&column, order);
-        }
-
-        if let Some(limit) = self.limit {
-            query = query.limit(limit);
-        }
-
-        if let Some(offset) = self.offset {
-            query = query.offset(offset);
-        }
-
-        if self.with_trashed {
-            query = query.with_trashed();
-        }
-
-        if self.only_trashed {
-            query = query.only_trashed();
-        }
-
-        query
-    }
-}
-
 /// A model plus the relation payloads an eager load resolved for it.
 ///
 /// This is what every [`EagerQueryBuilder`] terminal returns. The relations are
@@ -223,16 +95,6 @@ impl<M: Model> WithRelations<M> {
             model,
             relations: HashMap::new(),
         }
-    }
-
-    /// Record a raw JSON payload under `name`, builder-style.
-    ///
-    /// The by-value counterpart of [`set_relation`](Self::set_relation), which
-    /// is what the eager loader itself uses. Takes JSON directly, so it cannot
-    /// fail; useful for stitching in a relation resolved outside the ORM.
-    pub fn with_relation(mut self, name: &str, data: serde_json::Value) -> Self {
-        self.relations.insert(name.to_string(), data);
-        self
     }
 
     /// Record an eagerly-loaded relation payload under `name`.
@@ -299,23 +161,20 @@ impl<M> std::ops::DerefMut for WithRelations<M> {
 /// "Unknown relation '..' on ..".
 #[derive(Debug, Clone)]
 pub struct RelationPath {
-    /// The path as written, with the dots.
-    pub full_path: String,
     /// The dot-separated hops, outermost first.
     pub segments: Vec<String>,
 }
 
 impl RelationPath {
-    /// Split a dotted path into segments.
-    ///
-    /// Splitting is unconditional, so an empty string parses to a single empty
-    /// segment rather than to nothing; [`RelationTree::add_path`] is what filters
-    /// such a path out.
+    /// Split a dotted path into segments, dropping empty ones: `""` parses to
+    /// no segments and `"posts..comments"` to two.
     pub fn parse(path: &str) -> Self {
-        let segments: Vec<String> = path.split('.').map(|s| s.to_string()).collect();
         Self {
-            full_path: path.to_string(),
-            segments,
+            segments: path
+                .split('.')
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -330,23 +189,11 @@ impl RelationPath {
     pub fn nested(&self) -> Option<RelationPath> {
         if self.segments.len() > 1 {
             Some(RelationPath {
-                full_path: self.segments[1..].join("."),
                 segments: self.segments[1..].to_vec(),
             })
         } else {
             None
         }
-    }
-
-    /// Whether more than one hop remains, i.e. [`nested`](Self::nested) is
-    /// `Some`.
-    pub fn is_nested(&self) -> bool {
-        self.segments.len() > 1
-    }
-
-    /// Number of hops. `1` for a direct relation.
-    pub fn depth(&self) -> usize {
-        self.segments.len()
     }
 }
 
@@ -399,8 +246,7 @@ impl RelationTree {
     /// not in this level at all.
     ///
     /// A leaf yields `Some` of an empty tree, which the loader treats as "stop
-    /// here" — [`has_nested`](Self::has_nested) is the check that tells the two
-    /// apart.
+    /// here".
     pub fn get_nested(&self, name: &str) -> Option<&RelationTree> {
         self.children.get(name)
     }
@@ -408,15 +254,6 @@ impl RelationTree {
     /// Whether this level has nothing to resolve.
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
-    }
-
-    /// Whether `name` has a further level below it — false both for an unknown
-    /// name and for a leaf.
-    pub fn has_nested(&self, name: &str) -> bool {
-        self.children
-            .get(name)
-            .map(|t| !t.is_empty())
-            .unwrap_or(false)
     }
 }
 
@@ -433,7 +270,7 @@ impl RelationTree {
 /// implements. Nothing is loaded until a terminal runs.
 pub struct EagerQueryBuilder<M: Model> {
     query: QueryBuilder<M>,
-    relation_tree: RelationTree,
+    pub(super) relation_tree: RelationTree,
 }
 
 /// Macro-generated eager-loading machinery. Implemented for every model by
@@ -489,18 +326,77 @@ pub trait EagerLoadModel: Model + InternalModel {
             return Ok(grouped);
         }
 
-        let mut query = Self::query().where_in(foreign_key, lookup_keys);
-        if let Some((type_column, type_value)) = morph_type {
-            query = query.where_eq(type_column, type_value);
-        }
+        // A chunk per query keeps each IN list under the backends'
+        // bind-parameter limits however many parents there are.
+        for chunk in lookup_keys.chunks(5_000) {
+            let mut query = Self::query().where_in(foreign_key, chunk.to_vec());
+            if let Some((type_column, type_value)) = morph_type {
+                query = query.where_eq(type_column, type_value);
+            }
 
-        for row in query.get().await? {
-            let key = row.get_field_value(foreign_key)?;
-            grouped.entry(key.to_string()).or_default().push(row);
+            for row in query.get().await? {
+                let key = row.get_field_value(foreign_key)?;
+                grouped.entry(key.to_string()).or_default().push(row);
+            }
         }
 
         Ok(grouped)
     }
+}
+
+/// Resolve the next level of a to-many relation for every parent at once.
+///
+/// Recursing per parent would be N+1, so the groups are flattened, loaded in one
+/// pass and split back apart by their recorded sizes.
+#[doc(hidden)]
+pub async fn __eager_load_nested_many<R: EagerLoadModel>(
+    grouped: Vec<Vec<R>>,
+    nested: Option<&RelationTree>,
+) -> Result<Vec<Vec<R>>> {
+    let Some(nested) = nested.filter(|tree| !tree.is_empty()) else {
+        return Ok(grouped);
+    };
+
+    let group_sizes: Vec<usize> = grouped.iter().map(Vec::len).collect();
+    let mut flattened: Vec<WithRelations<R>> = grouped
+        .into_iter()
+        .flatten()
+        .map(WithRelations::new)
+        .collect();
+    R::__eager_load(&mut flattened, nested).await?;
+
+    let mut restored = flattened.into_iter().map(WithRelations::into_inner);
+    Ok(group_sizes
+        .into_iter()
+        .map(|size| restored.by_ref().take(size).collect())
+        .collect())
+}
+
+/// The to-one counterpart of [`__eager_load_nested_many`]: resolve the next
+/// level for the present children of every parent at once, keeping each in its
+/// slot.
+#[doc(hidden)]
+pub async fn __eager_load_nested_one<R: EagerLoadModel>(
+    related: Vec<Option<R>>,
+    nested: Option<&RelationTree>,
+) -> Result<Vec<Option<R>>> {
+    let Some(nested) = nested.filter(|tree| !tree.is_empty()) else {
+        return Ok(related);
+    };
+
+    let slots: Vec<bool> = related.iter().map(Option::is_some).collect();
+    let mut flattened: Vec<WithRelations<R>> = related
+        .into_iter()
+        .flatten()
+        .map(WithRelations::new)
+        .collect();
+    R::__eager_load(&mut flattened, nested).await?;
+
+    let mut restored = flattened.into_iter().map(WithRelations::into_inner);
+    Ok(slots
+        .into_iter()
+        .map(|filled| if filled { restored.next() } else { None })
+        .collect())
 }
 
 impl<M: Model> EagerQueryBuilder<M> {
@@ -546,17 +442,13 @@ impl<M: Model> EagerQueryBuilder<M> {
 
     /// Filter the *root* query. Relation queries are unaffected — constrain
     /// those by loading them lazily with `load_with` instead.
-    pub fn where_eq<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl IntoColumnName,
-        value: V,
-    ) -> Self {
+    pub fn where_eq<V: serde::Serialize>(mut self, column: impl IntoColumnName, value: V) -> Self {
         self.query = self.query.where_eq(column, value);
         self
     }
 
     /// Restrict the root query to rows whose `column` is one of `values`.
-    pub fn where_in<V: Into<serde_json::Value>>(
+    pub fn where_in<V: serde::Serialize>(
         mut self,
         column: impl IntoColumnName,
         values: Vec<V>,
@@ -594,12 +486,6 @@ impl<M: Model> EagerQueryBuilder<M> {
     pub fn offset(mut self, n: u64) -> Self {
         self.query = self.query.offset(n);
         self
-    }
-
-    /// The merged set of relations this builder will resolve. Mostly useful for
-    /// asserting in tests what a chain of `.with(..)` calls added up to.
-    pub fn get_relation_tree(&self) -> &RelationTree {
-        &self.relation_tree
     }
 
     /// Run the root query, then resolve every requested relation across all
@@ -657,7 +543,7 @@ impl<M: Model> Default for EagerQueryBuilder<M> {
 /// Blanket-implemented entry points for starting an eager load from the model
 /// type rather than from a query.
 ///
-/// `User::with_relation("posts")` and `User::query().with("posts")` build the
+/// `User::eager().with("posts")` and `User::query().with("posts")` build the
 /// same thing; these read better when there is nothing to filter, and are worse
 /// when there is, because they start from an unconstrained query.
 ///
@@ -671,14 +557,6 @@ pub trait EagerLoadExt: Model {
         Self: Sized,
     {
         EagerQueryBuilder::new()
-    }
-
-    /// Start an eager query for one relation, nested paths included.
-    fn with_relation(relation_name: &str) -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new().with(relation_name)
     }
 
     /// Start an eager query for several relations at once.
@@ -697,7 +575,6 @@ impl<T: Model> EagerLoadExt for T {}
 /// This is how relation loading gets at a key column without knowing the model's
 /// concrete field types — grouping eagerly-loaded rows by their foreign key, for
 /// instance. Blanket-implemented for every [`Model`].
-#[async_trait]
 pub trait RelationExt: Model {
     /// The value of `field`, rendered as JSON.
     ///

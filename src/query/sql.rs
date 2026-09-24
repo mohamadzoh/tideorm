@@ -7,6 +7,7 @@ use crate::internal::{
 };
 use crate::model::Model;
 use crate::soft_delete::{SoftDeleteScope, query_scope_for};
+use db_sql::JsonExistence;
 
 pub(crate) mod condition_builders;
 pub(crate) mod debugging;
@@ -38,24 +39,20 @@ enum JsonValueOperator {
 }
 
 #[derive(Clone, Copy)]
-enum JsonStringOperator {
-    KeyPresent,
-    KeyAbsent,
-    PathPresent,
-    PathAbsent,
-}
-
-#[derive(Clone, Copy)]
 enum ArrayOperator {
     Contains,
     ContainedBy,
     Overlaps,
 }
 
+/// The rendering a condition's operator/value pair calls for.
+///
+/// `condition_spec` returns `None` for a pair with no rendering, which is what
+/// lets execution reject such a condition instead of silently dropping it.
 enum ConditionSpec<'a> {
     Raw {
-        column: &'a str,
         raw_sql: &'a str,
+        values: &'a [Value],
     },
     Compare {
         operator: ComparisonOperator,
@@ -81,17 +78,14 @@ enum ConditionSpec<'a> {
         operator: JsonValueOperator,
         value: &'a serde_json::Value,
     },
-    JsonString {
-        operator: JsonStringOperator,
-        value: &'a str,
+    JsonExists {
+        existence: JsonExistence,
+        negated: bool,
+        target: &'a str,
     },
     Array {
         operator: ArrayOperator,
         values: &'a [serde_json::Value],
-    },
-    Subquery {
-        negated: bool,
-        query_sql: &'a str,
     },
 }
 

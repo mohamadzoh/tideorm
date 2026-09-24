@@ -1,6 +1,6 @@
 [package]
 name = "tideorm-macros"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 description = "Procedural macros for TideORM"
 license = "MIT"
@@ -8,7 +8,6 @@ repository = "https://github.com/mohamadzoh/tideorm"
 homepage = "https://tideorm.com"
 readme = "README.md"
 rust-version = "1.94"
-exclude = ["tests/**"]
 
 [lib]
 proc-macro = true
@@ -18,4 +17,4 @@ proc-macro2 = "1.0.105"
 quote = "1.0.43"
 syn = { version = "2.0.114", features = ["full", "extra-traits", "parsing"] }
 darling = "0.23.0"
-convert_case = "0.11.0"
+unicode-segmentation = "1.12.0"

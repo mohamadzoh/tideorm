@@ -1,12 +1,13 @@
 use crate::database::Database;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorContext, Result};
 use crate::internal::sql_safety::quote_ident_for_backend;
 use crate::internal::{
-    Alias, Backend, ConnectionTrait, Expr, Index, MysqlQueryBuilder, OrmColumnDef, OrmConnection,
-    PostgresQueryBuilder, QueryResult, SqliteQueryBuilder, Table, build_statement,
-    build_statement_with_values,
+    Backend, ConnectionTrait, OrmConnection, QueryResult, build_statement,
+    build_statement_with_values, translate_error,
 };
 use crate::migration::ColumnType;
+use crate::migration::ddl::{self, ColumnDefinition};
+use crate::model::IndexDefinition;
 use crate::schema::rust_type_to_column_type;
 use crate::{tide_debug, tide_info, tide_warn};
 
@@ -79,6 +80,18 @@ pub struct ModelSchema {
     pub columns: Vec<ColumnDef>,
     /// Primary key columns, in declaration order.
     pub primary_keys: Vec<String>,
+    /// The model's `#[index]` and `#[unique_index]` declarations.
+    pub indexes: Vec<IndexDefinition>,
+}
+
+/// The schema a [`ModelSchema`] names until [`ModelSchema::schema`] sets one.
+const DEFAULT_SCHEMA: &str = "public";
+
+/// The database a MySQL catalog probe or statement has to name for `schema`:
+/// the declared one, or `None` for the connected database. MySQL's schema *is*
+/// a database, and the PostgreSQL-flavoured default names none.
+fn mysql_database(schema: &str) -> Option<&str> {
+    (!schema.is_empty() && schema != DEFAULT_SCHEMA).then_some(schema)
 }
 
 impl ModelSchema {
@@ -86,9 +99,10 @@ impl ModelSchema {
     pub fn new(table_name: impl Into<String>) -> Self {
         Self {
             table_name: table_name.into(),
-            schema_name: "public".to_string(),
+            schema_name: DEFAULT_SCHEMA.to_string(),
             columns: Vec::new(),
             primary_keys: Vec::new(),
+            indexes: Vec::new(),
         }
     }
 
@@ -104,15 +118,15 @@ impl ModelSchema {
         self
     }
 
-    /// Add multiple columns
-    pub fn columns(mut self, cols: Vec<ColumnDef>) -> Self {
-        self.columns.extend(cols);
-        self
-    }
-
     /// Set the model primary keys.
     pub fn primary_keys(mut self, columns: Vec<String>) -> Self {
         self.primary_keys = columns;
+        self
+    }
+
+    /// Set the indexes sync creates on the table.
+    pub fn indexes(mut self, indexes: Vec<IndexDefinition>) -> Self {
+        self.indexes = indexes;
         self
     }
 }
@@ -127,50 +141,151 @@ pub(super) async fn sync_model_schemas(db: &Database, force_sync: bool) -> Resul
             check_table_exists(&conn, &model.schema_name, &model.table_name, backend).await?;
 
         if force_sync && table_exists {
-            let quoted_table = quote_ident_for_backend(backend, &model.table_name);
-            let drop_sql = match qualifying_schema(&model, backend) {
-                Some(schema) => format!(
-                    "DROP TABLE IF EXISTS {}.{} CASCADE",
-                    quote_ident_for_backend(backend, schema),
-                    quoted_table
-                ),
-                None => format!("DROP TABLE IF EXISTS {}", quoted_table),
+            let table = table_reference(&model, backend);
+            let drop_sql = if qualifying_schema(&model, backend).is_some() {
+                format!("DROP TABLE IF EXISTS {} CASCADE", table)
+            } else {
+                format!("DROP TABLE IF EXISTS {}", table)
             };
 
-            let drop_stmt = build_statement(backend, drop_sql);
-            conn.execute_raw(drop_stmt)
-                .await
-                .map_err(|error| Error::query(error.to_string()))?;
-
+            execute_ddl(&conn, backend, &model, drop_sql).await?;
             tide_warn!("Dropped TideORM table: {}", model.table_name);
         }
 
-        if !table_exists || force_sync {
-            create_table_from_model_schema(&conn, &model, backend).await?;
+        let created = !table_exists || force_sync;
+        if created {
+            execute_ddl(
+                &conn,
+                backend,
+                &model,
+                build_create_table_sql(&model, backend),
+            )
+            .await?;
             tide_info!("Created TideORM table: {}", model.table_name);
         } else {
             tide_debug!("TideORM table exists: {}", model.table_name);
             reconcile_existing_table(&conn, &model, backend).await?;
+        }
+        sync_indexes(&conn, &model, backend, created).await?;
+    }
+
+    Ok(())
+}
+
+/// Create the model's declared indexes the table lacks.
+///
+/// On a table sync has just created, a failure is an error: the model's own
+/// declaration cannot be applied. On an existing table a unique index can be
+/// blocked by rows that already break it, and sync never touches data, so that
+/// is reported and the rest of the sync carries on.
+async fn sync_indexes(
+    conn: &OrmConnection,
+    model: &ModelSchema,
+    backend: Backend,
+    new_table: bool,
+) -> Result<()> {
+    for index in &model.indexes {
+        // MySQL has no `CREATE INDEX IF NOT EXISTS`, so ask the catalog first.
+        if backend == Backend::MySql && mysql_index_exists(conn, model, &index.name).await? {
+            continue;
+        }
+
+        let sql = ddl::create_index(
+            backend.as_database_type(),
+            &index.name,
+            &table_reference(model, backend),
+            &index.columns,
+            index.unique,
+            true,
+        );
+        match execute_ddl(conn, backend, model, sql).await {
+            Ok(()) => tide_debug!(
+                "Ensured index '{}' on TideORM table '{}'",
+                index.name,
+                model.table_name
+            ),
+            Err(error) if !new_table => tide_warn!(
+                "Could not create index '{}' on TideORM table '{}': {}.                  Resolve the conflicting rows or create it with a migration.",
+                index.name,
+                model.table_name,
+                error
+            ),
+            Err(error) => return Err(error),
         }
     }
 
     Ok(())
 }
 
+async fn mysql_index_exists(
+    conn: &OrmConnection,
+    model: &ModelSchema,
+    index: &str,
+) -> Result<bool> {
+    let statement = build_statement_with_values(
+        Backend::MySql,
+        "SELECT COUNT(*) > 0 FROM information_schema.statistics          WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
+        vec![
+            mysql_database(&model.schema_name).into(),
+            model.table_name.as_str().into(),
+            index.into(),
+        ],
+    );
+    let row = conn.query_one_raw(statement).await.map_err(|error| {
+        translate_error(error).with_context(ErrorContext::new().table(model.table_name.as_str()))
+    })?;
+
+    match row {
+        Some(row) => decode_table_exists(&row, &model.table_name),
+        None => Ok(false),
+    }
+}
+
+/// Run one DDL statement against `model`'s table, keeping the statement and
+/// the table on the error.
+async fn execute_ddl(
+    conn: &OrmConnection,
+    backend: Backend,
+    model: &ModelSchema,
+    sql: String,
+) -> Result<()> {
+    conn.execute_raw(build_statement(backend, sql.as_str()))
+        .await
+        .map_err(|error| {
+            translate_error(error).with_context(
+                ErrorContext::new()
+                    .table(model.table_name.as_str())
+                    .query(sql),
+            )
+        })?;
+
+    Ok(())
+}
+
 /// The schema a model's DDL has to be qualified with, if any.
 ///
-/// Only PostgreSQL has schemas that are independent of the connected database,
-/// and it is the only backend whose existence probe filters on
-/// `model.schema_name`. MySQL's "schema" *is* the database - `check_table_exists`
-/// resolves it with `DATABASE()` - and SQLite has none, so qualifying there
-/// would name a database that does not exist.
+/// PostgreSQL qualifies with the model's schema, `public` by default. On MySQL
+/// the schema is a database, named only when the model declared one; SQLite
+/// has none. The catalog probes resolve the same way, so the table is created
+/// where they look for it - and where the model's queries go.
 ///
 /// Every statement that names the table has to go through this, or `CREATE
 /// TABLE` lands somewhere the existence probe and the force `DROP` never look.
 fn qualifying_schema(model: &ModelSchema, backend: Backend) -> Option<&str> {
     match backend {
         Backend::Postgres if !model.schema_name.is_empty() => Some(&model.schema_name),
+        Backend::MySql => mysql_database(&model.schema_name),
         _ => None,
+    }
+}
+
+/// The model's table as every statement sync issues names it.
+fn table_reference(model: &ModelSchema, backend: Backend) -> String {
+    let table = quote_ident_for_backend(backend, &model.table_name);
+
+    match qualifying_schema(model, backend) {
+        Some(schema) => format!("{}.{}", quote_ident_for_backend(backend, schema), table),
+        None => table,
     }
 }
 
@@ -262,13 +377,13 @@ async fn fetch_existing_columns(
     let statement = match backend {
         Backend::Postgres => build_statement_with_values(
             Backend::Postgres,
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+            "SELECT column_name::text FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
             vec![schema.into(), table.into()],
         ),
         Backend::MySql => build_statement_with_values(
             Backend::MySql,
-            "SELECT column_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ?",
-            vec![table.into()],
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ?",
+            vec![mysql_database(schema).into(), table.into()],
         ),
         Backend::Sqlite => build_statement_with_values(
             Backend::Sqlite,
@@ -277,23 +392,18 @@ async fn fetch_existing_columns(
         ),
     };
 
+    let table_context = || ErrorContext::new().table(table);
     let rows = conn
         .query_all_raw(statement)
         .await
-        .map_err(|error| Error::query(error.to_string()))?;
+        .map_err(|error| translate_error(error).with_context(table_context()))?;
 
-    let mut columns = Vec::with_capacity(rows.len());
-    for row in rows {
-        let name: String = row.try_get_by_index(0).map_err(|error| {
-            Error::query(format!(
-                "Unable to read the column list of table '{}': {}",
-                table, error
-            ))
-        })?;
-        columns.push(name);
-    }
-
-    Ok(columns)
+    rows.iter()
+        .map(|row| {
+            row.try_get_by_index(0)
+                .map_err(|error| translate_error(error).with_context(table_context()))
+        })
+        .collect()
 }
 
 async fn add_missing_column(
@@ -302,16 +412,12 @@ async fn add_missing_column(
     col: &ColumnDef,
     backend: Backend,
 ) -> Result<()> {
-    let mut column = OrmColumnDef::new(Alias::new(&col.name));
-    let _ = apply_column_type(&mut column, &col.col_type, col.auto_increment, backend);
-
-    if let Some(default) = &col.default {
-        column.default(Expr::cust(default.clone()));
-    }
+    let mut column = ColumnDefinition::new(&col.name, keyed_column_type(model, col, backend));
+    column.default = col.default.clone();
 
     if !col.nullable && !col.auto_increment {
         if col.default.is_some() {
-            column.not_null();
+            column.nullable = false;
         } else {
             tide_warn!(
                 "Column '{}' of table '{}' is declared NOT NULL without a default; \
@@ -323,32 +429,12 @@ async fn add_missing_column(
         }
     }
 
-    let mut alter = Table::alter();
-    match qualifying_schema(model, backend) {
-        Some(schema) => {
-            alter.table((Alias::new(schema), Alias::new(&model.table_name)));
-        }
-        None => {
-            alter.table(Alias::new(&model.table_name));
-        }
-    }
-    alter.add_column(&mut column);
-
-    let sql = match backend {
-        Backend::Postgres => alter.to_string(PostgresQueryBuilder),
-        Backend::MySql => alter.to_string(MysqlQueryBuilder),
-        Backend::Sqlite => alter.to_string(SqliteQueryBuilder),
-    };
-
-    let statement = build_statement(backend, sql);
-    conn.execute_raw(statement).await.map_err(|error| {
-        Error::query(format!(
-            "Failed to add column '{}' to table '{}': {}",
-            col.name, model.table_name, error
-        ))
-    })?;
-
-    Ok(())
+    let sql = ddl::add_column(
+        backend.as_database_type(),
+        &table_reference(model, backend),
+        &column,
+    );
+    execute_ddl(conn, backend, model, sql).await
 }
 
 async fn check_table_exists(
@@ -365,8 +451,8 @@ async fn check_table_exists(
         ),
         Backend::MySql => build_statement_with_values(
             Backend::MySql,
-            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
-            vec![table.into()],
+            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ?",
+            vec![mysql_database(schema).into(), table.into()],
         ),
         Backend::Sqlite => build_statement_with_values(
             Backend::Sqlite,
@@ -378,7 +464,7 @@ async fn check_table_exists(
     let result = conn
         .query_one_raw(statement)
         .await
-        .map_err(|error| Error::query(error.to_string()))?;
+        .map_err(|error| translate_error(error).with_context(ErrorContext::new().table(table)))?;
 
     match result {
         Some(row) => decode_table_exists(&row, table),
@@ -418,171 +504,107 @@ fn decode_table_exists(row: &QueryResult, table: &str) -> Result<bool> {
     )))
 }
 
-async fn create_table_from_model_schema(
-    conn: &OrmConnection,
-    model: &ModelSchema,
-    backend: Backend,
-) -> Result<()> {
-    let create_stmt = build_statement(backend, build_create_table_sql(model, backend));
-    conn.execute_raw(create_stmt)
-        .await
-        .map_err(|error| Error::query(error.to_string()))?;
-
-    Ok(())
-}
-
 /// Render the `CREATE TABLE` a model asks for.
 ///
-/// Kept separate from execution so the rendered DDL - in particular the schema
-/// qualification - can be asserted without a live database.
+/// This is the migration builders' DDL, so a synced table and a migrated one
+/// agree column for column. Kept separate from execution so the rendered DDL -
+/// in particular the schema qualification - can be asserted without a live
+/// database.
 fn build_create_table_sql(model: &ModelSchema, backend: Backend) -> String {
-    let mut table = Table::create();
-    match qualifying_schema(model, backend) {
-        Some(schema) => {
-            table.table((Alias::new(schema), Alias::new(&model.table_name)));
-        }
-        None => {
-            table.table(Alias::new(&model.table_name));
-        }
-    }
-    let composite_primary_key = model.primary_keys.len() > 1;
+    let primary_key = primary_key_columns(model);
+    let single_key = primary_key.len() == 1;
+    let columns: Vec<ColumnDefinition> = model
+        .columns
+        .iter()
+        .map(|column| {
+            column_definition(
+                column,
+                keyed_column_type(model, column, backend),
+                single_key && primary_key.contains(&column.name),
+            )
+        })
+        .collect();
 
-    for col in &model.columns {
-        let mut column = OrmColumnDef::new(Alias::new(&col.name));
+    ddl::create_table(
+        backend.as_database_type(),
+        &table_reference(model, backend),
+        true,
+        &columns,
+        &primary_key,
+        &[],
+    )
+}
 
-        let can_auto_increment =
-            apply_column_type(&mut column, &col.col_type, col.auto_increment, backend);
-
-        if col.primary_key && !composite_primary_key {
-            column.primary_key();
-        }
-
-        if col.auto_increment && can_auto_increment {
-            column.auto_increment();
-        }
-
-        if (composite_primary_key || !col.primary_key) && !col.auto_increment && !col.nullable {
-            column.not_null();
-        }
-
-        if let Some(ref default) = col.default {
-            let default_owned = default.clone();
-            column.default(Expr::cust(default_owned));
-        }
-
-        table.col(&mut column);
+/// The model's primary key: its declared key columns, or else the columns
+/// flagged as keys.
+fn primary_key_columns(model: &ModelSchema) -> Vec<String> {
+    if !model.primary_keys.is_empty() {
+        return model.primary_keys.clone();
     }
 
-    if composite_primary_key {
-        let mut primary_key = Index::create();
-        for column in &model.primary_keys {
-            primary_key.col(Alias::new(column));
-        }
-        table.primary_key(&mut primary_key);
+    model
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+/// The DDL column a model column becomes.
+///
+/// `single_key` says whether the column is the table's one-column primary
+/// key. A composite key's columns keep an explicit `NOT NULL`, which SQLite
+/// does not imply for them.
+fn column_definition(
+    col: &ColumnDef,
+    column_type: ColumnType,
+    single_key: bool,
+) -> ColumnDefinition {
+    let auto_increment = col.auto_increment && column_type.can_auto_increment();
+    if col.auto_increment && !auto_increment {
+        tide_warn!(
+            "Column type '{}' cannot auto-increment; creating the column without it.",
+            col.col_type
+        );
     }
 
-    table.if_not_exists();
+    let mut column = ColumnDefinition::new(&col.name, column_type);
+    column.nullable = col.nullable;
+    column.default = col.default.clone();
+    column.primary_key = single_key;
+    column.auto_increment = auto_increment;
+    column
+}
 
-    match backend {
-        Backend::Postgres => table.to_string(PostgresQueryBuilder),
-        Backend::MySql => table.to_string(MysqlQueryBuilder),
-        Backend::Sqlite => table.to_string(SqliteQueryBuilder),
+/// The type sync creates `col` with.
+///
+/// MySQL cannot make a `TEXT` column a key, or index it, without a prefix
+/// length, so on MySQL a string column in the primary key or in an index is a
+/// `VARCHAR(255)`.
+fn keyed_column_type(model: &ModelSchema, col: &ColumnDef, backend: Backend) -> ColumnType {
+    let column_type = column_type(col);
+    let keyed = primary_key_columns(model).contains(&col.name)
+        || model
+            .indexes
+            .iter()
+            .any(|index| index.columns.contains(&col.name));
+    if backend == Backend::MySql && keyed && matches!(column_type, ColumnType::Text) {
+        ColumnType::String
+    } else {
+        column_type
     }
 }
 
-/// The native integer width an auto-increment column of this type needs.
-///
-/// `None` means the type cannot carry an auto-increment clause at all.
-///
-/// The width has to be the one [`ColumnType::to_sql`] would have rendered, or a
-/// key column ends up wider than the plain column of the same Rust type - and
-/// on PostgreSQL that difference is fatal, since `sea-orm` decodes a `u32` from
-/// an `int4` and never from an `int8`. That is why [`ColumnType::Unsigned`]
-/// asks for a regular integer rather than a big one.
-#[derive(Clone, Copy)]
-enum AutoIncrementWidth {
-    Small,
-    Regular,
-    Big,
-}
-
-fn auto_increment_width(mapped: &ColumnType) -> Option<AutoIncrementWidth> {
-    match mapped {
-        ColumnType::SmallInteger | ColumnType::TinyUnsigned => Some(AutoIncrementWidth::Small),
-        ColumnType::Integer | ColumnType::SmallUnsigned | ColumnType::Unsigned => {
-            Some(AutoIncrementWidth::Regular)
-        }
-        ColumnType::BigInteger => Some(AutoIncrementWidth::Big),
-        _ => None,
-    }
-}
-
-/// Give `column` the SQL type the model's Rust type maps to.
-///
-/// No mapping decision is made here. The Rust type goes through
-/// [`rust_type_to_column_type`] - the crate's single Rust-to-column table - and
-/// the resulting logical type is rendered by [`ColumnType::to_sql`], the same
-/// pair schema export and the migration builders use. Sync applies that
-/// rendered SQL verbatim instead of re-deriving a type through `sea-query`, so
-/// a `DB_SYNC`-built table and a migration-built table cannot disagree about
-/// what a field becomes. Where the two vocabularies overlap the rendering is
-/// deliberately kept in parity with `sea-query`'s - the drivers only bind and
-/// decode what `sea-query`'s own DDL implies (`BINARY(16)` for a MySQL `Uuid`,
-/// a REAL-affinity column for a SQLite decimal), so diverging breaks reads.
-///
-/// Auto-increment keys are the one exception: `sea-query` builds
-/// `SERIAL`/`IDENTITY`/`AUTOINCREMENT` out of the column's *native* integer
-/// type and panics on a custom one, so those keep the native builder.
-///
-/// Returns whether the column's type can carry an auto-increment clause; the
-/// caller must not emit one otherwise.
-fn apply_column_type(
-    column: &mut OrmColumnDef,
-    rust_type: &str,
-    auto_increment: bool,
-    backend: Backend,
-) -> bool {
-    let mapped = rust_type_to_column_type(rust_type).unwrap_or_else(|| {
+/// The logical type a model column's Rust type maps to, through the crate's
+/// single Rust-to-column table; `TEXT` for a type the table does not know.
+fn column_type(col: &ColumnDef) -> ColumnType {
+    rust_type_to_column_type(&col.col_type).unwrap_or_else(|| {
         tide_warn!(
             "Unknown Rust type '{}' mapped to a TEXT column. Consider adding an explicit type mapping.",
-            rust_type
+            col.col_type
         );
         ColumnType::Text
-    });
-
-    let width = auto_increment_width(&mapped);
-
-    if auto_increment {
-        match width {
-            Some(AutoIncrementWidth::Small) => {
-                column.small_integer();
-            }
-            Some(AutoIncrementWidth::Regular) => {
-                column.integer();
-            }
-            Some(AutoIncrementWidth::Big) => {
-                column.big_integer();
-            }
-            None => {
-                tide_warn!(
-                    "Column type '{}' cannot auto-increment; creating the column without it.",
-                    rust_type
-                );
-                column.custom(Alias::new(mapped.to_sql(backend.as_database_type())));
-            }
-        }
-
-        return width.is_some();
-    }
-
-    column.custom(Alias::new(mapped.to_sql(backend.as_database_type())));
-
-    width.is_some()
-}
-
-/// Normalizes a Rust type string by removing whitespace
-pub fn normalize_rust_type(rust_type: &str) -> String {
-    rust_type.chars().filter(|ch| !ch.is_whitespace()).collect()
+    })
 }
 
 #[cfg(test)]

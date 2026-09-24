@@ -1,9 +1,5 @@
 use super::*;
 
-// =============================================================================
-// TEST MODELS (without database dependency)
-// =============================================================================
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchProduct {
     pub id: i64,

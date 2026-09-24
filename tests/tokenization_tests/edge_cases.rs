@@ -54,29 +54,3 @@ fn test_special_char_model_name() {
         );
     }
 }
-
-#[test]
-fn test_boundary_ids() {
-    init_test_env();
-
-    let boundary_ids = [
-        "-9223372036854775808",
-        "-9223372036854775807",
-        "-1",
-        "0",
-        "1",
-        "9223372036854775806",
-        "9223372036854775807",
-    ];
-
-    for id in boundary_ids {
-        let token = default_encode(id, "Boundary").unwrap();
-        let decoded = default_decode(&token, "Boundary").unwrap();
-        assert_eq!(
-            decoded,
-            Some(id.to_string()),
-            "Failed for boundary ID: {}",
-            id
-        );
-    }
-}

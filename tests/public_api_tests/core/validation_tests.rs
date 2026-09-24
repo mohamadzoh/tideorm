@@ -1,7 +1,4 @@
-// =============================================================================
-// VALIDATION MODULE TESTS
-// =============================================================================
-
+use tideorm::error::Error;
 use tideorm::validation::{ValidatableValue, ValidationErrors, ValidationRule, Validator};
 
 #[test]
@@ -197,12 +194,10 @@ fn test_validation_errors_display() {
     errors.add("password", "Too short");
 
     let display = format!("{}", errors);
-    assert!(
-        display.contains("email")
-            || display.contains("Invalid email")
-            || display.contains("password")
-            || display.contains("Too short")
-    );
+    // Fields are kept in a map, so only the set of "field: message" parts is stable.
+    let mut parts: Vec<&str> = display.split("; ").collect();
+    parts.sort_unstable();
+    assert_eq!(parts, ["email: Invalid email", "password: Too short"]);
 }
 
 #[test]
@@ -254,11 +249,13 @@ fn test_validation_error_messages() {
 }
 
 #[test]
-fn test_validation_errors_into_error() {
+fn test_validation_errors_convert_to_validation_error() {
     let mut errors = ValidationErrors::new();
-    errors.add("field1", "error1");
-    errors.add("field2", "error2");
+    errors.add("email", "is invalid");
 
-    let error: tideorm::error::Error = errors.into();
-    assert!(error.is_validation_error());
+    let error: Error = errors.into();
+    assert!(
+        matches!(&error, Error::Validation { field, message } if field == "email" && message == "is invalid"),
+        "unexpected conversion: {error:?}"
+    );
 }

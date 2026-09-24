@@ -22,10 +22,6 @@ mod models;
 use combined_operations::*;
 use models::*;
 
-// =============================================================================
-// FILE ATTACHMENT BENCHMARKS
-// =============================================================================
-
 fn bench_file_attachment_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("file_attachment_creation");
 
@@ -226,10 +222,6 @@ fn bench_files_data_serialization(c: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// TRANSLATION BENCHMARKS
-// =============================================================================
-
 fn bench_translations_data_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("translations_data_operations");
 
@@ -411,14 +403,6 @@ fn bench_translations_serialization(c: &mut Criterion) {
 
     group.finish();
 }
-
-// =============================================================================
-// COMBINED OPERATIONS BENCHMARKS
-// =============================================================================
-
-// =============================================================================
-// BENCHMARK GROUPS
-// =============================================================================
 
 criterion_group!(
     file_attachment_benches,

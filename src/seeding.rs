@@ -6,24 +6,19 @@
 //! If a seed does not run when expected, check its stored name, dependency list,
 //! and whether it was already recorded as executed.
 
-use crate::config::DatabaseType;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
+
 use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
-use crate::internal::ConnectionTrait;
-use crate::internal::Value;
-use crate::internal::sql_safety::quote_ident_for_backend;
+use crate::migration::Ledger;
 use crate::tide_info;
 
 mod results;
-mod store;
 
-// Re-export async_trait for users
 pub use async_trait::async_trait;
 pub use results::{SeedInfo, SeedResult, SeedStatus};
-
-// ============================================================================
-// SEED TRAIT
-// ============================================================================
 
 /// Trait for defining database seeds
 ///
@@ -66,15 +61,11 @@ pub trait Seed: Send + Sync {
     }
 }
 
-// ============================================================================
-// SEEDER
-// ============================================================================
-
 /// Seed runner
 ///
 /// Manages and executes database seeds with tracking to prevent duplicates.
 pub struct Seeder {
-    seeds: Vec<Box<dyn Seed>>,
+    seeds: Vec<Arc<dyn Seed>>,
 }
 
 impl Seeder {
@@ -86,65 +77,65 @@ impl Seeder {
     /// Add a seed
     #[allow(clippy::should_implement_trait)]
     pub fn add<S: Seed + 'static>(mut self, seed: S) -> Self {
-        self.seeds.push(Box::new(seed));
+        self.seeds.push(Arc::new(seed));
         self
     }
 
     /// Add a boxed seed (used internally)
     #[doc(hidden)]
     pub fn add_boxed(mut self, seed: Box<dyn Seed>) -> Self {
-        self.seeds.push(seed);
+        self.seeds.push(Arc::from(seed));
         self
+    }
+
+    /// The names of the seeds, in the order they were added.
+    ///
+    /// Needs no database, so a name can be checked before anything runs.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.seeds.iter().map(|seed| seed.name())
     }
 
     /// Run all pending seeds
     ///
     /// Seeds that have already been run (tracked in the `_seeds` table) will be skipped.
+    /// Each seed runs in one transaction with its ledger entry, so a seed that fails part
+    /// way leaves neither rows nor an entry behind and can be fixed and run again.
     pub async fn run(&self) -> Result<SeedResult> {
-        self.ensure_seeds_table().await?;
+        let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
 
-        let executed = self.get_executed_seeds().await?;
+        let executed = ledger.keys(&database).await?;
         let mut result = SeedResult::new();
 
-        let database = require_db()?;
-
-        // Sort seeds by priority, then by dependency order
-        let sorted_seeds = self.sort_seeds_by_priority_and_deps()?;
-
-        for seed in sorted_seeds {
+        for seed in self.sort_seeds_by_priority_and_deps()? {
             let name = seed.name();
 
-            if executed.contains(&name.to_string()) {
+            if executed.iter().any(|executed| executed == name) {
                 result.skipped.push(SeedInfo {
                     name: name.to_string(),
                 });
                 continue;
             }
 
-            // Check dependencies
-            for dep in seed.depends_on() {
-                if !executed.contains(&dep.to_string())
-                    && !result.executed.iter().any(|s| s.name == dep)
+            for dependency in seed.depends_on() {
+                if !executed.iter().any(|executed| executed == dependency)
+                    && !result.executed.iter().any(|seed| seed.name == dependency)
                 {
                     return Err(Error::configuration(format!(
                         "Seed '{}' depends on '{}' which has not been executed",
-                        name, dep
+                        name, dependency
                     )));
                 }
             }
 
-            log_seed_start(name);
-
-            seed.run(&database).await?;
-
-            // Record seed as executed
-            self.record_seed(name).await?;
+            log_seed("Seed running", name);
+            apply(Arc::clone(&seed), &database, true).await?;
+            log_seed("Seed completed", name);
 
             result.executed.push(SeedInfo {
                 name: name.to_string(),
             });
-
-            log_seed_complete(name);
         }
 
         Ok(result)
@@ -154,68 +145,44 @@ impl Seeder {
     ///
     /// This will force-run the seed regardless of whether it's been executed before.
     pub async fn run_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        self.ensure_seeds_table().await?;
-
         let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
+
+        let seed = self.find(seed_name)?;
+
+        log_seed("Seed running", seed_name);
+        // A seed that is re-run keeps its original ledger entry.
+        let recorded = ledger
+            .keys(&database)
+            .await?
+            .iter()
+            .any(|executed| executed == seed_name);
+        apply(seed, &database, !recorded).await?;
+        log_seed("Seed completed", seed_name);
+
         let mut result = SeedResult::new();
-
-        for seed in &self.seeds {
-            if seed.name() == seed_name {
-                log_seed_start(seed_name);
-
-                seed.run(&database).await?;
-
-                // Record seed (or update timestamp if already exists)
-                let executed = self.get_executed_seeds().await?;
-                if !executed.contains(&seed_name.to_string()) {
-                    self.record_seed(seed_name).await?;
-                }
-
-                result.executed.push(SeedInfo {
-                    name: seed_name.to_string(),
-                });
-
-                log_seed_complete(seed_name);
-                return Ok(result);
-            }
-        }
-
-        Err(Error::not_found(format!("Seed '{}' not found", seed_name)))
+        result.executed.push(SeedInfo {
+            name: seed_name.to_string(),
+        });
+        Ok(result)
     }
 
     /// Rollback the last executed seed
     pub async fn rollback(&self) -> Result<SeedResult> {
-        self.ensure_seeds_table().await?;
+        let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
 
-        let executed = self.get_executed_seeds().await?;
         let mut result = SeedResult::new();
-
-        if executed.is_empty() {
+        let Some(last_name) = ledger.keys(&database).await?.pop() else {
             return Ok(result);
-        }
-
-        let last_name = match executed.last() {
-            Some(n) => n,
-            None => return Ok(result),
         };
 
-        let database = require_db()?;
-
-        // Find the seed
-        for seed in &self.seeds {
-            if seed.name() == last_name {
-                log_seed_rollback(last_name);
-
-                seed.rollback(&database).await?;
-
-                self.remove_seed_record(last_name).await?;
-
-                result.rolled_back.push(SeedInfo {
-                    name: seed.name().to_string(),
-                });
-
-                break;
-            }
+        if let Some(seed) = self.seeds.iter().find(|seed| seed.name() == last_name) {
+            result
+                .rolled_back
+                .push(revert(Arc::clone(seed), &database).await?);
         }
 
         Ok(result)
@@ -223,28 +190,15 @@ impl Seeder {
 
     /// Rollback a specific seed by name
     pub async fn rollback_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        self.ensure_seeds_table().await?;
-
         let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
+
+        let seed = self.find(seed_name)?;
+
         let mut result = SeedResult::new();
-
-        for seed in &self.seeds {
-            if seed.name() == seed_name {
-                log_seed_rollback(seed_name);
-
-                seed.rollback(&database).await?;
-
-                self.remove_seed_record(seed_name).await?;
-
-                result.rolled_back.push(SeedInfo {
-                    name: seed_name.to_string(),
-                });
-
-                return Ok(result);
-            }
-        }
-
-        Err(Error::not_found(format!("Seed '{}' not found", seed_name)))
+        result.rolled_back.push(revert(seed, &database).await?);
+        Ok(result)
     }
 
     /// Rollback multiple seeds
@@ -268,9 +222,11 @@ impl Seeder {
     /// returns an empty result instead of failing on a missing `_seeds` table -
     /// which is what makes "reset then run" usable as a bootstrap.
     pub async fn reset(&self) -> Result<SeedResult> {
-        self.ensure_seeds_table().await?;
+        let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
 
-        let executed = self.get_executed_seeds().await?;
+        let executed = ledger.keys(&database).await?;
         self.rollback_steps(executed.len()).await
     }
 
@@ -288,98 +244,83 @@ impl Seeder {
 
     /// Get seed status
     pub async fn status(&self) -> Result<Vec<SeedStatus>> {
-        self.ensure_seeds_table().await?;
+        let database = require_db()?;
+        let ledger = Ledger::seeds();
+        ledger.ensure(&database).await?;
 
-        let executed = self.get_executed_seeds().await?;
-        let mut status = Vec::new();
+        let executed = ledger.keys(&database).await?;
 
-        let sorted_seeds = self.sort_seeds_by_priority_and_deps()?;
-
-        for seed in sorted_seeds {
-            let is_executed = executed.contains(&seed.name().to_string());
-            status.push(SeedStatus {
+        Ok(self
+            .sort_seeds_by_priority_and_deps()?
+            .into_iter()
+            .map(|seed| SeedStatus {
                 name: seed.name().to_string(),
-                executed: is_executed,
+                executed: executed.iter().any(|executed| executed == seed.name()),
                 priority: seed.priority(),
-            });
-        }
-
-        Ok(status)
+            })
+            .collect())
     }
 
-    // =========================================================================
-    // HELPER METHODS
-    // =========================================================================
+    fn find(&self, name: &str) -> Result<Arc<dyn Seed>> {
+        self.seeds
+            .iter()
+            .find(|seed| seed.name() == name)
+            .map(Arc::clone)
+            .ok_or_else(|| Error::not_found(format!("Seed '{}' not found", name)))
+    }
 
-    /// Sort seeds by priority, respecting dependencies via topological sort
-    fn sort_seeds_by_priority_and_deps(&self) -> Result<Vec<&dyn Seed>> {
-        use std::collections::{HashMap, HashSet, VecDeque};
-
-        let seeds: Vec<_> = self.seeds.iter().collect();
-
-        // Build a name -> index map
-        let name_to_idx: HashMap<String, usize> = seeds
+    /// Order the seeds so each one runs after the seeds it depends on.
+    ///
+    /// Among the seeds whose dependencies have all run, the lowest priority
+    /// goes next and equal priorities keep registration order. A dependency on
+    /// a seed this seeder does not hold orders nothing; `run` reports it when
+    /// the ledger has not recorded it either.
+    fn sort_seeds_by_priority_and_deps(&self) -> Result<Vec<Arc<dyn Seed>>> {
+        let seeds = &self.seeds;
+        let index_by_name: HashMap<&str, usize> = seeds
             .iter()
             .enumerate()
-            .map(|(i, s)| (s.name().to_string(), i))
+            .map(|(index, seed)| (seed.name(), index))
             .collect();
 
-        let n = seeds.len();
-        let mut in_degree = vec![0usize; n];
-        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-        // Build dependency graph: if seed B depends on seed A, A -> B
-        for (i, seed) in seeds.iter().enumerate() {
-            for dep in seed.depends_on() {
-                if let Some(&dep_idx) = name_to_idx.get(dep) {
-                    adj[dep_idx].push(i);
-                    in_degree[i] += 1;
+        let mut unmet = vec![0usize; seeds.len()];
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); seeds.len()];
+        for (index, seed) in seeds.iter().enumerate() {
+            for dependency in seed.depends_on() {
+                if let Some(&dependency_index) = index_by_name.get(dependency) {
+                    dependents[dependency_index].push(index);
+                    unmet[index] += 1;
                 }
             }
         }
 
-        // Kahn's algorithm for topological sort
-        // Use a BinaryHeap to break ties by priority (lower priority first)
-        let mut queue: VecDeque<usize> = VecDeque::new();
+        // Kahn's algorithm over a min-heap of (priority, registration index).
+        let mut ready: BinaryHeap<Reverse<(u32, usize)>> = (0..seeds.len())
+            .filter(|&index| unmet[index] == 0)
+            .map(|index| Reverse((seeds[index].priority(), index)))
+            .collect();
+        let mut sorted = Vec::with_capacity(seeds.len());
 
-        // Collect all roots (no dependencies), sorted by priority
-        let mut roots: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
-        roots.sort_by_key(|&i| seeds[i].priority());
-        for r in roots {
-            queue.push_back(r);
-        }
+        while let Some(Reverse((_, index))) = ready.pop() {
+            sorted.push(Arc::clone(&seeds[index]));
 
-        let mut sorted_indices: Vec<usize> = Vec::with_capacity(n);
-        let mut visited = HashSet::new();
-
-        while let Some(idx) = queue.pop_front() {
-            if !visited.insert(idx) {
-                continue;
-            }
-            sorted_indices.push(idx);
-
-            // Collect neighbors, reduce in-degree, add ready ones sorted by priority
-            let mut next: Vec<usize> = Vec::new();
-            for &neighbor in &adj[idx] {
-                in_degree[neighbor] -= 1;
-                if in_degree[neighbor] == 0 {
-                    next.push(neighbor);
+            for &dependent in &dependents[index] {
+                unmet[dependent] -= 1;
+                if unmet[dependent] == 0 {
+                    ready.push(Reverse((seeds[dependent].priority(), dependent)));
                 }
             }
-            next.sort_by_key(|&i| seeds[i].priority());
-            for n in next {
-                queue.push_back(n);
-            }
         }
 
-        // Unvisited seeds at this point participate in at least one dependency cycle.
-        if sorted_indices.len() < n {
-            let mut remaining: Vec<usize> = (0..n).filter(|i| !visited.contains(i)).collect();
-            remaining.sort_by_key(|&i| seeds[i].priority());
+        // A seed that never became ready is on, or behind, a dependency cycle.
+        if sorted.len() < seeds.len() {
+            let mut remaining: Vec<usize> =
+                (0..seeds.len()).filter(|&index| unmet[index] > 0).collect();
+            remaining.sort_by_key(|&index| seeds[index].priority());
 
             let cycle_names = remaining
                 .into_iter()
-                .map(|i| seeds[i].name().to_string())
+                .map(|index| seeds[index].name())
                 .collect::<Vec<_>>()
                 .join(", ");
 
@@ -389,10 +330,7 @@ impl Seeder {
             )));
         }
 
-        Ok(sorted_indices
-            .into_iter()
-            .map(|i| seeds[i].as_ref())
-            .collect())
+        Ok(sorted)
     }
 }
 
@@ -402,30 +340,48 @@ impl Default for Seeder {
     }
 }
 
-/// Log seed start
-fn log_seed_start(name: &str) {
-    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        tide_info!("Seed running: {}", name);
-    }
+/// Run `seed`, recording it in the ledger when `record` is set, as one
+/// transaction: a seed that fails part way leaves neither its rows nor a ledger
+/// entry behind, so running it again does not duplicate what it had written.
+async fn apply(seed: Arc<dyn Seed>, database: &Database, record: bool) -> Result<()> {
+    let db = database.clone();
+    database
+        .transaction(move |_| {
+            Box::pin(async move {
+                seed.run(&db).await?;
+                if record {
+                    Ledger::seeds().record(&db, seed.name(), &[]).await?;
+                }
+                Ok(())
+            })
+        })
+        .await
 }
 
-/// Log seed complete
-fn log_seed_complete(name: &str) {
-    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        tide_info!("Seed completed: {}", name);
-    }
+/// Roll `seed` back and remove its ledger entry, as one transaction.
+async fn revert(seed: Arc<dyn Seed>, database: &Database) -> Result<SeedInfo> {
+    log_seed("Seed rolling back", seed.name());
+    let name = seed.name().to_string();
+    let db = database.clone();
+    database
+        .transaction(move |_| {
+            Box::pin(async move {
+                seed.rollback(&db).await?;
+                Ledger::seeds().remove(&db, seed.name()).await
+            })
+        })
+        .await?;
+
+    Ok(SeedInfo { name })
 }
 
-/// Log seed rollback
-fn log_seed_rollback(name: &str) {
-    if std::env::var("TIDE_LOG_QUERIES").is_ok() || std::env::var("TIDE_LOG_SEEDS").is_ok() {
-        tide_info!("Seed rolling back: {}", name);
+/// Log seed progress when `TIDE_LOG_SEEDS` or `TIDE_LOG_QUERIES` asks for it.
+fn log_seed(action: &str, name: &str) {
+    if crate::logging::env_flag_enabled("TIDE_LOG_SEEDS") || crate::logging::query_logging_enabled()
+    {
+        tide_info!("{}: {}", action, name);
     }
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================
 
 #[cfg(test)]
 #[path = "../tests/unit/seeding_tests.rs"]

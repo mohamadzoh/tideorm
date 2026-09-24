@@ -20,37 +20,6 @@ impl IndexDefinition {
             unique,
         }
     }
-
-    /// Parse index definitions from the macro format.
-    pub fn parse(_table_name: &str, input: &str, unique: bool) -> Vec<Self> {
-        if input.is_empty() {
-            return vec![];
-        }
-
-        input
-            .split(';')
-            .filter(|s| !s.trim().is_empty())
-            .map(|part| {
-                let part = part.trim();
-                let (name, columns) = if let Some((n, cols)) = part.split_once(':') {
-                    (n.trim().to_string(), cols)
-                } else {
-                    let cols = part;
-                    let prefix = if unique { "uidx" } else { "idx" };
-                    let col_part = cols.replace(',', "_").replace(' ', "");
-                    (format!("{}_{}", prefix, col_part), cols)
-                };
-
-                let columns: Vec<String> = columns
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-
-                IndexDefinition::new(name, columns, unique)
-            })
-            .collect()
-    }
 }
 
 /// Strips hidden attributes from one eager-loaded relation payload, in place.
@@ -65,6 +34,14 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     type PrimaryKey: Send + Sync + Clone + std::fmt::Debug + serde::Serialize + 'static;
 
     fn table_name() -> &'static str;
+
+    /// The schema declared with `#[tideorm(schema = "..")]`, when there is one.
+    ///
+    /// Every statement then names the table as `schema.table`; without one the
+    /// table is found through the connection's search path.
+    fn schema_name() -> Option<&'static str> {
+        None
+    }
 
     fn primary_key_names() -> &'static [&'static str];
 
@@ -102,6 +79,25 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
             .find_map(|(field_name, column_name)| (field_name == name).then_some(column_name))
     }
 
+    /// Resolve a Rust field name or a database column name to the field name,
+    /// which is the key the model serializes under. A field name wins over a
+    /// column name that happens to be spelled the same.
+    fn canonical_field_name(name: &str) -> Option<&'static str> {
+        if let Some(field_name) = Self::field_names()
+            .iter()
+            .copied()
+            .find(|field| *field == name)
+        {
+            return Some(field_name);
+        }
+
+        Self::field_names()
+            .iter()
+            .copied()
+            .zip(Self::column_names().iter().copied())
+            .find_map(|(field_name, column_name)| (column_name == name).then_some(field_name))
+    }
+
     /// Split an optionally table-qualified column reference into its qualifier
     /// and this model's canonical database column name.
     ///
@@ -132,6 +128,13 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         vec!["deleted_at"]
     }
 
+    /// The key `field` is serialized under: its name, unless the model derives
+    /// `Serialize` itself and a serde attribute renames it.
+    #[doc(hidden)]
+    fn serialized_name(field: &str) -> &str {
+        field
+    }
+
     /// Strip this model's hidden attributes out of one already-serialized
     /// payload of it, in place.
     ///
@@ -148,11 +151,9 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// payloads, keyed by the serde key each payload is serialized under.
     ///
     /// The derive emits one entry per typed relation field, pointing at the
-    /// **target** model's `__strip_hidden_payload`. Without
-    /// it `to_json` cannot tell which model a nested payload came from and
-    /// filters it with the parent's hidden list — which is how
-    /// `post.to_json(None)` after `.with("author")` used to ship the columns
-    /// `User` declares hidden.
+    /// **target** model's `__strip_hidden_payload`. Without it `to_json` cannot
+    /// tell which model a nested payload came from and would filter it with
+    /// the parent's hidden list, shipping the columns the target model hides.
     ///
     /// Defaults to empty so hand-written `ModelMeta` impls keep compiling; they
     /// simply fall back to the parent's list. `MorphTo` fields stay empty for
@@ -160,10 +161,6 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// at runtime.
     fn relation_payload_filters() -> Vec<(&'static str, RelationPayloadFilter)> {
         vec![]
-    }
-
-    fn default_presenter() -> &'static str {
-        "default"
     }
 
     fn searchable_fields() -> Vec<&'static str> {
@@ -184,6 +181,13 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn has_encrypted_fields() -> bool {
         !Self::encrypted_fields().is_empty()
+    }
+
+    /// `(field, type)` for each field whose integer type some backend's driver
+    /// cannot store and read back; see `internal::ensure_fields_storable`.
+    #[doc(hidden)]
+    fn driver_limited_fields() -> &'static [(&'static str, &'static str)] {
+        &[]
     }
 
     fn allowed_languages() -> Vec<String> {
@@ -257,15 +261,5 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn unique_indexes() -> Vec<IndexDefinition> {
         vec![]
-    }
-
-    fn all_indexes() -> Vec<IndexDefinition> {
-        let mut all = Self::indexes();
-        all.extend(Self::unique_indexes());
-        all
-    }
-
-    fn has_indexes() -> bool {
-        !Self::indexes().is_empty() || !Self::unique_indexes().is_empty()
     }
 }

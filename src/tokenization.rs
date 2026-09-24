@@ -56,18 +56,12 @@
 use parking_lot::RwLock;
 #[cfg(feature = "encrypted-fields")]
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use rand::random;
 
 use crate::error::{Error, Result};
-
-// =============================================================================
-// TYPE DEFINITIONS
-// =============================================================================
 
 /// Function signature for token encoders.
 ///
@@ -81,27 +75,17 @@ pub type TokenEncoder = fn(record_id: &str, model_name: &str) -> Result<String>;
 /// decoding cannot proceed because configuration is missing.
 pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<String>>;
 
-// =============================================================================
-// GLOBAL STATE
-// =============================================================================
-
 struct TokenizationState {
     encryption_key: Option<ConfiguredEncryptionKey>,
     encoder: Option<TokenEncoder>,
     decoder: Option<TokenDecoder>,
 }
 
-static TOKENIZATION_STATE: OnceLock<RwLock<TokenizationState>> = OnceLock::new();
-
-fn tokenization_state() -> &'static RwLock<TokenizationState> {
-    TOKENIZATION_STATE.get_or_init(|| {
-        RwLock::new(TokenizationState {
-            encryption_key: None,
-            encoder: None,
-            decoder: None,
-        })
-    })
-}
+static TOKENIZATION_STATE: RwLock<TokenizationState> = RwLock::new(TokenizationState {
+    encryption_key: None,
+    encoder: None,
+    decoder: None,
+});
 
 struct ConfiguredEncryptionKey {
     raw: String,
@@ -138,13 +122,9 @@ impl ConfiguredEncryptionKey {
 }
 
 fn with_current_encryption_key<T>(read: impl FnOnce(&ConfiguredEncryptionKey) -> T) -> Option<T> {
-    let state = tokenization_state().read();
+    let state = TOKENIZATION_STATE.read();
     state.encryption_key.as_ref().map(read)
 }
-
-// =============================================================================
-// CONFIGURATION
-// =============================================================================
 
 /// Tokenization configuration and utilities
 pub struct TokenConfig;
@@ -155,7 +135,7 @@ impl TokenConfig {
     /// If this key changes, previously issued default tokens stop decoding.
     pub fn set_encryption_key(key: &str) {
         let configured_key = ConfiguredEncryptionKey::new(key);
-        tokenization_state().write().encryption_key = Some(configured_key);
+        TOKENIZATION_STATE.write().encryption_key = Some(configured_key);
     }
 
     /// Return the configured raw encryption key.
@@ -184,26 +164,26 @@ impl TokenConfig {
 
     /// Return whether a global encryption key is currently configured.
     pub fn has_encryption_key() -> bool {
-        tokenization_state().read().encryption_key.is_some()
+        TOKENIZATION_STATE.read().encryption_key.is_some()
     }
 
     /// Set a global token encoder override.
     ///
     /// Model-level encoders still take precedence over this setting.
     pub fn set_encoder(encoder: TokenEncoder) {
-        tokenization_state().write().encoder = Some(encoder);
+        TOKENIZATION_STATE.write().encoder = Some(encoder);
     }
 
     /// Set a global token decoder override.
     ///
     /// Model-level decoders still take precedence over this setting.
     pub fn set_decoder(decoder: TokenDecoder) {
-        tokenization_state().write().decoder = Some(decoder);
+        TOKENIZATION_STATE.write().decoder = Some(decoder);
     }
 
     /// Clear the global key and any global encoder or decoder overrides.
     pub fn reset() {
-        let mut state = tokenization_state().write();
+        let mut state = TOKENIZATION_STATE.write();
         state.encryption_key = None;
         state.encoder = None;
         state.decoder = None;
@@ -211,18 +191,12 @@ impl TokenConfig {
 
     /// Return the active global encoder, falling back to the default implementation.
     pub fn get_encoder() -> TokenEncoder {
-        tokenization_state()
-            .read()
-            .encoder
-            .unwrap_or(default_encode)
+        TOKENIZATION_STATE.read().encoder.unwrap_or(default_encode)
     }
 
     /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
-        tokenization_state()
-            .read()
-            .decoder
-            .unwrap_or(default_decode)
+        TOKENIZATION_STATE.read().decoder.unwrap_or(default_decode)
     }
 
     /// Encode a serialized primary-key payload using the active global encoder.
@@ -237,10 +211,6 @@ impl TokenConfig {
         Self::get_decoder()(token, model_name)
     }
 }
-
-// =============================================================================
-// ENCRYPTION UTILITIES
-// =============================================================================
 
 const DERIVED_ENCRYPTION_KEY_LEN: usize = 32;
 const TOKENIZATION_KDF_SALT: &[u8] = b"tideorm::xchacha20poly1305-key::v2";
@@ -351,36 +321,57 @@ pub(crate) fn base64_url_decode(encoded: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
-// =============================================================================
-// DEFAULT ENCODER/DECODER
-// =============================================================================
+const NONCE_LEN: usize = 24;
+
+/// Seal `plaintext` with XChaCha20-Poly1305 under `key` and a fresh random
+/// nonce, returning `nonce || ciphertext`.
+pub(crate) fn seal(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let ciphertext = XChaCha20Poly1305::new(key.into())
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .ok()?;
+
+    let mut sealed = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+    sealed.extend_from_slice(&nonce);
+    sealed.extend_from_slice(&ciphertext);
+    Some(sealed)
+}
+
+/// Open a payload produced by [`seal`]. `None` means it is truncated or does
+/// not authenticate under `key` and `aad`.
+pub(crate) fn open(key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>> {
+    if sealed.len() <= NONCE_LEN {
+        return None;
+    }
+
+    let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
+    XChaCha20Poly1305::new(key.into())
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
+        .ok()
+}
 
 /// Default token encoder using XChaCha20-Poly1305 authenticated encryption.
 ///
-/// Token format: base64url(nonce || ciphertext)
-/// - nonce: 24 bytes - random nonce for XChaCha20-Poly1305
-/// - ciphertext: encrypted record ID payload plus authentication tag
+/// Token format: base64url(nonce || ciphertext), with the model name bound in as
+/// associated data so a token only decodes for the model that issued it.
 pub fn default_encode(record_id: &str, model_name: &str) -> Result<String> {
     let key = TokenConfig::get_derived_encryption_key()?;
-    let cipher = XChaCha20Poly1305::new((&key).into());
-    let nonce_bytes: [u8; 24] = random();
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let sealed = seal(&key, record_id.as_bytes(), model_name.as_bytes())
+        .ok_or_else(|| Error::tokenization("Failed to encrypt token payload"))?;
 
-    let ciphertext = cipher
-        .encrypt(
-            nonce,
-            Payload {
-                msg: record_id.as_bytes(),
-                aad: model_name.as_bytes(),
-            },
-        )
-        .map_err(|_| Error::tokenization("Failed to encrypt token payload"))?;
-
-    let mut token_data = Vec::with_capacity(24 + ciphertext.len());
-    token_data.extend_from_slice(&nonce_bytes);
-    token_data.extend_from_slice(&ciphertext);
-
-    Ok(base64_url_encode(&token_data))
+    Ok(base64_url_encode(&sealed))
 }
 
 /// Default token decoder.
@@ -389,34 +380,16 @@ pub fn default_encode(record_id: &str, model_name: &str) -> Result<String> {
 /// tokenization is misconfigured, such as when no encryption key is set.
 pub fn default_decode(token: &str, model_name: &str) -> Result<Option<String>> {
     let key = TokenConfig::get_derived_encryption_key()?;
-    let cipher = XChaCha20Poly1305::new((&key).into());
 
-    let Some(token_data) = base64_url_decode(token) else {
+    let Some(sealed) = base64_url_decode(token) else {
         return Ok(None);
     };
-
-    if token_data.len() <= 24 {
+    let Some(plaintext) = open(&key, &sealed, model_name.as_bytes()) else {
         return Ok(None);
-    }
-
-    let nonce = XNonce::from_slice(&token_data[..24]);
-    let plaintext = match cipher.decrypt(
-        nonce,
-        Payload {
-            msg: &token_data[24..],
-            aad: model_name.as_bytes(),
-        },
-    ) {
-        Ok(plaintext) => plaintext,
-        Err(_) => return Ok(None),
     };
 
     Ok(String::from_utf8(plaintext).ok())
 }
-
-// =============================================================================
-// TOKENIZABLE TRAIT
-// =============================================================================
 
 /// Trait for models that support tokenization
 ///
@@ -436,11 +409,6 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// Return the primary key value that should be encoded into the token.
     fn token_primary_key(&self) -> Self::TokenPrimaryKey;
 
-    /// Return whether token helpers should be available for this model.
-    fn tokenization_enabled() -> bool {
-        true
-    }
-
     /// Return a model-specific encoder override.
     ///
     /// Return `None` to use the global encoder path instead.
@@ -457,22 +425,10 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Encode this record's primary key into an external token.
     ///
-    /// Fails when tokenization is disabled, the key cannot be serialized, or
-    /// the active encoder reports an error.
+    /// Fails when the key cannot be serialized or the active encoder reports
+    /// an error.
     fn to_token(&self) -> Result<String> {
-        if !Self::tokenization_enabled() {
-            return Err(Error::tokenization(
-                "Tokenization is not enabled for this model",
-            ));
-        }
-
-        let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
-
-        let primary_key = self.token_primary_key();
-        let payload = serde_json::to_string(&primary_key).map_err(|error| {
-            Error::tokenization(format!("Failed to serialize token primary key: {error}"))
-        })?;
-        encoder(&payload, Self::token_model_name())
+        Self::tokenize_id(self.token_primary_key())
     }
 
     /// Alias for `to_token()`.
@@ -482,12 +438,6 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Encode one primary-key value without loading a record first.
     fn tokenize_id(id: Self::TokenPrimaryKey) -> Result<String> {
-        if !Self::tokenization_enabled() {
-            return Err(Error::tokenization(
-                "Tokenization is not enabled for this model",
-            ));
-        }
-
         let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
 
         let payload = serde_json::to_string(&id).map_err(|error| {
@@ -506,15 +456,9 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Decode a token into the model primary key without loading the record.
     ///
-    /// Fails when tokenization is disabled, the token does not belong to this
-    /// model, or the decoded payload cannot be deserialized into the primary-key type.
+    /// Fails when the token does not belong to this model or the decoded
+    /// payload cannot be deserialized into the primary-key type.
     fn decode_token(token: &str) -> Result<Self::TokenPrimaryKey> {
-        if !Self::tokenization_enabled() {
-            return Err(Error::tokenization(
-                "Tokenization is not enabled for this model",
-            ));
-        }
-
         let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
         let payload = decoder(token, Self::token_model_name())?
             .ok_or_else(|| Error::invalid_token("Failed to decode token"))?;
@@ -537,10 +481,6 @@ pub trait Tokenizable: Sized + Send + Sync {
         self.to_token()
     }
 }
-
-// =============================================================================
-// TESTS
-// =============================================================================
 
 #[cfg(test)]
 #[path = "../tests/unit/tokenization_tests.rs"]

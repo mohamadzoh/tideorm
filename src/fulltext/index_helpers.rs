@@ -1,9 +1,4 @@
 use super::*;
-use crate::internal::sql_builder::SqlBuilder;
-
-// =============================================================================
-// INDEX GENERATION HELPERS
-// =============================================================================
 
 /// Full-text index definition
 #[derive(Debug, Clone)]
@@ -70,31 +65,7 @@ impl FullTextIndex {
             PgFullTextIndexType::GiST => "GiST",
         };
 
-        let language_literal = escape_sql_literal_for_db(DatabaseType::Postgres, language);
-
         let mut params = Vec::new();
-        let tsvector_expr = if self.columns.len() == 1 {
-            SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                .raw("to_tsvector('")
-                .raw(&language_literal)
-                .raw("', COALESCE(")
-                .ident(&self.columns[0])
-                .raw(", ''))")
-                .into_sql()
-        } else {
-            let mut builder = SqlBuilder::new(DatabaseType::Postgres, &mut params)
-                .raw("to_tsvector('")
-                .raw(&language_literal)
-                .raw("', ");
-            for (i, col) in self.columns.iter().enumerate() {
-                if i > 0 {
-                    builder = builder.raw(" || ' ' || ");
-                }
-                builder = builder.raw("COALESCE(").ident(col).raw(", '')");
-            }
-            builder.raw(")").into_sql()
-        };
-
         SqlBuilder::new(DatabaseType::Postgres, &mut params)
             .raw("CREATE INDEX ")
             .ident(&self.name)
@@ -102,9 +73,11 @@ impl FullTextIndex {
             .ident(&self.table)
             .raw(" USING ")
             .raw(index_type)
-            .raw(" ((")
-            .raw(&tsvector_expr)
-            .raw("))")
+            .raw(" ((to_tsvector('")
+            .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
+            .raw("', ")
+            .raw(&pg_search_document(&self.columns))
+            .raw(")))")
             .into_sql()
     }
 
@@ -116,14 +89,9 @@ impl FullTextIndex {
             .ident(&self.name)
             .raw(" ON ")
             .ident(&self.table)
-            .raw("(");
-        for (i, col) in self.columns.iter().enumerate() {
-            if i > 0 {
-                builder = builder.raw(", ");
-            }
-            builder = builder.ident(col);
-        }
-        builder = builder.raw(")");
+            .raw("(")
+            .raw(&column_list(DatabaseType::MySQL, &self.columns, ""))
+            .raw(")");
         // `WITH PARSER` takes an identifier, so it goes through the same quoting
         // path as every other identifier in this module rather than being pasted
         // in raw. A name that is not a real parser plugin then fails loudly on
@@ -134,105 +102,66 @@ impl FullTextIndex {
         builder.into_sql()
     }
 
-    /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5
+    /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5, plus the
+    /// triggers that keep it in sync with the table
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let mut params = Vec::new();
         let fts_table = format!("{}_fts", self.table);
+        let columns = column_list(DatabaseType::SQLite, &self.columns, "");
 
-        let mut columns_builder = SqlBuilder::new(DatabaseType::SQLite, &mut params);
-        for (i, col) in self.columns.iter().enumerate() {
-            if i > 0 {
-                columns_builder = columns_builder.raw(", ");
-            }
-            columns_builder = columns_builder.ident(col);
-        }
-        let columns_str = columns_builder.into_sql();
-
-        let mut new_columns_str = String::new();
-        let mut old_columns_str = String::new();
-        for (i, col) in self.columns.iter().enumerate() {
-            if i > 0 {
-                new_columns_str.push_str(", ");
-                old_columns_str.push_str(", ");
-            }
-            new_columns_str.push_str(
-                &SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                    .raw("new.")
-                    .ident(col)
-                    .into_sql(),
-            );
-            old_columns_str.push_str(
-                &SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                    .raw("old.")
-                    .ident(col)
-                    .into_sql(),
-            );
-        }
+        let insert_new = SqlBuilder::new(DatabaseType::SQLite, &mut params)
+            .raw("INSERT INTO ")
+            .ident(&fts_table)
+            .raw("(rowid, ")
+            .raw(&columns)
+            .raw(") VALUES (new.rowid, ")
+            .raw(&column_list(DatabaseType::SQLite, &self.columns, "new."))
+            .raw(");")
+            .into_sql();
+        let delete_old = SqlBuilder::new(DatabaseType::SQLite, &mut params)
+            .raw("INSERT INTO ")
+            .ident(&fts_table)
+            .raw("(")
+            .ident(&fts_table)
+            .raw(", rowid, ")
+            .raw(&columns)
+            .raw(") VALUES('delete', old.rowid, ")
+            .raw(&column_list(DatabaseType::SQLite, &self.columns, "old."))
+            .raw(");")
+            .into_sql();
 
         vec![
-            // Create FTS5 virtual table
             SqlBuilder::new(DatabaseType::SQLite, &mut params)
                 .raw("CREATE VIRTUAL TABLE IF NOT EXISTS ")
                 .ident(&fts_table)
                 .raw(" USING fts5(")
-                .raw(&columns_str)
+                .raw(&columns)
                 .raw(", content=")
                 .ident(&self.table)
                 .raw(", content_rowid=")
                 .ident("rowid")
                 .raw(")")
                 .into_sql(),
-            // Create triggers to keep FTS table in sync
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("CREATE TRIGGER IF NOT EXISTS ")
-                .ident(&format!("{}_ai", self.table))
-                .raw(" AFTER INSERT ON ")
-                .ident(&self.table)
-                .raw(" BEGIN INSERT INTO ")
-                .ident(&fts_table)
-                .raw("(rowid, ")
-                .raw(&columns_str)
-                .raw(") VALUES (new.rowid, ")
-                .raw(&new_columns_str)
-                .raw("); END")
-                .into_sql(),
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("CREATE TRIGGER IF NOT EXISTS ")
-                .ident(&format!("{}_ad", self.table))
-                .raw(" AFTER DELETE ON ")
-                .ident(&self.table)
-                .raw(" BEGIN INSERT INTO ")
-                .ident(&fts_table)
-                .raw("(")
-                .ident(&fts_table)
-                .raw(", rowid, ")
-                .raw(&columns_str)
-                .raw(") VALUES('delete', old.rowid, ")
-                .raw(&old_columns_str)
-                .raw("); END")
-                .into_sql(),
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("CREATE TRIGGER IF NOT EXISTS ")
-                .ident(&format!("{}_au", self.table))
-                .raw(" AFTER UPDATE ON ")
-                .ident(&self.table)
-                .raw(" BEGIN INSERT INTO ")
-                .ident(&fts_table)
-                .raw("(")
-                .ident(&fts_table)
-                .raw(", rowid, ")
-                .raw(&columns_str)
-                .raw(") VALUES('delete', old.rowid, ")
-                .raw(&old_columns_str)
-                .raw("); INSERT INTO ")
-                .ident(&fts_table)
-                .raw("(rowid, ")
-                .raw(&columns_str)
-                .raw(") VALUES (new.rowid, ")
-                .raw(&new_columns_str)
-                .raw("); END")
-                .into_sql(),
+            self.sqlite_trigger("ai", "INSERT", &insert_new),
+            self.sqlite_trigger("ad", "DELETE", &delete_old),
+            self.sqlite_trigger("au", "UPDATE", &format!("{delete_old} {insert_new}")),
         ]
+    }
+
+    /// Render the `AFTER <event>` trigger named `<table>_<suffix>`.
+    fn sqlite_trigger(&self, suffix: &str, event: &str, body: &str) -> String {
+        let mut params = Vec::new();
+        SqlBuilder::new(DatabaseType::SQLite, &mut params)
+            .raw("CREATE TRIGGER IF NOT EXISTS ")
+            .ident(&format!("{}_{}", self.table, suffix))
+            .raw(" AFTER ")
+            .raw(event)
+            .raw(" ON ")
+            .ident(&self.table)
+            .raw(" BEGIN ")
+            .raw(body)
+            .raw(" END")
+            .into_sql()
     }
 
     /// Generate CREATE INDEX for the current database type
@@ -245,30 +174,119 @@ impl FullTextIndex {
     }
 }
 
-// =============================================================================
-// HIGHLIGHTING UTILITIES
-// =============================================================================
-
 /// Highlight search terms in text
+///
+/// Each whole word of `query` is marked, regardless of case. `text` is not
+/// HTML-escaped; [`HighlightConfig`] escapes it around the tags it inserts.
 pub fn highlight_text(text: &str, query: &str, start_tag: &str, end_tag: &str) -> String {
-    let words: Vec<&str> = query.split_whitespace().collect();
-    let mut result = text.to_string();
-
-    // Pre-compile all regex patterns outside the loop to avoid regex_creation_in_loops
-    let patterns: Vec<regex::Regex> = words
-        .iter()
-        .filter_map(|word| regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(word))).ok())
-        .collect();
-
-    for pattern in &patterns {
-        result = pattern
-            .replace_all(&result, |caps: &regex::Captures| {
-                format!("{}{}{}", start_tag, &caps[0], end_tag)
-            })
-            .to_string();
+    match term_pattern(query) {
+        Some(pattern) => mark_matches(text, &pattern, start_tag, end_tag, false).0,
+        None => text.to_string(),
     }
+}
 
-    result
+/// The words of `query` as one case-insensitive whole-word pattern, or `None`
+/// when there are none (or too many to compile).
+///
+/// One pattern marks every term in one pass, so a term cannot match inside the
+/// tags an earlier one inserted (`b` inside `<b>`), and the longest terms come
+/// first, so `rust-lang` is marked whole rather than as `rust`.
+pub(crate) fn term_pattern(query: &str) -> Option<regex::Regex> {
+    let mut words: Vec<&str> = query.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+    words.sort_by_key(|word| std::cmp::Reverse(word.chars().count()));
+    let alternation: Vec<String> = words.into_iter().map(regex::escape).collect();
+    regex::Regex::new(&format!(r"(?i)\b(?:{})\b", alternation.join("|"))).ok()
+}
+
+/// `text` with every match of `pattern` between the tags, HTML-escaped around
+/// them when `escape` is set, and how many matches were marked.
+pub(crate) fn mark_matches(
+    text: &str,
+    pattern: &regex::Regex,
+    start_tag: &str,
+    end_tag: &str,
+    escape: bool,
+) -> (String, usize) {
+    let plain = |part: &str| {
+        if escape {
+            escape_html(part)
+        } else {
+            part.to_string()
+        }
+    };
+    let mut marked = String::with_capacity(text.len());
+    let mut matches = 0;
+    let mut last = 0;
+    for found in pattern.find_iter(text) {
+        marked.push_str(&plain(&text[last..found.start()]));
+        marked.push_str(start_tag);
+        marked.push_str(&plain(found.as_str()));
+        marked.push_str(end_tag);
+        last = found.end();
+        matches += 1;
+    }
+    marked.push_str(&plain(&text[last..]));
+    (marked, matches)
+}
+
+/// `text` with the five characters HTML gives a meaning replaced by entities.
+pub(crate) fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// The `fragment_words` words either side of the word holding the first match
+/// of `pattern`, or the first words of `text` when nothing matches, with `...`
+/// where words were left out.
+pub(crate) fn snippet_around_first_match(
+    text: &str,
+    pattern: Option<&regex::Regex>,
+    fragment_words: usize,
+) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let center = pattern
+        .and_then(|pattern| pattern.find(text))
+        .map_or(0, |found| {
+            let before = &text[..found.start()];
+            let index = before.split_whitespace().count();
+            // A match that starts inside a word belongs to that word.
+            if before
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_whitespace())
+            {
+                index - 1
+            } else {
+                index
+            }
+        });
+    let start = center.saturating_sub(fragment_words);
+    let end = center
+        .saturating_add(fragment_words)
+        .saturating_add(1)
+        .min(words.len());
+
+    let mut snippet = words[start..end].join(" ");
+    if start > 0 {
+        snippet.insert_str(0, "...");
+    }
+    if end < words.len() {
+        snippet.push_str("...");
+    }
+    snippet
 }
 
 /// Generate highlighted snippets from text
@@ -283,7 +301,6 @@ pub fn generate_snippet(
     let query_words_owned: Vec<String> =
         query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
-    // Find the first matching word position
     let mut match_pos = None;
     for (i, word) in words.iter().enumerate() {
         let word_lower = word.to_lowercase();
@@ -295,7 +312,7 @@ pub fn generate_snippet(
 
     if let Some(pos) = match_pos {
         let start = pos.saturating_sub(fragment_words);
-        let end = (pos + fragment_words).min(words.len());
+        let end = pos.saturating_add(fragment_words).min(words.len());
 
         let snippet_words: Vec<String> = words[start..end]
             .iter()
@@ -366,10 +383,6 @@ pub fn pg_headline_sql(
         .into_sql()
 }
 
-// =============================================================================
-// HELPER FUNCTIONS
-// =============================================================================
-
 /// Quote a `ts_headline` option value.
 ///
 /// PostgreSQL lets an option value be wrapped in double quotes, with an
@@ -378,11 +391,3 @@ pub fn pg_headline_sql(
 fn quote_ts_headline_option(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
-
-// =============================================================================
-// TESTS
-// =============================================================================
-
-#[cfg(test)]
-#[path = "../../tests/unit/fulltext_tests.rs"]
-mod tests;

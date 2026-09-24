@@ -92,36 +92,26 @@ impl TranslationsData {
     }
 
     /// Create from JSON value
+    ///
+    /// A field whose value is not a `{lang: value}` object is skipped rather
+    /// than failing the whole payload, so one malformed field cannot hide — or,
+    /// once saved back, erase — every other field's translations.
     pub fn from_json(value: &serde_json::Value) -> Self {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut fields = HashMap::new();
-                for (field_name, field_value) in map {
-                    if let serde_json::Value::Object(lang_map) = field_value {
-                        let mut translations = HashMap::new();
-                        for (lang, trans_value) in lang_map {
-                            translations.insert(lang.clone(), trans_value.clone());
-                        }
-                        fields.insert(field_name.clone(), FieldTranslations { translations });
-                    }
-                }
-                Self { fields }
-            }
-            _ => Self::new(),
-        }
+        let fields = value
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(field, translations)| {
+                let translations = serde_json::from_value(translations.clone()).ok()?;
+                Some((field.clone(), translations))
+            })
+            .collect();
+        Self { fields }
     }
 
     /// Convert to JSON value
     pub fn to_json(&self) -> serde_json::Value {
-        let mut map = serde_json::Map::new();
-        for (field, trans) in &self.fields {
-            let mut lang_map = serde_json::Map::new();
-            for (lang, value) in &trans.translations {
-                lang_map.insert(lang.clone(), value.clone());
-            }
-            map.insert(field.clone(), serde_json::Value::Object(lang_map));
-        }
-        serde_json::Value::Object(map)
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
     }
 
     /// Get translations for a field
@@ -137,6 +127,16 @@ impl TranslationsData {
     /// Get translation for a specific field and language
     pub fn get(&self, field: &str, lang: &str) -> Option<&serde_json::Value> {
         self.fields.get(field)?.get(lang)
+    }
+
+    /// Look `field` up in `lang`, then in `fallback`.
+    fn get_or_fallback(
+        &self,
+        field: &str,
+        lang: &str,
+        fallback: &str,
+    ) -> Option<&serde_json::Value> {
+        self.get(field, lang).or_else(|| self.get(field, fallback))
     }
 
     /// Set translation for a specific field and language
@@ -177,13 +177,10 @@ impl TranslationsData {
 /// names are queryable, but the read/write half needs a body only you can supply:
 /// it has to know which column holds the payload. Store it in a JSON column
 /// (`translations: Option<Json>` by convention) and forward
-/// `get_translations_data` / `set_translations_data` to it.
-///
-/// Implement this by hand on the model that owns the translations column. The
-/// derive does **not** generate it: doing so would collide with `ModelMeta`,
-/// which declares `translatable_fields`, `allowed_languages` and
-/// `fallback_language` under the same names, and would also conflict with any
-/// impl written by hand on a `#[tideorm::model]` struct.
+/// `get_translations_data` / `set_translations_data` to it. A generated impl
+/// would also collide with `ModelMeta`, which declares `translatable_fields`,
+/// `allowed_languages` and `fallback_language` under the same names, and with
+/// any impl written by hand on a `#[tideorm::model]` struct.
 ///
 /// Declaring the three metadata methods here rather than borrowing `ModelMeta`'s
 /// is deliberate: it lets a plain struct implement the trait with its own,
@@ -206,10 +203,6 @@ pub trait HasTranslations {
 
     /// Get the default (non-translated) value for a field
     fn get_default_value(&self, field: &str) -> Result<serde_json::Value, TranslationError>;
-
-    // =========================================================================
-    // SET TRANSLATION METHODS
-    // =========================================================================
 
     /// Set one translated value for one field and language.
     fn set_translation(
@@ -259,10 +252,6 @@ pub trait HasTranslations {
         self.set_translations_data(data)
     }
 
-    // =========================================================================
-    // GET TRANSLATION METHODS
-    // =========================================================================
-
     /// Return the translation stored for one field and language.
     ///
     /// Returns `None` when that language has no stored override.
@@ -285,22 +274,11 @@ pub trait HasTranslations {
         lang: &str,
     ) -> Result<serde_json::Value, TranslationError> {
         let data = self.get_translations_data()?;
-        let fallback = Self::fallback_language();
 
-        // Try requested language
-        if let Some(value) = data.get(field, lang) {
-            return Ok(value.clone());
+        match data.get_or_fallback(field, lang, &Self::fallback_language()) {
+            Some(value) => Ok(value.clone()),
+            None => self.get_default_value(field),
         }
-
-        // Try fallback language
-        if lang != fallback
-            && let Some(value) = data.get(field, &fallback)
-        {
-            return Ok(value.clone());
-        }
-
-        // Fall back to default field value
-        self.get_default_value(field)
     }
 
     /// Return every stored translation for one field.
@@ -332,10 +310,6 @@ pub trait HasTranslations {
         Ok(result)
     }
 
-    // =========================================================================
-    // REMOVE TRANSLATION METHODS
-    // =========================================================================
-
     /// Remove a translation for a field in a specific language
     fn remove_translation(&mut self, field: &str, lang: &str) -> Result<(), TranslationError> {
         let mut data = self.get_translations_data()?;
@@ -354,10 +328,6 @@ pub trait HasTranslations {
     fn clear_translations(&mut self) -> Result<(), TranslationError> {
         self.set_translations_data(TranslationsData::new())
     }
-
-    // =========================================================================
-    // CHECK METHODS
-    // =========================================================================
 
     /// Check if field has a translation for a language
     fn has_translation(&self, field: &str, lang: &str) -> Result<bool, TranslationError> {
@@ -380,10 +350,6 @@ pub trait HasTranslations {
             .unwrap_or_default())
     }
 
-    // =========================================================================
-    // JSON OUTPUT
-    // =========================================================================
-
     /// Serialize the model with translated values applied.
     ///
     /// The raw `translations` column is removed from the returned JSON.
@@ -399,33 +365,23 @@ pub trait HasTranslations {
             .map(|s| s.as_str())
             .unwrap_or(&fallback);
 
-        // Serialize model to JSON
         let mut json = match serde_json::to_value(self) {
             Ok(serde_json::Value::Object(map)) => map,
             _ => return serde_json::json!({}),
         };
 
-        // Get translations data
         let translations = json
             .get("translations")
             .map(TranslationsData::from_json)
             .unwrap_or_default();
 
-        // Apply translations to translatable fields
+        // A field without a translation keeps the default value already in `json`.
         for field in Self::translatable_fields() {
-            // Try requested language first
-            if let Some(value) = translations.get(field, requested_lang) {
+            if let Some(value) = translations.get_or_fallback(field, requested_lang, &fallback) {
                 json.insert(field.to_string(), value.clone());
-            } else if requested_lang != fallback {
-                // Try fallback language
-                if let Some(value) = translations.get(field, &fallback) {
-                    json.insert(field.to_string(), value.clone());
-                }
-                // Otherwise keep the default value already in json
             }
         }
 
-        // Remove the raw translations column from output
         json.remove("translations");
 
         serde_json::Value::Object(json)
@@ -438,10 +394,6 @@ pub trait HasTranslations {
     {
         serde_json::to_value(self).unwrap_or(serde_json::json!({}))
     }
-
-    // =========================================================================
-    // HELPER METHODS
-    // =========================================================================
 
     /// Validate that a field is translatable
     fn validate_field(&self, field: &str) -> Result<(), TranslationError> {

@@ -10,7 +10,7 @@
 //!
 //! Run with: cargo bench --bench crud_benchmarks
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tideorm::prelude::*;
@@ -23,10 +23,6 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
-
-// =============================================================================
-// BENCHMARK MODEL
-// =============================================================================
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "bench_users")]
@@ -61,10 +57,6 @@ impl BenchUser {
     }
 }
 
-// =============================================================================
-// SETUP HELPERS
-// =============================================================================
-
 fn init_database() {
     init_postgres_database(
         &DB_INITIALIZED,
@@ -91,10 +83,6 @@ fn setup_benchmark() {
     init_database();
     cleanup_data();
 }
-
-// =============================================================================
-// BENCHMARKS
-// =============================================================================
 
 fn bench_single_insert(c: &mut Criterion) {
     setup_benchmark();
@@ -311,4 +299,10 @@ criterion_group!(
     bench_count,
 );
 
-criterion_main!(benches);
+// `criterion_main!`, run only when a PostgreSQL server is configured.
+fn main() {
+    if support::postgres_benchmarks_enabled() {
+        benches();
+        Criterion::default().configure_from_args().final_summary();
+    }
+}

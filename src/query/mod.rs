@@ -19,22 +19,21 @@ use crate::model::Model;
 
 mod advanced;
 mod builder;
-mod conditions;
-mod db_sql;
+pub(crate) mod db_sql;
 mod filters;
-#[allow(missing_docs)]
 mod or_clauses;
 mod predicates;
 mod sql;
 mod structure;
 
-pub(crate) use filters::condition_is_vacuous;
+pub use advanced::Aggregate;
 pub use filters::{
-    ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order, WhereCondition,
+    ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
+pub(crate) use filters::{condition_is_vacuous, condition_methods, filter_value};
 pub use structure::{
-    AggregateFunction, CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType,
-    QueryFragment, UnionClause, UnionType, WindowFunction, WindowFunctionType,
+    CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, QueryFragment,
+    UnionClause, UnionType, WindowFunction, WindowFunctionType,
 };
 
 /// Fluent query builder for TideORM models.
@@ -46,14 +45,17 @@ pub struct QueryBuilder<M: Model> {
     pub conditions: Vec<WhereCondition>,
     /// OR groups for complex boolean expressions.
     pub or_groups: Vec<OrGroup>,
+    /// Index into `or_groups` of the group the `or_where_*` calls share.
+    simple_or_group: Option<usize>,
     order_by: Vec<(String, Order)>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_columns: Option<Vec<String>>,
     raw_select_expressions: Vec<String>,
-    subquery_select_expressions: Vec<(String, String)>,
+    subquery_select_expressions: Vec<structure::SubquerySelect>,
     include_trashed: bool,
     only_trashed: bool,
+    lock_for_update: bool,
     joins: Vec<JoinClause>,
     invalid_query_reason: Option<String>,
     group_by: Vec<String>,
@@ -64,6 +66,9 @@ pub struct QueryBuilder<M: Model> {
     ctes: Vec<CTE>,
     cache_options: Option<crate::cache::CacheOptions>,
     cache_key: Option<String>,
+    /// Column-type lookups for models whose tables the query joins, consulted
+    /// after `M`'s own when a filter value is bound.
+    joined_column_types: Vec<fn(&str) -> Option<crate::orm::ColumnType>>,
 }
 
 impl<M: Model> QueryBuilder<M> {

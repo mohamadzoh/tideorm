@@ -61,7 +61,8 @@ pub(super) fn seed_data(count: usize) {
             });
         }
 
-        // Batch insert
-        let _ = OrBenchUser::insert_all(users).await;
+        OrBenchUser::insert_all(users)
+            .await
+            .expect("Failed to seed benchmark users");
     });
 }

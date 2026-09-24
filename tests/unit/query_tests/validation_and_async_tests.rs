@@ -108,7 +108,7 @@ async fn test_select_rejects_unsafe_expression_before_db_lookup() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("unsafe SELECT expression"));
+    assert!(err.to_string().contains("unsafe SELECT column"));
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn test_group_by_rejects_unsafe_expression_before_db_lookup() {
 #[test]
 fn test_query_validation_allows_safe_expression_slots() {
     QueryBuilder::<QueryTestUser>::new()
-        .select(vec!["COUNT(*) AS total"])
+        .select_raw("COUNT(*) AS total")
         .group_by("name")
         .order_by("name", Order::Asc)
         .ensure_query_is_valid()
@@ -232,22 +232,83 @@ fn test_standalone_offset_renders_a_portable_limit() {
 }
 
 #[test]
-fn test_query_validation_splits_select_alias_at_outer_as_only() {
+fn test_select_takes_columns_and_aliases_but_not_expressions() {
     QueryBuilder::<QueryTestUser>::new()
-        .select(vec!["CAST(name AS TEXT) AS display_name"])
+        .select(vec!["name AS display_name", "query_test_users.id", "*"])
         .ensure_query_is_valid()
-        .expect("outer SELECT alias must not be confused with an inner CAST(... AS ...)");
+        .expect("columns, qualified columns, aliases and * are the typed projection");
 
-    QueryBuilder::<QueryTestUser>::new()
-        .select(vec!["CAST(name AS TEXT)"])
-        .ensure_query_is_valid()
-        .expect("SELECT expression without an outer alias must still validate");
+    for expression in [
+        "CAST(name AS TEXT) AS display_name",
+        "COUNT(*)",
+        "(SELECT name FROM query_test_users LIMIT 1) AS leaked",
+    ] {
+        let err = QueryBuilder::<QueryTestUser>::new()
+            .select(vec![expression])
+            .ensure_query_is_valid()
+            .expect_err("select() must not accept SQL expressions");
+        assert!(
+            err.to_string().contains("unsafe SELECT column"),
+            "{expression}: {err}"
+        );
+    }
 
     let err = QueryBuilder::<QueryTestUser>::new()
-        .select(vec!["CAST(name AS TEXT) AS bad\"alias"])
+        .select(vec!["name AS bad\"alias"])
         .ensure_query_is_valid()
         .expect_err("unsafe outer alias must still be rejected");
     assert!(err.to_string().contains("unsafe SELECT alias"));
+}
+
+const HOSTILE_COLUMNS: [&str; 6] = [
+    "1=1 OR name",
+    "name) OR 1=1 --",
+    "(SELECT 1)",
+    "name AS alias",
+    "\"name\"",
+    "lower(name)",
+];
+
+#[test]
+fn test_where_columns_reject_sql_expressions() {
+    for column in HOSTILE_COLUMNS {
+        let queries = [
+            QueryBuilder::<QueryTestUser>::new().where_eq(column, "x"),
+            QueryBuilder::<QueryTestUser>::new().where_null(column),
+            QueryBuilder::<QueryTestUser>::new().where_in(column, vec![1]),
+            QueryBuilder::<QueryTestUser>::new().or_where_eq(column, "x"),
+            QueryBuilder::<QueryTestUser>::new()
+                .begin_or()
+                .or_where_eq("name", "a")
+                .and_where_eq(column, "x")
+                .end_or(),
+        ];
+        for query in queries {
+            let err = query
+                .ensure_query_is_valid()
+                .expect_err("a WHERE column must be a column reference");
+            assert!(
+                err.to_string().contains("unsafe WHERE column"),
+                "{column}: {err}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_batch_update_validates_its_where_columns_before_db_lookup() {
+    for column in HOSTILE_COLUMNS {
+        let err = QueryTestUser::update_all()
+            .set("name", "x")
+            .where_eq(column, 0)
+            .execute()
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unsafe WHERE column"),
+            "{column}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -301,6 +362,40 @@ fn test_window_validation_rejects_unknown_qualifier() {
                 .to_string()
                 .contains("unknown window function column qualifier 'profiles'")
     );
+}
+
+/// An unselected `Option` column decodes as `None`, and saving such a model
+/// writes it back, so `get()` only takes a projection covering the model.
+#[tokio::test]
+async fn get_refuses_a_projection_that_leaves_model_columns_out() {
+    let err = QueryTestUser::query()
+        .select(vec!["id"])
+        .get()
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("select() leaves out name"),
+        "{err}"
+    );
+
+    // Covering projections get past the check and fail only for want of a
+    // connection.
+    for projection in [
+        vec!["*"],
+        vec!["query_test_users.*"],
+        vec!["id", "query_test_users.name"],
+        vec!["id", "name AS name"],
+    ] {
+        let err = QueryTestUser::query()
+            .select(projection.clone())
+            .get()
+            .await
+            .unwrap_err();
+        assert!(
+            !err.to_string().contains("leaves out"),
+            "{projection:?}: {err}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -430,7 +525,8 @@ async fn test_with_cte_columns_rejects_non_select_sql_before_db_lookup() {
 
     assert!(
         err.to_string()
-            .contains("invalid subquery for with_cte_columns()")
+            .contains("invalid CTE for with_cte_columns(): unsafe subquery"),
+        "{err}"
     );
 }
 

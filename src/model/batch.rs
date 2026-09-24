@@ -8,7 +8,7 @@
 use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::quote_ident;
-use crate::query::{LogicalOp, OrGroup, QueryBuilder};
+use crate::query::{OrGroup, QueryBuilder, WhereCondition};
 
 use super::Model;
 
@@ -30,7 +30,10 @@ mod validation_helpers;
 pub struct BatchUpdateBuilder<M: Model> {
     _marker: std::marker::PhantomData<M>,
     updates: std::collections::HashMap<String, UpdateValue>,
-    conditions: Vec<crate::query::WhereCondition>,
+    /// Filters ANDed together.
+    conditions: Vec<WhereCondition>,
+    /// The group every `or_where_*` call joins, ANDed with `conditions`.
+    or_group: OrGroup,
     returning: bool,
     limit_value: Option<u64>,
     /// Whether soft-deleted rows are in scope. Defaults to `true`.

@@ -1,9 +1,4 @@
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
-
-// =============================================================================
-// CACHE KEY BUILDER
-// =============================================================================
 
 /// Builder for generating cache keys from query parameters
 #[derive(Debug, Default)]
@@ -65,23 +60,13 @@ impl CacheKeyBuilder {
     /// [`CacheKeyBuilder::build`] whenever handing back the wrong entry would be
     /// a correctness problem; use the hash purely as a compact bucket id.
     pub fn build_hash(self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let key = self.build();
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+        super::hash_text(&self.build())
     }
 }
-
-// =============================================================================
-// CACHEABLE QUERY EXTENSION
-// =============================================================================
 
 /// Options for caching a query
 #[derive(Debug, Clone)]
 pub struct CacheOptions {
-    /// Custom cache key (if None, generated from query)
-    pub key: Option<String>,
     /// TTL for this specific query
     pub ttl: Duration,
 }
@@ -89,12 +74,6 @@ pub struct CacheOptions {
 impl CacheOptions {
     /// Create new cache options with TTL
     pub fn new(ttl: Duration) -> Self {
-        Self { key: None, ttl }
-    }
-
-    /// Set a custom cache key
-    pub fn with_key(mut self, key: &str) -> Self {
-        self.key = Some(key.to_string());
-        self
+        Self { ttl }
     }
 }

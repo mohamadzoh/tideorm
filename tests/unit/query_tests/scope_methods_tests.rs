@@ -11,6 +11,6 @@ fn model_local_scope_methods_chain_on_query_builder() {
 
     assert_eq!(
         sql,
-        "SELECT \"scoped_query_test_users\".* FROM \"scoped_query_test_users\" WHERE (\"active\" = true) AND (\"verified_at\" IS NOT NULL) AND (\"role\" = 'admin')"
+        "SELECT \"scoped_query_test_users\".\"id\", \"scoped_query_test_users\".\"active\", \"scoped_query_test_users\".\"verified_at\", \"scoped_query_test_users\".\"role\" FROM \"scoped_query_test_users\" WHERE \"active\" = TRUE AND \"verified_at\" IS NOT NULL AND \"role\" = 'admin'"
     );
 }

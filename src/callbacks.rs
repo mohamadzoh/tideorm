@@ -24,7 +24,6 @@
 //! actually need.
 
 use crate::error::Result;
-use crate::validation::Validate;
 
 /// Trait for model lifecycle callbacks
 ///
@@ -147,36 +146,10 @@ pub trait Callbacks: Sized {
 /// This is used internally by TideORM to execute callbacks.
 /// You typically don't need to use this directly.
 pub trait CallbackRunner: Callbacks {
-    /// Run the full save (create) callback chain
-    fn run_create_callbacks(&mut self) -> Result<()>
-    where
-        Self: Validate,
-    {
-        self.before_validation()?;
-        Validate::validate(self).map_err(crate::Error::from)?;
-        self.after_validation()?;
-        self.before_save()?;
-        self.before_create()?;
-        Ok(())
-    }
-
     /// Run the post-create callbacks
     fn run_after_create_callbacks(&self) -> Result<()> {
         self.after_create()?;
         self.after_save()?;
-        Ok(())
-    }
-
-    /// Run the full update callback chain
-    fn run_update_callbacks(&mut self) -> Result<()>
-    where
-        Self: Validate,
-    {
-        self.before_validation()?;
-        Validate::validate(self).map_err(crate::Error::from)?;
-        self.after_validation()?;
-        self.before_save()?;
-        self.before_update()?;
         Ok(())
     }
 
@@ -200,7 +173,6 @@ pub trait CallbackRunner: Callbacks {
     }
 }
 
-// Automatically implement CallbackRunner for anything that implements Callbacks
 impl<T: Callbacks> CallbackRunner for T {}
 
 // The `*Dispatch` traits below implement autoref specialization: a bounded impl
@@ -218,23 +190,6 @@ impl<T: Callbacks> CallbackRunner for T {}
 // Generic code must therefore drive writes through `Model::create`,
 // `Model::update`, `Model::save`, or `Model::delete` instead of dispatching
 // callbacks itself.
-
-#[doc(hidden)]
-pub trait BeforeCreateDispatch<T> {
-    fn run_before_create(self) -> Result<()>;
-}
-
-impl<T: CallbackRunner + Validate> BeforeCreateDispatch<T> for &mut T {
-    fn run_before_create(self) -> Result<()> {
-        self.run_create_callbacks()
-    }
-}
-
-impl<T> BeforeCreateDispatch<T> for &&mut T {
-    fn run_before_create(self) -> Result<()> {
-        Ok(())
-    }
-}
 
 #[doc(hidden)]
 pub trait AfterCreateDispatch<T> {
@@ -317,23 +272,6 @@ impl<T: Callbacks> BeforeCreateOnlyDispatch<T> for &mut T {
 
 impl<T> BeforeCreateOnlyDispatch<T> for &&mut T {
     fn run_before_create_only(self) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[doc(hidden)]
-pub trait BeforeUpdateDispatch<T> {
-    fn run_before_update(self) -> Result<()>;
-}
-
-impl<T: CallbackRunner + Validate> BeforeUpdateDispatch<T> for &mut T {
-    fn run_before_update(self) -> Result<()> {
-        self.run_update_callbacks()
-    }
-}
-
-impl<T> BeforeUpdateDispatch<T> for &&mut T {
-    fn run_before_update(self) -> Result<()> {
         Ok(())
     }
 }

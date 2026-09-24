@@ -1,18 +1,17 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::database::{Database, require_db};
+use crate::database::{Database, require_db, transaction_error};
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::is_safe_identifier_segment;
 use crate::internal::{
-    ConnectionTrait, OrmTransaction, QueryResult, TransactionTrait, Value, build_statement,
-    build_statement_with_values,
+    ConnectionTrait, OrmTransaction, QueryResult, TransactionTrait, Value,
+    build_statement_with_values, translate_error,
 };
-use crate::tide_warn;
+use crate::{tide_info, tide_warn};
 
 use super::{
-    DatabaseType, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
-    detect_database_type, log_migration_complete, log_migration_rollback, log_migration_start,
-    migration_parameter_list, migration_parameter_placeholder, quote_migration_identifier,
+    DatabaseType, Ledger, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
 };
 
 /// Ledger table a migrator uses unless it is pointed at another one.
@@ -96,7 +95,7 @@ impl MigrationLock {
             .__internal_connection()?
             .begin()
             .await
-            .map_err(|error| Error::transaction(error.to_string()))?;
+            .map_err(transaction_error)?;
 
         match db_type {
             DatabaseType::Postgres => {
@@ -110,7 +109,7 @@ impl MigrationLock {
                 transaction
                     .query_one_raw(statement)
                     .await
-                    .map_err(|error| Error::query(error.to_string()))?;
+                    .map_err(translate_error)?;
             }
             DatabaseType::MySQL | DatabaseType::MariaDB => {
                 let statement = build_statement_with_values(
@@ -124,7 +123,7 @@ impl MigrationLock {
                 let acquired = transaction
                     .query_one_raw(statement)
                     .await
-                    .map_err(|error| Error::query(error.to_string()))?
+                    .map_err(translate_error)?
                     .as_ref()
                     .and_then(lock_result_flag);
 
@@ -161,13 +160,10 @@ impl MigrationLock {
             transaction
                 .query_one_raw(statement)
                 .await
-                .map_err(|error| Error::query(error.to_string()))?;
+                .map_err(translate_error)?;
         }
 
-        transaction
-            .commit()
-            .await
-            .map_err(|error| Error::transaction(error.to_string()))
+        transaction.commit().await.map_err(transaction_error)
     }
 }
 
@@ -222,11 +218,6 @@ impl Migrator {
         self
     }
 
-    /// Name of the ledger table this migrator records applied migrations in.
-    pub fn migrations_table_name(&self) -> &str {
-        &self.table
-    }
-
     /// Run all pending migrations
     ///
     /// Concurrent migrators are serialized with a backend lock, so replicas
@@ -236,7 +227,7 @@ impl Migrator {
     /// applied change with no ledger row.
     pub async fn run(&self) -> Result<MigrationResult> {
         let db = require_db()?;
-        let db_type = detect_database_type(&db);
+        let db_type = db.backend();
 
         let lock = MigrationLock::acquire(&db, db_type).await?;
         let outcome = self.run_locked(&db, db_type).await;
@@ -248,10 +239,10 @@ impl Migrator {
     }
 
     async fn run_locked(&self, db: &Database, db_type: DatabaseType) -> Result<MigrationResult> {
-        self.ensure_migrations_table().await?;
+        let ledger = self.ledger()?;
+        ledger.ensure(db).await?;
 
-        let table = self.ledger_table()?;
-        let applied = self.get_applied_migrations().await?;
+        let applied = self.applied_versions(&ledger, db).await?;
         let mut result = MigrationResult::new();
 
         let mut migrations: Vec<_> = self.migrations.iter().collect();
@@ -259,25 +250,27 @@ impl Migrator {
 
         for migration in migrations {
             let version = migration.version();
+            let info = MigrationInfo {
+                version: version.to_string(),
+                name: migration.name().to_string(),
+            };
 
-            if applied.contains(&version.to_string()) {
-                result.skipped.push(MigrationInfo {
-                    version: version.to_string(),
-                    name: migration.name().to_string(),
-                });
+            if applied.iter().any(|applied| applied == version) {
+                result.skipped.push(info);
                 continue;
             }
 
-            log_migration_start(version, migration.name());
+            tide_info!("Running migration: {} - {}", version, migration.name());
+            apply_migration(
+                db,
+                db_type,
+                Arc::clone(migration),
+                ledger.table().to_string(),
+            )
+            .await?;
+            tide_info!("Completed migration: {} - {}", version, migration.name());
 
-            apply_migration(db, db_type, Arc::clone(migration), table.to_string()).await?;
-
-            result.applied.push(MigrationInfo {
-                version: version.to_string(),
-                name: migration.name().to_string(),
-            });
-
-            log_migration_complete(version, migration.name());
+            result.applied.push(info);
         }
 
         Ok(result)
@@ -289,7 +282,7 @@ impl Migrator {
     /// migration in one transaction where the backend allows it.
     pub async fn rollback(&self) -> Result<MigrationResult> {
         let db = require_db()?;
-        let db_type = detect_database_type(&db);
+        let db_type = db.backend();
 
         let lock = MigrationLock::acquire(&db, db_type).await?;
         let outcome = self.rollback_locked(&db, db_type).await;
@@ -305,14 +298,14 @@ impl Migrator {
         db: &Database,
         db_type: DatabaseType,
     ) -> Result<MigrationResult> {
-        self.ensure_migrations_table().await?;
+        let ledger = self.ledger()?;
+        ledger.ensure(db).await?;
 
-        let table = self.ledger_table()?.to_string();
-        // `get_applied_migrations` is ordered by the ledger's insertion id, so
-        // the last entry is the migration applied most recently - not the one
-        // with the highest version. After a long-lived branch merges those are
-        // routinely different migrations.
-        let applied = self.get_applied_migrations().await?;
+        // The ledger is ordered by insertion id, so the last entry is the
+        // migration applied most recently - not the one with the highest
+        // version. After a long-lived branch merges those are routinely
+        // different migrations.
+        let applied = self.applied_versions(&ledger, db).await?;
         let mut result = MigrationResult::new();
 
         let Some(last_version) = applied.last() else {
@@ -327,9 +320,20 @@ impl Migrator {
             return Ok(result);
         };
 
-        log_migration_rollback(last_version, migration.name());
+        tide_info!(
+            "Rolling back migration: {} - {}",
+            last_version,
+            migration.name()
+        );
 
-        revert_migration(db, db_type, Arc::clone(migration), last_version, table).await?;
+        revert_migration(
+            db,
+            db_type,
+            Arc::clone(migration),
+            last_version,
+            ledger.table().to_string(),
+        )
+        .await?;
 
         result.rolled_back.push(MigrationInfo {
             version: migration.version().to_string(),
@@ -361,13 +365,15 @@ impl Migrator {
     /// left to run. Those rows are reported and deliberately left in place
     /// rather than dropped, so the reset is not silently partial.
     pub async fn reset(&self) -> Result<MigrationResult> {
-        self.ensure_migrations_table().await?;
+        let db = require_db()?;
+        let ledger = self.ledger()?;
+        ledger.ensure(&db).await?;
 
-        let recorded = self.recorded_versions().await?;
+        let recorded = ledger.keys(&db).await?;
         let registered = self.registered_versions();
         let unknown: Vec<&str> = recorded
             .iter()
-            .filter(|version| !registered.contains(*version))
+            .filter(|version| !registered.contains(version.as_str()))
             .map(String::as_str)
             .collect();
 
@@ -396,208 +402,90 @@ impl Migrator {
 
     /// Get migration status
     pub async fn status(&self) -> Result<Vec<MigrationStatus>> {
-        self.ensure_migrations_table().await?;
+        let db = require_db()?;
+        let ledger = self.ledger()?;
+        ledger.ensure(&db).await?;
 
-        let applied = self.get_applied_migrations().await?;
-        let mut status = Vec::new();
+        let applied = self.applied_versions(&ledger, &db).await?;
 
         let mut migrations: Vec<_> = self.migrations.iter().collect();
         migrations.sort_by_key(|migration| migration.version());
 
-        for migration in migrations {
-            let is_applied = applied.contains(&migration.version().to_string());
-            status.push(MigrationStatus {
+        Ok(migrations
+            .into_iter()
+            .map(|migration| MigrationStatus {
                 version: migration.version().to_string(),
                 name: migration.name().to_string(),
-                applied: is_applied,
-            });
-        }
-
-        Ok(status)
+                applied: applied.iter().any(|applied| applied == migration.version()),
+            })
+            .collect())
     }
 
-    /// The ledger table name, checked before it reaches any SQL string.
+    /// The ledger this migrator records into, its table name checked before it
+    /// reaches any SQL string.
     ///
     /// Validation lives here rather than in [`Migrator::migrations_table`]
     /// because every path that touches the ledger already returns `Result`,
     /// while the builder method has nowhere to report a bad name.
-    fn ledger_table(&self) -> Result<&str> {
-        if is_safe_identifier_segment(&self.table) {
-            return Ok(&self.table);
+    pub(super) fn ledger(&self) -> Result<Ledger<'_>> {
+        if !is_safe_identifier_segment(&self.table) {
+            return Err(Error::configuration(format!(
+                "invalid migrations table name '{}': expected ASCII letters, numbers, and underscores",
+                self.table
+            )));
         }
 
-        Err(Error::configuration(format!(
-            "invalid migrations table name '{}': expected ASCII letters, numbers, and underscores",
-            self.table
-        )))
-    }
-
-    async fn ensure_migrations_table(&self) -> Result<()> {
-        let db = require_db()?;
-        let db_type = detect_database_type(&db);
-        let sql = create_ledger_table_sql(db_type, self.ledger_table()?);
-
-        db.__internal_connection()?
-            .execute_unprepared(&sql)
-            .await
-            .map_err(|error| Error::query(error.to_string()))?;
-
-        Ok(())
+        Ok(Ledger::migrations(&self.table))
     }
 
     /// Versions of the migrations registered on this migrator.
-    fn registered_versions(&self) -> std::collections::HashSet<String> {
+    fn registered_versions(&self) -> HashSet<&str> {
         self.migrations
             .iter()
-            .map(|migration| migration.version().to_string())
+            .map(|migration| migration.version())
             .collect()
-    }
-
-    /// Every version present in the ledger, oldest applied first.
-    async fn recorded_versions(&self) -> Result<Vec<String>> {
-        let db = require_db()?;
-        let backend = db.__internal_backend()?;
-        let db_type = detect_database_type(&db);
-        let statement = build_statement(
-            backend,
-            recorded_versions_sql(db_type, self.ledger_table()?),
-        );
-
-        let results = db
-            .__internal_connection()?
-            .query_all_raw(statement)
-            .await
-            .map_err(|error| Error::query(error.to_string()))?;
-
-        let mut versions = Vec::with_capacity(results.len());
-        for row in results {
-            let version: String = row
-                .try_get("", "version")
-                .map_err(|error| Error::query(error.to_string()))?;
-            versions.push(version);
-        }
-
-        Ok(versions)
     }
 
     /// Recorded versions this migrator still knows how to revert, in the order
     /// they were applied.
-    async fn get_applied_migrations(&self) -> Result<Vec<String>> {
+    async fn applied_versions(&self, ledger: &Ledger<'_>, db: &Database) -> Result<Vec<String>> {
         let registered = self.registered_versions();
 
-        Ok(self
-            .recorded_versions()
+        Ok(ledger
+            .keys(db)
             .await?
             .into_iter()
-            .filter(|version| registered.contains(version))
+            .filter(|version| registered.contains(version.as_str()))
             .collect())
     }
-}
-
-/// DDL that creates the ledger table if it is missing.
-fn create_ledger_table_sql(db_type: DatabaseType, table: &str) -> String {
-    let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
-    let columns = match db_type {
-        DatabaseType::Postgres => format!(
-            "{} SERIAL PRIMARY KEY, {} VARCHAR(255) NOT NULL UNIQUE, {} VARCHAR(255) NOT NULL, {} TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
-            quote("id"),
-            quote("version"),
-            quote("name"),
-            quote("applied_at")
-        ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!(
-            "{} INT AUTO_INCREMENT PRIMARY KEY, {} VARCHAR(255) NOT NULL UNIQUE, {} VARCHAR(255) NOT NULL, {} TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP",
-            quote("id"),
-            quote("version"),
-            quote("name"),
-            quote("applied_at")
-        ),
-        DatabaseType::SQLite => format!(
-            "{} INTEGER PRIMARY KEY AUTOINCREMENT, {} TEXT NOT NULL UNIQUE, {} TEXT NOT NULL, {} TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP",
-            quote("id"),
-            quote("version"),
-            quote("name"),
-            quote("applied_at")
-        ),
-    };
-
-    format!("CREATE TABLE IF NOT EXISTS {} ({})", quote(table), columns)
-}
-
-/// Query that lists the ledger in application order.
-///
-/// Ordering is by the monotonic `id`, not by `version` and not by `applied_at`:
-/// a branch that merges late applies an older version last, and `applied_at`
-/// has whole-second resolution on MySQL and is plain TEXT on SQLite. Only the
-/// insertion id says which migration really ran last, which is what a rollback
-/// has to revert.
-fn recorded_versions_sql(db_type: DatabaseType, table: &str) -> String {
-    let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
-
-    format!(
-        "SELECT {} FROM {} ORDER BY {} ASC",
-        quote("version"),
-        quote(table),
-        quote("id")
-    )
-}
-
-/// Statement that records one applied migration.
-fn insert_ledger_row_sql(db_type: DatabaseType, table: &str) -> String {
-    let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
-
-    format!(
-        "INSERT INTO {} ({}, {}) VALUES ({})",
-        quote(table),
-        quote("version"),
-        quote("name"),
-        migration_parameter_list(db_type, 2)
-    )
-}
-
-/// Statement that un-records one migration.
-fn delete_ledger_row_sql(db_type: DatabaseType, table: &str) -> String {
-    let quote = |identifier: &str| quote_migration_identifier(identifier, db_type);
-
-    format!(
-        "DELETE FROM {} WHERE {} = {}",
-        quote(table),
-        quote("version"),
-        migration_parameter_placeholder(db_type, 1)
-    )
 }
 
 /// Apply one migration and record it in the ledger.
 ///
 /// On a backend with transactional DDL both happen in one transaction, so a
 /// statement failing partway cannot leave schema changes behind with no ledger
-/// row. `Schema` resolves its connection from the ambient scope, which is what
-/// puts the DDL inside that transaction. Elsewhere the two run unwrapped,
-/// because the backend would implicitly commit the DDL anyway.
+/// row. `Schema` and the ledger both resolve their connection from the ambient
+/// scope, which is what puts them inside that transaction. Elsewhere the two
+/// run unwrapped, because the backend would implicitly commit the DDL anyway.
 async fn apply_migration(
     db: &Database,
     db_type: DatabaseType,
     migration: Arc<dyn Migration>,
     table: String,
 ) -> Result<()> {
-    let version = migration.version().to_string();
-    let name = migration.name().to_string();
+    let apply = async move {
+        let mut schema = Schema::new(db_type);
+        migration.up(&mut schema).await?;
+        Ledger::migrations(&table)
+            .record(&require_db()?, migration.version(), &[migration.name()])
+            .await
+    };
 
     if supports_transactional_ddl(db_type) {
-        return db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    let mut schema = Schema::new(db_type);
-                    migration.up(&mut schema).await?;
-                    record_migration(&table, &version, &name).await
-                })
-            })
-            .await;
+        return db.transaction(move |_| Box::pin(apply)).await;
     }
 
-    let mut schema = Schema::new(db_type);
-    migration.up(&mut schema).await?;
-    record_migration(&table, &version, &name).await
+    apply.await
 }
 
 /// Revert one migration and remove its ledger row, with the same transaction
@@ -610,169 +498,23 @@ async fn revert_migration(
     table: String,
 ) -> Result<()> {
     let version = version.to_string();
+    let revert = async move {
+        let mut schema = Schema::new(db_type);
+        migration.down(&mut schema).await?;
+        Ledger::migrations(&table)
+            .remove(&require_db()?, &version)
+            .await
+    };
 
     if supports_transactional_ddl(db_type) {
-        return db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    let mut schema = Schema::new(db_type);
-                    migration.down(&mut schema).await?;
-                    remove_migration_record(&table, &version).await
-                })
-            })
-            .await;
+        return db.transaction(move |_| Box::pin(revert)).await;
     }
 
-    let mut schema = Schema::new(db_type);
-    migration.down(&mut schema).await?;
-    remove_migration_record(&table, &version).await
-}
-
-async fn record_migration(table: &str, version: &str, name: &str) -> Result<()> {
-    let db = require_db()?;
-    let sql = insert_ledger_row_sql(detect_database_type(&db), table);
-
-    db.__execute_with_params(
-        &sql,
-        vec![
-            Value::String(Some(version.to_string())),
-            Value::String(Some(name.to_string())),
-        ],
-    )
-    .await?;
-
-    Ok(())
-}
-
-async fn remove_migration_record(table: &str, version: &str) -> Result<()> {
-    let db = require_db()?;
-    let sql = delete_ledger_row_sql(detect_database_type(&db), table);
-
-    db.__execute_with_params(&sql, vec![Value::String(Some(version.to_string()))])
-        .await?;
-
-    Ok(())
+    revert.await
 }
 
 impl Default for Migrator {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// These cover the ledger SQL, which is private to this module, so they live
-// here rather than in `tests/unit/migration_tests.rs`.
-#[cfg(test)]
-mod ledger_tests {
-    use super::*;
-
-    const BACKENDS: [DatabaseType; 4] = [
-        DatabaseType::Postgres,
-        DatabaseType::MySQL,
-        DatabaseType::MariaDB,
-        DatabaseType::SQLite,
-    ];
-
-    #[test]
-    fn ledger_table_defaults_to_underscore_migrations() {
-        assert_eq!(Migrator::new().migrations_table_name(), "_migrations");
-        assert_eq!(Migrator::default().migrations_table_name(), "_migrations");
-    }
-
-    #[test]
-    fn ledger_table_is_configurable() {
-        let migrator = Migrator::new().migrations_table("schema_migrations");
-
-        assert_eq!(migrator.migrations_table_name(), "schema_migrations");
-        assert_eq!(
-            migrator.ledger_table().expect("valid table name"),
-            "schema_migrations"
-        );
-    }
-
-    #[test]
-    fn ledger_sql_uses_the_configured_table_on_every_backend() {
-        for db_type in BACKENDS {
-            let quoted = quote_migration_identifier("schema_migrations", db_type);
-
-            for sql in [
-                create_ledger_table_sql(db_type, "schema_migrations"),
-                recorded_versions_sql(db_type, "schema_migrations"),
-                insert_ledger_row_sql(db_type, "schema_migrations"),
-                delete_ledger_row_sql(db_type, "schema_migrations"),
-            ] {
-                assert!(
-                    sql.contains(&quoted),
-                    "{:?} statement should target the configured ledger. Got: {}",
-                    db_type,
-                    sql
-                );
-                assert!(
-                    !sql.contains(&quote_migration_identifier(
-                        DEFAULT_MIGRATIONS_TABLE,
-                        db_type
-                    )),
-                    "{:?} statement should not fall back to the default ledger. Got: {}",
-                    db_type,
-                    sql
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn ledger_table_name_is_validated_before_it_reaches_sql() {
-        for name in ["schema migrations", "users\"; DROP TABLE users --", "1bad"] {
-            let error = Migrator::new()
-                .migrations_table(name)
-                .ledger_table()
-                .expect_err("unsafe ledger table names must be rejected");
-
-            assert!(
-                error.to_string().contains(name),
-                "Error should name the offending table. Got: {}",
-                error
-            );
-        }
-    }
-
-    #[test]
-    fn recorded_versions_are_ordered_by_insertion_id() {
-        for db_type in BACKENDS {
-            let sql = recorded_versions_sql(db_type, "_migrations");
-            let id = quote_migration_identifier("id", db_type);
-            let version = quote_migration_identifier("version", db_type);
-
-            assert!(
-                sql.ends_with(&format!("ORDER BY {} ASC", id)),
-                "Rollback order must follow the ledger id, not the version. Got: {}",
-                sql
-            );
-            assert!(
-                !sql.contains(&format!("ORDER BY {}", version)),
-                "Ordering by version reverts the wrong migration after a late merge. Got: {}",
-                sql
-            );
-        }
-    }
-
-    #[test]
-    fn ledger_table_ddl_keeps_the_monotonic_id_column() {
-        for db_type in BACKENDS {
-            let sql = create_ledger_table_sql(db_type, "_migrations");
-
-            assert!(
-                sql.contains(&quote_migration_identifier("id", db_type)),
-                "{:?} ledger needs the id rollback ordering depends on. Got: {}",
-                db_type,
-                sql
-            );
-            assert!(
-                sql.contains(&quote_migration_identifier("applied_at", db_type)),
-                "{:?} ledger should keep applied_at. Got: {}",
-                db_type,
-                sql
-            );
-        }
     }
 }

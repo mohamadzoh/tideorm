@@ -20,31 +20,19 @@ use super::{BatchUpdateBuilder, OnConflictBuilder, crud, serialization};
 pub trait Model:
     super::ModelMeta
     + crate::internal::InternalModel
+    + crate::validation::Validate
     + serde::Serialize
     + for<'de> serde::Deserialize<'de>
 {
     /// Get the primary key value of this instance
     fn primary_key(&self) -> Self::PrimaryKey;
 
-    /// Get the global database connection
-    fn db() -> crate::error::Result<crate::database::Database> {
-        crud::db()
-    }
-
-    /// Get the global database connection from an instance
-    fn database(&self) -> crate::error::Result<crate::database::Database> {
-        crud::db()
-    }
-
     /// Load every row of this model's table.
     ///
     /// Soft-deleted rows are excluded. There is no limit and no streaming — the
     /// whole table is materialised in memory, so use [`Model::query`] with a
     /// filter or [`Model::paginate`] for anything that can grow.
-    async fn all() -> Result<Vec<Self>>
-    where
-        Self: Sized,
-    {
+    async fn all() -> Result<Vec<Self>> {
         crud::all::<Self>().await
     }
 
@@ -59,10 +47,7 @@ pub trait Model:
     /// The query runs against whichever connection is current when a terminal
     /// method is awaited, so a builder created outside a transaction still joins
     /// one if it is awaited inside the transaction closure.
-    fn query() -> QueryBuilder<Self>
-    where
-        Self: Sized,
-    {
+    fn query() -> QueryBuilder<Self> {
         QueryBuilder::new()
     }
 
@@ -78,10 +63,7 @@ pub trait Model:
     /// all. Rendering follows execution, so the SQL is at least built for the
     /// backend it actually reaches. Run replica reads outside the transaction if
     /// you need them to go to the replica.
-    fn query_with(db: &crate::database::Database) -> QueryBuilder<Self>
-    where
-        Self: Sized,
-    {
+    fn query_with(db: &crate::database::Database) -> QueryBuilder<Self> {
         QueryBuilder::new().with_database(db.clone())
     }
 
@@ -89,10 +71,7 @@ pub trait Model:
     ///
     /// Soft-deleted rows are not counted. Counts the whole table; for a filtered
     /// count use `Model::query().where_eq(..).count()`.
-    async fn count() -> Result<u64>
-    where
-        Self: Sized,
-    {
+    async fn count() -> Result<u64> {
         crud::count::<Self>().await
     }
 
@@ -102,10 +81,7 @@ pub trait Model:
     /// delete, does not run per-row callbacks, and cannot be undone. It exists
     /// as a deliberate escape hatch precisely because the ordinary bulk paths
     /// refuse to run without a filter. Returns the number of rows removed.
-    async fn delete_all() -> Result<u64>
-    where
-        Self: Sized,
-    {
+    async fn delete_all() -> Result<u64> {
         Self::query().delete_all().await
     }
 
@@ -113,22 +89,24 @@ pub trait Model:
     ///
     /// Cheaper than [`Model::count`] on a large table: the statement stops at
     /// the first row instead of scanning to produce an exact total.
-    async fn exists_any() -> Result<bool>
-    where
-        Self: Sized,
-    {
+    async fn exists_any() -> Result<bool> {
         crud::exists_any::<Self>().await
     }
 
     /// Insert multiple records and return the inserted models.
     ///
+    /// Every model is checked against its validation rules first, and nothing
+    /// is written unless all of them pass. No callbacks run, `before_validation`
+    /// included, so each model is validated as it was built.
+    ///
     /// TideORM uses the most efficient strategy the active backend supports.
-    /// PostgreSQL and MariaDB can use a batch `INSERT ... RETURNING`, while
-    /// MySQL and SQLite fall back to individual inserts so database-generated
-    /// fields such as auto-incremented IDs are still reflected in the result.
+    /// PostgreSQL and SQLite send a batch `INSERT ... RETURNING`. MySQL and
+    /// MariaDB batch models that set their own integer or `Uuid` key and read
+    /// them back with one `SELECT`, and insert other models one at a time, so
+    /// database-generated fields such as auto-incremented IDs are still
+    /// reflected in the result.
     async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>>
     where
-        Self: Sized,
         <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             crate::internal::IntoActiveModel<<Self as crate::internal::InternalModel>::ActiveModel>,
     {
@@ -139,21 +117,17 @@ pub trait Model:
     ///
     /// `conflict_columns` must be covered by a unique constraint or unique index
     /// — the database, not TideORM, decides what counts as a conflict. Every
-    /// non-conflict column is overwritten; use [`Model::on_conflict`] when only
+    /// non-conflict column is overwritten except a managed `created_at`, which
+    /// keeps the stored row's creation time; use [`Model::on_conflict`] when only
     /// some of them should be.
-    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>
-    where
-        Self: Sized;
+    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>;
 
     /// Start an upsert whose conflict behaviour you want to narrow.
     ///
     /// The long form of [`Model::insert_or_update`]: the returned builder can
     /// restrict which columns the update writes, which is how insert-only
-    /// columns such as `created_at` are protected.
-    fn on_conflict(conflict_columns: Vec<&str>) -> OnConflictBuilder<Self>
-    where
-        Self: Sized,
-    {
+    /// columns are protected.
+    fn on_conflict(conflict_columns: Vec<&str>) -> OnConflictBuilder<Self> {
         OnConflictBuilder::new(
             conflict_columns
                 .into_iter()
@@ -168,10 +142,7 @@ pub trait Model:
     /// [`Model::query`] — it **includes soft-deleted rows by default**, so a
     /// bulk restore or backfill reaches trashed rows. Call
     /// [`BatchUpdateBuilder::without_trashed`] for the usual active-only scope.
-    fn update_all() -> BatchUpdateBuilder<Self>
-    where
-        Self: Sized,
-    {
+    fn update_all() -> BatchUpdateBuilder<Self> {
         BatchUpdateBuilder::new()
     }
 
@@ -192,7 +163,6 @@ pub trait Model:
     /// an arbitrary model in front of it.
     async fn transaction<F, T>(f: F) -> Result<T>
     where
-        Self: Sized,
         F: for<'c> FnOnce(
                 &'c crate::database::Transaction,
             ) -> std::pin::Pin<
@@ -209,10 +179,7 @@ pub trait Model:
     /// hands back first — not the oldest or the lowest primary key. Add an
     /// explicit order with `Model::query().order_asc(..).first()` when the
     /// choice matters. Soft-deleted rows are excluded.
-    async fn first() -> Result<Option<Self>>
-    where
-        Self: Sized,
-    {
+    async fn first() -> Result<Option<Self>> {
         crud::first::<Self>().await
     }
 
@@ -222,20 +189,19 @@ pub trait Model:
     /// sorted descending. For an auto-increment key that is the most recently
     /// inserted row, but for a natural or UUID key it is simply the largest one.
     /// Soft-deleted rows are excluded.
-    async fn last() -> Result<Option<Self>>
-    where
-        Self: Sized,
-    {
+    async fn last() -> Result<Option<Self>> {
         crud::last::<Self>().await
     }
 
     /// Return one page of models using 1-based page numbers.
     ///
-    /// Returns a validation error when `page == 0` or `per_page == 0`.
-    async fn paginate(page: u64, per_page: u64) -> Result<Vec<Self>>
-    where
-        Self: Sized,
-    {
+    /// Rows are ordered by primary key, so walking the pages visits each row
+    /// once even while rows are updated in between. For another order, use
+    /// `Model::query().order_asc(..).page(page, per_page)`.
+    ///
+    /// Returns a validation error when `page == 0` or `per_page == 0`, or when
+    /// `per_page` or the page's offset is past `i64::MAX`.
+    async fn paginate(page: u64, per_page: u64) -> Result<Vec<Self>> {
         crud::paginate::<Self>(page, per_page).await
     }
 
@@ -247,9 +213,7 @@ pub trait Model:
     /// [`Model::exists`] can disagree for the same id. Use [`Model::exists`],
     /// [`Model::find_or_fail`], or a filtered [`Model::query`] when trashed rows
     /// should stay invisible.
-    async fn find(id: Self::PrimaryKey) -> Result<Option<Self>>
-    where
-        Self: Sized;
+    async fn find(id: Self::PrimaryKey) -> Result<Option<Self>>;
 
     /// Look up a record by primary key on a specific database handle.
     ///
@@ -258,18 +222,13 @@ pub trait Model:
     async fn find_with(
         id: Self::PrimaryKey,
         db: &crate::database::Database,
-    ) -> Result<Option<Self>>
-    where
-        Self: Sized;
+    ) -> Result<Option<Self>>;
 
     /// Look up a record by primary key, returning a not-found error when it is missing.
     ///
     /// Soft-delete-enabled models only resolve rows that are not trashed. Use
     /// `Model::find` when a trashed row should still be returned.
-    async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self> {
         let id_display = Self::primary_key_display(&id);
         crud::find_active::<Self>(id).await?.ok_or_else(|| {
             Error::not_found(format!(
@@ -284,10 +243,7 @@ pub trait Model:
     ///
     /// Soft-delete-enabled models report trashed rows as not existing, matching
     /// `all()`, `count()`, and `query()`.
-    async fn exists(id: Self::PrimaryKey) -> Result<bool>
-    where
-        Self: Sized,
-    {
+    async fn exists(id: Self::PrimaryKey) -> Result<bool> {
         Ok(crud::find_active::<Self>(id).await?.is_some())
     }
 
@@ -295,9 +251,7 @@ pub trait Model:
     ///
     /// This always performs an `INSERT`. To get create-or-update behavior,
     /// use `save()` instead.
-    async fn create(model: Self) -> Result<Self>
-    where
-        Self: Sized;
+    async fn create(model: Self) -> Result<Self>;
 
     /// Delete the record with this primary key.
     ///
@@ -308,24 +262,18 @@ pub trait Model:
     ///
     /// This is a hard delete even on a soft-delete model — call
     /// `SoftDelete::soft_delete` on the loaded model to only mark it.
-    async fn destroy(id: Self::PrimaryKey) -> Result<u64>
-    where
-        Self: Sized;
+    async fn destroy(id: Self::PrimaryKey) -> Result<u64>;
 
     /// Persist this model.
     ///
     /// Performs an `INSERT` when `is_new()` returns true, otherwise performs
     /// an `UPDATE` for the current primary key.
-    async fn save(self) -> Result<Self>
-    where
-        Self: Sized;
+    async fn save(self) -> Result<Self>;
 
     /// Update an existing record.
     ///
     /// This always performs an `UPDATE` using the model's current primary key.
-    async fn update(self) -> Result<Self>
-    where
-        Self: Sized;
+    async fn update(self) -> Result<Self>;
 
     /// Delete this record's row.
     ///
@@ -333,14 +281,10 @@ pub trait Model:
     /// `soft_delete` — use `SoftDelete::soft_delete` when the row should be
     /// marked rather than removed. Runs the delete callbacks and returns the
     /// number of rows removed, which is `0` if the row was already gone.
-    async fn delete(self) -> Result<u64>
-    where
-        Self: Sized;
+    async fn delete(self) -> Result<u64>;
 
     #[doc(hidden)]
-    async fn __insert_with_conflict(model: Self, builder: OnConflictBuilder<Self>) -> Result<Self>
-    where
-        Self: Sized;
+    async fn __insert_with_conflict(model: Self, builder: OnConflictBuilder<Self>) -> Result<Self>;
 
     /// Re-read this record from the database and return the fresh copy.
     ///
@@ -348,10 +292,7 @@ pub trait Model:
     /// available for comparison. Errors with a not-found error when the row has
     /// been deleted in the meantime. Like [`Model::find`], it reads by primary
     /// key and so still sees soft-deleted rows.
-    async fn reload(&self) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    async fn reload(&self) -> Result<Self> {
         crud::reload(self).await
     }
 
@@ -387,10 +328,7 @@ pub trait Model:
     /// };
     /// ```
     #[cfg(feature = "dirty-tracking")]
-    fn changed_fields(&self) -> Result<Option<Vec<&'static str>>>
-    where
-        Self: Sized,
-    {
+    fn changed_fields(&self) -> Result<Option<Vec<&'static str>>> {
         dirty_tracking::changed_fields(self)
     }
 
@@ -409,10 +347,7 @@ pub trait Model:
     /// Returns an error when `field` names neither a field nor a column of this
     /// model, whether or not a baseline exists.
     #[cfg(feature = "dirty-tracking")]
-    fn original_value(&self, field: &str) -> Result<Option<Option<serde_json::Value>>>
-    where
-        Self: Sized,
-    {
+    fn original_value(&self, field: &str) -> Result<Option<Option<serde_json::Value>>> {
         dirty_tracking::original_value(self, field)
     }
 
@@ -421,45 +356,23 @@ pub trait Model:
     /// This is not plain `serde_json::to_value`: hidden attributes (the model's
     /// own plus the global ones from `Config`) are dropped, attachment fields are
     /// expanded into URLs, and translatable fields are resolved to one language.
-    /// Two option keys are understood — `"language"` picks the translation to
-    /// emit (default: the model's fallback language) and `"presenter"` picks a
-    /// named presenter (default: the model's default presenter).
+    /// One option key is understood: `"language"` picks the translation to emit
+    /// (default: the model's fallback language).
     ///
     /// Serialization failures are logged and yield `{}` rather than an error,
     /// because this sits on a rendering path.
-    fn to_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value
-    where
-        Self: serde::Serialize,
-    {
+    fn to_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value {
         serialization::to_json::<Self>(self, options.as_ref())
-    }
-
-    /// Expand one attachment field's stored metadata into its JSON representation.
-    ///
-    /// Called by [`Model::to_json`] for each attachment field; override the
-    /// `url_generator` through `Config` rather than calling this directly.
-    #[inline]
-    #[cfg(feature = "attachments")]
-    fn process_file_for_json(
-        field_name: &str,
-        file_data: &serde_json::Value,
-        hidden_attrs: &[&str],
-        url_generator: crate::config::FileUrlGenerator,
-    ) -> serde_json::Value {
-        serialization::process_file_for_json(field_name, file_data, hidden_attrs, url_generator)
     }
 
     /// Render a list of models as a JSON array, applying [`Model::to_json`] to each.
     ///
-    /// The same options apply to every element, so one language and one
-    /// presenter are used across the collection.
+    /// The same options apply to every element, so one language is used across
+    /// the collection.
     fn collection_to_json(
         models: Vec<Self>,
         options: Option<HashMap<String, String>>,
-    ) -> serde_json::Value
-    where
-        Self: serde::Serialize,
-    {
+    ) -> serde_json::Value {
         serialization::collection_to_json::<Self>(models, options)
     }
 
@@ -470,10 +383,7 @@ pub trait Model:
     /// text form, `null` becomes `"null"`, and nested objects and arrays become
     /// their JSON text. Intended for template context and form population, not
     /// for round-tripping back into a model.
-    fn to_hash_map(&self) -> HashMap<String, String>
-    where
-        Self: serde::Serialize,
-    {
+    fn to_hash_map(&self) -> HashMap<String, String> {
         serialization::to_hash_map::<Self>(self)
     }
 
@@ -482,19 +392,8 @@ pub trait Model:
     /// Falls back to the model's fallback language for any field the requested
     /// language does not define. Returns `Err` when the model declares no
     /// translations.
-    fn load_language_translations(&mut self, _language: &str) -> std::result::Result<(), String> {
-        serialization::load_language_translations(self, _language)
-    }
-
-    /// Pull the translatable attributes out of a decoded attribute map.
-    ///
-    /// The `translations` feature is what decides whether anything is extracted;
-    /// that branch lives in `serialization::extract_translations`, so this method
-    /// is deliberately not feature-gated.
-    fn extract_translations(
-        data: &mut HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<serde_json::Value, String> {
-        serialization::extract_translations::<Self>(data)
+    fn load_language_translations(&mut self, language: &str) -> std::result::Result<(), String> {
+        serialization::load_language_translations(self, language)
     }
 
     /// Read the raw attachment map keyed by relation name.
@@ -589,29 +488,5 @@ pub trait Model:
         serialization::sync_files::<Self>(relation_type, file_keys, &mut files)?;
         self.set_files_attribute(files)?;
         Ok(())
-    }
-
-    /// Pull the attachment relations out of a decoded attribute map.
-    ///
-    /// The attachment counterpart of [`Model::extract_translations`], used while
-    /// rebuilding a model from raw attributes: the file relations are removed
-    /// from `data` and returned as one JSON value.
-    #[cfg(feature = "attachments")]
-    fn extract_files(
-        data: &mut HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<serde_json::Value, String> {
-        serialization::extract_files::<Self>(data)
-    }
-
-    /// Pull the attachment relations out of a decoded attribute map.
-    ///
-    /// Without the `attachments` feature there are no file relations to remove,
-    /// so this leaves `data` alone. The method still exists in both builds so
-    /// macro-generated code does not have to branch on the feature.
-    #[cfg(not(feature = "attachments"))]
-    fn extract_files(
-        data: &mut HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<serde_json::Value, String> {
-        serialization::extract_files::<Self>(data)
     }
 }

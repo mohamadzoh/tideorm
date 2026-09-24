@@ -24,6 +24,7 @@
 
 mod builder;
 mod core;
+mod json_rows;
 mod raw;
 mod state;
 mod transaction;
@@ -32,22 +33,18 @@ use std::future::Future;
 
 pub use builder::DatabaseBuilder;
 pub use core::Database;
-pub use state::{
-    __current_backend, __current_connection, __current_db, db, has_global_db, require_db, try_db,
-};
-pub use transaction::{Connection, Transaction};
+pub use state::{__current_connection, __current_db, db, has_global_db, require_db, try_db};
+pub use transaction::Transaction;
+pub(crate) use transaction::transaction_error;
 
 #[doc(hidden)]
 pub use transaction::ConnectionRef;
-
-pub(crate) use state::DatabaseHandle;
 
 pub(crate) async fn __in_db_scope<F, T>(db: &Database, future: F) -> crate::error::Result<T>
 where
     F: Future<Output = crate::error::Result<T>>,
 {
-    let handle = db.current_handle()?;
-    state::with_connection_override(handle, future).await
+    state::with_connection_override(db.__get_connection()?, None, future).await
 }
 
 #[cfg(test)]

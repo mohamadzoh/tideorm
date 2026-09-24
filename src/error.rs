@@ -10,6 +10,8 @@
 //! Practical split:
 //! - inspect `suggestion()` first when you need the next debugging step quickly
 //! - inspect `context()` when the failure depends on rendered SQL or table metadata
+//! - match on `failure_kind()` to tell a unique violation from a foreign-key
+//!   violation, a deadlock, or a timeout
 //! - inspect `db_failure()` when you need the SQLSTATE or the name of the
 //!   constraint the database rejected the statement on
 //! - use `code()` and `http_status()` only when you need stable external handling for logs or APIs
@@ -26,8 +28,6 @@ mod context;
 mod presentation;
 
 pub use context::ErrorContext;
-
-// ── From impls for common external error types ─────────────────────
 
 impl From<crate::internal::OrmError> for Error {
     fn from(err: crate::internal::OrmError) -> Self {
@@ -77,6 +77,9 @@ pub enum DbFailureKind {
     NotNullViolation,
     /// `CHECK` constraint violation (SQLSTATE `23514`).
     CheckViolation,
+    /// A value does not fit its column: too long, out of range, or not valid
+    /// for the column's type (SQLSTATE class `22`, such as `22001`).
+    InvalidValue,
     /// The statement did not parse (SQLSTATE `42601`, MySQL `42000`).
     SyntaxError,
     /// A referenced column does not exist (SQLSTATE `42703`, MySQL `42S22`).
@@ -114,6 +117,7 @@ impl DbFailureKind {
             "23503" => Self::ForeignKeyViolation,
             "23502" => Self::NotNullViolation,
             "23514" => Self::CheckViolation,
+            data_exception if data_exception.starts_with("22") => Self::InvalidValue,
             "42601" | "42000" => Self::SyntaxError,
             "42703" | "42S22" => Self::UndefinedColumn,
             "42P01" | "42S02" => Self::UndefinedTable,
@@ -123,8 +127,53 @@ impl DbFailureKind {
             "55P03" => Self::LockNotAvailable,
             "57014" => Self::StatementTimeout,
             "53300" => Self::ConnectionTimeout,
-            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "57P01" | "57P02"
-            | "57P03" => Self::ConnectionClosed,
+            "08000" | "08001" | "08003" | "08004" | "08006" | "08007" | "08S01" | "57P01"
+            | "57P02" | "57P03" => Self::ConnectionClosed,
+            _ => Self::Unclassified,
+        }
+    }
+
+    /// Classify a native SQLite result code and its message.
+    ///
+    /// SQLite reports a missing table or column and a syntax error all as the
+    /// generic `SQLITE_ERROR` (1), so the message is what tells them apart. A
+    /// busy or locked database (5, 6 and their extended codes) is the lock
+    /// contention a retry can clear.
+    pub fn from_sqlite_code(code: &str, message: &str) -> Self {
+        match code {
+            "5" | "6" | "261" | "262" | "517" => Self::LockNotAvailable,
+            "1" if message.starts_with("no such table") => Self::UndefinedTable,
+            "1" if message.starts_with("no such column")
+                || message.contains("has no column named") =>
+            {
+                Self::UndefinedColumn
+            }
+            "1" if message.contains("syntax error") => Self::SyntaxError,
+            _ => Self::Unclassified,
+        }
+    }
+
+    /// Classify a MySQL or MariaDB error number.
+    ///
+    /// Several failures a caller branches on share a catch-all SQLSTATE there:
+    /// a lock wait timeout is `HY000`, a missing privilege is `42000` like a
+    /// syntax error. The number tells them apart; anything not listed here is
+    /// left to the SQLSTATE.
+    pub fn from_mysql_code(number: u16) -> Self {
+        match number {
+            // ER_LOCK_WAIT_TIMEOUT, ER_LOCK_NOWAIT
+            1205 | 3572 => Self::LockNotAvailable,
+            // ER_TRUNCATED_WRONG_VALUE_FOR_FIELD ("Incorrect string value"), HY000
+            1366 => Self::InvalidValue,
+            // ER_LOCK_DEADLOCK
+            1213 => Self::Deadlock,
+            // ER_QUERY_INTERRUPTED, MariaDB's ER_STATEMENT_TIMEOUT, ER_QUERY_TIMEOUT
+            1317 | 1969 | 3024 => Self::StatementTimeout,
+            // ER_SERVER_SHUTDOWN, MariaDB's ER_CONNECTION_KILLED
+            1053 | 1927 => Self::ConnectionClosed,
+            // ER_DBACCESS_DENIED_ERROR, ER_TABLEACCESS_DENIED_ERROR,
+            // ER_COLUMNACCESS_DENIED_ERROR, ER_SPECIFIC_ACCESS_DENIED_ERROR
+            1044 | 1142 | 1143 | 1227 => Self::InsufficientPrivilege,
             _ => Self::Unclassified,
         }
     }
@@ -137,6 +186,7 @@ impl DbFailureKind {
             Self::ForeignKeyViolation => "foreign key constraint violation",
             Self::NotNullViolation => "not-null constraint violation",
             Self::CheckViolation => "check constraint violation",
+            Self::InvalidValue => "invalid value",
             Self::SyntaxError => "SQL syntax error",
             Self::UndefinedColumn => "undefined column",
             Self::UndefinedTable => "undefined table",
@@ -184,10 +234,7 @@ impl fmt::Display for DbFailureKind {
 
 /// The driver-level failure behind a database error.
 ///
-/// TideORM translates driver errors at a single boundary, and that boundary
-/// used to keep only the rendered message — so a caller could not tell a unique
-/// violation from a foreign-key violation, let alone learn which constraint
-/// fired. This is what survives translation instead: the classification, the
+/// What survives TideORM's error translation: the classification, the
 /// SQLSTATE, and the constraint and table names where the driver exposes them.
 ///
 /// It is the [`source`](std::error::Error::source) of the [`Error`](enum@Error) it is
@@ -414,15 +461,6 @@ pub enum Error {
         model: String,
     },
 
-    /// `INSERT ... RETURNING` is not supported by the active backend.
-    #[error("Insert returning not supported: {message}")]
-    InsertReturningNotSupported {
-        /// Unsupported-RETURNING message.
-        message: String,
-        /// Backend name.
-        backend: String,
-    },
-
     /// Tokenization failed because configuration or encoding work could not proceed.
     #[error("Tokenization error: {message}")]
     Tokenization {
@@ -444,14 +482,6 @@ impl Error {
         Self::NotFound {
             message: message.into(),
             context: None,
-        }
-    }
-
-    /// Construct a missing-record error and attach table or query context.
-    pub fn not_found_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::NotFound {
-            message: message.into(),
-            context: Some(Box::new(context)),
         }
     }
 
@@ -549,17 +579,6 @@ impl Error {
         }
     }
 
-    /// Construct an error for `INSERT ... RETURNING` on an unsupported backend.
-    pub fn insert_returning_not_supported(
-        message: impl Into<String>,
-        backend: impl Into<String>,
-    ) -> Self {
-        Self::InsertReturningNotSupported {
-            message: message.into(),
-            backend: backend.into(),
-        }
-    }
-
     /// Construct a tokenization error.
     pub fn tokenization(message: impl Into<String>) -> Self {
         Self::Tokenization {
@@ -576,11 +595,7 @@ impl Error {
 
     /// Construct a query-builder misuse error before any SQL runs.
     pub fn invalid_query(message: impl Into<String>) -> Self {
-        Self::Query {
-            message: message.into(),
-            context: None,
-            source: None,
-        }
+        Self::query(message)
     }
 
     /// Return attached context for `NotFound` and `Query` errors.
@@ -693,77 +708,12 @@ impl Error {
             .map_or(DbFailureKind::Unclassified, DbFailure::kind)
     }
 
-    /// True when the variant is `NotFound`.
-    pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::NotFound { .. })
-    }
-
-    /// True when the variant is `Connection`.
-    pub fn is_connection_error(&self) -> bool {
-        matches!(self, Self::Connection { .. })
-    }
-
-    /// True when the variant is `Validation`.
-    pub fn is_validation_error(&self) -> bool {
-        matches!(self, Self::Validation { .. })
-    }
-
-    /// True when the variant is `Query`.
-    pub fn is_query_error(&self) -> bool {
-        matches!(self, Self::Query { .. })
-    }
-
-    /// True when the variant is `Transaction`.
-    pub fn is_transaction_error(&self) -> bool {
-        matches!(self, Self::Transaction { .. })
-    }
-
-    /// True when the variant is `Configuration`.
-    pub fn is_configuration_error(&self) -> bool {
-        matches!(self, Self::Configuration { .. })
-    }
-
-    /// True when the variant is `BackendNotSupported`.
-    pub fn is_backend_not_supported(&self) -> bool {
-        matches!(self, Self::BackendNotSupported { .. })
-    }
-
-    /// True when the variant is `PrimaryKeyNotSet`.
-    pub fn is_primary_key_not_set(&self) -> bool {
-        matches!(self, Self::PrimaryKeyNotSet { .. })
-    }
-
-    /// True when the variant is `InsertReturningNotSupported`.
-    pub fn is_insert_returning_not_supported(&self) -> bool {
-        matches!(self, Self::InsertReturningNotSupported { .. })
-    }
-
-    /// True when the database reported a unique or primary-key violation.
+    /// True when the database reported a foreign-key violation.
     ///
     /// Answered from the driver's own classification, so it does not depend on
     /// the wording of the backend's message.
-    pub fn is_unique_violation(&self) -> bool {
-        self.failure_kind() == DbFailureKind::UniqueViolation
-    }
-
-    /// True when the database reported a foreign-key violation.
     pub fn is_foreign_key_violation(&self) -> bool {
         self.failure_kind() == DbFailureKind::ForeignKeyViolation
-    }
-
-    /// True when the database reported a `NOT NULL` violation.
-    pub fn is_not_null_violation(&self) -> bool {
-        self.failure_kind() == DbFailureKind::NotNullViolation
-    }
-
-    /// True when the database reported a `CHECK` violation.
-    pub fn is_check_violation(&self) -> bool {
-        self.failure_kind() == DbFailureKind::CheckViolation
-    }
-
-    /// True when the database rejected the statement on any constraint.
-    pub fn is_constraint_violation(&self) -> bool {
-        self.failure_kind().is_constraint_violation()
     }
 }
 

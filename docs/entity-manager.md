@@ -4,11 +4,13 @@ The optional `entity-manager` feature adds an explicit persistence context for a
 
 An `EntityManager` owns a database handle, caches loaded models by primary key, tracks loaded aggregate-side relations for aggregate saves, and also supports managed lifecycles through `persist`, `merge`, `remove`, `detach`, and `flush`.
 
+Create one per request or unit of work. Its identity map keeps every model it has loaded until the manager is dropped or `clear()`ed, and `find` answers from that map without asking the database again, so a manager shared for the life of a process grows without bound and keeps serving rows other connections have since changed.
+
 ## Enabling the Feature
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.12.0", features = ["postgres", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql`, or `sqlite`) alongside `entity-manager`.

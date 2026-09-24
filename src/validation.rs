@@ -1,18 +1,11 @@
-//! Model Validation System
+//! Model validation.
 //!
-//! This module validates model data before writes.
-//!
-//! Validation can come from field attributes, custom `Validate` logic, or both.
-//! If `save()` or `update()` returns a validation error, inspect the collected
-//! field messages here before looking at database-side constraints.
-//!
-//! Typical flow:
-//! - field attributes catch simple shape problems like missing values, invalid email, or range failures
-//! - `custom_validations()` handles business rules that need model-aware logic
-//! - `validate_all()` is the better entry point when the caller needs every field error instead of the first one
-//!
-//! If validation unexpectedly passes, check whether the value type implements `ValidatableValue`
-//! the way you expect and whether the rule actually runs in `Validator` versus model-level custom logic.
+//! `#[validate(..)]` field attributes compile to [`ValidationRule`]s. The
+//! derived [`Validate::validate`] checks every rule on every field and returns
+//! all failures together in one [`ValidationErrors`], before `create`,
+//! `update` or `save` reaches the database. [`Validator::validate_rule`]
+//! applies a single rule by hand, and [`ValidationBuilder`] assembles the rule
+//! list for one field.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -125,15 +118,6 @@ impl ValidationErrors {
             })
             .collect()
     }
-
-    /// Convert the first collected message into the crate error type.
-    pub fn into_error(self) -> Option<crate::error::Error> {
-        self.first()
-            .map(|(field, message)| crate::error::Error::Validation {
-                field: field.clone(),
-                message: message.clone(),
-            })
-    }
 }
 
 impl fmt::Display for ValidationErrors {
@@ -196,13 +180,6 @@ pub enum ValidationRule {
     In(Vec<String>),
     /// Must not be in a list of disallowed values
     NotIn(Vec<String>),
-    /// Must match another field (for confirmations)
-    Confirmed(String),
-    /// Custom validation marker with message.
-    ///
-    /// This is not evaluated directly by `Validator::validate_rule`; macro-generated
-    /// model validation defers custom checks to `Validate::custom_validations()`.
-    Custom(String),
 }
 
 impl ValidationRule {
@@ -241,17 +218,10 @@ impl ValidationRule {
             ValidationRule::NotIn(values) => {
                 format!("The {} must not be one of: {}", field, values.join(", "))
             }
-            ValidationRule::Confirmed(other) => {
-                format!("The {} confirmation does not match {}", field, other)
-            }
-            ValidationRule::Custom(msg) => msg.clone(),
         }
     }
 
     /// Validate one value against this rule.
-    ///
-    /// `ValidationRule::Custom` is a no-op here because custom checks run
-    /// through `Validate::custom_validations()`.
     pub fn validate<T: ValidatableValue>(&self, value: &T) -> Result<(), String> {
         match Validator::validate_rule(value, self, "field") {
             Some(error) => Err(error),
@@ -311,30 +281,39 @@ impl Validator {
                     return Some(rule.message(field));
                 }
             }
+            // NaN compares false with every bound, so it is refused by name.
             ValidationRule::Min(min) => {
                 if let Some(n) = value.as_f64_value()
-                    && n < *min
+                    && (n.is_nan() || n < *min)
                 {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Max(max) => {
                 if let Some(n) = value.as_f64_value()
-                    && n > *max
+                    && (n.is_nan() || n > *max)
                 {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Range(min, max) => {
                 if let Some(n) = value.as_f64_value()
-                    && (n < *min || n > *max)
+                    && (n.is_nan() || n < *min || n > *max)
                 {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Regex(pattern) => {
+                // A pattern that does not compile fails for every value: letting
+                // it pass would accept everything the rule exists to reject.
+                let Some(re) = compiled_validation_regex(pattern) else {
+                    return Some(format!(
+                        "The {} validation pattern `{}` is not a valid regular expression",
+                        field, pattern
+                    ));
+                };
+
                 if let Some(s) = value.as_str_value()
-                    && let Some(re) = compiled_validation_regex(pattern)
                     && !re.is_match(s)
                 {
                     return Some(rule.message(field));
@@ -382,8 +361,6 @@ impl Validator {
                     return Some(rule.message(field));
                 }
             }
-            ValidationRule::Confirmed(_) => {}
-            ValidationRule::Custom(_) => {}
         }
         None
     }
@@ -391,17 +368,12 @@ impl Validator {
     /// Minimal email-shape check used by the built-in email rule.
     pub fn is_valid_email(s: &str) -> bool {
         static EMAIL_REGEX: OnceLock<regex::Regex> = OnceLock::new();
-        let email_regex = EMAIL_REGEX.get_or_init(|| {
-            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap_or_else(
-                |_| {
-                    // A hardcoded pattern should never fail to compile.
-                    // If it does, conservatively reject all emails with a pattern
-                    // that cannot match any input (`\b\B` is never satisfiable).
-                    regex::Regex::new(r"\b\B").unwrap()
-                },
-            )
-        });
-        email_regex.is_match(s)
+        EMAIL_REGEX
+            .get_or_init(|| {
+                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+                    .expect("the built-in email pattern is a valid regex")
+            })
+            .is_match(s)
     }
 
     /// URL check used by the built-in URL rule.
@@ -415,27 +387,11 @@ impl Validator {
 
 /// Trait for models that can be validated
 ///
-/// This trait is automatically implemented by TideORM's model macros
-/// when validation attributes are present. You can also implement it manually
-/// for custom validation logic.
+/// The model derive implements this for every model from its `#[validate(..)]`
+/// field attributes. Implement it by hand for types that are not TideORM models.
 pub trait Validate {
-    /// Return the static field-to-rules mapping for this model.
-    fn validation_rules() -> Vec<(&'static str, Vec<ValidationRule>)> {
-        vec![]
-    }
-
-    /// Validate and stop at the first reported error.
+    /// Check every rule and return all failures together.
     fn validate(&self) -> Result<(), ValidationErrors>;
-
-    /// Validate and collect all reported field errors.
-    fn validate_all(&self) -> Result<(), ValidationErrors> {
-        self.validate()
-    }
-
-    /// Hook for model-specific business-rule validation.
-    fn custom_validations(&self) -> Result<(), ValidationErrors> {
-        Ok(())
-    }
 
     /// Validate and return `self` for builder-style call chains.
     fn validated(self) -> Result<Self, ValidationErrors>

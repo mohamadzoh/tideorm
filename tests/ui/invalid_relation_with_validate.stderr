@@ -1,0 +1,5 @@
+error: #[validate(..)] does not apply to a relation field; declare the rules on the related model's fields
+  --> tests/ui/invalid_relation_with_validate.rs:16:5
+   |
+16 |     #[validate(required)]
+   |     ^^^^^^^^^^^^^^^^^^^^^

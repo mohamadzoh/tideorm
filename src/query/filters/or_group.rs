@@ -18,13 +18,20 @@ impl OrGroup {
         }
     }
 
+    /// An empty group whose members are ANDed together.
+    pub(crate) fn and_group() -> Self {
+        Self {
+            combine_with: LogicalOp::And,
+            ..Self::new()
+        }
+    }
+
     #[must_use]
     pub fn nested_or<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
     {
-        let nested = f(OrGroup::new());
-        self.nested_groups.push(nested);
+        self.nested_groups.push(f(OrGroup::new()));
         self
     }
 
@@ -33,10 +40,7 @@ impl OrGroup {
     where
         F: FnOnce(OrGroup) -> OrGroup,
     {
-        let mut nested = OrGroup::new();
-        nested.combine_with = LogicalOp::And;
-        nested = f(nested);
-        self.nested_groups.push(nested);
+        self.nested_groups.push(f(OrGroup::and_group()));
         self
     }
 
@@ -73,9 +77,19 @@ impl OrGroup {
         let nested_count: usize = self.nested_groups.iter().map(|g| g.condition_count()).sum();
         self.conditions.len() + nested_count
     }
+
+    fn push_condition(mut self, condition: WhereCondition) -> Self {
+        self.conditions.push(condition);
+        self
+    }
 }
 
-impl_or_where_condition_methods!(OrGroup);
+crate::query::condition_methods! {
+    impl[] OrGroup {
+        where + raw => push_condition,
+            "The condition joins this group, combined with its other members by `combine_with`.";
+    }
+}
 
 impl Default for OrGroup {
     fn default() -> Self {

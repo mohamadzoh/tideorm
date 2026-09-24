@@ -84,6 +84,8 @@ Runtime relation helpers operate on a single local or foreign key value per quer
 
 For `has_many_through`, TideORM requires all three relation options to be declared explicitly: `pivot`, `foreign_key`, and `related_key`. Missing any of them is now a compile-time error.
 
+The field's wrapper type decides the relation kind. The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be omitted, but when present it must name the same kind as the wrapper, and `HasOne`, `HasMany` and `BelongsTo` fields must declare `foreign_key`; either mistake is a compile-time error.
+
 ```rust
 // Load a HasOne relation
 let user = User::find(1).await?.unwrap();
@@ -269,30 +271,45 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "attachments"] }
+tideorm = { version = "0.12.0", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(has_one_files = "thumbnail")]
-#[tideorm(has_many_files = "images,documents")]
+#[tideorm::model(
+    table = "products",
+    has_one_files = "thumbnail",
+    has_many_files = "images,documents"
+)]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub files: Option<JsonValue>,  // JSONB column storing attachments
 }
+
+impl HasAttachments for Product {
+    fn has_one_files() -> Vec<&'static str> {
+        vec!["thumbnail"]
+    }
+
+    fn has_many_files() -> Vec<&'static str> {
+        vec!["images", "documents"]
+    }
+
+    fn get_files_data(&self) -> Result<FilesData, AttachmentError> {
+        Ok(self.files.as_ref().map(FilesData::from_json).unwrap_or_default())
+    }
+
+    fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError> {
+        self.files = Some(data.to_json());
+        Ok(())
+    }
+}
 ```
 
-The `files` column is **required**. The derive generates the `HasAttachments` impl
-against it, so declaring `has_one_files` or `has_many_files` without a `files`
-field is a compile error naming the missing column. Nothing else has to be
-written by hand — `attach()`, `detach()` and `sync()` are available on `Product`
-as soon as the attribute is declared, provided the `attachments` feature is
-enabled and `tideorm::prelude::*` (or `tideorm::attachments::HasAttachments`) is
-in scope.
+Every option goes inside the one `#[tideorm::model(..)]` attribute — combining it with a separate `#[tideorm(..)]` on the struct is a compile error. The attribute records the slot names on the model; the `HasAttachments` impl is yours to write, because only you know which column holds the payload. Once it exists, `attach()`, `detach()` and `sync()` are available on `Product` with the `attachments` feature enabled and `tideorm::prelude::*` in scope.
 
 ### Relation Types
 
@@ -612,14 +629,13 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "translations"] }
+tideorm = { version = "0.12.0", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(translatable = "name,description")]
+#[tideorm::model(table = "products", translatable = "name,description")]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
@@ -635,14 +651,12 @@ pub struct Product {
 }
 ```
 
-The `translations` column is **required**. The derive generates the
-`HasTranslations` impl against it, so declaring `translatable` without a
-`translations` field is a compile error naming the missing column. Nothing else
-has to be written by hand — `set_translation()` and `get_translated()` are
-available on `Product` as soon as the attribute is declared, provided the
-`translations` feature is enabled and `tideorm::prelude::*` (or
-`tideorm::translations::HasTranslations`) is in scope. The fallback value behind
-`get_translated()` is read from the model's own field of the same name.
+The attribute records which fields are translatable; the `HasTranslations` impl
+that reads and writes the `translations` column is yours to write, as shown in
+[Translation Configuration](#translation-configuration) below. Once it exists,
+`set_translation()` and `get_translated()` are available on `Product` with the
+`translations` feature enabled and `tideorm::prelude::*` in scope. The fallback
+value behind `get_translated()` is what your `get_default_value()` returns.
 
 ### Setting Translations
 
@@ -747,7 +761,7 @@ let json = product.to_json_with_all_translations();
 
 ### Translation Configuration
 
-When implementing `HasTranslations` manually:
+The impl the translation methods need:
 
 ```rust
 impl HasTranslations for Product {
@@ -806,13 +820,15 @@ Translations are stored in JSONB with this structure:
 
 ### Combining Attachments and Translations
 
-Models can use both features together:
+Models can use both features together, each with its impl from above:
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(translatable = "name,description")]
-#[tideorm(has_one_files = "thumbnail")]
-#[tideorm(has_many_files = "images")]
+#[tideorm::model(
+    table = "products",
+    translatable = "name,description",
+    has_one_files = "thumbnail",
+    has_many_files = "images"
+)]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,

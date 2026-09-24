@@ -6,9 +6,13 @@ impl<M: Model> QueryBuilder<M> {
     /// CTEs allow you to define temporary named result sets that can be
     /// referenced within the main query.
     #[must_use]
-    pub fn with_cte(mut self, cte: CTE) -> Self {
+    pub fn with_cte(self, cte: CTE) -> Self {
+        self.push_cte("with_cte", cte)
+    }
+
+    fn push_cte(mut self, method: &str, cte: CTE) -> Self {
         if let Err(reason) = Self::validate_cte_clause(&cte) {
-            self.invalidate_query(format!("invalid CTE for with_cte(): {}", reason));
+            self.invalidate_query(format!("invalid CTE for {}(): {}", method, reason));
         }
 
         self.ctes.push(cte);
@@ -29,8 +33,10 @@ impl<M: Model> QueryBuilder<M> {
         // The body is spliced into the outer statement and executed, so it goes
         // through the parameterized renderer instead of the debug preview
         // renderer: its values stay bound parameters rather than inline literals.
+        // It is the whole statement, ordering and limit included, which a CTE
+        // body may carry on every backend.
         let db_type = self.db_type_for_sql();
-        let (query_sql, params) = query.build_base_select_sql_with_params_for_db(db_type);
+        let (query_sql, params) = query.build_select_sql_with_params_for_db(db_type);
         self.ctes.push(CTE::with_params(name, query_sql, params));
         self
     }
@@ -40,28 +46,11 @@ impl<M: Model> QueryBuilder<M> {
     /// Trusted SQL only. Do not pass user-controlled input; prefer `with_query()` when the
     /// subquery can be expressed with `QueryBuilder`.
     #[must_use]
-    pub fn with_cte_columns(mut self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
-            self.invalidate_query(reason);
-        }
-
-        for column in &columns {
-            if let Err(reason) = crate::query::db_sql::validate_identifier("CTE column", column) {
-                self.invalidate_query(reason);
-                break;
-            }
-        }
-
-        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
-            self.invalidate_query(format!(
-                "invalid subquery for with_cte_columns(): {}",
-                reason
-            ));
-        }
-
-        self.ctes
-            .push(CTE::with_columns(name, columns, sql.to_string()));
-        self
+    pub fn with_cte_columns(self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
+        self.push_cte(
+            "with_cte_columns",
+            CTE::with_columns(name, columns, sql.to_string()),
+        )
     }
 
     /// Add a recursive CTE
@@ -106,10 +95,6 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    // =========================================================================
-    // SOFT DELETE QUERIES
-    // =========================================================================
-
     /// Include soft-deleted records in the query results
     ///
     /// By default, soft-deleted records (where `deleted_at` is not NULL) are excluded.
@@ -130,21 +115,6 @@ impl<M: Model> QueryBuilder<M> {
         self.include_trashed = false;
         self
     }
-
-    /// Exclude soft-deleted records (default behavior)
-    ///
-    /// This is the default, but can be used to explicitly exclude soft-deleted
-    /// records after calling `with_trashed()`.
-    #[must_use]
-    pub fn without_trashed(mut self) -> Self {
-        self.include_trashed = false;
-        self.only_trashed = false;
-        self
-    }
-
-    // =========================================================================
-    // SCOPES (Reusable query fragments)
-    // =========================================================================
 
     /// Apply a scope function to modify the query
     ///
@@ -183,6 +153,4 @@ impl<M: Model> QueryBuilder<M> {
             None => self,
         }
     }
-
-    // =========================================================================
 }

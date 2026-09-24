@@ -509,18 +509,23 @@ fn sql_preview_is_labeled_as_non_executable() {
 
     assert!(preview.starts_with("-- DEBUG PREVIEW (not executable, values are approximate)\n"));
     assert!(preview.contains("query_count_guard_users"));
-    assert!(preview.contains("WHERE (\"name\" = 'alice')"));
+    assert!(
+        preview.ends_with("WHERE \"name\" = 'alice'"),
+        "the preview is the executed statement with its values inlined: {preview}"
+    );
 }
 
 #[test]
-fn sql_preview_marks_escaped_literal_like_helpers() {
+fn sql_preview_inlines_escaped_like_patterns() {
     let name = crate::columns::Column::<String>::new("name");
     let preview = QueryCountGuardUser::query()
         .where_col(name.starts_with(r"100%_\done"))
         .build_sql_preview_for_db(DatabaseType::Postgres);
 
-    assert!(preview.contains("LIKE '100!%!_\\done%'"));
-    assert!(preview.contains("ESCAPE '!'"));
+    assert!(
+        preview.ends_with(r#"WHERE "name" LIKE E'100!%!_\\done%' ESCAPE '!'"#),
+        "{preview}"
+    );
 }
 
 #[test]
@@ -529,7 +534,10 @@ fn mysql_sql_preview_escapes_backslash_quote_pairs() {
         .where_eq("name", r#"\' OR 1=1 --"#)
         .build_sql_preview_for_db(DatabaseType::MySQL);
 
-    assert!(preview.contains("WHERE (`name` = '\\\\'' OR 1=1 --')"));
+    assert!(
+        preview.ends_with(r#"WHERE `name` = '\\\' OR 1=1 --'"#),
+        "{preview}"
+    );
 }
 
 #[test]
@@ -726,4 +734,163 @@ async fn force_delete_invalidates_cached_queries() {
     assert_eq!(QueryCache::global().stats().entries, 0);
 
     cleanup_query_mutation_cache_test_state();
+}
+
+/// A query carrying a condition whose operator and value do not pair up, so it
+/// has no SQL rendering.
+fn unrenderable_query() -> crate::query::QueryBuilder<MutationGuardUser> {
+    let mut query = MutationGuardUser::query();
+    query.conditions.push(crate::query::WhereCondition {
+        column: "id".to_string(),
+        operator: crate::query::Operator::Between,
+        value: crate::query::ConditionValue::Single(serde_json::json!(1)),
+    });
+    query
+}
+
+#[tokio::test]
+async fn aggregates_reject_a_condition_that_cannot_be_rendered() {
+    // The aggregates' SeaORM path used to drop such a condition from its WHERE
+    // clause, so the aggregate silently covered every row.
+    let sum = unrenderable_query().sum("id").await.unwrap_err();
+    assert!(
+        sum.to_string().contains("cannot be rendered as SQL"),
+        "{sum}"
+    );
+
+    let distinct = unrenderable_query()
+        .count_distinct("name")
+        .await
+        .unwrap_err();
+    assert!(
+        distinct.to_string().contains("cannot be rendered as SQL"),
+        "{distinct}"
+    );
+}
+
+#[test]
+fn subquery_operands_reject_a_condition_that_cannot_be_rendered() {
+    let err = MutationGuardUser::query()
+        .where_exists(unrenderable_query())
+        .ensure_query_is_valid()
+        .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("invalid subquery for where_exists()"),
+        "{err}"
+    );
+    assert!(
+        err.to_string().contains("cannot be rendered as SQL"),
+        "{err}"
+    );
+}
+
+#[test]
+fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
+    let query = SoftDeleteMutationGuardUser::query()
+        .eq_any("id", vec![1, 2])
+        .with_query(
+            "recent",
+            MutationGuardUser::query().where_eq("name", "carol"),
+        )
+        .union_all(
+            SoftDeleteMutationGuardUser::query()
+                .with_trashed()
+                .where_eq("name", "bob"),
+        );
+
+    let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    let preview = query.build_sql_preview_for_db(DatabaseType::Postgres);
+    assert_eq!(
+        preview,
+        format!(
+            "-- DEBUG PREVIEW (not executable, values are approximate)\n{}",
+            crate::query::db_sql::inline_parameters(DatabaseType::Postgres, &sql, &params)
+        )
+    );
+
+    // `eq_any` used to preview as `= ANY(ARRAY[..])` while it executes as `IN (..)`.
+    assert!(preview.contains("\"id\" IN (1, 2)"), "{preview}");
+    // Union and CTE operands used to preview their bare placeholders.
+    assert!(
+        preview.contains("WITH \"recent\" AS (SELECT") && preview.contains("\"name\" = 'carol'"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("UNION ALL (SELECT") && preview.contains("\"name\" = 'bob'"),
+        "{preview}"
+    );
+    assert!(!preview.contains('$'), "{preview}");
+    // The soft-delete scope comes from the executed condition tree too.
+    assert!(preview.contains("\"deleted_at\" IS NULL"), "{preview}");
+}
+
+#[test]
+fn sqlite_json_preview_keeps_numbers_numeric() {
+    let preview = MutationGuardUser::query()
+        .where_json_contains("name", 5)
+        .build_sql_preview_for_db(DatabaseType::SQLite);
+
+    assert!(
+        preview.contains("json_extract(\"name\", '$') = 5"),
+        "{preview}"
+    );
+    assert!(!preview.contains("'5'"), "{preview}");
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn aggregates_run_through_the_logged_statement_path() {
+    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _db = setup_query_mutation_cache_test_db().await;
+
+    for name in ["a", "b", "b"] {
+        MutationGuardUser {
+            id: 0,
+            name: name.to_string(),
+        }
+        .save()
+        .await
+        .expect("seed save should succeed");
+    }
+
+    crate::logging::QueryLogger::clear_history();
+    crate::logging::QueryLogger::global()
+        .set_level(crate::logging::LogLevel::Error)
+        .set_history_limit(10)
+        .enable();
+
+    let distinct = MutationGuardUser::query().count_distinct("name").await;
+    let total = MutationGuardUser::query()
+        .where_eq("name", "b")
+        .sum("id")
+        .await;
+    let empty = MutationGuardUser::query()
+        .where_eq("name", "nobody")
+        .max("id")
+        .await;
+    let history = crate::logging::QueryLogger::history();
+
+    crate::logging::QueryLogger::clear_history();
+    crate::logging::QueryLogger::global()
+        .set_history_limit(100)
+        .enable();
+    crate::logging::QueryLogger::disable();
+    cleanup_query_mutation_cache_test_state();
+
+    assert_eq!(distinct.expect("count_distinct should succeed"), 2);
+    assert_eq!(total.expect("sum should succeed"), 5.0);
+    assert_eq!(empty.expect("an aggregate over no rows is zero"), 0.0);
+    // The SeaORM path the unjoined aggregates used to take bypassed the query log.
+    assert!(
+        history
+            .iter()
+            .any(|entry| entry.sql.contains("COUNT(DISTINCT")),
+        "{history:?}"
+    );
+    assert!(
+        history.iter().any(|entry| entry.sql.contains("SUM(")),
+        "{history:?}"
+    );
 }

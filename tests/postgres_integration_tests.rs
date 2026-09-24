@@ -1,173 +1,110 @@
-//! PostgreSQL Integration Tests for TideORM
+//! PostgreSQL integration tests: the shared scenarios in
+//! `support/integration_parity.rs` plus PostgreSQL-only type decoding.
 //!
-//! These tests require a running PostgreSQL instance with:
-//! - Host: localhost
-//! - Port: 5432
-//! - User: postgres
-//! - Password: postgres
-//! - Database: test_tide_orm
+//! Opt-in: set `RUN_POSTGRES_TESTS`, `TEST_DATABASE_URL` or
+//! `POSTGRESQL_DATABASE_URL`; `SKIP_POSTGRES_TESTS` turns them off again. Once
+//! enabled, an unreachable server fails the run. The URL is `TEST_DATABASE_URL`,
+//! then `POSTGRESQL_DATABASE_URL`, then
+//! `postgres://postgres:postgres@localhost:5432/test_tide_orm`.
 //!
 //! Run with: cargo test --test postgres_integration_tests
 
-use std::sync::{LazyLock, Mutex};
-use tideorm::prelude::*;
-use tideorm::{Database, TideConfig};
+use tideorm::Database;
 
-#[path = "postgres_integration_tests/batch_operations.rs"]
-mod batch_operations;
-#[path = "postgres_integration_tests/batch_update.rs"]
-mod batch_update;
-#[path = "postgres_integration_tests/callbacks_scopes_cleanup.rs"]
-mod callbacks_scopes_cleanup;
-#[path = "postgres_integration_tests/connection.rs"]
-mod connection;
-#[path = "postgres_integration_tests/crud.rs"]
-mod crud;
-#[path = "postgres_integration_tests/query_builder.rs"]
-mod query_builder;
-#[path = "postgres_integration_tests/raw_json.rs"]
-mod raw_json;
-#[path = "postgres_integration_tests/raw_sql.rs"]
-mod raw_sql;
-#[path = "postgres_integration_tests/setup.rs"]
-mod setup;
-#[path = "postgres_integration_tests/soft_delete.rs"]
-mod soft_delete;
 #[path = "support/postgres_test_config.rs"]
 mod test_config;
-#[path = "postgres_integration_tests/transaction.rs"]
-mod transaction;
-#[path = "postgres_integration_tests/upsert.rs"]
-mod upsert;
 
-use test_config::test_database_url;
+mod backend {
+    use tideorm::TideConfig;
+    use tideorm::config::DatabaseType;
 
-// =============================================================================
-// TEST MODELS
-// =============================================================================
+    pub const DATABASE_TYPE: DatabaseType = DatabaseType::Postgres;
 
-#[derive(Model, PartialEq)]
-#[tideorm(table = "test_users")]
-pub struct TestUser {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub email: String,
-    pub name: String,
-    pub age: i32,
-    pub active: bool,
-}
-
-static CALLBACK_EVENTS: LazyLock<Mutex<Vec<&'static str>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
-#[derive(Model, PartialEq)]
-#[tideorm(table = "callback_users")]
-pub struct CallbackUser {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub email: String,
-    pub name: String,
-}
-
-impl Callbacks for CallbackUser {
-    fn before_validation(&mut self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("before_validation");
-        Ok(())
-    }
-
-    fn after_validation(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("after_validation");
-        Ok(())
-    }
-
-    fn before_save(&mut self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("before_save");
-        self.email = self.email.to_lowercase();
-        Ok(())
-    }
-
-    fn after_save(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("after_save");
-        Ok(())
-    }
-
-    fn before_create(&mut self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("before_create");
-        Ok(())
-    }
-
-    fn after_create(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("after_create");
-        Ok(())
-    }
-
-    fn before_update(&mut self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("before_update");
-        Ok(())
-    }
-
-    fn after_update(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("after_update");
-        Ok(())
-    }
-
-    fn before_delete(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("before_delete");
-        Ok(())
-    }
-
-    fn after_delete(&self) -> tideorm::Result<()> {
-        CALLBACK_EVENTS.lock().unwrap().push("after_delete");
-        Ok(())
+    pub async fn connect() -> bool {
+        if !super::test_config::should_run_postgres_tests() {
+            println!("{}", super::test_config::SKIPPED);
+            return false;
+        }
+        TideConfig::init()
+            .database(super::test_config::test_database_url())
+            .max_connections(10)
+            .connect()
+            .await
+            .expect("failed to connect to PostgreSQL");
+        true
     }
 }
 
-#[tideorm::model(table = "test_posts")]
-pub struct TestPost {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub user_id: i64,
-    pub title: String,
-    pub content: String,
-    pub published: bool,
-}
-
-#[tideorm::model(table = "test_soft_deletes", soft_delete)]
-pub struct TestSoftDelete {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub name: String,
-    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Model, PartialEq)]
-#[tideorm(table = "timestamp_users")]
-pub struct TimestampUser {
-    #[tideorm(primary_key, auto_increment)]
-    pub id: i64,
-    pub email: String,
-    pub name: String,
-    pub login_count: i32,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-// =============================================================================
-// SINGLE INTEGRATION TEST - Runs all scenarios sequentially
-// =============================================================================
+#[path = "support/integration_parity.rs"]
+mod parity;
 
 #[tokio::test]
-async fn postgres_integration_tests() {
-    setup::run().await;
-    connection::run().await;
-    raw_json::run().await;
-    crud::run().await;
-    query_builder::run().await;
-    soft_delete::run().await;
-    transaction::run().await;
-    raw_sql::run().await;
-    batch_operations::run().await;
-    upsert::run().await;
-    batch_update::run().await;
-    callbacks_scopes_cleanup::run().await;
+async fn raw_json_preserves_postgres_types() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS test_raw_json_types")
+        .await
+        .expect("failed to drop test_raw_json_types");
+    Database::execute(
+        "CREATE TABLE test_raw_json_types (
+            id BIGSERIAL PRIMARY KEY,
+            enabled BOOLEAN NOT NULL,
+            payload JSONB NOT NULL,
+            amount NUMERIC(10,2) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL,
+            uuid_value UUID NOT NULL
+        )",
+    )
+    .await
+    .expect("failed to create test_raw_json_types");
+
+    let probe_uuid = uuid::Uuid::parse_str("6d8f4a4e-5f60-4c5f-b8fb-7ddc7310df2a")
+        .expect("UUID literal should parse");
+    let db = tideorm::require_db().expect("database should be available");
+
+    db.__execute_with_params(
+        "INSERT INTO test_raw_json_types (enabled, payload, amount, created_at, uuid_value) VALUES ($1, $2, $3::numeric, $4::timestamptz, $5::uuid)",
+        vec![
+            tideorm::internal::Value::Bool(Some(true)),
+            tideorm::internal::Value::Json(Some(Box::new(serde_json::json!({
+                "kind": "probe",
+                "count": 2
+            })))),
+            tideorm::internal::Value::String(Some("12.34".to_string())),
+            tideorm::internal::Value::String(Some("2026-03-21T10:11:12+00:00".to_string())),
+            tideorm::internal::Value::String(Some(probe_uuid.to_string())),
+        ],
+    )
+    .await
+    .expect("typed raw-json probe insert should succeed");
+
+    let rows = db
+        .__raw_json_with_params(
+            "SELECT enabled, payload, amount, created_at, uuid_value FROM test_raw_json_types ORDER BY id ASC",
+            vec![],
+        )
+        .await
+        .expect("typed raw-json probe query should succeed");
+
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "enabled": true,
+            "payload": {
+                "kind": "probe",
+                "count": 2
+            },
+            "amount": serde_json::to_value(
+                rust_decimal::Decimal::from_str_exact("12.34")
+                    .expect("decimal literal should parse")
+            ).expect("decimal should serialize to JSON"),
+            "created_at": serde_json::to_value(
+                chrono::DateTime::parse_from_rfc3339("2026-03-21T10:11:12+00:00")
+                    .expect("timestamp literal should parse")
+            ).expect("timestamp should serialize to JSON"),
+            "uuid_value": serde_json::to_value(probe_uuid)
+                .expect("uuid should serialize to JSON"),
+        })]
+    );
 }

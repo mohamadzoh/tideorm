@@ -1,8 +1,8 @@
-//! Query caching and prepared statement caching for TideORM
+//! Query caching and statement statistics for TideORM
 //!
 //! This module contains two separate caches:
 //! - query-result caching for repeated reads
-//! - prepared-statement caching for repeated SQL shapes
+//! - statement statistics for repeated SQL shapes
 //!
 //! Start here when a query is correct but slower than expected, or when you
 //! need to understand why cached reads are not being reused.
@@ -16,7 +16,7 @@
 //! Practical split:
 //! - enable `QueryCache` when repeated reads should return the same payload for a while
 //! - use explicit cache keys only when the generated SQL shape is not enough to describe reuse
-//! - inspect `PreparedStatementCache` stats when repeated queries are still paying parse or planning cost
+//! - inspect `PreparedStatementCache` stats to see which SQL shapes repeat and what they cost
 //!
 //! ## Cache Strategies
 //!
@@ -43,6 +43,7 @@
 //! The cache types are shared and synchronized internally, so they can be used
 //! from multiple async tasks in the same process.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::OnceLock;
 
 mod builders;
@@ -54,13 +55,17 @@ pub use prepared_statements::{
     CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
 };
 pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
-
-// =============================================================================
-// GLOBAL CACHE INSTANCES
-// =============================================================================
+pub(crate) use query_cache::{PendingInvalidations, install_pending_invalidations};
 
 static GLOBAL_QUERY_CACHE: OnceLock<QueryCache> = OnceLock::new();
 static GLOBAL_STMT_CACHE: OnceLock<PreparedStatementCache> = OnceLock::new();
+
+/// The 64-bit digest both cache keys and statement slots are bucketed by.
+fn hash_text(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
 
 #[cfg(test)]
 #[path = "../../tests/unit/cache_tests.rs"]

@@ -1,28 +1,18 @@
+use thiserror::Error;
+
 /// Errors that can occur during translation operations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Error)]
 pub enum TranslationError {
     /// Invalid or non-translatable field
+    #[error("Invalid field: {0}")]
     InvalidField(String),
     /// Invalid or disallowed language
+    #[error("Invalid language: {0}")]
     InvalidLanguage(String),
     /// Failed to parse translations data
+    #[error("Parse error: {0}")]
     ParseError(String),
-    /// Model doesn't support translations
-    NotSupported,
 }
-
-impl std::fmt::Display for TranslationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TranslationError::InvalidField(msg) => write!(f, "Invalid field: {}", msg),
-            TranslationError::InvalidLanguage(msg) => write!(f, "Invalid language: {}", msg),
-            TranslationError::ParseError(msg) => write!(f, "Parse error: {}", msg),
-            TranslationError::NotSupported => write!(f, "Model does not support translations"),
-        }
-    }
-}
-
-impl std::error::Error for TranslationError {}
 
 impl From<TranslationError> for crate::Error {
     fn from(err: TranslationError) -> Self {

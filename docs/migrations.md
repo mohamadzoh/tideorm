@@ -22,7 +22,7 @@ t.decimal_with("amount", 16, 4);       // DECIMAL(16,4)
 
 ```rust
 t.string("name");                      // VARCHAR(255)
-t.text("description");                 // TEXT (unlimited)
+t.text("description");                 // TEXT (LONGTEXT on MySQL)
 ```
 
 #### Boolean
@@ -35,10 +35,10 @@ t.boolean("active");                   // BOOLEAN
 
 ```rust
 t.date("birth_date");                  // DATE
-t.time("start_time");                  // TIME
-t.datetime("logged_at");               // DATETIME (MySQL) / TIMESTAMP (Postgres)
-t.timestamp("created_at");             // TIMESTAMP (without timezone)
-t.timestamptz("expires_at");           // TIMESTAMPTZ (with timezone) - PostgreSQL
+t.time("start_time");                  // TIME (TIME(6) on MySQL)
+t.datetime("logged_at");               // TIMESTAMP (Postgres) / DATETIME(6) (MySQL)
+t.timestamp("created_at");             // TIMESTAMP (without timezone) / DATETIME(6) (MySQL)
+t.timestamptz("expires_at");           // TIMESTAMPTZ (with timezone) / DATETIME(6) (MySQL)
 ```
 
 #### Special Types
@@ -47,7 +47,7 @@ t.timestamptz("expires_at");           // TIMESTAMPTZ (with timezone) - PostgreS
 t.uuid("external_id");                 // UUID (Postgres) / BINARY(16) (MySQL)
 t.json("metadata");                    // JSON
 t.jsonb("data");                       // JSONB (PostgreSQL only)
-t.binary("file_data");                 // BYTEA/BLOB
+t.binary("file_data");                 // BYTEA / LONGBLOB (MySQL) / BLOB (SQLite)
 t.integer_array("tag_ids");            // INTEGER[] (PostgreSQL only)
 t.text_array("tags");                  // TEXT[] (PostgreSQL only)
 ```
@@ -63,6 +63,10 @@ t.timestamps();                        // created_at + updated_at (TIMESTAMPTZ)
 t.timestamps_naive();                  // created_at + updated_at (TIMESTAMP, no tz)
 t.soft_deletes();                      // deleted_at (nullable TIMESTAMPTZ)
 ```
+
+#### MySQL and MariaDB
+
+Every timestamp helper renders `DATETIME(6)` there: `TIMESTAMP` only spans 1970–2038 and a column without fractional digits drops microseconds, and a `CURRENT_TIMESTAMP` default is raised to `CURRENT_TIMESTAMP(6)` to match. `text()` and `binary()` render `LONGTEXT`/`LONGBLOB`, because `TEXT` and `BLOB` stop at 64 KB; a default on one of them, or on a JSON column, is written as the parenthesized expression MySQL requires. MySQL cannot index a `TEXT` column without a prefix length, so give an indexed or unique string column `string()` (`VARCHAR(255)`). Tables are created `DEFAULT CHARSET=utf8mb4`, whatever the database's own default is.
 
 ### Complete Migration Example
 

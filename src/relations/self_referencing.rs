@@ -4,22 +4,23 @@
 //! [`SelfRef`] walks up one level, [`SelfRefMany`] down one level, and
 //! [`SelfRefMany::load_tree`] walks the whole subtree in a single recursive CTE.
 //!
-//! Two behaviours differ from the direct wrappers. `load()` here is
-//! **cache-first**: a cached value is returned without consulting the database,
-//! including one that arrived by deserializing JSON. And neither wrapper has an
+//! Like the direct wrappers, `load()` prefers the database whenever a
+//! connection is reachable, so a payload that arrived by deserializing JSON
+//! cannot pass itself off as the stored rows. Unlike them, neither wrapper has an
 //! eager-loading path — `.with("..")` on one is an error pointing at the lazy
 //! load — because an arbitrary-depth self-join has no fixed number of levels to
 //! batch.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::marker::PhantomData;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::{build_self_ref_tree_sql, cached_ref, preserve_cached_value};
-use super::require_scalar_relation_key;
+use super::helpers::{
+    build_self_ref_tree_sql, has_active_database, preserve_cached_value,
+    require_scalar_relation_key, required_key,
+};
 
 /// The upward half of a self-referencing relation: the single row of the same
 /// table that this row points at, such as a node's parent.
@@ -38,8 +39,8 @@ use super::require_scalar_relation_key;
 /// [`Default`] uses `parent_id`/`id`, which is why (unlike the direct wrappers)
 /// this type has no "not configured" error.
 ///
-/// [`load`](Self::load) is cache-first, and this relation has no eager path; see
-/// the module documentation.
+/// [`load`](Self::load) queries whenever a connection is reachable, and this
+/// relation has no eager path; see the module documentation.
 #[derive(Debug, Clone)]
 pub struct SelfRef<E: Model> {
     /// Column on this row holding the target row's key — the "points upward"
@@ -50,7 +51,6 @@ pub struct SelfRef<E: Model> {
     pub local_key: &'static str,
     cached: Option<Box<E>>,
     fk_value: Option<serde_json::Value>,
-    _marker: PhantomData<E>,
 }
 
 impl<E: Model> SelfRef<E> {
@@ -59,9 +59,7 @@ impl<E: Model> SelfRef<E> {
         Self {
             foreign_key,
             local_key,
-            cached: None,
-            fk_value: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -89,26 +87,36 @@ impl<E: Model> SelfRef<E> {
         );
     }
 
+    /// The query for the parent row, or `None` at a root.
+    fn query(&self, context: &str) -> Result<Option<QueryBuilder<E>>> {
+        match &self.fk_value {
+            Some(fk) if !fk.is_null() => {
+                let fk = require_scalar_relation_key(fk, context)?;
+                Ok(Some(E::query().where_eq(self.local_key, fk.clone())))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Fetch the row this one points at, or `Ok(None)` at a root.
     ///
-    /// Cache-first: a cached row is cloned out without touching the database,
-    /// even with a live connection. Loading a whole ancestor chain therefore
-    /// costs one query per level — for a subtree use
+    /// Queries whenever a connection is reachable, ignoring any cached row; the
+    /// cache is served only when there is no foreign-key value to look the
+    /// parent up by, or no connection to look it up through. Loading a whole
+    /// ancestor chain costs one query per level — for a subtree use
     /// [`SelfRefMany::load_tree`], which does it in one.
     pub async fn load(&self) -> Result<Option<E>> {
-        if let Some(cached) = &self.cached {
-            return Ok(Some((**cached).clone()));
+        let Some(fk) = &self.fk_value else {
+            return Ok(self.cached.as_deref().cloned());
+        };
+        if !fk.is_null() && self.cached.is_some() && !has_active_database() {
+            return Ok(self.cached.as_deref().cloned());
         }
 
-        let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load")?,
-            _ => return Ok(None),
-        };
-
-        E::query()
-            .where_eq(self.local_key, fk.clone())
-            .first()
-            .await
+        match self.query("SelfRef::load")? {
+            Some(query) => query.first().await,
+            None => Ok(None),
+        }
     }
 
     /// Fetch the parent through a caller-supplied refinement of the query.
@@ -119,13 +127,10 @@ impl<E: Model> SelfRef<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::load_with")?,
-            _ => return Ok(None),
-        };
-
-        let query = E::query().where_eq(self.local_key, fk.clone());
-        constraint_fn(query).first().await
+        match self.query("SelfRef::load_with")? {
+            Some(query) => constraint_fn(query).first().await,
+            None => Ok(None),
+        }
     }
 
     /// Whether the referenced row exists. `Ok(false)` at a root, without a
@@ -134,22 +139,15 @@ impl<E: Model> SelfRef<E> {
     /// Always queries otherwise; the cache is not consulted. A non-null foreign
     /// key with `Ok(false)` here means the reference dangles.
     pub async fn exists(&self) -> Result<bool> {
-        let fk = match &self.fk_value {
-            Some(v) if !v.is_null() => require_scalar_relation_key(v, "SelfRef::exists")?,
-            _ => return Ok(false),
-        };
-
-        E::query()
-            .where_eq(self.local_key, fk.clone())
-            .exists()
-            .await
+        match self.query("SelfRef::exists")? {
+            Some(query) => query.exists().await,
+            None => Ok(false),
+        }
     }
 
-    /// The cached parent, if one is present. Never queries and never awaits —
-    /// and since [`load`](Self::load) is cache-first, a `Some` here is exactly
-    /// what `load()` would hand back.
+    /// The cached parent, if one is present. Never queries and never awaits.
     pub fn get_cached(&self) -> Option<&E> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 }
 
@@ -160,12 +158,11 @@ impl<E: Model> Default for SelfRef<E> {
             local_key: "id",
             cached: None,
             fk_value: None,
-            _marker: PhantomData,
         }
     }
 }
 
-impl<E: Model + Serialize> Serialize for SelfRef<E> {
+impl<E: Model> Serialize for SelfRef<E> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -200,8 +197,8 @@ impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
 /// [`load`](Self::load) returns *one* level; [`load_tree`](Self::load_tree)
 /// returns the whole subtree in a single query.
 ///
-/// `load()` is cache-first, and this relation has no eager path; see the module
-/// documentation.
+/// `load()` queries whenever a connection is reachable, and this relation has no
+/// eager path; see the module documentation.
 #[derive(Debug, Clone)]
 pub struct SelfRefMany<E: Model> {
     /// Column on the child rows holding this row's key. Defaults to
@@ -212,7 +209,6 @@ pub struct SelfRefMany<E: Model> {
     pub local_key: &'static str,
     cached: Option<Vec<E>>,
     parent_pk: Option<serde_json::Value>,
-    _marker: PhantomData<E>,
 }
 
 impl<E: Model> SelfRefMany<E> {
@@ -221,9 +217,7 @@ impl<E: Model> SelfRefMany<E> {
         Self {
             foreign_key,
             local_key,
-            cached: None,
-            parent_pk: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -232,7 +226,7 @@ impl<E: Model> SelfRefMany<E> {
     ///
     /// Must be a scalar. Unlike [`SelfRef::with_fk_value`] there is no
     /// null-means-root short circuit here: leaving it unset makes every method
-    /// error with "Parent primary key not set for self-reference".
+    /// error with "Parent primary key not set for relation".
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
         self.parent_pk = Some(pk);
         self
@@ -250,27 +244,31 @@ impl<E: Model> SelfRefMany<E> {
         );
     }
 
+    fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
+        required_key(&self.parent_pk, "Parent primary key", context)
+    }
+
+    /// The query for the direct children.
+    fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
+        let pk = self.parent_key(context)?;
+        Ok(E::query().where_eq(self.foreign_key, pk.clone()))
+    }
+
     /// Fetch the direct children — one level only, in no particular order.
     ///
-    /// Cache-first: cached rows are cloned out without touching the database.
-    /// Recursing with this is one query per node; use
-    /// [`load_tree`](Self::load_tree) instead.
+    /// Queries whenever a connection is reachable, ignoring any cached rows; the
+    /// cache is served only when there is nothing to query through. Recursing
+    /// with this is one query per node; use [`load_tree`](Self::load_tree)
+    /// instead.
     pub async fn load(&self) -> Result<Vec<E>> {
-        if let Some(cached) = &self.cached {
+        let can_query = self.parent_pk.is_some() && has_active_database();
+        if let Some(cached) = &self.cached
+            && !can_query
+        {
             return Ok(cached.clone());
         }
 
-        let pk = self.parent_pk.as_ref().ok_or_else(|| {
-            Error::query(String::from(
-                "Parent primary key not set for self-reference",
-            ))
-        })?;
-        let pk = require_scalar_relation_key(pk, "SelfRefMany::load")?;
-
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .get()
-            .await
+        self.query("SelfRefMany::load")?.get().await
     }
 
     /// Fetch the direct children through a caller-supplied refinement of the
@@ -279,56 +277,29 @@ impl<E: Model> SelfRefMany<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        let pk = self.parent_pk.as_ref().ok_or_else(|| {
-            Error::query(String::from(
-                "Parent primary key not set for self-reference",
-            ))
-        })?;
-        let pk = require_scalar_relation_key(pk, "SelfRefMany::load_with")?;
-
-        let query = E::query().where_eq(self.foreign_key, pk.clone());
-        constraint_fn(query).get().await
+        constraint_fn(self.query("SelfRefMany::load_with")?)
+            .get()
+            .await
     }
 
     /// Count the direct children. Always queries; one level only, so this is not
     /// the size of the subtree.
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_pk.as_ref().ok_or_else(|| {
-            Error::query(String::from(
-                "Parent primary key not set for self-reference",
-            ))
-        })?;
-        let pk = require_scalar_relation_key(pk, "SelfRefMany::count")?;
-
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .count()
-            .await
+        self.query("SelfRefMany::count")?.count().await
     }
 
     /// Whether this row has at least one direct child — i.e. whether it is a
     /// leaf. Cheaper than [`count`](Self::count).
     pub async fn exists(&self) -> Result<bool> {
-        let pk = self.parent_pk.as_ref().ok_or_else(|| {
-            Error::query(String::from(
-                "Parent primary key not set for self-reference",
-            ))
-        })?;
-        let pk = require_scalar_relation_key(pk, "SelfRefMany::exists")?;
-
-        E::query()
-            .where_eq(self.foreign_key, pk.clone())
-            .exists()
-            .await
+        self.query("SelfRefMany::exists")?.exists().await
     }
 
     /// The cached direct children, if populated. Never queries and never awaits.
     ///
     /// `Some(&[])` means "loaded, and this is a leaf"; `None` means nothing was
-    /// ever loaded — and it is the only state in which [`load`](Self::load) will
-    /// query.
+    /// ever loaded.
     pub fn get_cached(&self) -> Option<&[E]> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 
     /// Fetch the whole subtree below this row in one recursive-CTE query,
@@ -351,13 +322,7 @@ impl<E: Model> SelfRefMany<E> {
             return Ok(Vec::new());
         }
 
-        let pk = self.parent_pk.as_ref().ok_or_else(|| {
-            Error::query(String::from(
-                "Parent primary key not set for self-reference",
-            ))
-        })?;
-        let pk = require_scalar_relation_key(pk, "SelfRefMany::load_tree")?;
-
+        let pk = self.parent_key("SelfRefMany::load_tree")?;
         let db = crate::database::__current_db()?;
         let (sql, params) = build_self_ref_tree_sql::<E>(
             self.foreign_key,
@@ -378,12 +343,11 @@ impl<E: Model> Default for SelfRefMany<E> {
             local_key: "id",
             cached: None,
             parent_pk: None,
-            _marker: PhantomData,
         }
     }
 }
 
-impl<E: Model + Serialize> Serialize for SelfRefMany<E> {
+impl<E: Model> Serialize for SelfRefMany<E> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,

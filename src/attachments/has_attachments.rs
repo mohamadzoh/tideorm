@@ -9,9 +9,8 @@ use super::{AttachmentError, FileAttachment, FilesData};
 /// column (`files: Option<Json>` by convention) and forward
 /// `get_files_data` / `set_files_data` to it.
 ///
-/// Generating the impl was tried and reverted: it forces a column-naming
-/// convention the attribute never promised, and it conflicts with every impl
-/// already written by hand on a model.
+/// A generated impl would force a column-naming convention the attribute never
+/// promised, and would conflict with every impl already written by hand.
 ///
 /// # Trust boundary
 ///
@@ -136,27 +135,14 @@ pub trait HasAttachments {
 
     /// Replace the current relation contents with a new list of file keys.
     fn sync(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
-        self.validate_relation(relation)?;
-
-        let mut files = self.get_files_data()?;
-
-        if Self::is_has_one_relation(relation) {
-            if file_keys.is_empty() {
-                files.remove_one(relation);
-            } else {
-                files.set_one(relation, FileAttachment::new(file_keys[0]));
-            }
-        } else {
-            files.clear_many(relation);
-            for key in file_keys {
-                files.add_many(relation, FileAttachment::new(key));
-            }
-        }
-
-        self.set_files_data(files)
+        let attachments = file_keys.into_iter().map(FileAttachment::new).collect();
+        self.sync_with_metadata(relation, attachments)
     }
 
     /// Replace the current relation contents with pre-built attachment metadata.
+    ///
+    /// A `hasOne` relation keeps the first attachment, or is cleared when there
+    /// is none.
     fn sync_with_metadata(
         &mut self,
         relation: &str,
@@ -167,10 +153,9 @@ pub trait HasAttachments {
         let mut files = self.get_files_data()?;
 
         if Self::is_has_one_relation(relation) {
-            if attachments.is_empty() {
-                files.remove_one(relation);
-            } else if let Some(first) = attachments.into_iter().next() {
-                files.set_one(relation, first);
+            match attachments.into_iter().next() {
+                Some(first) => files.set_one(relation, first),
+                None => files.remove_one(relation),
             }
         } else {
             files.clear_many(relation);

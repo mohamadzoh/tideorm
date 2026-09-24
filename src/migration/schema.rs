@@ -1,9 +1,7 @@
-use super::{
-    AlterTableBuilder, DatabaseType, TableBuilder, log_migration_sql, quote_identifier_for_db,
-};
-use crate::database::{__current_connection, ConnectionRef};
-use crate::error::{Error, Result};
-use crate::internal::ConnectionTrait;
+use super::{AlterTableBuilder, DatabaseType, TableBuilder, ddl};
+use crate::error::{ErrorContext, Result};
+use crate::internal::sql_safety::quote_ident;
+use crate::tide_debug;
 
 /// Schema manipulation context for migrations
 ///
@@ -23,16 +21,7 @@ impl Schema {
     where
         F: FnOnce(&mut TableBuilder),
     {
-        let mut builder = TableBuilder::new(name, self.database_type);
-        build(&mut builder);
-        let sql = builder.build_create();
-        self.execute(&sql).await?;
-
-        for index_sql in builder.build_indexes() {
-            self.execute(&index_sql).await?;
-        }
-
-        Ok(())
+        self.create(name, false, build).await
     }
 
     /// Create a table if it doesn't exist
@@ -40,12 +29,18 @@ impl Schema {
     where
         F: FnOnce(&mut TableBuilder),
     {
+        self.create(name, true, build).await
+    }
+
+    async fn create<F>(&mut self, name: &str, if_not_exists: bool, build: F) -> Result<()>
+    where
+        F: FnOnce(&mut TableBuilder),
+    {
         let mut builder = TableBuilder::new(name, self.database_type);
         build(&mut builder);
-        let sql = builder.build_create_if_not_exists();
-        self.execute(&sql).await?;
+        self.execute(&builder.build_create(if_not_exists)).await?;
 
-        for index_sql in builder.build_indexes_if_not_exists() {
+        for index_sql in builder.build_indexes(if_not_exists) {
             self.execute(&index_sql).await?;
         }
 
@@ -69,30 +64,16 @@ impl Schema {
 
     /// Drop a table
     pub async fn drop_table(&mut self, name: &str) -> Result<()> {
-        let sql = format!("DROP TABLE {}", self.quote_identifier(name));
+        let sql = format!("DROP TABLE {}", quote_ident(self.database_type, name));
         self.execute(&sql).await
     }
 
     /// Drop a table if it exists
     pub async fn drop_table_if_exists(&mut self, name: &str) -> Result<()> {
-        let sql = format!("DROP TABLE IF EXISTS {}", self.quote_identifier(name));
-        self.execute(&sql).await
-    }
-
-    /// Rename a table
-    pub async fn rename_table(&mut self, from: &str, to: &str) -> Result<()> {
-        let sql = match self.database_type {
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!(
-                "RENAME TABLE {} TO {}",
-                self.quote_identifier(from),
-                self.quote_identifier(to)
-            ),
-            _ => format!(
-                "ALTER TABLE {} RENAME TO {}",
-                self.quote_identifier(from),
-                self.quote_identifier(to)
-            ),
-        };
+        let sql = format!(
+            "DROP TABLE IF EXISTS {}",
+            quote_ident(self.database_type, name)
+        );
         self.execute(&sql).await
     }
 
@@ -104,31 +85,27 @@ impl Schema {
         columns: &[&str],
         unique: bool,
     ) -> Result<()> {
-        let index_type = if unique { "UNIQUE INDEX" } else { "INDEX" };
-        let columns: Vec<String> = columns
-            .iter()
-            .map(|column| self.quote_identifier(column))
-            .collect();
-
-        let sql = format!(
-            "CREATE {} {} ON {} ({})",
-            index_type,
-            self.quote_identifier(name),
-            self.quote_identifier(table),
-            columns.join(", ")
+        let sql = ddl::create_index(
+            self.database_type,
+            name,
+            &quote_ident(self.database_type, table),
+            columns,
+            unique,
+            false,
         );
         self.execute(&sql).await
     }
 
     /// Drop an index
     pub async fn drop_index(&mut self, table: &str, name: &str) -> Result<()> {
-        let sql = match self.database_type {
+        let db_type = self.database_type;
+        let sql = match db_type {
             DatabaseType::MySQL | DatabaseType::MariaDB => format!(
                 "DROP INDEX {} ON {}",
-                self.quote_identifier(name),
-                self.quote_identifier(table)
+                quote_ident(db_type, name),
+                quote_ident(db_type, table)
             ),
-            _ => format!("DROP INDEX {}", self.quote_identifier(name)),
+            _ => format!("DROP INDEX {}", quote_ident(db_type, name)),
         };
         self.execute(&sql).await
     }
@@ -138,38 +115,19 @@ impl Schema {
         self.execute(sql).await
     }
 
+    /// Run `sql` on the ambient connection rather than the global pool: on
+    /// backends with transactional DDL the migrator wraps each migration in a
+    /// transaction, and a pooled connection would run the DDL outside it.
     async fn execute(&mut self, sql: &str) -> Result<()> {
-        log_migration_sql(sql);
+        if crate::logging::query_logging_enabled() {
+            tide_debug!("Migration SQL: {}", sql);
+        }
 
-        // Resolve the connection through the ambient scope instead of the global
-        // pool: on backends with transactional DDL the migrator wraps a
-        // migration in a transaction, and `require_db()` would hand back a
-        // pooled connection that silently runs the DDL outside it.
-        let outcome = match __current_connection()? {
-            ConnectionRef::Database(connection) => {
-                connection.connection().execute_unprepared(sql).await
-            }
-            ConnectionRef::Transaction(transaction) => {
-                transaction.as_ref().execute_unprepared(sql).await
-            }
-        };
-
-        outcome.map_err(|error| {
-            Error::query_with_context(
-                error.to_string(),
-                crate::error::ErrorContext::new().query(sql.to_string()),
-            )
-        })?;
+        let db = crate::database::__current_db()?;
+        crate::logging::logged_by_caller(db.exec_raw(sql))
+            .await
+            .map_err(|error| error.with_context(ErrorContext::new().query(sql)))?;
 
         Ok(())
-    }
-
-    pub(crate) fn quote_identifier(&self, name: &str) -> String {
-        quote_identifier_for_db(name, self.database_type)
-    }
-
-    /// Get the database type
-    pub fn database_type(&self) -> DatabaseType {
-        self.database_type
     }
 }

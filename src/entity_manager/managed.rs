@@ -6,11 +6,9 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::model::Model;
-
 use super::{
     EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-    save::{save_with_entity_manager_impl, sync_entity_manager_relations_only_impl},
+    save::{save_in_scope, sync_entity_manager_relations_only_impl},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,23 +233,13 @@ pub(crate) trait ManagedOps: Send + Sync {
     fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint>;
 
     /// Table this entry writes to, used to order the flush.
-    ///
-    /// The three relation-order hooks default to "no declared relations", so a
-    /// hand-written entry keeps flushing in registration order within its
-    /// operation kind instead of having to describe a schema it does not have.
-    fn table_name(&self) -> &'static str {
-        ""
-    }
+    fn table_name(&self) -> &'static str;
 
     /// Tables that must hold a row before this entry can be inserted.
-    fn parent_tables(&self) -> Vec<&'static str> {
-        Vec::new()
-    }
+    fn parent_tables(&self) -> Vec<&'static str>;
 
     /// Tables holding rows that reference this entry.
-    fn child_tables(&self) -> Vec<&'static str> {
-        Vec::new()
-    }
+    fn child_tables(&self) -> Vec<&'static str>;
 
     async fn flush(
         self: Arc<Self>,
@@ -347,27 +335,15 @@ impl<T> ManagedEntry<T> {
         *self.state.write() = EntityState::Removed;
     }
 
-    fn mark_detached(&self) {
+    pub(crate) fn mark_detached(&self) {
         *self.state.write() = EntityState::Detached;
-    }
-
-    pub(crate) fn mark_detached_public(&self) {
-        self.mark_detached();
     }
 }
 
 #[async_trait]
 impl<T> ManagedOps for ManagedEntry<T>
 where
-    T: Model
-        + TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + serde::Serialize
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
     <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
         PartialEq,
 {
@@ -429,7 +405,7 @@ where
                         .read()
                         .clone()
                         .unwrap_or_else(|| self.current.read().clone());
-                    super::__with_entity_manager_db(
+                    super::with_entity_manager_db(
                         entity_manager,
                         <T as crate::model::Model>::delete(entity),
                     )
@@ -460,7 +436,7 @@ where
                 // actually filed as, not under the persisted key it may not have.
                 let previous_key = self.identity_key.read().as_ref().cloned();
                 let saved = if columns_changed {
-                    save_with_entity_manager_impl(&current, entity_manager).await?
+                    save_in_scope(&current, entity_manager).await?
                 } else {
                     sync_entity_manager_relations_only_impl(&current, entity_manager).await?
                 };

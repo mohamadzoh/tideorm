@@ -1,6 +1,3 @@
-// EXTENDED ATTACHMENTS TESTS
-// =============================================================================
-
 #![cfg(feature = "attachments")]
 
 use serde::{Deserialize, Serialize};

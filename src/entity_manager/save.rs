@@ -12,9 +12,7 @@ use parking_lot::Mutex;
 use crate::error::Result;
 use crate::model::Model;
 
-use super::{
-    EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-};
+use super::{EntityManager, TideEntityManagerMergePersisted, TideEntityManagerSync};
 
 pub(super) type IdentityRollbackLog = HashMap<super::IdentityKey, Box<dyn IdentityMapRollback>>;
 pub(super) type ManagedCheckpoints = Vec<Box<dyn super::managed::ManagedCheckpoint>>;
@@ -217,17 +215,10 @@ pub async fn save_with_entity_manager<T>(
     entity_manager: &Arc<EntityManager>,
 ) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     if in_entity_manager_transaction_scope() {
-        return save_with_entity_manager_impl(entity, entity_manager).await;
+        return save_in_scope(entity, entity_manager).await;
     }
 
     let rollback_state = capture_entity_manager_rollback_state(entity_manager.as_ref());
@@ -242,7 +233,7 @@ where
             Box::pin(async move {
                 with_entity_manager_transaction_scope(
                     identity_rollback_for_txn,
-                    save_with_entity_manager_impl(&entity, &entity_manager_for_txn),
+                    save_in_scope(&entity, &entity_manager_for_txn),
                 )
                 .await
             })
@@ -263,22 +254,14 @@ where
     }
 }
 
-pub(crate) async fn save_with_entity_manager_impl<T>(
-    entity: &T,
-    entity_manager: &Arc<EntityManager>,
-) -> Result<T>
+/// Save `entity` and sync its loaded relations inside the unit of work the caller
+/// already opened.
+pub(super) async fn save_in_scope<T>(entity: &T, entity_manager: &Arc<EntityManager>) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     let mut aggregate = entity.clone();
-    let persisted = __with_entity_manager_db(
+    let persisted = with_entity_manager_db(
         entity_manager,
         <T as crate::model::Model>::save(entity.clone()),
     )
@@ -297,14 +280,7 @@ pub(crate) async fn sync_entity_manager_relations_only_impl<T>(
     entity_manager: &Arc<EntityManager>,
 ) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     let mut aggregate = entity.clone();
     <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
@@ -315,26 +291,65 @@ where
     Ok(aggregate)
 }
 
+/// Persists one entity held by a loaded relation during a relation sync — or,
+/// when the identity map already holds an identical copy, only syncs that
+/// entity's own relations — and returns its identity key afterwards.
 #[doc(hidden)]
-pub async fn __save_with_entity_manager_in_scope<T>(
-    entity: &T,
+pub async fn __sync_related_entity<T>(
+    entity: &mut T,
     entity_manager: &Arc<EntityManager>,
-) -> Result<T>
+) -> Result<Option<String>>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
-    save_with_entity_manager_impl(entity, entity_manager).await
+    let existing_key = super::meta::model_entity_manager_key(entity)?;
+    let unchanged = match existing_key.as_deref() {
+        Some(key) => match entity_manager.get_by_entity_manager_key::<T>(key) {
+            Some(cached) => serde_json::to_value(&*entity)? == serde_json::to_value(&cached)?,
+            None => false,
+        },
+        None => false,
+    };
+
+    if unchanged {
+        entity
+            .tide_sync_entity_manager_relations(entity_manager)
+            .await?;
+        entity_manager.put(entity.clone());
+        return Ok(existing_key);
+    }
+
+    let saved = save_in_scope(entity, entity_manager).await?;
+    let saved_key = super::meta::model_entity_manager_key(&saved)?;
+    *entity = saved.clone();
+    entity_manager.put(saved);
+    Ok(saved_key)
 }
 
+/// Deletes the entities an owner's relation held at its last snapshot but no
+/// longer lists in `current_keys`, and drops them from the identity map.
 #[doc(hidden)]
-pub async fn __with_entity_manager_db<F, T>(
+pub async fn __delete_detached_entities<T>(
+    entity_manager: &Arc<EntityManager>,
+    owner_table: &'static str,
+    owner_key: &str,
+    relation: &'static str,
+    current_keys: &[String],
+) -> Result<()>
+where
+    T: Model + Clone + Send + Sync + 'static,
+{
+    for key in entity_manager.deletions::<T>(owner_table, owner_key, relation, current_keys) {
+        if let Some(deleted) = entity_manager.get_by_entity_manager_key::<T>(&key) {
+            with_entity_manager_db(entity_manager, deleted.delete()).await?;
+        }
+        entity_manager.remove_by_entity_manager_key::<T>(&key);
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn with_entity_manager_db<F, T>(
     entity_manager: &Arc<EntityManager>,
     future: F,
 ) -> Result<T>

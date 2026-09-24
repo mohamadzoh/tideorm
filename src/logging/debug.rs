@@ -47,12 +47,6 @@ impl QueryDebugInfo {
         }
     }
 
-    /// Override the detected operation shown in the debug output.
-    pub fn with_operation(mut self, op: QueryOperation) -> Self {
-        self.operation = op;
-        self
-    }
-
     /// Add one rendered condition line.
     pub fn add_condition(&mut self, condition: impl Into<String>) {
         self.conditions.push(condition.into());
@@ -66,12 +60,6 @@ impl QueryDebugInfo {
     /// Attach the rendered SQL or preview text.
     pub fn with_sql(mut self, sql: impl Into<String>) -> Self {
         self.sql = sql.into();
-        self
-    }
-
-    /// Attach rendered parameter values.
-    pub fn with_params(mut self, params: Vec<String>) -> Self {
-        self.params = params;
         self
     }
 }

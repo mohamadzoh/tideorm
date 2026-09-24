@@ -12,7 +12,7 @@ This crate is typically used as a dependency of the main `tideorm` crate. If you
 
 ```toml
 [dependencies]
-tideorm-macros = "0.9.19"
+tideorm-macros = "0.12"
 ```
 
 ## Usage
@@ -89,22 +89,23 @@ For `has_many_through`, declare `pivot`, `foreign_key`, and `related_key` explic
 | `#[tideorm(nullable)]` | Mark field as nullable |
 | `#[tideorm(default = "expr")]` | Set a default value expression |
 | `#[tideorm(skip)]` | Skip this field in queries |
-| `#[tideorm(timestamp)]` | Mark as timestamp field (created_at, updated_at) |
 
 ### Relation Attributes
 
 | Attribute | Description |
 |-----------|-------------|
-| `#[tideorm(has_one = "Model")]` | Define a has-one relationship |
-| `#[tideorm(has_many = "Model")]` | Define a has-many relationship |
-| `#[tideorm(belongs_to = "Model")]` | Define a belongs-to relationship |
-| `#[tideorm(has_many_through = "Model")]` | Define a has-many-through relationship |
+| `#[tideorm(has_one = "Model")]` | Name a `HasOne<T>` relation |
+| `#[tideorm(has_many = "Model")]` | Name a `HasMany<T>` relation |
+| `#[tideorm(belongs_to = "Model")]` | Name a `BelongsTo<T>` relation |
+| `#[tideorm(has_many_through = "Model")]` | Name a `HasManyThrough<T, P>` relation |
 | `#[tideorm(foreign_key = "col")]` | Specify the foreign key column |
-| `#[tideorm(owner_key = "col")]` | Specify the owner/local key |
+| `#[tideorm(local_key = "col")]` | Specify the local key (defaults to `id`) |
+| `#[tideorm(owner_key = "col")]` | Specify the owner key of a `BelongsTo`, or the related key of a `HasManyThrough` |
+| `#[tideorm(related_key = "col")]` | Specify the pivot column pointing at the related model |
 | `#[tideorm(morph_name = "name")]` | Configure the base name for polymorphic relation columns |
 | `#[tideorm(pivot = "table")]` | Specify pivot table for many-to-many |
 
-Wrapper fields such as `MorphOne<T>`, `MorphMany<T>`, `MorphTo<T>`, `SelfRef<T>`, and `SelfRefMany<T>` are macro-wired as relation helpers when their required metadata is present. Polymorphic wrappers require `morph_name`; self-referencing wrappers use `foreign_key` and default `local_key` to `id`.
+The wrapper type decides the relation kind: a `has_one`-style attribute is optional, but it must name the same kind as the field's wrapper. `HasOne`, `HasMany` and `BelongsTo` require `foreign_key`; polymorphic wrappers require `morph_name`; self-referencing wrappers default `foreign_key` to `parent_id` and `local_key` to `id`. A missing requirement or a mismatched attribute is a compile-time error.
 
 ## License
 

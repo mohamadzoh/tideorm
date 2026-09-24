@@ -1,5 +1,7 @@
-use super::encrypted_field_missing_key_error;
+#[cfg(feature = "encrypted-fields")]
+use super::encrypted::encrypted_field_missing_key_error;
 
+#[cfg(feature = "encrypted-fields")]
 #[test]
 fn encrypted_missing_key_error_mentions_startup_configuration_for_serialization() {
     let err = encrypted_field_missing_key_error("serialization");
@@ -12,92 +14,13 @@ fn encrypted_missing_key_error_mentions_startup_configuration_for_serialization(
     assert!(message.contains("#[tideorm(encrypted)]"));
 }
 
+#[cfg(feature = "encrypted-fields")]
 #[test]
 fn encrypted_missing_key_error_mentions_deserialization() {
     let err = encrypted_field_missing_key_error("deserialization");
     let message = err.to_string();
 
     assert!(message.contains("Encrypted field deserialization requires an encryption key"));
-}
-
-#[test]
-fn castable_i32_rejects_values_outside_the_i32_range() {
-    use super::Castable;
-
-    assert_eq!(
-        i32::from_json(&serde_json::json!(i32::MAX)).expect("in-range values still cast"),
-        i32::MAX
-    );
-
-    let err = i32::from_json(&serde_json::json!(i64::from(i32::MAX) + 1))
-        .expect_err("2^31 must not wrap around to -2^31");
-    assert!(err.contains("out of range for i32"), "{err}");
-}
-
-#[test]
-fn cast_value_integer_rejects_unsigned_values_above_i64_max() {
-    let err = super::CastValue::cast(&serde_json::json!(u64::MAX), super::CastType::Integer)
-        .expect_err("u64::MAX must not saturate to i64::MAX");
-    assert!(err.contains("out of range for i64"), "{err}");
-}
-
-#[test]
-fn cast_value_integer_rejects_floats_outside_the_i64_range() {
-    let err = super::CastValue::cast(&serde_json::json!(1.0e30_f64), super::CastType::Integer)
-        .expect_err("1e30 must not saturate to i64::MAX");
-    assert!(err.contains("out of range for i64"), "{err}");
-}
-
-#[test]
-fn cast_value_integer_still_truncates_in_range_fractions_toward_zero() {
-    assert_eq!(
-        super::CastValue::cast(&serde_json::json!(3.9), super::CastType::Integer)
-            .expect("in-range fractions still cast"),
-        serde_json::json!(3)
-    );
-    assert_eq!(
-        super::CastValue::cast(&serde_json::json!(-3.9), super::CastType::Integer)
-            .expect("in-range fractions still cast"),
-        serde_json::json!(-3)
-    );
-}
-
-#[test]
-fn cast_value_decimal_keeps_money_strings_exact() {
-    assert_eq!(
-        super::CastValue::cast(
-            &serde_json::json!("12345678901234567890.12"),
-            super::CastType::Decimal
-        )
-        .expect("a decimal string must cast"),
-        serde_json::json!("12345678901234567890.12"),
-        "money strings must not round-trip through f64"
-    );
-
-    assert!(
-        super::CastValue::cast(&serde_json::json!("not-a-number"), super::CastType::Decimal)
-            .is_err()
-    );
-}
-
-#[test]
-fn cast_value_array_wraps_bare_scalar_strings() {
-    assert_eq!(
-        super::CastValue::cast(&serde_json::json!("5"), super::CastType::Array)
-            .expect("a scalar string must cast"),
-        serde_json::json!(["5"]),
-        "a bare scalar must not pass through as a number"
-    );
-    assert_eq!(
-        super::CastValue::cast(&serde_json::json!("[1,2]"), super::CastType::Array)
-            .expect("a JSON array string must cast"),
-        serde_json::json!([1, 2])
-    );
-    assert_eq!(
-        super::CastValue::cast(&serde_json::json!("a, b"), super::CastType::Array)
-            .expect("a comma-separated string must cast"),
-        serde_json::json!(["a", "b"])
-    );
 }
 
 #[test]

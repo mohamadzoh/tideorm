@@ -1,18 +1,3 @@
-pub(crate) fn detect_operation(sql: &str) -> String {
-    let sql_upper = sql.trim().to_uppercase();
-    if sql_upper.starts_with("SELECT") {
-        "SELECT".to_string()
-    } else if sql_upper.starts_with("INSERT") {
-        "INSERT".to_string()
-    } else if sql_upper.starts_with("UPDATE") {
-        "UPDATE".to_string()
-    } else if sql_upper.starts_with("DELETE") {
-        "DELETE".to_string()
-    } else {
-        "OTHER".to_string()
-    }
-}
-
 pub(crate) fn textwrap_simple(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current_line = String::new();

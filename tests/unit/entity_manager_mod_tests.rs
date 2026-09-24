@@ -13,6 +13,24 @@ struct EntityManagerModTestUser {
     name: String,
 }
 
+/// The flush-ordering hooks for a test double that describes no schema, so it
+/// flushes in registration order within its operation kind.
+macro_rules! no_declared_relations {
+    () => {
+        fn table_name(&self) -> &'static str {
+            ""
+        }
+
+        fn parent_tables(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn child_tables(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+    };
+}
+
 struct NoopCheckpoint;
 
 impl managed::ManagedCheckpoint for NoopCheckpoint {
@@ -42,6 +60,8 @@ impl managed::ManagedOps for AppendingManagedEntry {
     }
 
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
+
+    no_declared_relations!();
 
     fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
         Box::new(NoopCheckpoint)
@@ -78,6 +98,8 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
     }
 
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
+
+    no_declared_relations!();
 
     fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
         Box::new(CountingCheckpoint {
@@ -152,12 +174,14 @@ impl crate::internal::InternalModel for RefreshAwareSyncOnlyModel {
         .into_active_model()
     }
 
-    fn from_entity_model(model: <Self::Entity as crate::internal::EntityTrait>::Model) -> Self {
-        Self {
+    fn try_from_entity_model(
+        model: <Self::Entity as crate::internal::EntityTrait>::Model,
+    ) -> crate::error::Result<Self> {
+        Ok(Self {
             id: model.id,
             name: model.name,
             runtime_state: "from-entity".to_string(),
-        }
+        })
     }
 
     fn to_entity_model(&self) -> <Self::Entity as crate::internal::EntityTrait>::Model {
@@ -188,6 +212,12 @@ impl crate::internal::InternalModel for RefreshAwareSyncOnlyModel {
 
     fn refresh_runtime_relations_from(&mut self, previous: &Self) {
         self.runtime_state = format!("refreshed:{}", previous.runtime_state);
+    }
+}
+
+impl crate::validation::Validate for RefreshAwareSyncOnlyModel {
+    fn validate(&self) -> std::result::Result<(), crate::validation::ValidationErrors> {
+        Ok(())
     }
 }
 
@@ -311,6 +341,8 @@ impl managed::ManagedOps for RunawayManagedEntry {
     }
 
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
+
+    no_declared_relations!();
 
     fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
         Box::new(NoopCheckpoint)
@@ -562,6 +594,8 @@ impl managed::ManagedOps for OrderRecordingManagedEntry {
 
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
 
+    no_declared_relations!();
+
     fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
         Box::new(NoopCheckpoint)
     }
@@ -669,7 +703,7 @@ struct EntityManagerModTestWidget {
 
 #[tokio::test]
 async fn detach_clears_an_entry_persisted_under_a_client_assigned_key() {
-    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
 
     let managed = entity_manager.persist(EntityManagerModTestWidget {
         id: 42,
@@ -697,11 +731,34 @@ async fn detach_clears_an_entry_persisted_under_a_client_assigned_key() {
     );
 }
 
+#[test]
+fn merge_reuses_the_handle_persist_filed_under_a_client_assigned_key() -> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+
+    let persisted = entity_manager.persist(EntityManagerModTestWidget {
+        id: 42,
+        name: "persisted".to_string(),
+    });
+    let merged = entity_manager.merge(EntityManagerModTestWidget {
+        id: 42,
+        name: "merged".to_string(),
+    })?;
+
+    // `persist` files the entry under the manager's own identity key and
+    // `merge` looks it up by the rendered primary key; the two must agree or
+    // the same row ends up with two handles.
+    assert!(Arc::ptr_eq(&persisted.entry, &merged.entry));
+    assert_eq!(persisted.get().name, "merged");
+    assert_eq!(entity_manager.managed_entries.read().len(), 1);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn removing_a_never_inserted_entity_evicts_it_without_a_delete() -> crate::error::Result<()> {
     // The database is disconnected, so this also asserts the flush issues no
     // DELETE for a row that was never written — it would fail if it tried.
-    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
 
     let managed = entity_manager.persist(EntityManagerModTestWidget {
         id: 77,
@@ -727,7 +784,7 @@ async fn removing_a_never_inserted_entity_evicts_it_without_a_delete() -> crate:
 
 #[tokio::test]
 async fn registering_two_unsaved_entities_keeps_them_distinct() {
-    let entity_manager = Arc::new(EntityManager::new(Arc::new(Database::disconnected())));
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
 
     // Both have the default primary key, which `tide_pk_key` renders as "0".
     // Filing them under it made the second collide with the first and get the

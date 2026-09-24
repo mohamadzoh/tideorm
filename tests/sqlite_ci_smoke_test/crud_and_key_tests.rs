@@ -2,28 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn sqlite_ci_smoke_test() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     let created = CiUser {
         id: 0,
@@ -85,29 +64,16 @@ async fn sqlite_ci_smoke_test() {
 
 #[tokio::test]
 async fn sqlite_composite_primary_key_crud_smoke_test() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_user_roles").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_user_roles (
+    fresh_table(
+        "CREATE TABLE ci_user_roles (
             user_id INTEGER NOT NULL,
             role_id INTEGER NOT NULL,
             label TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (user_id, role_id)
-        )
-    "#,
+        )",
     )
-    .await
-    .expect("failed to create ci_user_roles table");
+    .await;
 
     let created = CiUserRole {
         user_id: 1,
@@ -176,27 +142,14 @@ async fn sqlite_composite_primary_key_crud_smoke_test() {
 
 #[tokio::test]
 async fn sqlite_natural_primary_key_save_smoke_test() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_api_keys").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_api_keys (
+    fresh_table(
+        "CREATE TABLE ci_api_keys (
             key TEXT PRIMARY KEY,
             label TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
+        )",
     )
-    .await
-    .expect("failed to create ci_api_keys table");
+    .await;
 
     let created = CiApiKey {
         key: "ci-key-1".to_string(),

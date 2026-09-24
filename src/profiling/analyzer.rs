@@ -29,7 +29,7 @@ impl QueryAnalyzer {
             ));
         }
 
-        if sql_upper.contains("LIKE '%") || sql_upper.contains("LIKE '%") {
+        if sql_upper.contains("LIKE '%") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Leading wildcard in LIKE",
@@ -78,8 +78,9 @@ impl QueryAnalyzer {
             }
         }
 
-        if sql_upper.contains("= '") && (sql_upper.contains("_id =") || sql_upper.contains("id ="))
-        {
+        // `sql_upper` is uppercased, so the column name is matched as `ID`;
+        // this also covers every `<name>_ID` column.
+        if sql_upper.contains("= '") && sql_upper.contains("ID =") {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "Possible type mismatch",

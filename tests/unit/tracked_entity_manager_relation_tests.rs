@@ -34,7 +34,11 @@ fn test_lock() -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-async fn setup_database() -> crate::error::Result<Arc<Database>> {
+async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
+    if !crate::postgres_test_config::should_run_postgres_tests() {
+        println!("{}", crate::postgres_test_config::SKIPPED);
+        return Ok(None);
+    }
     let db = Arc::new(Database::connect(test_database_url()).await?);
 
     __in_db_scope(db.as_ref(), async {
@@ -54,7 +58,7 @@ async fn setup_database() -> crate::error::Result<Arc<Database>> {
     })
     .await?;
 
-    Ok(db)
+    Ok(Some(db))
 }
 
 async fn seed_relations(
@@ -98,7 +102,9 @@ async fn tracked_has_many_read_helpers_query_via_parent_entity_manager_database(
     let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 
-    let db = setup_database().await?;
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
     let (saved_user, saved_posts) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
@@ -137,7 +143,7 @@ async fn cached_relation_load_keeps_the_registered_identity_map_instance()
 
     let mut relation =
         super::TrackedHasMany::<TrackedEntityManagerRelationPost>::new("user_id", "id")
-            .with_metadata("posts", USER_TABLE, POST_TABLE)
+            .with_metadata("posts", USER_TABLE)
             .with_owner_key("1".to_string());
     relation.set_cached(vec![TrackedEntityManagerRelationPost {
         id: 7,
@@ -155,6 +161,31 @@ async fn cached_relation_load_keeps_the_registered_identity_map_instance()
         .get::<TrackedEntityManagerRelationPost>(&7)?
         .expect("identity map should still hold the registered instance");
     assert_eq!(mapped.title, "Canonical");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rows_edited_through_as_mut_are_the_rows_load_serves_without_a_connection()
+-> crate::error::Result<()> {
+    let _guard = test_lock().lock_owned().await;
+    Database::reset_global();
+
+    let mut relation =
+        super::TrackedHasMany::<TrackedEntityManagerRelationPost>::new("user_id", "id")
+            .with_parent_pk(serde_json::json!(1));
+    relation.set_cached(vec![TrackedEntityManagerRelationPost {
+        id: 7,
+        user_id: 1,
+        title: "Loaded".to_string(),
+    }]);
+    relation.as_mut().expect("posts should be cached")[0].title = "Edited".to_string();
+
+    // With no connection `load` serves the cache. The wrapper used to hold a
+    // second copy of it, so this returned the rows as they were before the edit.
+    let loaded = relation.load().await?;
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].title, "Edited");
 
     Ok(())
 }

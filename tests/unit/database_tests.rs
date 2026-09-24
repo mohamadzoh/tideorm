@@ -1,4 +1,4 @@
-use super::{Connection, Database};
+use super::Database;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::sync::{Arc, Mutex};
@@ -66,7 +66,7 @@ fn debug_reports_disconnected_database_state() {
 async fn global_database_round_trips_through_set_and_reset() {
     Database::reset_global();
     assert!(!crate::database::has_global_db());
-    assert!(Database::try_global().is_none());
+    assert!(super::try_db().is_none());
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -75,13 +75,13 @@ async fn global_database_round_trips_through_set_and_reset() {
     Database::set_global(db.clone()).expect("setting global database should succeed");
 
     assert!(crate::database::has_global_db());
-    assert!(Database::try_global().is_some());
+    assert!(super::try_db().is_some());
     assert!(format!("{:?}", Database::global()).contains("connected: true"));
 
     Database::reset_global();
 
     assert!(!crate::database::has_global_db());
-    assert!(Database::try_global().is_none());
+    assert!(super::try_db().is_none());
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -100,10 +100,11 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
         .begin()
         .await
         .expect("transaction should begin successfully");
-    let handle = super::DatabaseHandle::Transaction(Arc::new(transaction));
+    let handle = super::ConnectionRef::Transaction(Arc::new(transaction));
     let polled_threads = Arc::new(Mutex::new(Vec::new()));
     let mut future = Box::pin(super::state::with_connection_override(
         handle,
+        None,
         OverrideVisibleAcrossPolls {
             polled_threads: polled_threads.clone(),
             stage: 0,
@@ -289,6 +290,16 @@ fn database_builder_records_an_acquire_timeout_override() {
         configured_debug.contains("acquire_timeout: Some("),
         "the acquire_timeout knob must reach the pool options: {configured_debug}"
     );
+}
+
+#[test]
+fn database_builder_debug_masks_the_url_credentials() {
+    let password = format!("pw{}", std::process::id());
+    let builder = Database::builder().url(format!("postgres://app:{password}@db:5432/app"));
+    let debug = format!("{builder:?}");
+
+    assert!(!debug.contains(&password), "{debug}");
+    assert!(debug.contains("postgres://***@db:5432/app"), "{debug}");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

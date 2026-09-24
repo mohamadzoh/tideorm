@@ -194,27 +194,40 @@ fn test_frame_type_sql() {
 
 #[test]
 fn test_window_function_type_row_number() {
-    assert_eq!(WindowFunctionType::RowNumber.as_sql(), "ROW_NUMBER()");
+    assert_eq!(
+        WindowFunctionType::RowNumber.as_sql_for_db(DatabaseType::Postgres),
+        "ROW_NUMBER()"
+    );
 }
 
 #[test]
 fn test_window_function_type_rank() {
-    assert_eq!(WindowFunctionType::Rank.as_sql(), "RANK()");
+    assert_eq!(
+        WindowFunctionType::Rank.as_sql_for_db(DatabaseType::Postgres),
+        "RANK()"
+    );
 }
 
 #[test]
 fn test_window_function_type_dense_rank() {
-    assert_eq!(WindowFunctionType::DenseRank.as_sql(), "DENSE_RANK()");
+    assert_eq!(
+        WindowFunctionType::DenseRank.as_sql_for_db(DatabaseType::Postgres),
+        "DENSE_RANK()"
+    );
 }
 
 #[test]
 fn test_window_function_type_ntile() {
-    assert_eq!(WindowFunctionType::Ntile(4).as_sql(), "NTILE(4)");
+    assert_eq!(
+        WindowFunctionType::Ntile(4).as_sql_for_db(DatabaseType::Postgres),
+        "NTILE(4)"
+    );
 }
 
 #[test]
 fn test_window_function_type_lag() {
-    let sql = WindowFunctionType::Lag("price".to_string(), Some(1), Some("0".to_string())).as_sql();
+    let sql = WindowFunctionType::Lag("price".to_string(), Some(1), Some("0".to_string()))
+        .as_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("LAG"));
     assert!(sql.contains("\"price\""));
     assert!(sql.contains("1"));
@@ -222,7 +235,8 @@ fn test_window_function_type_lag() {
 
 #[test]
 fn test_window_function_type_lead() {
-    let sql = WindowFunctionType::Lead("date".to_string(), Some(1), None).as_sql();
+    let sql = WindowFunctionType::Lead("date".to_string(), Some(1), None)
+        .as_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("LEAD"));
     assert!(sql.contains("\"date\""));
 }
@@ -230,7 +244,7 @@ fn test_window_function_type_lead() {
 #[test]
 fn test_window_function_type_first_value() {
     assert_eq!(
-        WindowFunctionType::FirstValue("amount".to_string()).as_sql(),
+        WindowFunctionType::FirstValue("amount".to_string()).as_sql_for_db(DatabaseType::Postgres),
         "FIRST_VALUE(\"amount\")"
     );
 }
@@ -238,7 +252,7 @@ fn test_window_function_type_first_value() {
 #[test]
 fn test_window_function_type_last_value() {
     assert_eq!(
-        WindowFunctionType::LastValue("total".to_string()).as_sql(),
+        WindowFunctionType::LastValue("total".to_string()).as_sql_for_db(DatabaseType::Postgres),
         "LAST_VALUE(\"total\")"
     );
 }
@@ -246,23 +260,27 @@ fn test_window_function_type_last_value() {
 #[test]
 fn test_window_function_type_sum() {
     assert_eq!(
-        WindowFunctionType::Sum("amount".to_string()).as_sql(),
+        WindowFunctionType::Sum("amount".to_string()).as_sql_for_db(DatabaseType::Postgres),
         "SUM(\"amount\")"
     );
 }
 
 #[test]
 fn test_window_function_type_count() {
-    assert_eq!(WindowFunctionType::Count(None).as_sql(), "COUNT(*)");
     assert_eq!(
-        WindowFunctionType::Count(Some("id".to_string())).as_sql(),
+        WindowFunctionType::Count(None).as_sql_for_db(DatabaseType::Postgres),
+        "COUNT(*)"
+    );
+    assert_eq!(
+        WindowFunctionType::Count(Some("id".to_string())).as_sql_for_db(DatabaseType::Postgres),
         "COUNT(\"id\")"
     );
 }
 
 #[test]
 fn test_window_function_basic() {
-    let sql = WindowFunction::new(WindowFunctionType::RowNumber, "row_num").to_sql();
+    let sql = WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
+        .to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("ROW_NUMBER()"));
     assert!(sql.contains("OVER"));
     assert!(sql.contains("AS \"row_num\""));
@@ -272,7 +290,7 @@ fn test_window_function_basic() {
 fn test_window_function_with_partition() {
     let sql = WindowFunction::new(WindowFunctionType::RowNumber, "row_num")
         .partition_by("category")
-        .to_sql();
+        .to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("PARTITION BY \"category\""));
 }
 
@@ -280,7 +298,7 @@ fn test_window_function_with_partition() {
 fn test_window_function_with_order() {
     let sql = WindowFunction::new(WindowFunctionType::Rank, "rank")
         .order_by("score", Order::Desc)
-        .to_sql();
+        .to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("ORDER BY \"score\" DESC"));
 }
 
@@ -296,7 +314,7 @@ fn test_window_function_with_frame() {
         FrameBound::UnboundedPreceding,
         FrameBound::CurrentRow,
     )
-    .to_sql();
+    .to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
 }
 
@@ -310,7 +328,7 @@ fn test_window_function_full() {
             FrameBound::UnboundedPreceding,
             FrameBound::CurrentRow,
         )
-        .to_sql();
+        .to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("SUM(\"sales\")"));
     assert!(sql.contains("PARTITION BY \"region\""));
     assert!(sql.contains("ORDER BY \"month\" ASC"));
@@ -324,7 +342,7 @@ fn test_cte_basic() {
         "active_users",
         "SELECT * FROM users WHERE active = true".to_string(),
     );
-    let sql = cte.to_sql();
+    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("\"active_users\""));
     assert!(sql.contains("AS ("));
     assert!(sql.contains("active = true"));
@@ -337,7 +355,7 @@ fn test_cte_with_columns() {
         vec!["user_id", "total", "count"],
         "SELECT user_id, SUM(amount), COUNT(*) FROM orders GROUP BY user_id".to_string(),
     );
-    let sql = cte.to_sql();
+    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.contains("\"user_stats\""));
     assert!(sql.contains("(\"user_id\", \"total\", \"count\")"));
     assert!(sql.contains("GROUP BY"));
@@ -352,6 +370,84 @@ fn test_cte_recursive() {
 #[test]
 fn test_cte_name_quoting() {
     let cte = CTE::new("my_cte", "SELECT 1".to_string());
-    let sql = cte.to_sql();
+    let sql = cte.to_sql_for_db(DatabaseType::Postgres);
     assert!(sql.starts_with("\"my_cte\""));
+}
+
+#[test]
+fn a_cte_body_keeps_its_ordering_and_limit() {
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .with_query(
+            "top_users",
+            QueryBuilder::<QueryTestUser>::new()
+                .order_desc("id")
+                .limit(10)
+                .offset(20),
+        )
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(
+        sql.contains("ORDER BY \"id\" DESC LIMIT 10 OFFSET $1)"),
+        "sql: {sql}"
+    );
+    assert_eq!(params, vec![Value::BigInt(Some(20))]);
+}
+
+#[test]
+fn a_union_operand_keeps_its_ordering_and_limit() {
+    let operand = || {
+        QueryBuilder::<QueryTestUser>::new()
+            .order_desc("id")
+            .limit(10)
+    };
+
+    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
+        .union(operand())
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+    assert!(
+        sql.contains("UNION (SELECT") && sql.ends_with("DESC LIMIT 10)"),
+        "sql: {sql}"
+    );
+
+    // SQLite takes no parenthesized operand, so a limited one is read through
+    // a derived table. (An operand renders for the connected backend, and
+    // this test has none, so the operand is asked for SQLite directly.)
+    let (sql, _) = operand().build_compound_operand_sql_for_db(DatabaseType::SQLite);
+    assert!(
+        sql.starts_with("SELECT * FROM (SELECT")
+            && sql.ends_with("DESC LIMIT 10) AS \"tideorm_union_operand\""),
+        "sql: {sql}"
+    );
+}
+
+#[test]
+fn a_lag_default_is_chosen_by_a_case_on_the_mysql_family() {
+    let window = WindowFunction::new(
+        WindowFunctionType::Lag("amount".to_string(), Some(1), Some("0".to_string())),
+        "prev",
+    )
+    .partition_by("region")
+    .order_by("id", Order::Asc);
+
+    assert_eq!(
+        window.to_sql_for_db(DatabaseType::Postgres),
+        r#"LAG("amount", 1, 0) OVER (PARTITION BY "region" ORDER BY "id" ASC) AS "prev""#
+    );
+    // MariaDB's LAG takes no default.
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(
+            window.to_sql_for_db(db_type),
+            "CASE WHEN LAG(1, 1) OVER (PARTITION BY `region` ORDER BY `id` ASC) IS NULL THEN 0 \
+             ELSE LAG(`amount`, 1) OVER (PARTITION BY `region` ORDER BY `id` ASC) END AS `prev`"
+        );
+    }
+
+    let lead = WindowFunction::new(
+        WindowFunctionType::Lead("amount".to_string(), Some(2), None),
+        "next",
+    );
+    assert_eq!(
+        lead.to_sql_for_db(DatabaseType::MariaDB),
+        "LEAD(`amount`, 2) OVER () AS `next`"
+    );
 }

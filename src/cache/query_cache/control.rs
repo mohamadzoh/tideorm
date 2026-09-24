@@ -1,45 +1,11 @@
-use super::QueryCache;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::{CacheConfig, CacheStrategy, QueryCache};
 use crate::cache::GLOBAL_QUERY_CACHE;
 
-use super::{CacheConfig, CacheStats, CacheStrategy};
-
 impl QueryCache {
-    pub(super) fn snapshot_stats(&self) -> CacheStats {
-        CacheStats {
-            hits: self.hits.load(std::sync::atomic::Ordering::Relaxed),
-            misses: self.misses.load(std::sync::atomic::Ordering::Relaxed),
-            entries: self.entries.load(std::sync::atomic::Ordering::Relaxed),
-            size_bytes: self.size_bytes.load(std::sync::atomic::Ordering::Relaxed),
-            evictions: self.evictions.load(std::sync::atomic::Ordering::Relaxed),
-            invalidations: self
-                .invalidations
-                .load(std::sync::atomic::Ordering::Relaxed),
-        }
-    }
-
-    pub(super) fn record_entries_len(&self, entries: usize) {
-        self.entries
-            .store(entries, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(super) fn add_size_bytes(&self, bytes: usize) {
-        self.size_bytes
-            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(super) fn subtract_size_bytes(&self, bytes: usize) {
-        self.size_bytes
-            .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(super) fn overwrite_size_bytes(&self, bytes: usize) {
-        self.size_bytes
-            .store(bytes, std::sync::atomic::Ordering::Relaxed);
-    }
-
     pub(super) fn next_order(&self) -> u64 {
-        self.order_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.order_counter.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Get or initialize the global query cache
@@ -47,15 +13,21 @@ impl QueryCache {
         GLOBAL_QUERY_CACHE.get_or_init(QueryCache::new)
     }
 
+    /// Whether this is the instance model writes invalidate, whose
+    /// invalidations an open transaction replays once it commits.
+    pub(super) fn is_global(&self) -> bool {
+        GLOBAL_QUERY_CACHE
+            .get()
+            .is_some_and(|global| std::ptr::eq(self, global))
+    }
+
     /// Initialize the global cache (call at startup)
     ///
     /// Any earlier `global()` call already installed a default instance, and the
     /// `OnceLock` behind it cannot be replaced. Because macro-generated model
     /// writes reach for `QueryCache::global()`, a single model operation before
-    /// startup is enough to install that default. Rather than silently dropping
-    /// the requested configuration — which left the cache looking configured
-    /// while staying disabled forever — it is applied to the live cache, so a
-    /// late `init_global` still takes effect.
+    /// startup is enough to install that default, so the requested configuration
+    /// is applied to the live cache instead of being dropped.
     ///
     /// Already-cached entries are kept; see [`QueryCache::apply_config`].
     pub fn init_global(config: CacheConfig) -> &'static QueryCache {
@@ -71,27 +43,48 @@ impl QueryCache {
     /// Enable the cache
     pub fn enable(&self) -> &Self {
         self.config.write().enabled = true;
-        self.enabled
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.enabled.store(true, Ordering::Release);
         self
     }
 
     /// Disable the cache
     pub fn disable(&self) -> &Self {
         self.config.write().enabled = false;
-        self.enabled
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.enabled.store(false, Ordering::Release);
         self
     }
 
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(std::sync::atomic::Ordering::Acquire)
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    /// Warn, once per process, when a query asks for caching while the cache
+    /// is off. The cache starts disabled, so `.cache(ttl)` would otherwise do
+    /// nothing without a word.
+    pub(crate) fn warn_once_if_disabled(&self) {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !self.is_enabled() && !WARNED.swap(true, Ordering::Relaxed) {
+            crate::tide_warn!(
+                "a query asked for .cache(..), but the query cache is disabled, so nothing is cached; enable it with QueryCache::global().enable() or QueryCache::init_global(..)"
+            );
+        }
     }
 
     /// Set the maximum number of cache entries
     pub fn set_max_entries(&self, max: usize) -> &Self {
         self.config.write().max_entries = max;
+        self
+    }
+
+    /// Set an upper bound on the total serialized size of cached data
+    ///
+    /// Entries are evicted with the configured strategy until a new payload fits
+    /// inside the budget, and a payload larger than the whole budget is never
+    /// cached. Pass `0` (the default) for no byte budget, in which case only
+    /// `max_entries` bounds the cache.
+    pub fn set_max_size_bytes(&self, max: usize) -> &Self {
+        self.config.write().max_size_bytes = max;
         self
     }
 
@@ -107,12 +100,6 @@ impl QueryCache {
         self
     }
 
-    /// Set the key prefix
-    pub fn set_key_prefix(&self, prefix: &str) -> &Self {
-        self.config.write().key_prefix = Some(prefix.to_string());
-        self
-    }
-
     /// Set whether to cache empty results
     pub fn set_cache_empty_results(&self, cache_empty: bool) -> &Self {
         self.config.write().cache_empty_results = cache_empty;
@@ -120,42 +107,7 @@ impl QueryCache {
     }
 
     /// Get current configuration
-    pub fn config(&self) -> Option<CacheConfig> {
-        Some(self.config.read().clone())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn init_global_applies_config_after_a_default_cache_was_installed() {
-        // Reaching for the global cache is what a macro-generated model write
-        // does; it installs the disabled default that `init_global` used to be
-        // unable to replace.
-        let previous = QueryCache::global()
-            .config()
-            .expect("the global cache always reports a configuration");
-
-        let installed = QueryCache::init_global(CacheConfig {
-            enabled: true,
-            max_entries: 17,
-            key_prefix: Some("late-init".to_string()),
-            ..CacheConfig::default()
-        });
-
-        assert!(
-            installed.is_enabled(),
-            "a late init_global must apply instead of being silently dropped"
-        );
-        let config = installed
-            .config()
-            .expect("the global cache always reports a configuration");
-        assert_eq!(config.max_entries, 17);
-        assert_eq!(config.key_prefix.as_deref(), Some("late-init"));
-
-        // Leave the process-wide cache as it was found.
-        QueryCache::init_global(previous);
+    pub fn config(&self) -> CacheConfig {
+        self.config.read().clone()
     }
 }

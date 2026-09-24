@@ -2,12 +2,7 @@ use super::*;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 
-#[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
-    pub(crate) fn build_sea_condition(&self) -> Condition {
-        self.build_sea_condition_for_db(self.db_type_for_sql())
-    }
-
     pub(crate) fn build_sea_condition_for_db(&self, db_type: DatabaseType) -> Condition {
         let mut condition = Condition::all();
 
@@ -91,29 +86,23 @@ impl<M: Model> QueryBuilder<M> {
         format!("'{}'", rendered)
     }
 
+    /// Bind `value` with the type of `column` when it is one of `M`'s columns,
+    /// or a table-qualified column of a model registered with
+    /// [`bind_columns_of`](Self::bind_columns_of).
+    pub(crate) fn column_value(&self, column: &str, value: &serde_json::Value) -> Value {
+        let column_type = crate::internal::column_type_of::<M>(column).or_else(|| {
+            self.joined_column_types
+                .iter()
+                .find_map(|column_type_of| column_type_of(column))
+        });
+        crate::internal::json_to_column_value(value, column_type.as_ref())
+    }
+
     pub(crate) fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
         values
             .iter()
             .map(crate::internal::json_to_db_value)
             .collect()
-    }
-
-    pub(crate) fn json_text_value(text: String) -> Value {
-        Value::String(Some(text))
-    }
-
-    pub(crate) fn json_array_parameter(values: &[serde_json::Value]) -> Value {
-        Self::json_text_value(serde_json::to_string(values).unwrap())
-    }
-
-    pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
-        Self::json_text_value(serde_json::to_string(value).unwrap())
-    }
-
-    pub(crate) fn placeholder_list(count: usize) -> String {
-        std::iter::repeat_n("?", count)
-            .collect::<Vec<_>>()
-            .join(", ")
     }
 
     pub(crate) fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
@@ -132,18 +121,16 @@ impl<M: Model> QueryBuilder<M> {
         // field-name map, so rendering has to agree or a name that validates
         // would be emitted as a column that does not exist.
         match M::canonical_column_parts(column) {
-            (Some(table), field) => {
-                if db_sql::validate_identifier("table", table).is_ok()
-                    && db_sql::validate_identifier("column", field).is_ok()
-                {
-                    return Expr::col((Alias::new(table), Alias::new(field)));
-                }
+            (Some(table), field)
+                if db_sql::is_safe_identifier_segment(table)
+                    && db_sql::is_safe_identifier_segment(field) =>
+            {
+                return Expr::col((Alias::new(table), Alias::new(field)));
             }
-            (None, field) => {
-                if db_sql::validate_identifier("column", field).is_ok() {
-                    return Expr::col(Alias::new(field));
-                }
+            (None, field) if db_sql::is_safe_identifier_segment(field) => {
+                return Expr::col(Alias::new(field));
             }
+            _ => {}
         }
 
         Expr::cust(self.format_column_for_db(db_type, column))
@@ -162,26 +149,19 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Option<ConditionSpec<'a>> {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => Some(ConditionSpec::Raw {
-                column: &condition.column,
                 raw_sql,
+                values: &[],
             }),
-            // Only the string renderers reach this arm: `build_condition_expression`
-            // intercepts the values-carrying variant first and emits it through
-            // `Expr::cust_with_values`. A `ConditionSpec` borrows its SQL, so the
-            // preview rendering is what can be handed back here — and it is also
-            // what the preview renderer wants, since placeholders it cannot bind
-            // would be meaningless in a UNION/CTE operand string.
-            (Operator::Raw, ConditionValue::RawExprWithValues { preview_sql, .. }) => {
+            (Operator::Raw, ConditionValue::RawExprWithValues { sql, values }) => {
                 Some(ConditionSpec::Raw {
-                    column: &condition.column,
-                    raw_sql: preview_sql,
+                    raw_sql: sql,
+                    values,
                 })
             }
             // `col = NULL` and `col != NULL` are UNKNOWN for every row, so binding
             // the JSON null as a parameter would silently match nothing with no
-            // error to explain it. Both renderers go through `condition_spec`, so
-            // rewriting here makes every path emit the null check `where_null()`
-            // and `where_not_null()` build.
+            // error to explain it. Rewriting here makes both emit the null check
+            // `where_null()` and `where_not_null()` build.
             (Operator::Eq, ConditionValue::Single(serde_json::Value::Null)) => {
                 Some(ConditionSpec::NullCheck { negated: false })
             }
@@ -266,73 +246,45 @@ impl<M: Model> QueryBuilder<M> {
                     value,
                 })
             }
-            (Operator::JsonKeyExists, ConditionValue::Single(serde_json::Value::String(value))) => {
-                Some(ConditionSpec::JsonString {
-                    operator: JsonStringOperator::KeyPresent,
-                    value,
-                })
-            }
             (
-                Operator::JsonKeyNotExists,
-                ConditionValue::Single(serde_json::Value::String(value)),
-            ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::KeyAbsent,
-                value,
+                Operator::JsonKeyExists
+                | Operator::JsonKeyNotExists
+                | Operator::JsonPathExists
+                | Operator::JsonPathNotExists,
+                ConditionValue::Single(serde_json::Value::String(target)),
+            ) => Some(ConditionSpec::JsonExists {
+                existence: match condition.operator {
+                    Operator::JsonKeyExists | Operator::JsonKeyNotExists => JsonExistence::Key,
+                    _ => JsonExistence::Path,
+                },
+                negated: matches!(
+                    condition.operator,
+                    Operator::JsonKeyNotExists | Operator::JsonPathNotExists
+                ),
+                target,
             }),
-            (
-                Operator::JsonPathExists,
-                ConditionValue::Single(serde_json::Value::String(value)),
-            ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::PathPresent,
-                value,
+            (Operator::ArrayContains, ConditionValue::List(values)) => Some(ConditionSpec::Array {
+                operator: ArrayOperator::Contains,
+                values,
             }),
-            (
-                Operator::JsonPathNotExists,
-                ConditionValue::Single(serde_json::Value::String(value)),
-            ) => Some(ConditionSpec::JsonString {
-                operator: JsonStringOperator::PathAbsent,
-                value,
-            }),
-            (Operator::ArrayContains, ConditionValue::List(values))
-            | (Operator::ArrayContainsAll, ConditionValue::List(values)) => {
-                Some(ConditionSpec::Array {
-                    operator: ArrayOperator::Contains,
-                    values,
-                })
-            }
             (Operator::ArrayContainedBy, ConditionValue::List(values)) => {
                 Some(ConditionSpec::Array {
                     operator: ArrayOperator::ContainedBy,
                     values,
                 })
             }
-            (Operator::ArrayOverlaps, ConditionValue::List(values))
-            | (Operator::ArrayContainsAny, ConditionValue::List(values)) => {
-                Some(ConditionSpec::Array {
-                    operator: ArrayOperator::Overlaps,
-                    values,
-                })
-            }
-            (Operator::SubqueryIn, ConditionValue::Subquery(query_sql)) => {
-                Some(ConditionSpec::Subquery {
-                    negated: false,
-                    query_sql,
-                })
-            }
-            (Operator::SubqueryNotIn, ConditionValue::Subquery(query_sql)) => {
-                Some(ConditionSpec::Subquery {
-                    negated: true,
-                    query_sql,
-                })
-            }
+            (Operator::ArrayOverlaps, ConditionValue::List(values)) => Some(ConditionSpec::Array {
+                operator: ArrayOperator::Overlaps,
+                values,
+            }),
             _ => None,
         }
     }
 
     /// Reject any condition whose operator/value pairing has no SQL rendering.
     ///
-    /// `condition_spec` returns `None` for an unrepresentable pair and both WHERE
-    /// renderers skip a `None`, so such a condition would silently disappear from
+    /// `condition_spec` returns `None` for an unrepresentable pair and the WHERE
+    /// renderer skips a `None`, so such a condition would silently disappear from
     /// the rendered predicate — widening a targeted mutation into a full-table
     /// one. Surfacing it as `invalid_query` at render time keeps an unrenderable
     /// filter from ever becoming a missing filter.

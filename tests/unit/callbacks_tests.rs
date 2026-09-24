@@ -2,6 +2,10 @@ use super::*;
 use crate::validation::{Validate, ValidationErrors};
 use std::cell::RefCell;
 
+// The tests below call the dispatchers with the same call shapes, in the same
+// order, as the code the model derive emits for `create`, `update` and
+// `delete`: `(&mut model).run_*()` before the write, `(&model).run_*()` after.
+
 struct PlainModel;
 
 struct HookedModel {
@@ -24,53 +28,6 @@ impl Validate for HookedModel {
     fn validate(&self) -> std::result::Result<(), ValidationErrors> {
         self.events.borrow_mut().push("validate");
         Ok(())
-    }
-}
-
-struct InvalidHookedModel {
-    events: RefCell<Vec<&'static str>>,
-}
-
-impl InvalidHookedModel {
-    fn new() -> Self {
-        Self {
-            events: RefCell::new(Vec::new()),
-        }
-    }
-
-    fn events(&self) -> Vec<&'static str> {
-        self.events.borrow().clone()
-    }
-}
-
-impl Callbacks for InvalidHookedModel {
-    fn before_validation(&mut self) -> Result<()> {
-        self.events.borrow_mut().push("before_validation");
-        Ok(())
-    }
-
-    fn after_validation(&self) -> Result<()> {
-        self.events.borrow_mut().push("after_validation");
-        Ok(())
-    }
-
-    fn before_save(&mut self) -> Result<()> {
-        self.events.borrow_mut().push("before_save");
-        Ok(())
-    }
-
-    fn before_create(&mut self) -> Result<()> {
-        self.events.borrow_mut().push("before_create");
-        Ok(())
-    }
-}
-
-impl Validate for InvalidHookedModel {
-    fn validate(&self) -> std::result::Result<(), ValidationErrors> {
-        self.events.borrow_mut().push("validate");
-        let mut errors = ValidationErrors::new();
-        errors.add("name", "is invalid");
-        Err(errors)
     }
 }
 
@@ -130,9 +87,12 @@ impl Callbacks for HookedModel {
 #[allow(clippy::unnecessary_mut_passed)]
 fn callback_dispatch_is_noop_for_models_without_callbacks() {
     let mut model = PlainModel;
-    assert!((&mut &mut model).run_before_create().is_ok());
+    assert!((&mut model).run_before_validation().is_ok());
+    assert!((&model).run_after_validation().is_ok());
+    assert!((&mut model).run_before_save().is_ok());
+    assert!((&mut model).run_before_create_only().is_ok());
     assert!((&model).run_after_create().is_ok());
-    assert!((&mut &mut model).run_before_update().is_ok());
+    assert!((&mut model).run_before_update_only().is_ok());
     assert!((&model).run_after_update().is_ok());
     assert!((&model).run_before_delete().is_ok());
     assert!((&model).run_after_delete().is_ok());
@@ -141,7 +101,11 @@ fn callback_dispatch_is_noop_for_models_without_callbacks() {
 #[test]
 fn callback_dispatch_runs_create_chain_in_order() {
     let mut model = HookedModel::new();
-    (&mut model).run_before_create().unwrap();
+    (&mut model).run_before_validation().unwrap();
+    Validate::validate(&model).unwrap();
+    (&model).run_after_validation().unwrap();
+    (&mut model).run_before_save().unwrap();
+    (&mut model).run_before_create_only().unwrap();
     (&model).run_after_create().unwrap();
 
     assert_eq!(
@@ -161,7 +125,11 @@ fn callback_dispatch_runs_create_chain_in_order() {
 #[test]
 fn callback_dispatch_runs_update_and_delete_chains() {
     let mut model = HookedModel::new();
-    (&mut model).run_before_update().unwrap();
+    (&mut model).run_before_validation().unwrap();
+    Validate::validate(&model).unwrap();
+    (&model).run_after_validation().unwrap();
+    (&mut model).run_before_save().unwrap();
+    (&mut model).run_before_update_only().unwrap();
     (&model).run_after_update().unwrap();
     (&model).run_before_delete().unwrap();
     (&model).run_after_delete().unwrap();
@@ -182,12 +150,61 @@ fn callback_dispatch_runs_update_and_delete_chains() {
     );
 }
 
-#[test]
-fn callback_dispatch_stops_create_chain_when_validation_fails() {
-    let mut model = InvalidHookedModel::new();
+mod derived_model_dispatch {
+    use crate::callbacks::Callbacks;
+    use crate::model::Model;
+    use std::sync::Mutex;
 
-    let err = (&mut model).run_before_create().unwrap_err();
+    static EVENTS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-    assert!(matches!(err, crate::Error::Validation { .. }));
-    assert_eq!(model.events(), vec!["before_validation", "validate"]);
+    fn record(event: &'static str) -> crate::Result<()> {
+        EVENTS.lock().unwrap().push(event);
+        Ok(())
+    }
+
+    #[tideorm::model(table = "callback_dispatch_users")]
+    struct RejectedUser {
+        #[tideorm(primary_key, auto_increment)]
+        id: i64,
+        #[validate(min_length = 3)]
+        name: String,
+    }
+
+    impl Callbacks for RejectedUser {
+        fn before_validation(&mut self) -> crate::Result<()> {
+            record("before_validation")
+        }
+
+        fn after_validation(&self) -> crate::Result<()> {
+            record("after_validation")
+        }
+
+        fn before_save(&mut self) -> crate::Result<()> {
+            record("before_save")
+        }
+
+        fn before_create(&mut self) -> crate::Result<()> {
+            record("before_create")
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_validation_stops_create_before_any_later_hook() {
+        EVENTS.lock().unwrap().clear();
+
+        // Validation fails before `create` asks for a connection, so no
+        // database is needed.
+        let error = RejectedUser::create(RejectedUser {
+            id: 0,
+            name: "x".to_string(),
+        })
+        .await
+        .expect_err("a too-short name must fail validation");
+
+        assert!(
+            matches!(error, crate::Error::Validation { .. }),
+            "{error:?}"
+        );
+        assert_eq!(*EVENTS.lock().unwrap(), vec!["before_validation"]);
+    }
 }

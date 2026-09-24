@@ -1,18 +1,17 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::GLOBAL_STMT_CACHE;
 
-/// A cached prepared statement
+/// A tracked SQL statement and its execution statistics
 #[derive(Debug, Clone)]
 struct PreparedStatement {
     /// The SQL query template (with placeholders)
     sql: String,
-    /// When this statement was prepared
+    /// When this statement was first registered
     prepared_at: Instant,
     /// When this statement was last used
     last_used: Instant,
@@ -45,9 +44,9 @@ impl PreparedStatement {
 /// Statistics for prepared statement cache
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PreparedStatementStats {
-    /// Total number of cache hits (statement reused)
+    /// Total number of cache hits (statement seen before)
     pub hits: u64,
-    /// Total number of cache misses (new statement prepared)
+    /// Total number of cache misses (statement seen for the first time)
     pub misses: u64,
     /// Current number of cached statements
     pub cached_count: usize,
@@ -76,7 +75,8 @@ pub struct PreparedStatementConfig {
     pub enabled: bool,
     /// Maximum number of cached statements
     pub max_statements: usize,
-    /// Maximum age of cached statements (they'll be re-prepared after this)
+    /// Maximum age of a cached statement; an older one is dropped and
+    /// registered afresh on its next use
     pub max_age: Duration,
 }
 
@@ -107,7 +107,7 @@ impl Default for PreparedStatementConfig {
 pub struct PreparedStatementCache {
     /// Cache configuration
     config: RwLock<PreparedStatementConfig>,
-    /// Fast path for checking whether caching is enabled.
+    /// `config.enabled`, readable on every query without taking the lock.
     enabled: AtomicBool,
     /// Cached statements keyed by SQL hash
     statements: RwLock<HashMap<u64, PreparedStatement>>,
@@ -115,8 +115,6 @@ pub struct PreparedStatementCache {
     hits: AtomicU64,
     /// Cache miss counter.
     misses: AtomicU64,
-    /// Current number of cached statements.
-    cached_count: AtomicUsize,
     /// Total number of statement executions.
     total_executions: AtomicU64,
     /// Number of evictions.
@@ -126,40 +124,19 @@ pub struct PreparedStatementCache {
 impl PreparedStatementCache {
     /// Create a new prepared statement cache
     pub fn new() -> Self {
-        Self {
-            config: RwLock::new(PreparedStatementConfig::default()),
-            enabled: AtomicBool::new(false),
-            statements: RwLock::new(HashMap::new()),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            cached_count: AtomicUsize::new(0),
-            total_executions: AtomicU64::new(0),
-            evictions: AtomicU64::new(0),
-        }
+        Self::with_config(PreparedStatementConfig::default())
     }
 
     /// Create with custom configuration
     pub fn with_config(config: PreparedStatementConfig) -> Self {
-        let enabled = config.enabled;
         Self {
+            enabled: AtomicBool::new(config.enabled),
             config: RwLock::new(config),
-            enabled: AtomicBool::new(enabled),
             statements: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
-            cached_count: AtomicUsize::new(0),
             total_executions: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
-        }
-    }
-
-    fn snapshot_stats(&self) -> PreparedStatementStats {
-        PreparedStatementStats {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
-            cached_count: self.cached_count.load(Ordering::Relaxed),
-            total_executions: self.total_executions.load(Ordering::Relaxed),
-            evictions: self.evictions.load(Ordering::Relaxed),
         }
     }
 
@@ -171,9 +148,8 @@ impl PreparedStatementCache {
     /// Initialize the global cache (call at startup)
     ///
     /// Any earlier `global()` call already installed a default instance, and the
-    /// `OnceLock` behind it cannot be replaced. Rather than silently dropping the
-    /// requested configuration, it is applied to the live cache, so a late
-    /// `init_global` still takes effect.
+    /// `OnceLock` behind it cannot be replaced, so the requested configuration is
+    /// applied to the live cache instead of being dropped.
     pub fn init_global(config: PreparedStatementConfig) -> &'static PreparedStatementCache {
         if GLOBAL_STMT_CACHE
             .set(PreparedStatementCache::with_config(config.clone()))
@@ -193,10 +169,6 @@ impl PreparedStatementCache {
         *self.config.write() = config;
         self.enabled.store(enabled, Ordering::Release);
     }
-
-    // =========================================================================
-    // CONFIGURATION
-    // =========================================================================
 
     /// Enable the cache
     pub fn enable(&self) -> &Self {
@@ -230,13 +202,9 @@ impl PreparedStatementCache {
     }
 
     /// Get current configuration
-    pub fn config(&self) -> Option<PreparedStatementConfig> {
-        Some(self.config.read().clone())
+    pub fn config(&self) -> PreparedStatementConfig {
+        self.config.read().clone()
     }
-
-    // =========================================================================
-    // CACHE OPERATIONS
-    // =========================================================================
 
     /// Hash a SQL query for cache lookup
     ///
@@ -245,14 +213,13 @@ impl PreparedStatementCache {
     /// slot as a match; never use the hash on its own to decide that two
     /// statements are the same.
     pub fn hash_sql(sql: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        sql.hash(&mut hasher);
-        hasher.finish()
+        super::hash_text(sql)
     }
 
-    /// Get or prepare a statement
-    /// Returns (sql, is_cached)
+    /// Register `sql` and report whether it was already cached
+    ///
+    /// Returns `(sql, is_cached)`, handing `sql` back unchanged: nothing is
+    /// prepared here, since the driver owns the real prepared handles.
     ///
     /// A slot occupied by a *different* statement that happens to hash the same
     /// counts as a miss: the colliding entry is replaced rather than handed back,
@@ -264,18 +231,13 @@ impl PreparedStatementCache {
 
         let hash = Self::hash_sql(sql);
         let max_age = self.config.read().max_age;
+        let is_current =
+            |stmt: &PreparedStatement| stmt.sql == sql && stmt.prepared_at.elapsed() < max_age;
 
         // Fast path: read-only cache hit without taking the write lock.
-        {
-            let statements = self.statements.read();
-            if let Some(stmt) = statements.get(&hash)
-                && stmt.sql == sql
-                && stmt.prepared_at.elapsed() < max_age
-            {
-                drop(statements);
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return (sql.to_string(), true);
-            }
+        if self.statements.read().get(&hash).is_some_and(is_current) {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return (sql.to_string(), true);
         }
 
         // Remove expired or colliding entries, and resolve races, under the
@@ -283,7 +245,7 @@ impl PreparedStatementCache {
         {
             let mut statements = self.statements.write();
             if let Some(stmt) = statements.get(&hash) {
-                if stmt.sql == sql && stmt.prepared_at.elapsed() < max_age {
+                if is_current(stmt) {
                     drop(statements);
                     self.hits.fetch_add(1, Ordering::Relaxed);
                     return (sql.to_string(), true);
@@ -293,9 +255,7 @@ impl PreparedStatementCache {
             }
         }
 
-        // Cache miss - prepare and cache
         self.cache_statement(sql);
-
         self.misses.fetch_add(1, Ordering::Relaxed);
 
         (sql.to_string(), false)
@@ -330,8 +290,6 @@ impl PreparedStatementCache {
         }
 
         statements.insert(hash, PreparedStatement::new(sql.to_string()));
-
-        self.cached_count.store(statements.len(), Ordering::Relaxed);
     }
 
     /// Record one execution of `sql`, registering the statement on first sight
@@ -359,11 +317,13 @@ impl PreparedStatementCache {
 
         let hash = Self::hash_sql(sql);
 
+        if let Some(stmt) = self
+            .statements
+            .write()
+            .get_mut(&hash)
+            .filter(|stmt| stmt.sql == sql)
         {
-            let mut statements = self.statements.write();
-            if let Some(stmt) = statements.get_mut(&hash).filter(|stmt| stmt.sql == sql) {
-                stmt.record_execution(execution_time_us);
-            }
+            stmt.record_execution(execution_time_us);
         }
 
         self.total_executions.fetch_add(1, Ordering::Relaxed);
@@ -381,30 +341,34 @@ impl PreparedStatementCache {
         }
 
         statements.remove(&hash);
-        self.cached_count.store(statements.len(), Ordering::Relaxed);
         true
     }
 
     /// Clear all cached statements
     pub fn clear(&self) {
-        let mut statements = self.statements.write();
-        statements.clear();
-        self.cached_count.store(0, Ordering::Relaxed);
+        self.statements.write().clear();
     }
 
     /// Get cache statistics
     pub fn stats(&self) -> PreparedStatementStats {
-        self.snapshot_stats()
+        PreparedStatementStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            cached_count: self.len(),
+            total_executions: self.total_executions.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+        }
     }
 
     /// Reset statistics
+    ///
+    /// The cached-statement count describes the cache itself and is
+    /// unaffected.
     pub fn reset_stats(&self) {
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
         self.total_executions.store(0, Ordering::Relaxed);
         self.evictions.store(0, Ordering::Relaxed);
-        self.cached_count
-            .store(self.statements.read().len(), Ordering::Relaxed);
     }
 
     /// Get the number of cached statements
@@ -468,85 +432,5 @@ pub struct CachedStatementInfo {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Plant `stored` in the slot `probe` hashes to, simulating a 64-bit
-    /// collision without having to find a real one.
-    fn plant_colliding_statement(cache: &PreparedStatementCache, probe: &str, stored: &str) {
-        let hash = PreparedStatementCache::hash_sql(probe);
-        cache
-            .statements
-            .write()
-            .insert(hash, PreparedStatement::new(stored.to_string()));
-    }
-
-    #[test]
-    fn get_or_prepare_never_returns_a_colliding_statements_sql() {
-        let cache = PreparedStatementCache::new();
-        cache.enable();
-        plant_colliding_statement(&cache, "SELECT 1", "DELETE FROM users");
-
-        let (sql, cached) = cache.get_or_prepare("SELECT 1");
-
-        assert_eq!(sql, "SELECT 1");
-        assert!(!cached, "a colliding slot must not count as a cache hit");
-        assert_eq!(cache.stats().hits, 0);
-
-        // The colliding entry was replaced, so the next lookup is a real hit.
-        let (sql, cached) = cache.get_or_prepare("SELECT 1");
-        assert_eq!(sql, "SELECT 1");
-        assert!(cached);
-    }
-
-    #[test]
-    fn record_execution_ignores_a_colliding_statement() {
-        let cache = PreparedStatementCache::new();
-        cache.enable();
-        plant_colliding_statement(&cache, "SELECT 1", "DELETE FROM users");
-
-        cache.record_execution("SELECT 1", 1_000);
-
-        let info = cache.cached_statements_info();
-        assert_eq!(info.len(), 1);
-        assert_eq!(info[0].execution_count, 0);
-    }
-
-    #[test]
-    fn invalidate_leaves_a_colliding_statement_alone() {
-        let cache = PreparedStatementCache::new();
-        cache.enable();
-        plant_colliding_statement(&cache, "SELECT 1", "DELETE FROM users");
-
-        assert!(!cache.invalidate("SELECT 1"));
-        assert_eq!(cache.len(), 1);
-    }
-
-    #[test]
-    fn init_global_applies_config_after_a_default_cache_was_installed() {
-        // Touching the global cache installs the disabled default that
-        // `init_global` used to be unable to replace.
-        let previous = PreparedStatementCache::global()
-            .config()
-            .expect("the global cache always reports a configuration");
-
-        let installed = PreparedStatementCache::init_global(PreparedStatementConfig {
-            enabled: true,
-            max_statements: 23,
-            max_age: Duration::from_secs(11),
-        });
-
-        assert!(
-            installed.is_enabled(),
-            "a late init_global must apply instead of being silently dropped"
-        );
-        let config = installed
-            .config()
-            .expect("the global cache always reports a configuration");
-        assert_eq!(config.max_statements, 23);
-        assert_eq!(config.max_age, Duration::from_secs(11));
-
-        // Leave the process-wide cache as it was found.
-        PreparedStatementCache::init_global(previous);
-    }
-}
+#[path = "../../tests/unit/cache_prepared_statements_tests.rs"]
+mod tests;

@@ -1,9 +1,10 @@
+use super::helpers::build_self_ref_tree_sql;
 use super::{
     BelongsTo, EagerLoadExt, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, MorphTo,
-    RelationConstraints, RelationExt, SelfRef, SelfRefMany, Value, build_self_ref_tree_sql,
+    RelationExt, SelfRef, SelfRefMany,
 };
 use crate::config::DatabaseType;
-use crate::model::Model as _;
+use crate::internal::Value;
 use serde_json::json;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

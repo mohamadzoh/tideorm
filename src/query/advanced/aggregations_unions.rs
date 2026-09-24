@@ -24,20 +24,79 @@ fn aggregate_value_as_f64(value: &serde_json::Value) -> Option<f64> {
         .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
 }
 
+/// One aggregate that [`QueryBuilder::aggregates`] computes.
+///
+/// The constructors take a column name or a typed column, as the
+/// single-aggregate terminals do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aggregate {
+    /// `COUNT(*)`: the number of rows.
+    Count,
+    /// `COUNT(DISTINCT column)`.
+    CountDistinct(String),
+    /// `SUM(column)`.
+    Sum(String),
+    /// `AVG(column)`.
+    Avg(String),
+    /// `MIN(column)`.
+    Min(String),
+    /// `MAX(column)`.
+    Max(String),
+}
+
+impl Aggregate {
+    /// `COUNT(*)`: the number of rows.
+    pub fn count() -> Self {
+        Self::Count
+    }
+
+    /// `COUNT(DISTINCT column)`.
+    pub fn count_distinct(column: impl crate::columns::IntoColumnName) -> Self {
+        Self::CountDistinct(column.column_name().to_string())
+    }
+
+    /// `SUM(column)`.
+    pub fn sum(column: impl crate::columns::IntoColumnName) -> Self {
+        Self::Sum(column.column_name().to_string())
+    }
+
+    /// `AVG(column)`.
+    pub fn avg(column: impl crate::columns::IntoColumnName) -> Self {
+        Self::Avg(column.column_name().to_string())
+    }
+
+    /// `MIN(column)`.
+    pub fn min(column: impl crate::columns::IntoColumnName) -> Self {
+        Self::Min(column.column_name().to_string())
+    }
+
+    /// `MAX(column)`.
+    pub fn max(column: impl crate::columns::IntoColumnName) -> Self {
+        Self::Max(column.column_name().to_string())
+    }
+
+    /// The select-list expression, with columns rendered by `format_column`.
+    /// The numeric ones are cast to a float, as the single terminals are.
+    fn render(&self, db_type: DatabaseType, format_column: &dyn Fn(&str) -> String) -> String {
+        let (function, column) = match self {
+            Self::Count => return "COUNT(*)".to_string(),
+            Self::CountDistinct(column) => {
+                return format!("COUNT(DISTINCT {})", format_column(column));
+            }
+            Self::Sum(column) => ("SUM", column),
+            Self::Avg(column) => ("AVG", column),
+            Self::Min(column) => ("MIN", column),
+            Self::Max(column) => ("MAX", column),
+        };
+        db_sql::cast_to_float(db_type, &format!("{}({})", function, format_column(column)))
+    }
+}
+
 impl<M: Model> QueryBuilder<M> {
     /// Add a GROUP BY clause
     #[must_use]
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.group_by.push(column.column_name().to_string());
-        self
-    }
-
-    /// Add multiple GROUP BY columns
-    #[must_use]
-    pub fn group_by_columns(mut self, columns: Vec<&str>) -> Self {
-        for col in columns {
-            self.group_by.push(col.to_string());
-        }
         self
     }
 
@@ -65,24 +124,6 @@ impl<M: Model> QueryBuilder<M> {
     #[must_use]
     pub fn having_count_gt(self, value: i64) -> Self {
         self.having_with_params("COUNT(*) > ?".to_string(), vec![value.into()])
-    }
-
-    /// Add HAVING with COUNT >= condition
-    #[must_use]
-    pub fn having_count_gte(self, value: i64) -> Self {
-        self.having_with_params("COUNT(*) >= ?".to_string(), vec![value.into()])
-    }
-
-    /// Add HAVING with COUNT < condition
-    #[must_use]
-    pub fn having_count_lt(self, value: i64) -> Self {
-        self.having_with_params("COUNT(*) < ?".to_string(), vec![value.into()])
-    }
-
-    /// Add HAVING with COUNT <= condition
-    #[must_use]
-    pub fn having_count_lte(self, value: i64) -> Self {
-        self.having_with_params("COUNT(*) <= ?".to_string(), vec![value.into()])
     }
 
     /// Add HAVING with SUM condition
@@ -155,19 +196,16 @@ impl<M: Model> QueryBuilder<M> {
     /// be materialised in a derived table before the aggregate function runs.
     ///
     /// `LIMIT`/`OFFSET` placed next to the aggregate would bound the single result
-    /// row instead of the rows being aggregated, and UNION/CTE bodies cannot be
-    /// expressed by a plain `FROM <table>` aggregate at all.
+    /// row instead of the rows being aggregated, `DISTINCT` has to collapse the
+    /// rows before they are counted, as `count()` does, and UNION/CTE bodies
+    /// cannot be expressed by a plain `FROM <table>` aggregate at all.
     fn aggregate_needs_derived_table(&self) -> bool {
         !self.unions.is_empty()
             || !self.ctes.is_empty()
             || self.limit_value.is_some()
             || self.offset_value.is_some()
-    }
-
-    /// True when the aggregate carries no modifier beyond WHERE and can therefore
-    /// run through the typed entity path unchanged.
-    fn aggregate_uses_typed_path(&self) -> bool {
-        self.joins.is_empty() && !self.aggregate_needs_derived_table()
+            || self.lock_for_update
+            || self.is_distinct()
     }
 
     /// Render a scalar aggregate through the same pipeline `count()` uses, so
@@ -180,14 +218,31 @@ impl<M: Model> QueryBuilder<M> {
         render_expression: impl Fn(&str) -> String,
     ) -> (String, Vec<Value>) {
         let quoted_alias = db_sql::quote_ident(db_type, alias);
+        self.build_projected_aggregate_sql(db_type, |format_column| {
+            vec![format!(
+                "{} AS {}",
+                render_expression(&format_column(column)),
+                quoted_alias
+            )]
+        })
+    }
 
+    /// `SELECT <projections>` over the query's rows, read from a derived table
+    /// when its modifiers shape those rows. `projections` is handed the column
+    /// formatter for whichever of the two forms is rendered.
+    fn build_projected_aggregate_sql(
+        &self,
+        db_type: DatabaseType,
+        projections: impl FnOnce(&dyn Fn(&str) -> String) -> Vec<String>,
+    ) -> (String, Vec<Value>) {
         if self.aggregate_needs_derived_table() {
             let (inner_sql, params) = self.build_select_sql_with_params_for_db(db_type);
+            let select_list =
+                projections(&|column| Self::format_derived_aggregate_column(db_type, column));
             return (
                 format!(
-                    "SELECT {} AS {} FROM ({}) AS {}",
-                    render_expression(&Self::format_derived_aggregate_column(db_type, column)),
-                    quoted_alias,
+                    "SELECT {} FROM ({}) AS {}",
+                    select_list.join(", "),
                     inner_sql,
                     db_sql::quote_ident(db_type, AGGREGATE_SUBQUERY_ALIAS)
                 ),
@@ -196,11 +251,8 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        let mut sql = format!(
-            "SELECT {} AS {} ",
-            render_expression(&Self::format_aggregate_column(db_type, column)),
-            quoted_alias
-        );
+        let select_list = projections(&|column| Self::format_aggregate_column(db_type, column));
+        let mut sql = format!("SELECT {} ", select_list.join(", "));
         self.append_from_and_join_sql(&mut sql, db_type);
         if !where_sql.is_empty() {
             sql.push_str(&format!("WHERE {}", where_sql));
@@ -209,36 +261,35 @@ impl<M: Model> QueryBuilder<M> {
         (sql.trim_end().to_string(), params)
     }
 
-    /// Execute a rendered scalar aggregate and return its single value, if any.
+    /// Run a scalar aggregate and return the value of its single `alias`
+    /// column; `None` when the backend returned no such column.
+    ///
+    /// The query is validated like every other terminal, so a condition that
+    /// cannot be rendered is rejected instead of silently widening the rows the
+    /// aggregate covers.
     async fn execute_scalar_aggregate(
         &self,
+        terminal: &str,
         db_type: DatabaseType,
         column: &str,
         alias: &str,
         render_expression: impl Fn(&str) -> String,
     ) -> Result<Option<serde_json::Value>> {
+        self.ensure_query_is_executable()?;
+        self.ensure_scalar_aggregate_is_representable(terminal)?;
+
         let (sql, params) =
             self.build_aggregate_sql_with_params_for_db(db_type, column, alias, render_expression);
-        let error_context = self.build_query_error_context(Some(&sql));
+        let rows = self.fetch_json(&sql, params).await?;
 
-        let rows = self
-            .current_db()?
-            .__raw_json_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context))?;
-
-        Ok(rows
-            .first()
-            .and_then(|row| row.get(alias))
-            .filter(|value| !value.is_null())
-            .cloned())
+        Ok(rows.first().and_then(|row| row.get(alias)).cloned())
     }
 
     /// Calculate SUM of a column
     ///
     /// Joins, CTEs, unions, and `limit()`/`offset()` are honoured; `group_by()`,
     /// `having()`, and `window()` are rejected because a grouped aggregate has no
-    /// single scalar answer.
+    /// single scalar answer. An aggregate over no rows is `0.0`.
     pub async fn sum(self, column: impl crate::columns::IntoColumnName) -> Result<f64> {
         self.aggregate_f64("SUM", column.column_name()).await
     }
@@ -268,184 +319,138 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Carries the same modifier rules as [`sum()`](Self::sum).
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
-        use crate::database::Connection;
+        let value = self
+            .execute_scalar_aggregate(
+                "count_distinct()",
+                self.db_type_for_sql(),
+                column.column_name(),
+                COUNT_RESULT_ALIAS,
+                |column_sql| format!("COUNT(DISTINCT {})", column_sql),
+            )
+            .await?;
 
-        #[derive(Debug, FromQueryResult)]
-        struct CountResult {
-            count_result: i64,
-        }
-
-        self.ensure_query_is_valid()?;
-        self.ensure_scalar_aggregate_is_representable("count_distinct()")?;
-
-        let column = column.column_name();
-        let db_type = self.db_type_for_sql();
-        let render_expression = |column_sql: &str| format!("COUNT(DISTINCT {})", column_sql);
-
-        if !self.aggregate_uses_typed_path() {
-            let value = self
-                .execute_scalar_aggregate(db_type, column, COUNT_RESULT_ALIAS, render_expression)
-                .await?;
-
-            let Some(value) = value else {
-                return Ok(0);
-            };
-
-            return if let Some(count) = value.as_u64() {
-                Ok(count)
-            } else if let Some(count) = value.as_i64() {
-                crate::internal::count_to_u64(count, "COUNT(DISTINCT ...)")
-            } else {
-                Ok(0)
-            };
-        }
-
-        let db = self.current_db()?;
-        let preview = self.build_sql_preview();
-        let error_context = self.build_query_error_context(Some(&preview));
-
-        let mut select = M::Entity::find();
-
-        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
-            let condition = self.build_sea_condition();
-            select = select.filter(condition);
-        }
-
-        let count_expr = Expr::cust(render_expression(&Self::format_aggregate_column(
-            db_type, column,
-        )));
-
-        let result: Option<CountResult> = match db.__get_connection()? {
-            crate::database::ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(
-                    select
-                        .select_only()
-                        .column_as(count_expr, COUNT_RESULT_ALIAS)
-                        .into_model::<CountResult>()
-                        .one(conn.connection()),
-                )
-                .await
-            }
-            crate::database::ConnectionRef::Transaction(tx) => {
-                crate::profiling::__profile_future(
-                    select
-                        .select_only()
-                        .column_as(count_expr, COUNT_RESULT_ALIAS)
-                        .into_model::<CountResult>()
-                        .one(tx.as_ref()),
-                )
-                .await
-            }
-        }
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(error_context))?;
-
-        result
-            .map(|r| crate::internal::count_to_u64(r.count_result, "COUNT(DISTINCT ...)"))
-            .transpose()
-            .map(|count| count.unwrap_or(0))
+        Self::decode_count_value(value.as_ref(), COUNT_RESULT_ALIAS)
     }
 
-    /// Internal helper for f64 aggregations
+    /// Compute several aggregates over the same rows in one statement.
+    ///
+    /// Returns one value per entry of `aggregates`, in the same order. Counts
+    /// are whole numbers, and a `SUM`, `AVG`, `MIN` or `MAX` over no rows is
+    /// `0.0`, as the single-aggregate terminals report it. Carries the same
+    /// modifier rules as [`sum()`](Self::sum), so unlike
+    /// [`count()`](Self::count), [`Aggregate::Count`] counts only the rows
+    /// `limit()` and `offset()` leave.
+    ///
+    /// ```ignore
+    /// let stats = Sale::query()
+    ///     .where_eq("region", "EU")
+    ///     .aggregates(&[Aggregate::count(), Aggregate::sum("amount"), Aggregate::max("amount")])
+    ///     .await?;
+    /// let (orders, revenue, largest) = (stats[0], stats[1], stats[2]);
+    /// ```
+    pub async fn aggregates(self, aggregates: &[Aggregate]) -> Result<Vec<f64>> {
+        if aggregates.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_query_is_executable()?;
+        self.ensure_scalar_aggregate_is_representable("aggregates()")?;
+
+        let db_type = self.db_type_for_sql();
+        let aliases: Vec<String> = (0..aggregates.len())
+            .map(|index| format!("aggregate_{index}"))
+            .collect();
+        let (sql, params) = self.build_projected_aggregate_sql(db_type, |format_column| {
+            aggregates
+                .iter()
+                .zip(&aliases)
+                .map(|(aggregate, alias)| {
+                    format!(
+                        "{} AS {}",
+                        aggregate.render(db_type, format_column),
+                        db_sql::quote_ident(db_type, alias)
+                    )
+                })
+                .collect()
+        });
+        let rows = self.fetch_json(&sql, params).await?;
+        let row = rows.first();
+
+        aggregates
+            .iter()
+            .zip(&aliases)
+            .map(|(aggregate, alias)| {
+                let value = row.and_then(|row| row.get(alias.as_str()));
+                match aggregate {
+                    Aggregate::Count | Aggregate::CountDistinct(_) => {
+                        Self::decode_count_value(value, alias).map(|count| count as f64)
+                    }
+                    _ => match value {
+                        None => Err(Error::query(format!(
+                            "Database returned no '{}' column for aggregates()",
+                            alias
+                        ))),
+                        Some(serde_json::Value::Null) => Ok(0.0),
+                        Some(value) => aggregate_value_as_f64(value).ok_or_else(|| {
+                            Error::query(format!(
+                                "Unable to decode the {:?} result as a number (got {})",
+                                aggregate, value
+                            ))
+                        }),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Run one of the `f64` aggregates.
     ///
     /// `function` is one of the four hardcoded aggregate names used by the public
     /// terminals above; it is never caller-controlled, so interpolating it is safe.
+    /// A NULL result — the aggregate of no rows — is `0.0`; a missing or
+    /// non-numeric one is a decode failure.
     async fn aggregate_f64(&self, function: &str, column: &str) -> Result<f64> {
-        use crate::database::Connection;
-
-        #[derive(Debug, FromQueryResult)]
-        struct AggResult {
-            agg_result: Option<f64>,
-        }
-
-        self.ensure_query_is_valid()?;
-        self.ensure_scalar_aggregate_is_representable(&format!(
-            "{}()",
-            function.to_ascii_lowercase()
-        ))?;
-
         let db_type = self.db_type_for_sql();
-        let render_expression = |column_sql: &str| {
-            db_sql::cast_to_float(db_type, &format!("{}({})", function, column_sql))
-        };
+        let value = self
+            .execute_scalar_aggregate(
+                &format!("{}()", function.to_ascii_lowercase()),
+                db_type,
+                column,
+                AGGREGATE_RESULT_ALIAS,
+                |column_sql| {
+                    db_sql::cast_to_float(db_type, &format!("{}({})", function, column_sql))
+                },
+            )
+            .await?;
 
-        if !self.aggregate_uses_typed_path() {
-            let value = self
-                .execute_scalar_aggregate(
-                    db_type,
-                    column,
-                    AGGREGATE_RESULT_ALIAS,
-                    render_expression,
-                )
-                .await?;
-            return Ok(value
-                .as_ref()
-                .and_then(aggregate_value_as_f64)
-                .unwrap_or(0.0));
+        match value {
+            None => Err(Error::query(format!(
+                "Database returned no '{}' column for {}()",
+                AGGREGATE_RESULT_ALIAS, function
+            ))),
+            Some(serde_json::Value::Null) => Ok(0.0),
+            Some(value) => aggregate_value_as_f64(&value).ok_or_else(|| {
+                Error::query(format!(
+                    "Unable to decode the {}() result as a number (got {})",
+                    function, value
+                ))
+            }),
         }
-
-        let db = self.current_db()?;
-        let preview = self.build_sql_preview();
-        let error_context = self.build_query_error_context(Some(&preview));
-
-        let mut select = M::Entity::find();
-
-        if !self.conditions.is_empty() || !self.or_groups.is_empty() || M::soft_delete_enabled() {
-            let condition = self.build_sea_condition();
-            select = select.filter(condition);
-        }
-
-        let agg_expr = Expr::cust(render_expression(&Self::format_aggregate_column(
-            db_type, column,
-        )));
-
-        let result: Option<AggResult> = match db.__get_connection()? {
-            crate::database::ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(
-                    select
-                        .select_only()
-                        .column_as(agg_expr, AGGREGATE_RESULT_ALIAS)
-                        .into_model::<AggResult>()
-                        .one(conn.connection()),
-                )
-                .await
-            }
-            crate::database::ConnectionRef::Transaction(tx) => {
-                crate::profiling::__profile_future(
-                    select
-                        .select_only()
-                        .column_as(agg_expr, AGGREGATE_RESULT_ALIAS)
-                        .into_model::<AggResult>()
-                        .one(tx.as_ref()),
-                )
-                .await
-            }
-        }
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(error_context))?;
-
-        Ok(result.and_then(|r| r.agg_result).unwrap_or(0.0))
     }
-
-    // =========================================================================
-    // UNION OPERATIONS
-    // =========================================================================
 
     /// Render a compound-select operand as parameterized SQL.
     ///
     /// The operand string is concatenated into the outer statement and executed,
-    /// so it goes through the parameterized renderer rather than the debug
-    /// preview renderer: every builder-supplied value stays a bound parameter
-    /// instead of becoming a hand-escaped inline literal. The operand is
-    /// rendered for the outer statement's backend so both halves agree on
-    /// identifier quoting and placeholder style.
+    /// so every builder-supplied value stays a bound parameter instead of
+    /// becoming a hand-escaped inline literal. The operand is rendered for the
+    /// outer statement's backend so both halves agree on identifier quoting and
+    /// placeholder style.
     fn compound_operand<N: Model>(
         &self,
         union_type: UnionType,
         other: &QueryBuilder<N>,
     ) -> UnionClause {
         let db_type = self.db_type_for_sql();
-        let (query_sql, params) = other.build_base_select_sql_with_params_for_db(db_type);
+        let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
         UnionClause::with_params(union_type, query_sql, params)
     }
 

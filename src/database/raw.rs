@@ -1,8 +1,9 @@
 use crate::DbValue;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::internal::translate_error;
 
-use super::{Connection, ConnectionRef, Database};
+use super::Database;
+use super::json_rows::ColumnTypeLookup;
 
 // ── Raw SQL: ambient vs. instance ──────────────────────────────────────────
 //
@@ -31,33 +32,14 @@ impl Database {
     /// A health check is about the handle it was called on, so it reaches that
     /// handle's own connection even inside a transaction scope opened on
     /// another one — a replica that reported on the primary would answer the
-    /// wrong question.
+    /// wrong question. Any failure is a connection failure by construction.
     pub async fn ping(&self) -> Result<()> {
         use crate::internal::ConnectionTrait;
 
-        match self.own_connection()? {
-            ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.connection().execute_unprepared("SELECT 1"))
-                    .await
-            }
-            ConnectionRef::Transaction(tx) => {
-                crate::profiling::__profile_future(tx.as_ref().execute_unprepared("SELECT 1")).await
-            }
-        }
-        .map_err(|err| {
-            // A failed health check is a connection failure by construction,
-            // even when the driver reports it as an execution error. Override
-            // the classification, but carry the structured driver detail across
-            // so the SQLSTATE and the source chain still survive.
-            let message = err.to_string();
-            match translate_error(err) {
-                connection @ Error::Connection { .. } => connection,
-                other => Error::Connection {
-                    message,
-                    source: other.into_db_failure(),
-                },
-            }
-        })?;
+        let connection = self.own_handle()?;
+        crate::profiling::__profile_future(connection.executor().execute_unprepared("SELECT 1"))
+            .await
+            .map_err(crate::internal::translate_connection_error)?;
 
         Ok(())
     }
@@ -81,21 +63,7 @@ impl Database {
     /// [`Database::transaction`] scope still takes precedence over `self`, so
     /// the statement joins that transaction instead of opening a second one.
     pub async fn query_raw<T: crate::model::Model>(&self, sql: &str) -> Result<Vec<T>> {
-        use crate::internal::{ConnectionTrait, build_statement};
-
-        let results = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt = build_statement(conn.connection().get_database_backend(), sql);
-                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt = build_statement(tx.as_ref().get_database_backend(), sql);
-                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
-            }
-        };
-        Self::invalidate_cache_after_raw_sql(sql);
-
-        Self::rows_to_models(results.map_err(translate_error)?)
+        self.query_raw_with_params(sql, Vec::new()).await
     }
 
     /// Execute a raw SQL query with parameters on the ambient connection
@@ -151,25 +119,23 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<T>> {
+        Self::rows_to_models(self.fetch_rows(sql, params).await?)
+    }
+
+    /// Run a row-returning statement on this handle's connection.
+    async fn fetch_rows(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<crate::internal::QueryResult>> {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
-        let results = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt = build_statement_with_values(
-                    conn.connection().get_database_backend(),
-                    sql,
-                    params,
-                );
-                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt =
-                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
-                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
-            }
-        };
-
-        Self::rows_to_models(results.map_err(translate_error)?)
+        let connection = self.__get_connection()?;
+        let executor = connection.executor();
+        let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
+        crate::profiling::__profile_future(executor.query_all_raw(statement))
+            .await
+            .map_err(translate_error)
     }
 
     /// Decode raw rows through the generated entity model.
@@ -204,22 +170,20 @@ impl Database {
 
     /// Execute a raw SQL statement on this handle and return rows affected
     ///
-    /// The instance form of [`Database::execute`].
+    /// The instance form of [`Database::execute`]. The statement is sent
+    /// unprepared, so it may contain several `;`-separated statements.
     pub async fn exec_raw(&self, sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
 
-        let result = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                crate::profiling::__profile_future(conn.connection().execute_unprepared(sql)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                crate::profiling::__profile_future(tx.as_ref().execute_unprepared(sql)).await
-            }
-        };
+        let connection = self.__get_connection()?;
+        let started = std::time::Instant::now();
+        let result =
+            crate::profiling::__profile_future(connection.executor().execute_unprepared(sql)).await;
+        // The engine reports no unprepared statement to the logging callback.
+        crate::logging::log_statement(sql, started.elapsed(), result.is_err());
         Self::invalidate_cache_after_raw_sql(sql);
-        let result = result.map_err(translate_error)?;
 
-        Ok(result.rows_affected())
+        Ok(result.map_err(translate_error)?.rows_affected())
     }
 
     /// Execute a raw SQL statement with parameters on the ambient connection
@@ -254,22 +218,12 @@ impl Database {
     pub async fn __execute_with_params(&self, sql: &str, params: Vec<DbValue>) -> Result<u64> {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
-        let result = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt = build_statement_with_values(
-                    conn.connection().get_database_backend(),
-                    sql,
-                    params,
-                );
-                crate::profiling::__profile_future(conn.connection().execute_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt =
-                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
-                crate::profiling::__profile_future(tx.as_ref().execute_raw(stmt)).await
-            }
-        };
-        let result = result.map_err(translate_error)?;
+        let connection = self.__get_connection()?;
+        let executor = connection.executor();
+        let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
+        let result = crate::profiling::__profile_future(executor.execute_raw(statement))
+            .await
+            .map_err(translate_error)?;
 
         Ok(result.rows_affected())
     }
@@ -287,21 +241,7 @@ impl Database {
     ///
     /// The instance form of [`Database::raw_json`].
     pub async fn query_raw_json(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
-        use crate::internal::{ConnectionTrait, build_statement};
-
-        let results = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt = build_statement(conn.connection().get_database_backend(), sql);
-                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt = build_statement(tx.as_ref().get_database_backend(), sql);
-                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
-            }
-        };
-        Self::invalidate_cache_after_raw_sql(sql);
-
-        Self::query_rows_to_json(results.map_err(translate_error)?)
+        self.query_raw_json_with_params(sql, Vec::new()).await
     }
 
     /// Execute a raw SQL query with parameters on the ambient connection and
@@ -333,20 +273,14 @@ impl Database {
     {
         use crate::internal::{ConnectionTrait, build_statement};
 
-        let result = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt =
-                    build_statement(conn.connection().get_database_backend(), sql.to_string());
-                crate::profiling::__profile_future(conn.connection().query_one_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt = build_statement(tx.as_ref().get_database_backend(), sql.to_string());
-                crate::profiling::__profile_future(tx.as_ref().query_one_raw(stmt)).await
-            }
-        };
-        let result = result.map_err(translate_error)?;
+        let connection = self.__get_connection()?;
+        let executor = connection.executor();
+        let statement = build_statement(executor.get_database_backend(), sql);
+        let row = crate::profiling::__profile_future(executor.query_one_raw(statement))
+            .await
+            .map_err(translate_error)?;
 
-        match result {
+        match row {
             Some(row) => row.try_get("", column).map(Some).map_err(translate_error),
             None => Ok(None),
         }
@@ -376,25 +310,19 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<serde_json::Value>> {
-        use crate::internal::{ConnectionTrait, build_statement_with_values};
+        self.__raw_json_typed(sql, params, |_| None).await
+    }
 
-        let results = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => {
-                let stmt = build_statement_with_values(
-                    conn.connection().get_database_backend(),
-                    sql,
-                    params,
-                );
-                crate::profiling::__profile_future(conn.connection().query_all_raw(stmt)).await
-            }
-            ConnectionRef::Transaction(tx) => {
-                let stmt =
-                    build_statement_with_values(tx.as_ref().get_database_backend(), sql, params);
-                crate::profiling::__profile_future(tx.as_ref().query_all_raw(stmt)).await
-            }
-        };
-
-        Self::query_rows_to_json(results.map_err(translate_error)?)
+    /// Run a statement a model query rendered and return the rows as JSON,
+    /// decoding each column `model_type` knows as that model column.
+    pub(crate) async fn __raw_json_typed(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+        model_type: ColumnTypeLookup,
+    ) -> Result<Vec<serde_json::Value>> {
+        let rows = self.fetch_rows(sql, params).await?;
+        Ok(Self::query_rows_to_json(&rows, model_type))
     }
 
     /// Flush the query cache when a raw statement may have modified data.
@@ -598,435 +526,8 @@ impl Database {
             }
         }
     }
-
-    fn query_rows_to_json(
-        results: Vec<crate::internal::QueryResult>,
-    ) -> Result<Vec<serde_json::Value>> {
-        let mut json_results = Vec::new();
-        for row in results {
-            json_results.push(Self::query_row_to_json(&row));
-        }
-
-        Ok(json_results)
-    }
-
-    fn query_row_to_json(row: &crate::internal::QueryResult) -> serde_json::Value {
-        #[cfg(feature = "postgres")]
-        if let Some(pg_row) = row.try_as_pg_row() {
-            return Self::sqlx_row_to_json(
-                row,
-                pg_row,
-                |result, index, type_name| match type_name {
-                    "BOOL" => Self::typed_or_fallback::<bool>(result, index),
-                    "INT2" => Self::typed_or_fallback::<i16>(result, index),
-                    "INT4" => Self::typed_or_fallback::<i32>(result, index),
-                    "INT8" => Self::typed_or_fallback::<i64>(result, index),
-                    "FLOAT4" => Self::float_or_fallback::<f32>(result, index),
-                    "FLOAT8" => Self::float_or_fallback::<f64>(result, index),
-                    "NUMERIC" => Self::decimal_or_fallback(result, index),
-                    "UUID" => Self::typed_or_fallback::<uuid::Uuid>(result, index),
-                    "JSON" | "JSONB" => Self::typed_or_fallback::<serde_json::Value>(result, index),
-                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
-                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
-                    "TIMESTAMP" => Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index),
-                    "TIMESTAMPTZ" => {
-                        Self::typed_or_fallback::<chrono::DateTime<chrono::FixedOffset>>(
-                            result, index,
-                        )
-                    }
-                    _ => Self::fallback_try_get_json(result, index),
-                },
-            );
-        }
-
-        #[cfg(feature = "mysql")]
-        if let Some(mysql_row) = row.try_as_mysql_row() {
-            return Self::sqlx_row_to_json(
-                row,
-                mysql_row,
-                |result, index, type_name| match type_name {
-                    "BOOLEAN" | "BOOL" => Self::typed_or_fallback::<bool>(result, index),
-                    "TINYINT" => Self::typed_or_fallback::<i8>(result, index),
-                    "SMALLINT" => Self::typed_or_fallback::<i16>(result, index),
-                    "INT" | "INTEGER" | "MEDIUMINT" => {
-                        Self::typed_or_fallback::<i32>(result, index)
-                    }
-                    "BIGINT" => Self::typed_or_fallback::<i64>(result, index),
-                    "FLOAT" => Self::float_or_fallback::<f32>(result, index),
-                    "DOUBLE" => Self::float_or_fallback::<f64>(result, index),
-                    "DECIMAL" | "NUMERIC" => Self::decimal_or_fallback(result, index),
-                    "JSON" => Self::typed_or_fallback::<serde_json::Value>(result, index),
-                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
-                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
-                    "DATETIME" | "TIMESTAMP" => {
-                        Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index)
-                    }
-                    _ => Self::fallback_try_get_json(result, index),
-                },
-            );
-        }
-
-        #[cfg(feature = "sqlite")]
-        if let Some(sqlite_row) = row.try_as_sqlite_row() {
-            return Self::sqlx_row_to_json(row, sqlite_row, |result, index, type_name| {
-                match type_name {
-                    "BOOLEAN" | "BOOL" => Self::typed_or_fallback::<bool>(result, index),
-                    "INTEGER" | "INT" => Self::typed_or_fallback::<i64>(result, index),
-                    "REAL" | "FLOAT" | "DOUBLE" => Self::float_or_fallback::<f64>(result, index),
-                    "NUMERIC" | "DECIMAL" => Self::decimal_or_fallback(result, index),
-                    "JSON" => Self::typed_or_fallback::<serde_json::Value>(result, index),
-                    "DATE" => Self::typed_or_fallback::<chrono::NaiveDate>(result, index),
-                    "TIME" => Self::typed_or_fallback::<chrono::NaiveTime>(result, index),
-                    "DATETIME" | "TIMESTAMP" => {
-                        Self::typed_or_fallback::<chrono::NaiveDateTime>(result, index)
-                    }
-                    "TEXT" => Self::typed_or_fallback::<String>(result, index),
-                    "BLOB" => Self::typed_or_fallback::<Vec<u8>>(result, index),
-                    _ => Self::sqlite_unknown_type_or_fallback(result, index),
-                }
-            });
-        }
-
-        let mut obj = serde_json::Map::new();
-        for (index, col_name) in row.column_names().into_iter().enumerate() {
-            obj.insert(col_name, Self::fallback_try_get_json(row, index));
-        }
-
-        serde_json::Value::Object(obj)
-    }
-
-    fn fallback_try_get_json(
-        row: &crate::internal::QueryResult,
-        index: usize,
-    ) -> serde_json::Value {
-        Self::try_get_json::<serde_json::Value>(row, index)
-            .or_else(|| Self::try_get_json::<uuid::Uuid>(row, index))
-            .or_else(|| Self::try_get_decimal_json(row, index))
-            .or_else(|| Self::try_get_json::<chrono::DateTime<chrono::FixedOffset>>(row, index))
-            .or_else(|| Self::try_get_json::<chrono::DateTime<chrono::Utc>>(row, index))
-            .or_else(|| Self::try_get_json::<chrono::NaiveDateTime>(row, index))
-            .or_else(|| Self::try_get_json::<chrono::NaiveDate>(row, index))
-            .or_else(|| Self::try_get_json::<chrono::NaiveTime>(row, index))
-            .or_else(|| Self::try_get_json::<i64>(row, index))
-            .or_else(|| Self::try_get_json::<u64>(row, index))
-            .or_else(|| Self::try_get_json::<f64>(row, index))
-            .or_else(|| Self::try_get_json::<bool>(row, index))
-            .or_else(|| Self::try_get_json::<String>(row, index))
-            .unwrap_or(serde_json::Value::Null)
-    }
-
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    fn typed_or_fallback<T>(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value
-    where
-        T: crate::internal::TryGetable + serde::Serialize,
-    {
-        Self::try_get_json::<T>(row, index)
-            .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
-    }
-
-    /// Decode a floating-point column, keeping non-finite values visible.
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    fn float_or_fallback<T>(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value
-    where
-        T: crate::internal::TryGetable + Into<f64>,
-    {
-        match row.try_get_by_index::<Option<T>>(index) {
-            Ok(Some(value)) => Self::f64_to_json(value.into()),
-            Ok(None) => serde_json::Value::Null,
-            Err(_) => Self::fallback_try_get_json(row, index),
-        }
-    }
-
-    /// Represent an `f64` as JSON.
-    ///
-    /// JSON has no `NaN` or `Infinity`, so those are rendered as strings — a
-    /// `null` would be indistinguishable from a real SQL `NULL`.
-    fn f64_to_json(value: f64) -> serde_json::Value {
-        match serde_json::Number::from_f64(value) {
-            Some(number) => serde_json::Value::Number(number),
-            None => serde_json::Value::String(value.to_string()),
-        }
-    }
-
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    fn decimal_or_fallback(row: &crate::internal::QueryResult, index: usize) -> serde_json::Value {
-        Self::try_get_decimal_json(row, index)
-            .unwrap_or_else(|| Self::fallback_try_get_json(row, index))
-    }
-
-    #[cfg(feature = "sqlite")]
-    fn sqlite_unknown_type_or_fallback(
-        row: &crate::internal::QueryResult,
-        index: usize,
-    ) -> serde_json::Value {
-        let value = Self::fallback_try_get_json(row, index);
-
-        if let serde_json::Value::String(text) = &value {
-            if let Ok(integer) = text.parse::<i64>() {
-                return serde_json::json!(integer);
-            }
-
-            if let Ok(unsigned) = text.parse::<u64>() {
-                return serde_json::json!(unsigned);
-            }
-        }
-
-        value
-    }
-
-    fn try_get_decimal_json(
-        row: &crate::internal::QueryResult,
-        index: usize,
-    ) -> Option<serde_json::Value> {
-        if let Some(value) = Self::try_get_json::<rust_decimal::Decimal>(row, index) {
-            return Some(value);
-        }
-
-        if let Ok(Some(value)) = row.try_get_by_index::<Option<String>>(index) {
-            return rust_decimal::Decimal::from_str_exact(&value)
-                .ok()
-                .and_then(|decimal| serde_json::to_value(decimal).ok())
-                .or(Some(serde_json::Value::String(value)));
-        }
-
-        if let Ok(Some(value)) = row.try_get_by_index::<Option<i64>>(index) {
-            return serde_json::to_value(rust_decimal::Decimal::from(value))
-                .ok()
-                .or(Some(serde_json::json!(value)));
-        }
-
-        if let Ok(Some(value)) = row.try_get_by_index::<Option<u64>>(index) {
-            return serde_json::to_value(rust_decimal::Decimal::from(value))
-                .ok()
-                .or(Some(serde_json::json!(value)));
-        }
-
-        if let Ok(Some(value)) = row.try_get_by_index::<Option<f64>>(index) {
-            let value_text = value.to_string();
-            return Some(
-                rust_decimal::Decimal::from_str_exact(&value_text)
-                    .ok()
-                    .and_then(|decimal| serde_json::to_value(decimal).ok())
-                    .unwrap_or_else(|| Self::f64_to_json(value)),
-            );
-        }
-
-        None
-    }
-
-    fn try_get_json<T>(
-        row: &crate::internal::QueryResult,
-        index: usize,
-    ) -> Option<serde_json::Value>
-    where
-        T: crate::internal::TryGetable + serde::Serialize,
-    {
-        row.try_get_by_index::<Option<T>>(index)
-            .ok()
-            .and_then(Self::option_to_json)
-    }
-
-    /// Convert a decoded column into JSON.
-    ///
-    /// Returns `None` when the value decoded but could not be represented as
-    /// JSON, so callers keep trying other decoders instead of reporting a
-    /// value that never existed. Only a real SQL `NULL` yields
-    /// `Some(Value::Null)`.
-    fn option_to_json<T>(value: Option<T>) -> Option<serde_json::Value>
-    where
-        T: serde::Serialize,
-    {
-        match value {
-            Some(value) => serde_json::to_value(value).ok(),
-            None => Some(serde_json::Value::Null),
-        }
-    }
-
-    #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-    fn sqlx_row_to_json<R, F>(
-        result: &crate::internal::QueryResult,
-        row: &R,
-        decoder_for_type: F,
-    ) -> serde_json::Value
-    where
-        R: crate::internal::sqlx::Row,
-        F: Fn(&crate::internal::QueryResult, usize, &str) -> serde_json::Value,
-    {
-        use crate::internal::sqlx::{Column, TypeInfo};
-
-        let mut obj = serde_json::Map::new();
-        for (index, column) in row.columns().iter().enumerate() {
-            let type_name = column.type_info().name().to_ascii_uppercase();
-            obj.insert(
-                column.name().to_string(),
-                decoder_for_type(result, index, type_name.as_str()),
-            );
-        }
-
-        serde_json::Value::Object(obj)
-    }
 }
 
 #[cfg(test)]
-mod raw_sql_tests {
-    use super::Database;
-
-    #[test]
-    fn read_only_statements_do_not_flush_the_cache() {
-        assert!(!Database::raw_sql_may_write("SELECT 1"));
-        assert!(!Database::raw_sql_may_write(
-            "  -- comment\n select * from users"
-        ));
-        assert!(!Database::raw_sql_may_write("/* hint */ EXPLAIN SELECT 1"));
-        assert!(!Database::raw_sql_may_write("(SELECT 1)"));
-        assert!(!Database::raw_sql_may_write(
-            "WITH active AS (SELECT 1) SELECT * FROM active"
-        ));
-    }
-
-    #[test]
-    fn soft_delete_columns_are_not_write_keywords() {
-        // `deleted_at` and `updated_at` contain `DELETE` and `UPDATE`, and the
-        // soft-delete scope renders them into the `WHERE` clause of every read.
-        assert!(!Database::raw_sql_may_write(
-            "WITH scoped AS (SELECT id FROM users WHERE \"deleted_at\" IS NULL) \
-             SELECT * FROM scoped"
-        ));
-        assert!(!Database::raw_sql_may_write(
-            "WITH recent AS (SELECT id, updated_at FROM users) \
-             SELECT * FROM recent ORDER BY updated_at DESC"
-        ));
-        // Nor can a literal that merely mentions one.
-        assert!(!Database::raw_sql_may_write(
-            "WITH notes AS (SELECT 'delete me' AS body) SELECT * FROM notes"
-        ));
-        // A column list in front of `AS` is not a statement.
-        assert!(!Database::raw_sql_may_write(
-            "WITH scoped (id) AS (SELECT id FROM users) SELECT * FROM scoped"
-        ));
-    }
-
-    #[test]
-    fn writing_statements_flush_the_cache() {
-        assert!(Database::raw_sql_may_write(
-            "INSERT INTO users (id) VALUES (1)"
-        ));
-        assert!(Database::raw_sql_may_write("update users set active = 1"));
-        assert!(Database::raw_sql_may_write("DELETE FROM users"));
-        assert!(Database::raw_sql_may_write(
-            "CREATE TABLE users (id INTEGER)"
-        ));
-        assert!(Database::raw_sql_may_write(
-            "WITH removed AS (DELETE FROM users RETURNING id) SELECT * FROM removed"
-        ));
-        // Unparseable input stays conservative.
-        assert!(Database::raw_sql_may_write(""));
-    }
-
-    #[test]
-    fn data_modifying_ctes_still_flush_the_cache() {
-        // The soft-delete filter inside the CTE is not what makes this a write:
-        // the CTE body itself is.
-        assert!(Database::raw_sql_may_write(
-            "WITH removed AS (DELETE FROM users WHERE deleted_at IS NOT NULL RETURNING id) \
-             SELECT * FROM removed"
-        ));
-        // The statement following the CTE list counts too.
-        assert!(Database::raw_sql_may_write(
-            "WITH stale AS (SELECT id FROM users) \
-             UPDATE users SET updated_at = NULL WHERE id IN (SELECT id FROM stale)"
-        ));
-        // As does a nested one.
-        assert!(Database::raw_sql_may_write(
-            "WITH outer_rows AS (WITH inner_rows AS (INSERT INTO audit (id) VALUES (1) \
-             RETURNING id) SELECT * FROM inner_rows) SELECT * FROM outer_rows"
-        ));
-        // A `WITH` that never reaches a statement stays conservative.
-        assert!(Database::raw_sql_may_write("WITH scoped AS ("));
-    }
-
-    #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-    #[tokio::test]
-    async fn only_unattributable_raw_writes_flush_the_cache() {
-        use crate::cache::QueryCache;
-
-        let cache = QueryCache::global();
-        let was_enabled = cache.is_enabled();
-        cache.enable();
-
-        let db = Database::connect("sqlite::memory:")
-            .await
-            .expect("sqlite in-memory connection should succeed");
-        db.exec_raw("CREATE TABLE raw_cache_probe (id INTEGER PRIMARY KEY, deleted_at TEXT)")
-            .await
-            .expect("the probe table should be created");
-
-        let seed = || {
-            cache.clear();
-            cache
-                .set_tagged(
-                    "raw-cache-probe",
-                    &[1_i64],
-                    None,
-                    &["unrelated_table".to_string()],
-                )
-                .expect("seeding the cache should succeed");
-            assert!(
-                cache.contains("raw-cache-probe"),
-                "the seeded entry should be cached"
-            );
-        };
-
-        // A builder read on a soft-delete model renders `deleted_at`, which used
-        // to classify the read as a write and destroy the cache on every call.
-        seed();
-        db.query_raw_json(
-            "WITH scoped AS (SELECT id FROM raw_cache_probe WHERE deleted_at IS NULL) \
-             SELECT * FROM scoped",
-        )
-        .await
-        .expect("the CTE read should succeed");
-        assert!(
-            cache.contains("raw-cache-probe"),
-            "a read must never flush the query cache"
-        );
-
-        // Statements TideORM rendered itself leave invalidation to their caller,
-        // which knows the one table it wrote.
-        seed();
-        db.__execute_with_params("INSERT INTO raw_cache_probe (id) VALUES (1)", Vec::new())
-            .await
-            .expect("the internal insert should succeed");
-        assert!(
-            cache.contains("raw-cache-probe"),
-            "an internal write must leave unrelated entries to targeted invalidation"
-        );
-
-        // Hand-written raw SQL remains unattributable, so it still flushes.
-        seed();
-        db.exec_raw("INSERT INTO raw_cache_probe (id) VALUES (2)")
-            .await
-            .expect("the raw insert should succeed");
-        assert!(
-            !cache.contains("raw-cache-probe"),
-            "an unattributable raw write must still flush the query cache"
-        );
-
-        if !was_enabled {
-            cache.disable();
-        }
-    }
-
-    #[test]
-    fn non_finite_floats_stay_distinguishable_from_null() {
-        assert_eq!(Database::f64_to_json(1.5), serde_json::json!(1.5));
-        assert_eq!(
-            Database::f64_to_json(f64::NAN),
-            serde_json::Value::String("NaN".to_string())
-        );
-        assert_eq!(
-            Database::f64_to_json(f64::INFINITY),
-            serde_json::Value::String("inf".to_string())
-        );
-    }
-}
+#[path = "../../tests/unit/database_raw_tests.rs"]
+mod raw_sql_tests;

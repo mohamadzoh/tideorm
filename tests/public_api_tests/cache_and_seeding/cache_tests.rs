@@ -1,11 +1,18 @@
-// CACHE MODULE TESTS
-// =============================================================================
-
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 use tideorm::cache::{
-    CacheKeyBuilder, CacheOptions, CacheStats, CacheStrategy, PreparedStatementCache,
-    PreparedStatementStats, QueryCache,
+    CacheConfig, CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache,
 };
+
+fn enabled_cache(max_entries: usize, strategy: CacheStrategy) -> QueryCache {
+    QueryCache::with_config(CacheConfig {
+        enabled: true,
+        max_entries,
+        strategy,
+        ..CacheConfig::default()
+    })
+}
 
 #[test]
 fn test_query_cache_miss() {
@@ -17,8 +24,6 @@ fn test_query_cache_miss() {
 
     let stats = cache.stats();
     assert_eq!(stats.misses, 1);
-
-    cache.clear();
 }
 
 #[test]
@@ -35,8 +40,6 @@ fn test_query_cache_enabled_disabled() {
     cache.set("key", &"value", None, "model").unwrap();
     let result: Option<String> = cache.get("key");
     assert!(result.is_some());
-
-    cache.clear();
 }
 
 #[test]
@@ -62,60 +65,40 @@ fn test_query_cache_ttl() {
 
     let result: Option<String> = cache.get("ttl_key");
     assert!(result.is_none());
-
-    cache.clear();
 }
 
 #[test]
-fn test_query_cache_max_entries_lru() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.set_max_entries(3);
-    cache.set_strategy(CacheStrategy::LRU);
+fn test_query_cache_entry_expires_after_default_ttl() {
+    let cache = QueryCache::with_config(CacheConfig {
+        enabled: true,
+        max_entries: 100,
+        default_ttl: Duration::from_millis(50),
+        ..CacheConfig::default()
+    });
 
-    cache.set("key1", &1, None, "model").unwrap();
-    cache.set("key2", &2, None, "model").unwrap();
-    cache.set("key3", &3, None, "model").unwrap();
+    cache
+        .set::<String>("k", &"value".to_string(), None, "test")
+        .unwrap();
+    assert!(cache.get::<String>("k").is_some());
 
-    assert_eq!(cache.len(), 3);
-
-    let _: Option<i32> = cache.get("key1");
-
-    cache.set("key4", &4, None, "model").unwrap();
-
-    let result: Option<i32> = cache.get("key2");
-    assert!(result.is_none());
-
-    let result: Option<i32> = cache.get("key1");
-    assert!(result.is_some());
-
-    cache.clear();
+    thread::sleep(Duration::from_millis(80));
+    assert!(cache.get::<String>("k").is_none());
 }
 
 #[test]
-fn test_query_cache_max_entries_fifo() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.set_max_entries(3);
-    cache.set_strategy(CacheStrategy::FIFO);
+fn test_query_cache_fifo_evicts_oldest_insert_even_when_recently_read() {
+    let cache = enabled_cache(2, CacheStrategy::FIFO);
 
-    cache.set("key1", &1, None, "model").unwrap();
-    std::thread::sleep(Duration::from_millis(1));
-    cache.set("key2", &2, None, "model").unwrap();
-    std::thread::sleep(Duration::from_millis(1));
-    cache.set("key3", &3, None, "model").unwrap();
+    cache.set::<i32>("a", &1, None, "t").unwrap();
+    cache.set::<i32>("b", &2, None, "t").unwrap();
+    // A read would save "a" under LRU; FIFO must ignore it.
+    let _: Option<i32> = cache.get("a");
 
-    assert_eq!(cache.len(), 3);
-
-    cache.set("key4", &4, None, "model").unwrap();
-
-    let result: Option<i32> = cache.get("key1");
-    assert!(result.is_none());
-
-    let result: Option<i32> = cache.get("key2");
-    assert!(result.is_some());
-
-    cache.clear();
+    cache.set::<i32>("c", &3, None, "t").unwrap();
+    assert_eq!(cache.len(), 2);
+    assert!(!cache.contains("a"));
+    assert!(cache.contains("b"));
+    assert!(cache.contains("c"));
 }
 
 #[test]
@@ -133,68 +116,23 @@ fn test_query_cache_replacing_existing_key_at_capacity_does_not_evict_other_entr
     assert_eq!(cache.len(), 2);
     assert_eq!(cache.get::<i32>("key1"), Some(10));
     assert_eq!(cache.get::<i32>("key2"), Some(2));
-
-    cache.clear();
 }
 
 #[test]
-fn test_query_cache_complex_types() {
-    let cache = QueryCache::new();
-    cache.enable();
+fn test_query_cache_stats_count_hits_misses_and_evictions() {
+    let cache = enabled_cache(2, CacheStrategy::LRU);
 
-    let vec_data = vec![1, 2, 3, 4, 5];
-    cache.set("vec_key", &vec_data, None, "model").unwrap();
-    let result: Option<Vec<i32>> = cache.get("vec_key");
-    assert_eq!(result, Some(vec_data));
-
-    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-    struct TestStruct {
-        name: String,
-        value: i32,
-    }
-
-    let struct_data = TestStruct {
-        name: "test".to_string(),
-        value: 42,
-    };
-    cache
-        .set("struct_key", &struct_data, None, "model")
-        .unwrap();
-    let result: Option<TestStruct> = cache.get("struct_key");
-    assert_eq!(
-        result,
-        Some(TestStruct {
-            name: "test".to_string(),
-            value: 42
-        })
-    );
-
-    cache.clear();
-}
-
-#[test]
-fn test_query_cache_stats() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.reset_stats();
-
-    cache.set("key", &"value", None, "model").unwrap();
-    let _: Option<String> = cache.get("key");
-    let _: Option<String> = cache.get("key");
-    let _: Option<String> = cache.get("missing");
+    let _: Option<i32> = cache.get("nope");
+    cache.set::<i32>("a", &1, None, "t").unwrap();
+    let _: Option<i32> = cache.get("a");
+    cache.set::<i32>("b", &2, None, "t").unwrap();
+    cache.set::<i32>("c", &3, None, "t").unwrap();
 
     let stats = cache.stats();
-    assert_eq!(stats.entries, 1);
-    assert_eq!(stats.hits, 2);
     assert_eq!(stats.misses, 1);
-    assert!((stats.hit_ratio() - 0.666).abs() < 0.01);
-
-    cache.reset_stats();
-    let stats = cache.stats();
-    assert_eq!(stats.hits, 0);
-    assert_eq!(stats.misses, 0);
-
-    cache.clear();
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.evictions, 1);
+    assert_eq!(stats.entries, 2);
 }
 
 #[test]
@@ -220,33 +158,59 @@ fn test_query_cache_evict_expired() {
 
     cache.evict_expired();
     assert_eq!(cache.len(), 1);
-
-    cache.clear();
 }
 
 #[test]
-fn test_prepared_statement_cache_different_queries() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-    cache.clear();
+fn test_query_cache_concurrent_writers_respect_max_entries() {
+    let cache = Arc::new(enabled_cache(100, CacheStrategy::LRU));
 
-    let sql1 = "SELECT * FROM users WHERE id = $1";
-    let sql2 = "SELECT * FROM posts WHERE user_id = $1";
+    let mut handles = Vec::new();
+    for i in 0..25 {
+        let c = Arc::clone(&cache);
+        handles.push(thread::spawn(move || {
+            for j in 0..20 {
+                let key = format!("w{}_{}", i, j);
+                c.set::<i32>(&key, &(i * 100 + j), None, "stress").unwrap();
+            }
+        }));
+    }
+    for i in 0..25 {
+        let c = Arc::clone(&cache);
+        handles.push(thread::spawn(move || {
+            for j in 0..20 {
+                let key = format!("w{}_{}", i, j);
+                let _: Option<i32> = c.get(&key);
+            }
+        }));
+    }
 
-    cache.get_or_prepare(sql1);
-    cache.get_or_prepare(sql2);
+    for h in handles {
+        h.join().expect("thread should not panic");
+    }
 
-    assert_eq!(cache.len(), 2);
+    assert!(
+        cache.stats().entries <= 100,
+        "should not exceed max_entries"
+    );
+}
 
-    cache.clear();
+#[test]
+fn test_query_cache_generate_key_applies_prefix() {
+    let prefixed = QueryCache::with_config(CacheConfig {
+        enabled: true,
+        key_prefix: Some("v7".into()),
+        ..CacheConfig::default()
+    });
+    assert_eq!(prefixed.generate_key("users", 12345), "v7:users:12345");
+
+    let unprefixed = QueryCache::new();
+    assert_eq!(unprefixed.generate_key("posts", 999), "posts:999");
 }
 
 #[test]
 fn test_prepared_statement_cache_stats() {
     let cache = PreparedStatementCache::new();
     cache.enable();
-    cache.clear();
-    cache.reset_stats();
 
     let sql = "SELECT * FROM users";
 
@@ -260,15 +224,12 @@ fn test_prepared_statement_cache_stats() {
     assert_eq!(stats.hits, 2);
     assert_eq!(stats.misses, 2);
     assert!((stats.hit_ratio() - 0.5).abs() < 0.01);
-
-    cache.clear();
 }
 
 #[test]
 fn test_prepared_statement_record_execution() {
     let cache = PreparedStatementCache::new();
     cache.enable();
-    cache.clear();
 
     let sql = "SELECT * FROM users WHERE id = $1";
     cache.get_or_prepare(sql);
@@ -285,14 +246,11 @@ fn test_prepared_statement_record_execution() {
     let stmt = &statements[0];
     assert_eq!(stmt.execution_count, 3);
     assert_eq!(stmt.avg_execution_time_us, 200);
-
-    cache.clear();
 }
 
 #[test]
 fn test_prepared_statement_enabled_disabled() {
     let cache = PreparedStatementCache::new();
-    cache.clear();
 
     cache.disable();
     let (_, cached) = cache.get_or_prepare("SELECT 1");
@@ -303,32 +261,10 @@ fn test_prepared_statement_enabled_disabled() {
     cache.get_or_prepare("SELECT 1");
     let (_, cached) = cache.get_or_prepare("SELECT 1");
     assert!(cached);
-
-    cache.clear();
 }
 
 #[test]
-fn test_cache_key_builder_basic() {
-    let key = CacheKeyBuilder::new().table("users").build();
-
-    assert!(key.contains("users"));
-}
-
-#[test]
-fn test_cache_key_builder_with_conditions() {
-    let key = CacheKeyBuilder::new()
-        .table("users")
-        .condition("active", true)
-        .condition("role", "admin")
-        .build();
-
-    assert!(key.contains("users"));
-    assert!(key.contains("active"));
-    assert!(key.contains("role"));
-}
-
-#[test]
-fn test_cache_key_builder_with_order_and_limit() {
+fn test_cache_key_builder_with_order_limit_and_offset() {
     let key = CacheKeyBuilder::new()
         .table("posts")
         .order("created_at", "desc")
@@ -336,11 +272,10 @@ fn test_cache_key_builder_with_order_and_limit() {
         .offset(20)
         .build();
 
-    assert!(key.contains("posts"));
-    assert!(key.contains("created_at"));
-    assert!(key.contains("desc"));
-    assert!(key.contains("10"));
-    assert!(key.contains("20"));
+    assert!(key.contains("t:posts"));
+    assert!(key.contains("o:created_at:desc"));
+    assert!(key.contains("l:10"));
+    assert!(key.contains("off:20"));
 }
 
 #[test]
@@ -363,72 +298,6 @@ fn test_cache_key_builder_hash() {
         .build_hash();
 
     assert_ne!(hash1, hash3);
-}
-
-#[test]
-fn test_cache_key_builder_deterministic() {
-    let key1 = CacheKeyBuilder::new()
-        .table("users")
-        .condition("a", 1)
-        .condition("b", 2)
-        .build();
-
-    let key2 = CacheKeyBuilder::new()
-        .table("users")
-        .condition("a", 1)
-        .condition("b", 2)
-        .build();
-
-    assert_eq!(key1, key2);
-}
-
-#[test]
-fn test_cache_options_creation() {
-    let options = CacheOptions::new(Duration::from_secs(300));
-    assert_eq!(options.ttl, Duration::from_secs(300));
-    assert!(options.key.is_none());
-}
-
-#[test]
-fn test_cache_options_with_key() {
-    let options = CacheOptions::new(Duration::from_secs(300)).with_key("my_custom_key");
-
-    assert_eq!(options.key, Some("my_custom_key".to_string()));
-}
-
-#[test]
-fn test_cache_options_chaining() {
-    let options = CacheOptions::new(Duration::from_secs(600)).with_key("featured_products");
-
-    assert_eq!(options.ttl, Duration::from_secs(600));
-    assert_eq!(options.key, Some("featured_products".to_string()));
-}
-
-#[test]
-fn test_cache_stats_hit_ratio_zero_requests() {
-    let stats = CacheStats {
-        entries: 0,
-        size_bytes: 0,
-        hits: 0,
-        misses: 0,
-        evictions: 0,
-        invalidations: 0,
-    };
-
-    assert_eq!(stats.hit_ratio(), 0.0);
-}
-
-#[test]
-fn test_prepared_statement_stats_hit_ratio() {
-    let stats = PreparedStatementStats {
-        cached_count: 50,
-        hits: 100,
-        misses: 50,
-        total_executions: 200,
-        evictions: 0,
-    };
-
-    assert!((stats.hit_ratio() - 0.666).abs() < 0.01);
 }
 
 #[test]
@@ -460,54 +329,4 @@ fn test_global_prepared_statement_cache() {
     assert!(cached);
 
     cache1.clear();
-}
-
-#[test]
-fn test_query_cache_thread_safety() {
-    use std::thread;
-
-    let cache = QueryCache::new();
-    cache.enable();
-
-    let handles: Vec<_> = (0..10)
-        .map(|i| {
-            let cache_ref = QueryCache::global();
-            thread::spawn(move || {
-                let key = format!("thread_key_{}", i);
-                cache_ref.set(&key, &i, None, "test").ok();
-                let _: Option<i32> = cache_ref.get(&key);
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    QueryCache::global().clear();
-}
-
-#[test]
-fn test_prepared_statement_cache_thread_safety() {
-    use std::thread;
-
-    let cache = PreparedStatementCache::global();
-    cache.enable();
-    cache.clear();
-
-    let handles: Vec<_> = (0..10)
-        .map(|i| {
-            let cache_ref = PreparedStatementCache::global();
-            thread::spawn(move || {
-                let sql = format!("SELECT * FROM table_{}", i);
-                cache_ref.get_or_prepare(&sql);
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    cache.clear();
 }

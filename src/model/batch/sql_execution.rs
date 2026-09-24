@@ -1,6 +1,49 @@
 use super::*;
 
+use crate::internal::push_param;
+
 impl<M: Model> BatchUpdateBuilder<M> {
+    /// Bind `value` with the type of the column it is assigned to.
+    fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
+        crate::internal::json_to_column_value(
+            value,
+            crate::internal::column_type_of::<M>(column).as_ref(),
+        )
+    }
+
+    /// `arithmetic` as the value of `column`, rounded back to an integer when
+    /// the column holds one.
+    ///
+    /// Scaling by an `f64` yields a floating-point result. PostgreSQL and MySQL
+    /// round it when storing it in an integer column, but SQLite stores the
+    /// REAL as it is, after which the model can no longer read the row.
+    fn keep_integral(
+        column: &str,
+        db_type: crate::config::DatabaseType,
+        arithmetic: String,
+    ) -> String {
+        use crate::orm::ColumnType;
+
+        let integral = matches!(
+            crate::internal::column_type_of::<M>(column),
+            Some(
+                ColumnType::TinyInteger
+                    | ColumnType::SmallInteger
+                    | ColumnType::Integer
+                    | ColumnType::BigInteger
+                    | ColumnType::TinyUnsigned
+                    | ColumnType::SmallUnsigned
+                    | ColumnType::Unsigned
+                    | ColumnType::BigUnsigned
+            )
+        );
+        if integral && db_type == crate::config::DatabaseType::SQLite {
+            format!("CAST(ROUND({}) AS INTEGER)", arithmetic)
+        } else {
+            arithmetic
+        }
+    }
+
     fn build_assignment_sql(
         column: &str,
         value: &UpdateValue,
@@ -11,52 +54,43 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         match value {
             UpdateValue::Value(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
+                let placeholder = push_param(db_type, params, Self::column_value(column, value));
                 Ok(format!("{} = {}", col, placeholder))
             }
             UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
             UpdateValue::Increment(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::BigInt(Some(*by)),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
                 Ok(format!("{} = {} + {}", col, col, placeholder))
             }
             UpdateValue::Decrement(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::BigInt(Some(*by)),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
                 Ok(format!("{} = {} - {}", col, col, placeholder))
             }
             UpdateValue::Multiply(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::Double(Some(*by)),
-                );
-                Ok(format!("{} = {} * {}", col, col, placeholder))
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                let product = format!("{} * {}", col, placeholder);
+                Ok(format!(
+                    "{} = {}",
+                    col,
+                    Self::keep_integral(column, db_type, product)
+                ))
             }
             UpdateValue::Divide(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::Double(Some(*by)),
-                );
-                Ok(format!("{} = {} / {}", col, col, placeholder))
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
+                let quotient = format!("{} / {}", col, placeholder);
+                Ok(format!(
+                    "{} = {}",
+                    col,
+                    Self::keep_integral(column, db_type, quotient)
+                ))
             }
             UpdateValue::ArrayAppend(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::json_to_db_value(value));
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => {
                         format!("{} = array_append({}, {})", col, col, placeholder)
@@ -70,11 +104,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 })
             }
             UpdateValue::ArrayRemove(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::json_to_db_value(value));
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => {
                         format!("{} = array_remove({}, {})", col, col, placeholder)
@@ -95,24 +126,21 @@ impl<M: Model> BatchUpdateBuilder<M> {
             }
             UpdateValue::JsonSet(path, value) => {
                 let segments = Self::validate_json_path(path)?;
-                let path_placeholder = match db_type {
-                    crate::config::DatabaseType::Postgres => crate::internal::push_param(
-                        db_type,
-                        params,
-                        crate::internal::Value::String(Some(Self::postgres_json_path_literal(
-                            &segments,
-                        ))),
-                    ),
+                let bound_path = match db_type {
+                    crate::config::DatabaseType::Postgres => {
+                        Self::postgres_json_path_literal(&segments)
+                    }
                     crate::config::DatabaseType::MySQL
                     | crate::config::DatabaseType::MariaDB
-                    | crate::config::DatabaseType::SQLite => crate::internal::push_param(
-                        db_type,
-                        params,
-                        crate::internal::Value::String(Some(path.clone())),
-                    ),
+                    | crate::config::DatabaseType::SQLite => path.clone(),
                 };
+                let path_placeholder = push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::String(Some(bound_path)),
+                );
                 let json_text = serde_json::to_string(value)?;
-                let value_placeholder = crate::internal::push_param(
+                let value_placeholder = push_param(
                     db_type,
                     params,
                     crate::internal::Value::String(Some(json_text)),
@@ -121,11 +149,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => format!(
                         "{} = jsonb_set({}, {}::text[], CAST({} AS jsonb))",
-                        col, col, path_placeholder, value_placeholder
+                        col,
+                        crate::query::db_sql::postgres_jsonb(&col),
+                        path_placeholder,
+                        value_placeholder
                     ),
+                    // `JSON_EXTRACT(?, '$')` reads the text as JSON on both
+                    // servers; MariaDB has no `CAST(.. AS JSON)`.
                     crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
                         format!(
-                            "{} = JSON_SET({}, {}, CAST({} AS JSON))",
+                            "{} = JSON_SET({}, {}, JSON_EXTRACT({}, '$'))",
                             col, col, path_placeholder, value_placeholder
                         )
                     }
@@ -138,11 +171,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 })
             }
             UpdateValue::Coalesce(default) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(default),
-                );
+                let placeholder = push_param(db_type, params, Self::column_value(column, default));
                 Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
             }
         }
@@ -180,10 +209,13 @@ impl<M: Model> BatchUpdateBuilder<M> {
         db_type: crate::config::DatabaseType,
     ) -> Result<()> {
         if !db_type.supports_returning() {
-            return Err(Error::query(format!(
-                "{} does not support RETURNING clause",
-                db_type
-            )));
+            return Err(Error::backend_not_supported(
+                format!(
+                    "execute_returning() is not supported on {}: it needs UPDATE .. RETURNING",
+                    db_type
+                ),
+                db_type.to_string(),
+            ));
         }
 
         Ok(())
@@ -198,27 +230,22 @@ impl<M: Model> BatchUpdateBuilder<M> {
         } else {
             QueryBuilder::new()
         };
-        let mut or_conditions = Vec::new();
 
-        for condition in &self.conditions {
-            if let Some(column) = condition.column.strip_prefix("__OR__") {
-                let mut or_condition = condition.clone();
-                or_condition.column = column.to_string();
-                or_conditions.push(or_condition);
-            } else {
-                query.conditions.push(condition.clone());
-            }
-        }
-
-        if !or_conditions.is_empty() {
-            query.or_groups.push(OrGroup {
-                conditions: or_conditions,
-                nested_groups: Vec::new(),
-                combine_with: LogicalOp::Or,
-            });
+        query.conditions = self.conditions.clone();
+        if !self.or_group.is_empty() {
+            query.or_groups.push(self.or_group.clone());
         }
 
         query
+    }
+
+    /// A batch update's filters must pass the query builder's validation, and
+    /// at least one of them must be able to exclude a row; these are the same
+    /// guards the `QueryBuilder` mutation terminals use.
+    pub(crate) fn ensure_explicit_filters(&self, operation: &str) -> Result<()> {
+        let query = self.build_where_query();
+        query.ensure_query_is_executable()?;
+        query.ensure_mutation_has_explicit_filters(operation)
     }
 
     /// Whether the backend accepts `LIMIT` directly on an `UPDATE` statement.
@@ -233,7 +260,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// cannot take `LIMIT` directly.
     fn limit_scope_primary_key(db_type: crate::config::DatabaseType) -> Result<String> {
         match M::primary_key_names() {
-            [column] => Ok(Self::quote_identifier(column, db_type)),
+            [column] => Ok(quote_ident(db_type, column)),
             columns => Err(Error::invalid_query(format!(
                 "limit() is not supported for '{}' on {}: that backend cannot cap an UPDATE \
                  directly, so the row limit has to be scoped through a primary-key subquery, \
@@ -270,11 +297,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let (mut where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
 
         if matches!(db_type, crate::config::DatabaseType::Postgres) {
-            where_sql = Self::offset_postgres_placeholders(&where_sql, params.len());
+            where_sql =
+                crate::query::db_sql::offset_postgres_placeholders(&where_sql, params.len());
         }
         params.extend(where_params);
 
-        let table = Self::quote_identifier(M::table_name(), db_type);
+        let table = crate::query::db_sql::quote_table::<M>(db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
 
         match self.limit_value {
@@ -342,25 +370,27 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let (sql, params) = self.build_update_statement(db_type)?;
 
         let rows_affected = db.__execute_with_params(&sql, params).await?;
-        if rows_affected > 0 {
-            crate::QueryCache::global().invalidate_model(M::table_name());
-            #[cfg(feature = "dirty-tracking")]
-            crate::model::__invalidate_dirty_snapshots::<M>();
-        }
+        QueryBuilder::<M>::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
     /// Run the update and return the rows it wrote.
     ///
-    /// Appends `RETURNING *`, so it needs a backend that supports it:
-    /// PostgreSQL, MariaDB, and SQLite do, plain MySQL does not and is rejected
-    /// with an error before anything runs. Calling
+    /// Appends `RETURNING`, so it needs a backend whose `UPDATE` takes one:
+    /// PostgreSQL and SQLite. MySQL has no `RETURNING`, and MariaDB has
+    /// `UPDATE .. RETURNING` only from 13.0, so both are refused with an error
+    /// before anything runs, whatever the server's version. Calling
     /// [`returning()`](Self::returning) first is optional here — this terminal
     /// always returns rows.
     ///
     /// Returns an empty vector without touching the database when no assignment
     /// was staged, and errors when the builder carries no explicit filter. Like
     /// [`execute`](Self::execute), no callbacks or validations run.
+    ///
+    /// The update and the decoding of the rows it returns are not one unit: if
+    /// a row does not decode into the model, the error comes back but the rows
+    /// are already written, and retrying repeats a non-idempotent change such
+    /// as `increment`. Run it inside `Database::transaction` when that matters.
     pub async fn execute_returning(self) -> Result<Vec<M>> {
         if self.updates.is_empty() {
             return Ok(vec![]);
@@ -371,205 +401,21 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let db = crate::database::__current_db()?;
         let db_type = db.backend();
         Self::ensure_backend_supports_returning(db_type)?;
+        // The rows are written before they are decoded, as with `update()`.
+        crate::internal::ensure_fields_storable::<M, _>(&db.__get_connection()?.executor())?;
 
         let (mut sql, params) = self.build_update_statement(db_type)?;
-        sql.push_str(" RETURNING *");
+        sql.push_str(" RETURNING ");
+        sql.push_str(&crate::query::db_sql::model_columns_sql::<M>(db_type, None));
 
         let models = db.__raw_with_params::<M>(&sql, params).await?;
-        if !models.is_empty() {
-            crate::QueryCache::global().invalidate_model(M::table_name());
-            #[cfg(feature = "dirty-tracking")]
-            {
-                crate::model::__invalidate_dirty_snapshots::<M>();
-                let _ = crate::model::__remember_dirty_snapshots(&models);
-            }
-        }
+        QueryBuilder::<M>::invalidate_model_state(models.len() as u64);
+        #[cfg(feature = "dirty-tracking")]
+        crate::model::__remember_dirty_snapshots(&models);
         Ok(models)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    // The macro-generated entity module emits `Result<_, DbErr>`, so it must not see
-    // tideorm's own one-parameter `Result<T>` alias that `use super::*` brings in here.
-    use std::result::Result;
-
-    #[tideorm::model(table = "batch_sql_execution_users")]
-    struct BatchSqlUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-        age: i32,
-    }
-
-    #[tideorm::model(table = "batch_sql_execution_soft_delete_users", soft_delete)]
-    struct BatchSqlSoftDeleteUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-        deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    #[test]
-    fn empty_negative_list_does_not_count_as_an_explicit_filter() {
-        // Same hazard as the QueryBuilder mutation terminals: an empty candidate
-        // set for a negative membership test renders constant-true, so counting
-        // conditions would let a caller whose filter list came back empty rewrite
-        // every row in the table.
-        let err = BatchUpdateBuilder::<BatchSqlUser>::new()
-            .set("name", "updated")
-            .where_not_in("id", Vec::<i64>::new())
-            .ensure_explicit_filters("update")
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unfiltered bulk mutations are blocked"),
-            "vacuous filter was accepted: {err}"
-        );
-
-        // One real predicate alongside it is still enough.
-        assert!(
-            BatchUpdateBuilder::<BatchSqlUser>::new()
-                .set("name", "updated")
-                .where_eq("name", "alice")
-                .where_not_in("id", Vec::<i64>::new())
-                .ensure_explicit_filters("update")
-                .is_ok()
-        );
-    }
-
-    fn filtered_builder() -> BatchUpdateBuilder<BatchSqlUser> {
-        BatchUpdateBuilder::<BatchSqlUser>::new()
-            .set("name", "updated")
-            .set("age", 30)
-            .where_eq("id", 1)
-    }
-
-    fn filtered_soft_delete_builder() -> BatchUpdateBuilder<BatchSqlSoftDeleteUser> {
-        BatchUpdateBuilder::<BatchSqlSoftDeleteUser>::new()
-            .set("name", "updated")
-            .where_eq("id", 1)
-    }
-
-    #[test]
-    fn batch_update_includes_trashed_rows_by_default() {
-        let (sql, _) = filtered_soft_delete_builder()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            !sql.contains("deleted_at"),
-            "the default scope must not filter soft-deleted rows: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_without_trashed_restores_the_active_only_scope() {
-        let (sql, _) = filtered_soft_delete_builder()
-            .without_trashed()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(r#""deleted_at" IS NULL"#),
-            "without_trashed() must scope out soft-deleted rows: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_with_trashed_is_the_default_scope() {
-        let (default_sql, _) = filtered_soft_delete_builder()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-        let (explicit_sql, _) = filtered_soft_delete_builder()
-            .without_trashed()
-            .with_trashed()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert_eq!(default_sql, explicit_sql);
-    }
-
-    #[test]
-    fn batch_update_set_clause_order_is_deterministic() {
-        for _ in 0..16 {
-            let (sql, _) = filtered_builder()
-                .build_update_statement(crate::config::DatabaseType::SQLite)
-                .expect("statement should build");
-
-            assert!(
-                sql.starts_with(r#"UPDATE "batch_sql_execution_users" SET "age" = ?, "name" = ?"#),
-                "unexpected sql: {sql}"
-            );
-        }
-    }
-
-    #[test]
-    fn batch_update_limit_is_scoped_by_primary_key_subquery_on_postgres() {
-        let (sql, params) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::Postgres)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(
-                r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = $3 LIMIT 5)"#
-            ),
-            "unexpected sql: {sql}"
-        );
-        assert_eq!(params.len(), 3);
-    }
-
-    #[test]
-    fn batch_update_limit_is_scoped_by_primary_key_subquery_on_sqlite() {
-        let (sql, _) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(
-                r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = ? LIMIT 5)"#
-            ),
-            "unexpected sql: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_limit_uses_the_native_clause_on_mysql() {
-        let (sql, _) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::MySQL)
-            .expect("statement should build");
-
-        assert!(sql.ends_with(" LIMIT 5"), "unexpected sql: {sql}");
-        assert!(!sql.contains("SELECT"), "unexpected sql: {sql}");
-    }
-
-    #[test]
-    fn batch_update_without_limit_keeps_a_plain_where_clause() {
-        let (sql, _) = filtered_builder()
-            .build_update_statement(crate::config::DatabaseType::Postgres)
-            .expect("statement should build");
-
-        assert!(
-            sql.ends_with(r#" WHERE "id" = $3"#),
-            "unexpected sql: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_execute_rejects_a_returning_flag_it_cannot_honour() {
-        let err = filtered_builder()
-            .returning()
-            .ensure_returning_terminal()
-            .unwrap_err();
-
-        assert!(
-            err.to_string().contains("requires execute_returning()"),
-            "unexpected error: {err}"
-        );
-        assert!(filtered_builder().ensure_returning_terminal().is_ok());
-    }
-}
+#[path = "../../../tests/unit/model_batch_sql_execution_tests.rs"]
+mod tests;

@@ -43,12 +43,6 @@ impl<'a> SqlBuilder<'a> {
         self
     }
 
-    /// Append a placeholder that was already created via `push_param`.
-    pub fn placeholder(mut self, ph: &str) -> Self {
-        self.sql.push_str(ph);
-        self
-    }
-
     /// Consume the builder and return the built SQL string.
     pub fn into_sql(self) -> String {
         self.sql

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+/// Compile a validation pattern once per process; `None` when it is not a
+/// valid regex.
 pub(super) fn compiled_validation_regex(pattern: &str) -> Option<regex::Regex> {
     static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> = OnceLock::new();
     let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));

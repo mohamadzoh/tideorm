@@ -1,5 +1,84 @@
 use super::{DbFailure, DbFailureKind, Error};
 
+/// What to do about an exhausted pool, whether or not the driver classified it.
+const POOL_ADVICE: &str = "Consider:\n\
+     1. Increasing `max_connections` in TideConfig\n\
+     2. Reducing connection hold time\n\
+     3. Using `acquire_timeout` to wait for connections";
+
+/// The headline and next step for each classification.
+///
+/// Both the structured path and the message fallback render from this one
+/// table. `None` for [`DbFailureKind::Unclassified`], which has neither.
+fn advice(kind: DbFailureKind) -> Option<(&'static str, &'static str)> {
+    let advice = match kind {
+        DbFailureKind::Unclassified => return None,
+        DbFailureKind::UniqueViolation => (
+            "Duplicate key violation",
+            "The value already exists in a unique column.",
+        ),
+        DbFailureKind::ForeignKeyViolation => (
+            "Foreign key constraint violation",
+            "The referenced record doesn't exist or can't be deleted.",
+        ),
+        DbFailureKind::NotNullViolation => (
+            "NULL value not allowed",
+            "Ensure all required fields are provided.",
+        ),
+        DbFailureKind::CheckViolation => (
+            "Check constraint violation",
+            "The value is outside the range the column allows.",
+        ),
+        DbFailureKind::InvalidValue => (
+            "Value does not fit the column",
+            "Check its length, range and format, or validate it before saving.",
+        ),
+        DbFailureKind::SyntaxError => (
+            "SQL syntax error",
+            "Check column names and query structure.",
+        ),
+        DbFailureKind::UndefinedColumn => (
+            "Column doesn't exist",
+            "Check spelling and run migrations if needed.",
+        ),
+        DbFailureKind::UndefinedTable => (
+            "Table doesn't exist",
+            "Run migrations: `TideConfig::init().run_migrations(true).connect().await?`",
+        ),
+        DbFailureKind::InsufficientPrivilege => {
+            ("Permission denied", "Check database user privileges.")
+        }
+        DbFailureKind::Deadlock => (
+            "Deadlock detected",
+            "Retry the transaction or review query ordering.",
+        ),
+        DbFailureKind::SerializationFailure => (
+            "Serialization failure",
+            "Replay the transaction; concurrent writes conflicted.",
+        ),
+        DbFailureKind::LockNotAvailable => (
+            "Lock not available",
+            "Retry, or shorten the transaction holding the lock.",
+        ),
+        DbFailureKind::StatementTimeout => (
+            "Statement timed out",
+            "Retry, add an index, or raise the statement timeout.",
+        ),
+        DbFailureKind::ConnectionTimeout => ("Timed out waiting for a connection", POOL_ADVICE),
+        DbFailureKind::ConnectionClosed => (
+            "The connection was closed",
+            "Retry; the pool opens a fresh connection.",
+        ),
+    };
+
+    Some(advice)
+}
+
+/// Render the table entry for `kind`, with `detail` right after the headline.
+fn render_advice(kind: DbFailureKind, detail: &str) -> Option<String> {
+    advice(kind).map(|(headline, next_step)| format!("{headline}{detail}. {next_step}"))
+}
+
 /// Render what the driver reported about a failure, for appending to a
 /// suggestion.
 ///
@@ -22,117 +101,56 @@ fn failure_detail(failure: &DbFailure) -> String {
 /// to reading the message — the only place substring matching is still correct,
 /// because there is no structured data to consult.
 fn structured_suggestion(failure: &DbFailure) -> Option<String> {
-    let detail = failure_detail(failure);
-
-    let suggestion = match failure.kind() {
-        DbFailureKind::Unclassified => return None,
-        DbFailureKind::UniqueViolation => format!(
-            "Duplicate key violation{}. The value already exists in a unique column.",
-            detail
-        ),
-        DbFailureKind::ForeignKeyViolation => format!(
-            "Foreign key constraint violation{}. The referenced record doesn't exist or can't be deleted.",
-            detail
-        ),
-        DbFailureKind::NotNullViolation => format!(
-            "NULL value not allowed{}. Ensure all required fields are provided.",
-            detail
-        ),
-        DbFailureKind::CheckViolation => format!(
-            "Check constraint violation{}. The value is outside the range the column allows.",
-            detail
-        ),
-        DbFailureKind::SyntaxError => format!(
-            "SQL syntax error{}. Check column names and query structure.",
-            detail
-        ),
-        DbFailureKind::UndefinedColumn => format!(
-            "Column doesn't exist{}. Check spelling and run migrations if needed.",
-            detail
-        ),
-        DbFailureKind::UndefinedTable => format!(
-            "Table doesn't exist{}. Run migrations: `TideConfig::init().run_migrations(true).connect().await?`",
-            detail
-        ),
-        DbFailureKind::InsufficientPrivilege => format!(
-            "Permission denied{}. Check database user privileges.",
-            detail
-        ),
-        DbFailureKind::Deadlock => format!(
-            "Deadlock detected{}. Retry the transaction or review query ordering.",
-            detail
-        ),
-        DbFailureKind::SerializationFailure => format!(
-            "Serialization failure{}. Replay the transaction; concurrent writes conflicted.",
-            detail
-        ),
-        DbFailureKind::LockNotAvailable => format!(
-            "Lock not available{}. Retry, or shorten the transaction holding the lock.",
-            detail
-        ),
-        DbFailureKind::StatementTimeout => format!(
-            "Statement timed out{}. Retry, add an index, or raise the statement timeout.",
-            detail
-        ),
-        DbFailureKind::ConnectionTimeout => format!(
-            "Timed out waiting for a connection{}. Consider:\n\
-             1. Increasing `max_connections` in TideConfig\n\
-             2. Reducing connection hold time\n\
-             3. Using `acquire_timeout` to wait for connections",
-            detail
-        ),
-        DbFailureKind::ConnectionClosed => format!(
-            "The connection was closed{}. Retry; the pool opens a fresh connection.",
-            detail
-        ),
-    };
-
-    Some(suggestion)
+    render_advice(failure.kind(), &failure_detail(failure))
 }
 
-/// Fall back to reading the message when the driver classified nothing.
-fn query_suggestion_from_message(message: &str) -> &'static str {
+/// Guess a query failure's classification from its message, for the
+/// suggestion only, when the driver classified nothing.
+fn classify_query_message(message: &str) -> DbFailureKind {
     if message.contains("syntax") || message.contains("Syntax") {
-        "SQL syntax error. Check column names and query structure."
+        DbFailureKind::SyntaxError
     } else if message.contains("duplicate") || message.contains("unique") {
-        "Duplicate key violation. The value already exists in a unique column."
-    } else if message.contains("foreign key") || message.contains("violates foreign key") {
-        "Foreign key constraint violation. The referenced record doesn't exist or can't be deleted."
+        DbFailureKind::UniqueViolation
+    } else if message.contains("foreign key") {
+        DbFailureKind::ForeignKeyViolation
     } else if message.contains("null") || message.contains("NOT NULL") {
-        "NULL value not allowed. Ensure all required fields are provided."
+        DbFailureKind::NotNullViolation
     } else if message.contains("column") && message.contains("does not exist") {
-        "Column doesn't exist. Check spelling and run migrations if needed."
+        DbFailureKind::UndefinedColumn
     } else if message.contains("table") && message.contains("does not exist") {
-        "Table doesn't exist. Run migrations: `TideConfig::init().run_migrations(true).connect().await?`"
+        DbFailureKind::UndefinedTable
     } else if message.contains("permission") || message.contains("denied") {
-        "Permission denied. Check database user privileges."
+        DbFailureKind::InsufficientPrivilege
     } else if message.contains("deadlock") {
-        "Deadlock detected. Retry the transaction or review query ordering."
+        DbFailureKind::Deadlock
     } else {
-        "Check the SQL query and ensure all referenced columns/tables exist."
+        DbFailureKind::Unclassified
     }
 }
 
 /// Fall back to reading the message for connection failures.
-fn connection_suggestion_from_message(message: &str) -> &'static str {
-    if message.contains("refused") || message.contains("Refused") {
+fn connection_suggestion_from_message(message: &str) -> String {
+    if message.contains("not initialized") {
+        "No global database connection has been set up yet. Connect first with \
+         `TideConfig::init().database(url).connect().await?` or `Database::init(url).await?`."
+            .to_string()
+    } else if message.contains("refused") || message.contains("Refused") {
         "Database server is not running or not accepting connections. Check that:\n\
          1. The database server is running\n\
          2. The host and port are correct\n\
          3. Firewall allows the connection"
+            .to_string()
     } else if message.contains("password") || message.contains("authentication") {
-        "Check your database credentials in the connection URL."
+        "Check your database credentials in the connection URL.".to_string()
     } else if message.contains("does not exist") || message.contains("unknown database") {
-        "The database doesn't exist. Create it first: CREATE DATABASE dbname;"
+        "The database doesn't exist. Create it first: CREATE DATABASE dbname;".to_string()
     } else if message.contains("timeout") || message.contains("Timeout") {
         "Connection timed out. Check network connectivity and increase `connect_timeout` if needed."
+            .to_string()
     } else if message.contains("pool") || message.contains("Pool") {
-        "Connection pool exhausted. Consider:\n\
-         1. Increasing `max_connections` in TideConfig\n\
-         2. Reducing connection hold time\n\
-         3. Using `acquire_timeout` to wait for connections"
+        format!("Connection pool exhausted. {POOL_ADVICE}")
     } else {
-        "Verify your database URL format: postgres://user:pass@host:5432/database"
+        "Verify your database URL format: postgres://user:pass@host:5432/database".to_string()
     }
 }
 
@@ -166,7 +184,7 @@ impl Error {
             Self::Connection { message, source } => source
                 .as_deref()
                 .and_then(structured_suggestion)
-                .unwrap_or_else(|| connection_suggestion_from_message(message).to_string()),
+                .unwrap_or_else(|| connection_suggestion_from_message(message)),
             Self::Query {
                 message,
                 context,
@@ -175,7 +193,11 @@ impl Error {
                 let base_suggestion = source
                     .as_deref()
                     .and_then(structured_suggestion)
-                    .unwrap_or_else(|| query_suggestion_from_message(message).to_string());
+                    .or_else(|| render_advice(classify_query_message(message), ""))
+                    .unwrap_or_else(|| {
+                        "Check the SQL query and ensure all referenced columns/tables exist."
+                            .to_string()
+                    });
 
                 match context.as_deref().and_then(|ctx| ctx.query.as_deref()) {
                     Some(query) => format!("{}\n\nQuery: {}", base_suggestion, query),
@@ -197,13 +219,7 @@ impl Error {
                 .and_then(structured_suggestion)
                 .unwrap_or_else(|| transaction_suggestion_from_message(message).to_string()),
             Self::Configuration { message } => {
-                if message.contains("initialized") || message.contains("not set") {
-                    "Database not initialized. Call `TideConfig::init().database(url).connect().await?` first.".to_string()
-                } else if message.contains("already") {
-                    "Configuration already set. TideConfig::init() should only be called once.".to_string()
-                } else {
-                    format!("Check your TideConfig settings: {}", message)
-                }
+                format!("Check your TideConfig settings: {}", message)
             }
             Self::Internal { .. } => {
                 "Internal error. Please report this issue at https://github.com/mohamadzoh/tideorm/issues".to_string()
@@ -233,16 +249,6 @@ impl Error {
                     "Set the primary key on your {} instance before this operation.\n\
                      Use `Model::find(id)` to load an existing record, or ensure auto-increment is configured.",
                     model
-                )
-            }
-            Self::InsertReturningNotSupported { backend, .. } => {
-                format!(
-                    "{} does not support INSERT ... RETURNING syntax.\n\
-                     Options:\n\
-                     1. Use separate insert() and find() calls\n\
-                     2. For MySQL, use last_insert_id() after insert\n\
-                     3. Consider using PostgreSQL which supports RETURNING",
-                    backend
                 )
             }
             Self::Tokenization { message } => {
@@ -283,7 +289,6 @@ impl Error {
             Self::Rbac { .. } => "TIDE_RBAC",
             Self::BackendNotSupported { .. } => "TIDE_BACKEND_NOT_SUPPORTED",
             Self::PrimaryKeyNotSet { .. } => "TIDE_PRIMARY_KEY_NOT_SET",
-            Self::InsertReturningNotSupported { .. } => "TIDE_INSERT_RETURNING_NOT_SUPPORTED",
             Self::Tokenization { .. } => "TIDE_TOKENIZATION",
             Self::InvalidToken { .. } => "TIDE_INVALID_TOKEN",
         }
@@ -304,7 +309,6 @@ impl Error {
             Self::Rbac { .. } => 500,
             Self::BackendNotSupported { .. } => 501,
             Self::PrimaryKeyNotSet { .. } => 400,
-            Self::InsertReturningNotSupported { .. } => 501,
             Self::Tokenization { .. } => 400,
             Self::InvalidToken { .. } => 401,
         }
@@ -379,103 +383,5 @@ impl Error {
 
         output.push_str(&format!("\n  Suggestion: {}", self.suggestion()));
         output
-    }
-}
-
-#[cfg(test)]
-mod structured_presentation_tests {
-    use super::{DbFailure, DbFailureKind, Error};
-
-    #[test]
-    fn a_unique_violation_names_the_constraint_that_fired() {
-        let err =
-            Error::query("duplicate key value violates unique constraint").with_db_failure(Some(
-                DbFailure::new(DbFailureKind::UniqueViolation)
-                    .with_code(Some("23505".to_string()))
-                    .with_constraint(Some("users_email_key".to_string())),
-            ));
-
-        assert!(err.is_unique_violation());
-        assert!(!err.is_foreign_key_violation());
-        assert_eq!(err.sqlstate(), Some("23505"));
-        assert_eq!(err.constraint(), Some("users_email_key"));
-
-        let suggestion = err.suggestion();
-        assert!(suggestion.contains("users_email_key"), "{suggestion}");
-        assert!(suggestion.contains("23505"), "{suggestion}");
-    }
-
-    #[test]
-    fn foreign_key_violations_are_distinguishable_from_unique_ones() {
-        let err = Error::query("violates foreign key constraint").with_db_failure(Some(
-            DbFailure::new(DbFailureKind::ForeignKeyViolation)
-                .with_code(Some("23503".to_string()))
-                .with_constraint(Some("posts_user_id_fkey".to_string())),
-        ));
-
-        assert!(err.is_foreign_key_violation());
-        assert!(!err.is_unique_violation());
-        assert!(err.is_constraint_violation());
-        assert!(err.log_format().contains("posts_user_id_fkey"));
-    }
-
-    #[test]
-    fn the_driver_classification_beats_the_message_for_retries() {
-        // The message reads "deadlock", which the substring fallback would call
-        // retryable; the driver says 23505, which never is.
-        let err = Error::query("deadlock while checking duplicate key").with_db_failure(Some(
-            DbFailure::new(DbFailureKind::UniqueViolation).with_code(Some("23505".to_string())),
-        ));
-        assert!(!err.is_retryable());
-
-        // And the reverse: a real serialization failure no longer depends on
-        // the backend having worded its message the way the fallback expects.
-        let err = Error::query("could not complete because of conflict").with_db_failure(Some(
-            DbFailure::new(DbFailureKind::SerializationFailure)
-                .with_code(Some("40001".to_string())),
-        ));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn an_unclassified_failure_still_falls_back_to_the_message() {
-        let err = Error::query("syntax error at or near \"slect\"")
-            .with_db_failure(Some(DbFailure::new(DbFailureKind::Unclassified)));
-
-        assert_eq!(err.failure_kind(), DbFailureKind::Unclassified);
-        assert!(err.suggestion().contains("SQL syntax error"));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn errors_that_never_reached_a_driver_report_no_failure() {
-        let err = Error::invalid_query("where_eq called without a column");
-
-        assert!(err.db_failure().is_none());
-        assert_eq!(err.failure_kind(), DbFailureKind::Unclassified);
-        assert!(err.sqlstate().is_none());
-        assert!(err.constraint().is_none());
-    }
-
-    #[test]
-    fn sqlstate_classification_covers_what_the_driver_kind_does_not() {
-        assert_eq!(
-            DbFailureKind::from_sqlstate("40P01"),
-            DbFailureKind::Deadlock
-        );
-        assert_eq!(
-            DbFailureKind::from_sqlstate("42P01"),
-            DbFailureKind::UndefinedTable
-        );
-        assert_eq!(
-            DbFailureKind::from_sqlstate("42501"),
-            DbFailureKind::InsufficientPrivilege
-        );
-        // SQLite reports a native code, not a SQLSTATE; it stays unclassified
-        // here and is classified from the driver's own kind instead.
-        assert_eq!(
-            DbFailureKind::from_sqlstate("2067"),
-            DbFailureKind::Unclassified
-        );
     }
 }

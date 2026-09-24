@@ -1,0 +1,5 @@
+error: #[tideorm(has_many = "...")] requires a `HasMany<..>` field
+  --> tests/ui/invalid_relation_kind_mismatch.rs:16:12
+   |
+16 |     posts: HasOne<Post>,
+   |            ^^^^^^^^^^^^
