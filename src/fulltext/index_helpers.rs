@@ -102,8 +102,9 @@ impl FullTextIndex {
         builder.into_sql()
     }
 
-    /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5, plus the
-    /// triggers that keep it in sync with the table
+    /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5, the statement
+    /// that indexes the rows the table already holds, and the triggers that
+    /// keep it in sync with the table
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let mut params = Vec::new();
         let fts_table = format!("{}_fts", self.table);
@@ -145,6 +146,15 @@ impl FullTextIndex {
             self.sqlite_trigger("ai", "INSERT", &insert_new),
             self.sqlite_trigger("ad", "DELETE", &delete_old),
             self.sqlite_trigger("au", "UPDATE", &format!("{delete_old} {insert_new}")),
+            // An external-content table starts empty: without a rebuild, rows
+            // written before the index was created are never found.
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("INSERT INTO ")
+                .ident(&fts_table)
+                .raw("(")
+                .ident(&fts_table)
+                .raw(") VALUES('rebuild')")
+                .into_sql(),
         ]
     }
 
@@ -312,7 +322,11 @@ pub fn generate_snippet(
 
     if let Some(pos) = match_pos {
         let start = pos.saturating_sub(fragment_words);
-        let end = pos.saturating_add(fragment_words).min(words.len());
+        // The matching word itself, then `fragment_words` after it.
+        let end = pos
+            .saturating_add(fragment_words)
+            .saturating_add(1)
+            .min(words.len());
 
         let snippet_words: Vec<String> = words[start..end]
             .iter()

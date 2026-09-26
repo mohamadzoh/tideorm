@@ -105,6 +105,7 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
     let mut future = Box::pin(super::state::with_connection_override(
         handle,
         None,
+        None,
         OverrideVisibleAcrossPolls {
             polled_threads: polled_threads.clone(),
             stage: 0,
@@ -184,7 +185,7 @@ async fn raw_json_preserves_boolean_and_json_column_types() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn raw_json_preserves_decimal_and_datetime_column_types() {
+async fn raw_json_reads_decimal_and_datetime_columns_by_what_sqlite_stores() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("sqlite in-memory connection should succeed");
@@ -214,11 +215,9 @@ async fn raw_json_preserves_decimal_and_datetime_column_types() {
         .await
         .expect("querying typed raw JSON rows should succeed");
 
-    let expected_amount = serde_json::to_value(
-        rust_decimal::Decimal::from_str_exact("12.34")
-            .expect("decimal literal should parse for comparison"),
-    )
-    .expect("decimal should serialize to JSON");
+    // SQLite stores a `DECIMAL` as a REAL, and raw SQL has no model to say
+    // the column is meant as a decimal.
+    let expected_amount = serde_json::json!(12.34);
     let expected_created_at = serde_json::to_value(
         chrono::NaiveDateTime::parse_from_str("2026-03-21 10:11:12", "%Y-%m-%d %H:%M:%S")
             .expect("datetime literal should parse for comparison"),
@@ -271,6 +270,40 @@ async fn raw_json_preserves_count_aggregates_as_numbers() {
             "count": 3,
             "enabled_total": 2,
         })]
+    );
+}
+
+/// A float sum, a running total and an average are numbers: they used to come
+/// back as decimal strings, which `as_f64()` reads as nothing.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn raw_json_reads_real_expressions_as_numbers() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    for statement in [
+        "CREATE TABLE raw_json_real_probe (id INTEGER PRIMARY KEY, amount REAL NOT NULL)",
+        "INSERT INTO raw_json_real_probe (amount) VALUES (1.5), (2.25)",
+    ] {
+        db.__execute_with_params(statement, vec![])
+            .await
+            .expect("setting up the probe table should succeed");
+    }
+
+    let rows = db
+        .__raw_json_with_params(
+            "SELECT SUM(amount) OVER (ORDER BY id) AS running, AVG(id) OVER () AS average              FROM raw_json_real_probe ORDER BY id",
+            vec![],
+        )
+        .await
+        .expect("querying real expressions should succeed");
+
+    assert_eq!(
+        rows,
+        vec![
+            serde_json::json!({"running": 1.5, "average": 1.5}),
+            serde_json::json!({"running": 3.75, "average": 1.5}),
+        ]
     );
 }
 

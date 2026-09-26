@@ -41,6 +41,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
     // unreachable database keeps its `Error::Connection` class. A key matches at
     // most one row, so the lookup reads with `all()`: `one()` adds a bound
     // `LIMIT`, which recent SQLite releases recompile the statement for on every run.
+    // The lookup keeps the soft-delete scope, as every other read does.
     let find_body = |connection_expr: TokenStream2| {
         quote! {
             use ::tideorm::orm::{EntityTrait, QueryFilter};
@@ -50,7 +51,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             );
             let connection = #connection_expr;
             let rows = ::tideorm::profiling::__profile_future(
-                #internal_entity_mod::Entity::find()
+                ::tideorm::internal::scoped_find::<Self>()
                     .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
                     .all(&connection.executor()),
             )
@@ -86,34 +87,12 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn destroy(id: Self::PrimaryKey) -> ::tideorm::Result<u64> {
-                use ::tideorm::orm::{EntityTrait, QueryFilter};
-                use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
-                let error_context = || ::tideorm::internal::primary_key_error_context::<Self>(
-                    &id,
-                    format!("destroy({})", <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id)),
-                );
-                // Load the row first so `destroy(id)` runs the same delete callbacks as
-                // `delete(self)`; a `before_delete` guard must hold on both entry points.
-                let model = match <Self as ::tideorm::model::Model>::find(id.clone()).await? {
-                    Some(model) => model,
-                    None => return Ok(0),
-                };
-                (&model).run_before_delete()?;
-                let connection = ::tideorm::database::__current_connection()?;
-                let result = ::tideorm::profiling::__profile_future(
-                    #internal_entity_mod::Entity::delete_many()
-                        .filter(<Self as ::tideorm::internal::InternalModel>::primary_key_condition(&id))
-                        .exec(&connection.executor()),
-                )
-                    .await
-                    .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context()))?;
-                if result.rows_affected > 0 {
-                    ::tideorm::QueryCache::global().invalidate_model(#table_name);
-                    ::tideorm::model::__forget_dirty_snapshot_by_pk::<Self>(&id);
+                // Load the row first so `destroy(id)` runs the same delete, and the
+                // same callbacks, as `delete(self)`; a trashed row is not found.
+                match <Self as ::tideorm::model::Model>::find(id).await? {
+                    Some(model) => <Self as ::tideorm::model::Model>::delete(model).await,
+                    None => Ok(0),
                 }
-                (&model).run_after_delete()?;
-                Ok(result.rows_affected)
             }
 
             async fn create(model: Self) -> ::tideorm::Result<Self> {
@@ -146,6 +125,23 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             async fn delete(self) -> ::tideorm::Result<u64> {
+                use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
+                if !<Self as ::tideorm::model::ModelMeta>::soft_delete_enabled() {
+                    return <Self as ::tideorm::model::Model>::__force_delete(self).await;
+                }
+                // A soft-delete model is marked, not removed.
+                let model = self;
+                (&model).run_before_delete()?;
+                let rows =
+                    ::tideorm::model::__soft_delete_by_primary_key::<Self>(&model.primary_key()).await?;
+                if rows > 0 {
+                    ::tideorm::model::__forget_dirty_snapshot(&model);
+                }
+                (&model).run_after_delete()?;
+                Ok(rows)
+            }
+
+            async fn __force_delete(self) -> ::tideorm::Result<u64> {
                 use ::tideorm::orm::{EntityTrait, QueryFilter};
                 use ::tideorm::callbacks::{AfterDeleteDispatch, BeforeDeleteDispatch};
                 let model = self;

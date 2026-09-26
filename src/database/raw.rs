@@ -119,7 +119,11 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<T>> {
-        Self::rows_to_models(self.fetch_rows(sql, params).await?)
+        let rows = self.fetch_rows(sql, params).await?;
+        // The rows are remembered as read from the pool this handle runs on,
+        // which a `query_with()` handle need not share with the scope.
+        let origin = super::origin_of(&self.__get_connection()?);
+        crate::model::__loading_from(origin, || Self::rows_to_models(rows))
     }
 
     /// Run a row-returning statement on this handle's connection.
@@ -310,7 +314,7 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<serde_json::Value>> {
-        self.__raw_json_typed(sql, params, |_| None).await
+        self.__raw_json_typed(sql, params, &|_| None).await
     }
 
     /// Run a statement a model query rendered and return the rows as JSON,
@@ -319,7 +323,7 @@ impl Database {
         &self,
         sql: &str,
         params: Vec<DbValue>,
-        model_type: ColumnTypeLookup,
+        model_type: ColumnTypeLookup<'_>,
     ) -> Result<Vec<serde_json::Value>> {
         let rows = self.fetch_rows(sql, params).await?;
         Ok(Self::query_rows_to_json(&rows, model_type))

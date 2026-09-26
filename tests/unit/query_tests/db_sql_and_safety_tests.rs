@@ -120,7 +120,8 @@ fn test_json_key_exists_renders_each_backend_operator() {
     assert_eq!(
         json_exists(DatabaseType::SQLite, JsonExistence::Key, "email", false),
         Some((
-            "json_extract(\"data\", ?) IS NOT NULL".to_string(),
+            "CASE WHEN \"data\" IS NOT NULL THEN json_type(\"data\", ?) IS NOT NULL END"
+                .to_string(),
             "$.\"email\"".to_string()
         ))
     );
@@ -209,12 +210,29 @@ fn test_json_path_special_keys_are_quoted_safely() {
 
 #[test]
 fn test_unexpressible_json_path_matches_nothing_instead_of_being_dropped() {
-    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
-        .where_json_path_exists("data", "$.user') OR 1=1 --")
-        .build_select_sql_with_params_for_db(DatabaseType::MySQL);
+    let path = "$.user') OR 1=1 --";
+    for query in [
+        QueryBuilder::<QueryTestUser>::new().where_json_path_exists("data", path),
+        QueryBuilder::<QueryTestUser>::new().where_json_path_not_exists("data", path),
+    ] {
+        let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
 
-    assert!(sql.ends_with("WHERE 0 = 1"), "{sql}");
-    assert!(params.is_empty());
+        assert!(sql.ends_with("WHERE 0 = 1"), "{sql}");
+        assert!(params.is_empty());
+    }
+}
+
+#[test]
+fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .where_json_path_not_exists("data", "$.user.name")
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(
+        sql.ends_with("WHERE NOT ((\"data\")::jsonb @? ($1::jsonpath))"),
+        "{sql}"
+    );
+    assert!(matches!(params.as_slice(), [Value::String(Some(path))] if path == "$.user.name"));
 }
 
 #[test]
@@ -271,10 +289,16 @@ fn test_postgres_array_predicates_take_their_placeholders_outside_brackets() {
     // is unknown, so the offending row goes uncounted), where `<@` matches
     // neither.
     assert_eq!(
-        db_sql::postgres_array_contained_by("\"roles\"", &operands),
+        db_sql::postgres_array_contained_by("\"roles\"", &operands, false),
         "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
          tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
          tideorm_array_element.element NOT IN ($1, $2)))"
+    );
+    // A NULL in the list lets a NULL element through and stays out of NOT IN.
+    assert_eq!(
+        db_sql::postgres_array_contained_by("\"roles\"", &operands, true),
+        "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
+         tideorm_array_element(element) WHERE tideorm_array_element.element NOT IN ($1, $2)))"
     );
 }
 
@@ -463,26 +487,6 @@ fn test_format_identifier_reference_quotes_reserved_words() {
 }
 
 #[test]
-fn test_cast_to_float() {
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::Postgres, "value"),
-        "CAST(value AS FLOAT8)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::MySQL, "value"),
-        "CAST(value AS DOUBLE)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::MariaDB, "value"),
-        "CAST(value AS DOUBLE)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::SQLite, "value"),
-        "CAST(value AS REAL)"
-    );
-}
-
-#[test]
 fn test_join_identifier_validation_accepts_safe_values() {
     assert!(db_sql::validate_identifier("JOIN table", "users").is_ok());
     assert!(db_sql::validate_identifier("JOIN alias", "author_1").is_ok());
@@ -590,7 +594,43 @@ fn test_subquery_validation_rejects_top_level_compound_queries() {
 }
 
 #[test]
+fn test_subquery_validation_tells_a_function_from_a_statement() {
+    for sql in [
+        "SELECT REPLACE(name, 'a', 'b') FROM users",
+        "SELECT id FROM users WHERE LOWER(REPLACE (email, ' ', '')) = 'x'",
+    ] {
+        db_sql::validate_subquery_sql(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    for sql in [
+        "SELECT 1; REPLACE INTO users VALUES (1)",
+        "SELECT id FROM users UPDATE users SET name = 'x'",
+    ] {
+        assert!(db_sql::validate_subquery_sql(sql).is_err(), "{sql}");
+    }
+    db_sql::validate_having_sql_fragment("HAVING", "LEFT(MAX(name), 1) = 'a'")
+        .expect("LEFT() is a string function in HAVING");
+    assert!(db_sql::validate_having_sql_fragment("HAVING", "COUNT(*) > 1 LEFT JOIN x").is_err());
+}
+
+#[test]
 fn test_compound_subquery_validation_allows_recursive_cte_shape() {
     db_sql::validate_compound_subquery_sql("SELECT 1 UNION ALL SELECT 2")
         .expect("recursive CTE bodies should allow top-level UNION ALL");
+}
+
+#[test]
+fn test_a_question_mark_in_quotes_is_no_placeholder() {
+    assert_eq!(
+        db_sql::count_template_placeholders("MAX(note) LIKE '%?%'"),
+        0
+    );
+    assert_eq!(
+        db_sql::count_template_placeholders("SUM(\"a?\") > ? AND b = '?'"),
+        1
+    );
+    assert_eq!(
+        db_sql::map_template_placeholders("x = ? AND y LIKE 'it''s ?' AND z = ?", || "$"
+            .to_string()),
+        "x = $ AND y LIKE 'it''s ?' AND z = $"
+    );
 }

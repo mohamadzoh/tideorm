@@ -2,6 +2,11 @@ use super::*;
 
 use crate::internal::push_param;
 
+/// `value` as the JSON text a statement reads back with a JSON function.
+fn json_text(value: &serde_json::Value) -> crate::internal::Value {
+    crate::internal::Value::String(Some(value.to_string()))
+}
+
 impl<M: Model> BatchUpdateBuilder<M> {
     /// Bind `value` with the type of the column it is assigned to.
     fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
@@ -88,42 +93,65 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     Self::keep_integral(column, db_type, quotient)
                 ))
             }
-            UpdateValue::ArrayAppend(value) => {
-                let placeholder =
-                    push_param(db_type, params, crate::internal::json_to_db_value(value));
-                Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        format!("{} = array_append({}, {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::SQLite => {
-                        format!("{} = json_insert({}, '$[#]', {})", col, col, placeholder)
-                    }
-                })
-            }
-            UpdateValue::ArrayRemove(value) => {
-                let placeholder =
-                    push_param(db_type, params, crate::internal::json_to_db_value(value));
-                Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        format!("{} = array_remove({}, {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        format!(
-                            "{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))",
-                            col, col, col, placeholder
-                        )
-                    }
-                    crate::config::DatabaseType::SQLite => {
-                        format!(
-                            "{} = (SELECT json_group_array(value) FROM json_each({}) WHERE value != {})",
-                            col, col, placeholder
-                        )
-                    }
-                })
-            }
+            UpdateValue::ArrayAppend(value) => Ok(match db_type {
+                crate::config::DatabaseType::Postgres => {
+                    let placeholder =
+                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    format!("{} = array_append({}, {})", col, col, placeholder)
+                }
+                // The element is bound as its JSON text and read back as JSON,
+                // so an object stays an object rather than becoming a string,
+                // and a NULL column starts a new array.
+                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                    let placeholder = push_param(db_type, params, json_text(value));
+                    format!(
+                        "{} = JSON_ARRAY_APPEND(COALESCE({}, JSON_ARRAY()), '$', JSON_EXTRACT({}, '$'))",
+                        col, col, placeholder
+                    )
+                }
+                crate::config::DatabaseType::SQLite => {
+                    let placeholder = push_param(db_type, params, json_text(value));
+                    format!(
+                        "{} = json_insert(COALESCE({}, '[]'), '$[#]', json({}))",
+                        col, col, placeholder
+                    )
+                }
+            }),
+            UpdateValue::ArrayRemove(value) => Ok(match db_type {
+                crate::config::DatabaseType::Postgres => {
+                    let placeholder =
+                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    format!("{} = array_remove({}, {})", col, col, placeholder)
+                }
+                // Every element equal to the value goes, by JSON value (`1`,
+                // `"1"` and `true` differ), and the rest keep their order and
+                // types; a NULL column stays NULL. Equality is containment both
+                // ways, which MySQL and MariaDB share: MariaDB crashes comparing
+                // a JSON_TABLE value with `<=>`, and MySQL has no JSON_EQUALS.
+                // JSON_TABLE reads a JSON null as SQL NULL on MySQL, hence the
+                // extra test when null is what is removed.
+                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                    let first = push_param(db_type, params, json_text(value));
+                    let second = push_param(db_type, params, json_text(value));
+                    let null_guard = if value.is_null() {
+                        "tideorm_element.v IS NOT NULL AND "
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE(JSON_CONTAINS(tideorm_element.v, {first}) AND JSON_CONTAINS({second}, tideorm_element.v), FALSE)) END"
+                    )
+                }
+                // Each kept element is rebuilt as the JSON it was: `json_each`
+                // reports true and false as 1 and 0 and null as NULL.
+                crate::config::DatabaseType::SQLite => {
+                    let placeholder = push_param(db_type, params, json_text(value));
+                    let element = "CASE type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') WHEN 'null' THEN json('null') WHEN 'object' THEN json(value) WHEN 'array' THEN json(value) ELSE json_quote(value) END";
+                    format!(
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY key) FROM json_each({col}) WHERE {element} <> json({placeholder})) END"
+                    )
+                }
+            }),
             UpdateValue::JsonSet(path, value) => {
                 let segments = Self::validate_json_path(path)?;
                 let bound_path = match db_type {
@@ -222,16 +250,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
     }
 
     fn build_where_query(&self) -> QueryBuilder<M> {
-        // Batch updates keep soft-deleted rows in scope by default so a bulk
-        // restore can reach them; `without_trashed()` opts back into the normal
-        // active-only scope.
-        let mut query = if self.include_trashed {
-            QueryBuilder::new().with_trashed()
-        } else {
-            QueryBuilder::new()
-        };
+        // Live rows, as a query reads them, unless the update chose otherwise;
+        // an update started from a query keeps that query's scope.
+        let mut query = self.base.clone().unwrap_or_default();
+        match self.include_trashed {
+            Some(true) => query = query.with_trashed(),
+            Some(false) => query = query.live_rows_only(),
+            None => {}
+        }
 
-        query.conditions = self.conditions.clone();
+        query.conditions.extend(self.conditions.iter().cloned());
         if !self.or_group.is_empty() {
             query.or_groups.push(self.or_group.clone());
         }
@@ -239,10 +267,33 @@ impl<M: Model> BatchUpdateBuilder<M> {
         query
     }
 
+    /// Refuse the parts of a query an `UPDATE` cannot keep: it takes the
+    /// query's filters, scope and database, and nothing that reshapes rows.
+    fn ensure_base_is_updatable(&self) -> Result<()> {
+        match self.base.as_ref().and_then(QueryBuilder::update_blocker) {
+            Some(part) => Err(Error::invalid_query(format!(
+                "update_all() of a {} query keeps its filters and scope only; {} cannot be part of an UPDATE",
+                M::table_name(),
+                part
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The database the update runs on: the one its query named, else the
+    /// scope's.
+    fn database(&self) -> Result<crate::database::Database> {
+        match self.base.as_ref().and_then(QueryBuilder::named_database) {
+            Some(database) => Ok(database),
+            None => crate::database::__current_db(),
+        }
+    }
+
     /// A batch update's filters must pass the query builder's validation, and
     /// at least one of them must be able to exclude a row; these are the same
     /// guards the `QueryBuilder` mutation terminals use.
     pub(crate) fn ensure_explicit_filters(&self, operation: &str) -> Result<()> {
+        self.ensure_base_is_updatable()?;
         let query = self.build_where_query();
         query.ensure_query_is_executable()?;
         query.ensure_mutation_has_explicit_filters(operation)
@@ -270,19 +321,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 columns.len()
             ))),
         }
-    }
-
-    /// `returning()` only has a terminal that can hand rows back:
-    /// `execute_returning()`. Refuse rather than silently discard the request.
-    fn ensure_returning_terminal(&self) -> Result<()> {
-        if self.returning {
-            return Err(Error::invalid_query(
-                "returning() requires execute_returning(); execute() only reports the number of \
-                 affected rows",
-            ));
-        }
-
-        Ok(())
     }
 
     /// Render the `UPDATE` statement (without any `RETURNING` clause) and its
@@ -345,10 +383,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// own lifecycle matters.
     ///
     /// Returns `Ok(0)` without touching the database when no assignment was
-    /// staged. Errors when the builder carries no explicit filter, or when
-    /// [`returning()`](Self::returning) was requested — that flag needs
-    /// [`execute_returning`](Self::execute_returning), and silently dropping it
-    /// would hide the caller's intent.
+    /// staged, and errors when the builder carries no explicit filter. Use
+    /// [`execute_returning`](Self::execute_returning) for the rows.
     ///
     /// On success the query cache for this table is invalidated.
     pub async fn execute(self) -> Result<u64> {
@@ -357,15 +393,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
         }
 
         self.ensure_explicit_filters("update")?;
-        self.ensure_returning_terminal()?;
 
         // Resolve the dialect from the very handle that will run the statement.
         // `require_db()` only ever sees the global connection, so a batch update
         // inside `some_db.transaction(..)` with no global connection used to
         // fail before it rendered any SQL — and could pick the wrong dialect
         // when the scoped handle spoke a different backend.
-        let db = crate::database::__current_db()?;
-        let db_type = db.backend();
+        let db = self.database()?;
+        let db_type = db.execution_backend();
 
         let (sql, params) = self.build_update_statement(db_type)?;
 
@@ -379,9 +414,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Appends `RETURNING`, so it needs a backend whose `UPDATE` takes one:
     /// PostgreSQL and SQLite. MySQL has no `RETURNING`, and MariaDB has
     /// `UPDATE .. RETURNING` only from 13.0, so both are refused with an error
-    /// before anything runs, whatever the server's version. Calling
-    /// [`returning()`](Self::returning) first is optional here — this terminal
-    /// always returns rows.
+    /// before anything runs, whatever the server's version.
     ///
     /// Returns an empty vector without touching the database when no assignment
     /// was staged, and errors when the builder carries no explicit filter. Like
@@ -398,8 +431,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         self.ensure_explicit_filters("update")?;
 
-        let db = crate::database::__current_db()?;
-        let db_type = db.backend();
+        let db = self.database()?;
+        let db_type = db.execution_backend();
         Self::ensure_backend_supports_returning(db_type)?;
         // The rows are written before they are decoded, as with `update()`.
         crate::internal::ensure_fields_storable::<M, _>(&db.__get_connection()?.executor())?;
@@ -408,8 +441,13 @@ impl<M: Model> BatchUpdateBuilder<M> {
         sql.push_str(" RETURNING ");
         sql.push_str(&crate::query::db_sql::model_columns_sql::<M>(db_type, None));
 
-        let models = db.__raw_with_params::<M>(&sql, params).await?;
-        QueryBuilder::<M>::invalidate_model_state(models.len() as u64);
+        let models = db.__raw_with_params::<M>(&sql, params).await;
+        // A row that fails to decode was still written, so the table's cached
+        // reads are dropped whether or not the decoding succeeds.
+        QueryBuilder::<M>::invalidate_model_state(
+            models.as_ref().map_or(1, |models| models.len() as u64),
+        );
+        let models = models?;
         #[cfg(feature = "dirty-tracking")]
         crate::model::__remember_dirty_snapshots(&models);
         Ok(models)

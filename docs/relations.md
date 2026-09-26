@@ -134,6 +134,16 @@ let users = User::eager()
 
 Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
 
+After `with()`, the eager builder forwards the common filters (`where_eq`, `where_in`, `where_raw`, `order_by`, `limit`, `offset`); `query(|q| ..)` reaches every other query method:
+
+```rust
+let users = User::query()
+    .with("posts")
+    .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
+    .get()
+    .await?;
+```
+
 #### Hidden Attributes in Eager-Loaded Payloads
 
 `to_json()` serializes a cached relation inline, and each payload is filtered by **the target model's** `hidden` list, at any nesting depth. A `User` that declares `hidden = "password_hash"` keeps it out of `post.to_json(None)` even though the hidden list belongs to `User` and the call was made on `Post`:
@@ -227,6 +237,8 @@ user.roles.sync(vec![
     serde_json::json!(3),
 ]).await?;
 ```
+
+When the pivot model has soft delete, a trashed pivot row no longer links its pair: `load()`, `load_with()`, eager loading and `count()` leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
 
 ### Polymorphic Relations
 

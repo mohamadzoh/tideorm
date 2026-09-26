@@ -27,32 +27,6 @@ use crate::internal::InternalModel;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
 
-fn apply_primary_key_filter<M: Model>(
-    mut query: QueryBuilder<M>,
-    primary_key: &M::PrimaryKey,
-) -> Result<QueryBuilder<M>> {
-    let values = match serde_json::to_value(primary_key)
-        .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?
-    {
-        serde_json::Value::Array(values) => values,
-        value => vec![value],
-    };
-
-    let columns = M::primary_key_names();
-    if values.len() != columns.len() {
-        return Err(Error::invalid_query(format!(
-            "Primary key value for {} did not match declared key columns",
-            M::table_name()
-        )));
-    }
-
-    for (column, value) in columns.iter().zip(values) {
-        query = query.where_eq(*column, value);
-    }
-
-    Ok(query)
-}
-
 /// A model plus the relation payloads an eager load resolved for it.
 ///
 /// This is what every [`EagerQueryBuilder`] terminal returns. The relations are
@@ -440,6 +414,24 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
+    /// Shape the *root* query with any [`QueryBuilder`] method, for the ones
+    /// this builder does not forward:
+    ///
+    /// ```ignore
+    /// let users = User::query()
+    ///     .with("posts")
+    ///     .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
+    ///     .get()
+    ///     .await?;
+    /// ```
+    ///
+    /// Relation queries are unaffected, as with the methods below.
+    #[must_use]
+    pub fn query(mut self, shape: impl FnOnce(QueryBuilder<M>) -> QueryBuilder<M>) -> Self {
+        self.query = shape(self.query);
+        self
+    }
+
     /// Filter the *root* query. Relation queries are unaffected — constrain
     /// those by loading them lazily with `load_with` instead.
     pub fn where_eq<V: serde::Serialize>(mut self, column: impl IntoColumnName, value: V) -> Self {
@@ -451,7 +443,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     pub fn where_in<V: serde::Serialize>(
         mut self,
         column: impl IntoColumnName,
-        values: Vec<V>,
+        values: impl IntoIterator<Item = V>,
     ) -> Self {
         self.query = self.query.where_in(column, values);
         self
@@ -529,7 +521,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
-        self.query = apply_primary_key_filter(self.query, &id)?.limit(1);
+        self.query = self.query.where_primary_key(&id)?.limit(1);
         self.first().await
     }
 }

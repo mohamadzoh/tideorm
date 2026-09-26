@@ -80,6 +80,6 @@ pub trait SoftDelete: Model {
 
     /// Bypass soft deletion and remove the record permanently.
     async fn force_delete(self) -> Result<u64> {
-        <Self as Model>::delete(self).await
+        <Self as Model>::__force_delete(self).await
     }
 }

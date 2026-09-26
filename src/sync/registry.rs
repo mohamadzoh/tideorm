@@ -10,9 +10,39 @@ pub(super) static MODEL_SCHEMAS: RwLock<Vec<ModelSchema>> = RwLock::new(Vec::new
 pub struct CompiledModelRegistration {
     pub source_path: &'static str,
     pub sync_schema: fn() -> ModelSchema,
+    /// The model's table, which a query joining it names.
+    pub table_name: fn() -> &'static str,
+    /// The model's type for one of its columns, which binds a filter value on
+    /// that column when another model's query joins the table.
+    pub column_type: ColumnTypeOf,
 }
 
+/// A model's column-type lookup, as its registration carries it.
+#[doc(hidden)]
+pub type ColumnTypeOf = fn(&str) -> Option<crate::orm::ColumnType>;
+
 inventory::collect!(CompiledModelRegistration);
+
+/// The column type a compiled model declares for `column` of `table`, for a
+/// query that joins the table: `None` when no model has that table.
+pub(crate) fn registered_column_type(table: &str, column: &str) -> Option<crate::orm::ColumnType> {
+    static BY_TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, ColumnTypeOf>> =
+        std::sync::OnceLock::new();
+
+    let by_table = BY_TABLE.get_or_init(|| {
+        let mut by_table = std::collections::HashMap::new();
+        for model in inventory::iter::<CompiledModelRegistration> {
+            // Two models may share a table; the first one's types serve both.
+            by_table
+                .entry((model.table_name)())
+                .or_insert(model.column_type);
+        }
+        by_table
+    });
+    by_table
+        .get(table)
+        .and_then(|column_type| column_type(column))
+}
 
 pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {
     let Some(compiled_pattern) = compile_glob_pattern(pattern) else {

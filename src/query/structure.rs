@@ -291,6 +291,28 @@ pub enum WindowFunctionType {
 }
 
 impl WindowFunctionType {
+    /// This function with its column argument, if any, passed through `column`.
+    fn map_column(&self, column: &dyn Fn(&str) -> String) -> Self {
+        match self {
+            Self::Lag(col, offset, default) => Self::Lag(column(col), *offset, default.clone()),
+            Self::Lead(col, offset, default) => Self::Lead(column(col), *offset, default.clone()),
+            Self::FirstValue(col) => Self::FirstValue(column(col)),
+            Self::LastValue(col) => Self::LastValue(column(col)),
+            Self::NthValue(col, n) => Self::NthValue(column(col), *n),
+            Self::Sum(col) => Self::Sum(column(col)),
+            Self::Avg(col) => Self::Avg(column(col)),
+            Self::Count(Some(col)) => Self::Count(Some(column(col))),
+            Self::Min(col) => Self::Min(column(col)),
+            Self::Max(col) => Self::Max(column(col)),
+            Self::RowNumber
+            | Self::Rank
+            | Self::DenseRank
+            | Self::Ntile(_)
+            | Self::Count(None)
+            | Self::Custom(_) => self.clone(),
+        }
+    }
+
     /// Render the function call itself — no `OVER (..)` clause, which
     /// [`WindowFunction::to_sql_for_db`] adds around it.
     ///
@@ -394,6 +416,21 @@ impl WindowFunction {
             frame_start: None,
             frame_end: None,
             alias: alias.to_string(),
+        }
+    }
+
+    /// This window with every column it names passed through `column`: its
+    /// function's argument and its `PARTITION BY` and `ORDER BY` columns.
+    pub(crate) fn map_columns(&self, column: &dyn Fn(&str) -> String) -> Self {
+        Self {
+            function: self.function.map_column(column),
+            partition_by: self.partition_by.iter().map(|c| column(c)).collect(),
+            order_by: self
+                .order_by
+                .iter()
+                .map(|(c, direction)| (column(c), *direction))
+                .collect(),
+            ..self.clone()
         }
     }
 
@@ -701,7 +738,7 @@ pub struct QueryFragment<M: Model> {
     /// Values bound to each HAVING clause, indexed in lockstep with
     /// `having_conditions`: slot `i` holds the values for the `?` placeholders
     /// in clause `i`, and is empty for a clause written as raw SQL.
-    pub(crate) having_bindings: Vec<Vec<serde_json::Value>>,
+    pub(crate) having_bindings: Vec<Vec<crate::internal::Value>>,
     /// JOIN clauses, in the order they will be rendered. **Appended.**
     pub joins: Vec<JoinClause>,
     /// Compound-select operands. **Appended.**
@@ -723,6 +760,8 @@ pub struct QueryFragment<M: Model> {
     /// **First-wins**, so the earliest failure is the one reported and later
     /// ones do not mask it.
     pub invalid_query_reason: Option<String>,
+    /// A page `page()` refused, carried as the field and reason it reports.
+    pub(crate) invalid_page: Option<(&'static str, String)>,
     /// `with_trashed()`: include soft-deleted rows. **Last-wins**, and mutually
     /// exclusive with [`only_trashed`](Self::only_trashed) — a fragment that set
     /// neither leaves the builder's scope untouched.
@@ -769,6 +808,7 @@ impl<M: Model> QueryFragment<M> {
             cache_options: None,
             cache_key: None,
             invalid_query_reason: None,
+            invalid_page: None,
             include_trashed: false,
             only_trashed: false,
             lock_for_update: false,
@@ -798,6 +838,7 @@ impl<M: Model> QueryFragment<M> {
             || self.cache_options.is_some()
             || self.cache_key.is_some()
             || self.invalid_query_reason.is_some()
+            || self.invalid_page.is_some()
             || self.lock_for_update;
 
         let has_soft_delete_scope = self.include_trashed || self.only_trashed;

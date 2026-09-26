@@ -25,16 +25,21 @@ impl<M: Model> QueryBuilder<M> {
         condition
     }
 
+    /// The backend the query renders for: the one its statement runs on.
+    ///
+    /// That is the enclosing transaction when there is one, even for a query
+    /// with a handle of its own, since the handle executes inside it.
     pub(crate) fn db_type_for_sql(&self) -> DatabaseType {
         self.database
             .as_ref()
-            .map(|db| db.backend())
+            .map(|db| db.execution_backend())
             .unwrap_or_else(Self::ambient_db_type)
     }
 
-    /// The backend to render for when the query carries no connection of its own.
+    /// The backend to render for when the query carries no connection of its
+    /// own: the scope's, which is the enclosing transaction's if any.
     fn ambient_db_type() -> DatabaseType {
-        crate::database::try_db()
+        crate::database::__current_db()
             .map(|db| db.backend())
             .unwrap_or(DatabaseType::Postgres)
     }
@@ -90,12 +95,32 @@ impl<M: Model> QueryBuilder<M> {
     /// or a table-qualified column of a model registered with
     /// [`bind_columns_of`](Self::bind_columns_of).
     pub(crate) fn column_value(&self, column: &str, value: &serde_json::Value) -> Value {
-        let column_type = crate::internal::column_type_of::<M>(column).or_else(|| {
-            self.joined_column_types
-                .iter()
-                .find_map(|column_type_of| column_type_of(column))
-        });
-        crate::internal::json_to_column_value(value, column_type.as_ref())
+        crate::internal::json_to_column_value(value, self.column_type(column).as_ref())
+    }
+
+    /// The type a model declares for a filter's column: the query's own
+    /// model's, else a joined model's.
+    pub(in crate::query) fn column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
+        crate::internal::column_type_of::<M>(column)
+            .or_else(|| {
+                self.joined_column_types
+                    .iter()
+                    .find_map(|column_type_of| column_type_of(column))
+            })
+            .or_else(|| self.joined_model_column_type(column))
+    }
+
+    /// The type a model declares for `qualifier.column` when the qualifier is
+    /// a joined table or its alias, so a value compared with a joined table's
+    /// UUID or timestamp column is bound as one, not as text.
+    fn joined_model_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
+        let (qualifier, name) = column.split_once('.')?;
+        let table = self.joins.iter().find_map(|join| match &join.alias {
+            Some(alias) if alias == qualifier => Some(join.table.as_str()),
+            None if join.table == qualifier => Some(join.table.as_str()),
+            _ => None,
+        })?;
+        crate::sync::registered_column_type(table, name)
     }
 
     pub(crate) fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
@@ -128,6 +153,9 @@ impl<M: Model> QueryBuilder<M> {
                 return Expr::col((Alias::new(table), Alias::new(field)));
             }
             (None, field) if db_sql::is_safe_identifier_segment(field) => {
+                if self.qualifies_model_column(field) {
+                    return Expr::col((Alias::new(M::table_name()), Alias::new(field)));
+                }
                 return Expr::col(Alias::new(field));
             }
             _ => {}
@@ -151,12 +179,33 @@ impl<M: Model> QueryBuilder<M> {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => Some(ConditionSpec::Raw {
                 raw_sql,
                 values: &[],
+                template: false,
             }),
             (Operator::Raw, ConditionValue::RawExprWithValues { sql, values }) => {
                 Some(ConditionSpec::Raw {
                     raw_sql: sql,
                     values,
+                    template: false,
                 })
+            }
+            (Operator::Raw, ConditionValue::RawTemplate { sql, values }) => {
+                Some(ConditionSpec::Raw {
+                    raw_sql: sql,
+                    values,
+                    template: true,
+                })
+            }
+            (operator, ConditionValue::Column(other)) => {
+                let operator = match operator {
+                    Operator::Eq => ComparisonOperator::Eq,
+                    Operator::NotEq => ComparisonOperator::NotEq,
+                    Operator::Gt => ComparisonOperator::Gt,
+                    Operator::Gte => ComparisonOperator::Gte,
+                    Operator::Lt => ComparisonOperator::Lt,
+                    Operator::Lte => ComparisonOperator::Lte,
+                    _ => return None,
+                };
+                Some(ConditionSpec::CompareColumns { operator, other })
             }
             // `col = NULL` and `col != NULL` are UNKNOWN for every row, so binding
             // the JSON null as a parameter would silently match nothing with no
@@ -231,8 +280,17 @@ impl<M: Model> QueryBuilder<M> {
             (Operator::IsNotNull, ConditionValue::None) => {
                 Some(ConditionSpec::NullCheck { negated: true })
             }
-            (Operator::Between, ConditionValue::Range(low, high)) => {
-                Some(ConditionSpec::Between { low, high })
+            (Operator::Between, ConditionValue::Range(low, high)) => Some(ConditionSpec::Between {
+                low,
+                high,
+                negated: false,
+            }),
+            (Operator::NotBetween, ConditionValue::Range(low, high)) => {
+                Some(ConditionSpec::Between {
+                    low,
+                    high,
+                    negated: true,
+                })
             }
             (Operator::JsonContains, ConditionValue::Single(value)) => {
                 Some(ConditionSpec::JsonValue {
@@ -325,7 +383,7 @@ impl<M: Model> QueryBuilder<M> {
                 Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte,
                 ConditionValue::Single(serde_json::Value::Null),
             ) => true,
-            (Operator::Between, ConditionValue::Range(low, high)) => {
+            (Operator::Between | Operator::NotBetween, ConditionValue::Range(low, high)) => {
                 low.is_null() || high.is_null()
             }
             _ => false,

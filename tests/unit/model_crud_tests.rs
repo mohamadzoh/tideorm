@@ -78,7 +78,7 @@ async fn paginate_reports_an_offset_that_would_overflow() {
         .expect_err("an overflowing offset should be reported");
 
     assert!(
-        error.to_string().contains("overflows"),
+        error.to_string().contains("exceeds i64::MAX"),
         "unexpected error: {error}"
     );
 }
@@ -105,12 +105,12 @@ async fn paginate_rejects_a_page_size_or_offset_past_i64_max() {
 }
 
 #[tokio::test]
-async fn find_active_reports_a_missing_connection_as_a_connection_error() {
-    // `find` reports an outage as `Error::Connection`; the soft-delete path
-    // must too, or `exists`/`find_or_fail` miss every connection-specific branch.
+async fn the_reload_lookup_reports_a_missing_connection_as_a_connection_error() {
+    // `find` reports an outage as `Error::Connection`; the unscoped lookup
+    // `reload` uses must too, or callers miss every connection-specific branch.
     crate::database::Database::reset_global();
 
-    let error = find_active::<SoftDeleteUser>(1)
+    let error = find_including_trashed::<SoftDeleteUser>(1)
         .await
         .expect_err("a missing global connection should be reported");
 

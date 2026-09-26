@@ -18,6 +18,7 @@ mod executor;
 pub(crate) mod sql_builder;
 pub(crate) mod sql_safety;
 
+pub use column_values::__column_type_of;
 pub(crate) use column_values::{column_type_of, json_to_column_value};
 pub use executor::Executor;
 
@@ -271,6 +272,17 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
 
     /// Rebuild runtime-only relation wrappers after an in-memory model overwrite.
     fn refresh_runtime_relations_from(&mut self, _previous: &Self) {}
+
+    /// This model with its relation wrappers built from its own fields, as a
+    /// load builds them; for a model read back from JSON, whose wrappers a
+    /// user's `Deserialize` leaves detached.
+    #[doc(hidden)]
+    fn __rebuild_relations(self) -> Self
+    where
+        Self: Sized,
+    {
+        self
+    }
 
     /// Get one model field as JSON without serializing the full model.
     fn field_json_value(&self, _field: &str) -> Result<Option<serde_json::Value>> {
@@ -640,6 +652,24 @@ where
     }
 
     select
+}
+
+/// [`scoped_find`] for a relation read through `Pivot`, leaving out the rows
+/// only a soft-deleted pivot row links. Generated eager loaders start their
+/// `has_many_through` queries here; the loader joins the pivot table in.
+#[doc(hidden)]
+pub fn scoped_find_through<M, Pivot>() -> Select<M::Entity>
+where
+    M: InternalModel + crate::model::Model,
+    Pivot: InternalModel + crate::model::Model,
+{
+    let select = scoped_find::<M>();
+    match Pivot::column_from_str(Pivot::deleted_at_column()) {
+        Some(deleted_at_column) if Pivot::soft_delete_enabled() => {
+            select.filter(deleted_at_column.is_null())
+        }
+        _ => select,
+    }
 }
 
 /// Internal query executor

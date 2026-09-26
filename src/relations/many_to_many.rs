@@ -37,16 +37,16 @@ use super::helpers::{
 /// # Duplicate pivot rows
 ///
 /// The join fans a related row out once per matching pivot row. `load()` collapses
-/// that with a `GROUP BY` on `Related`'s primary key, and `count()` with
-/// `COUNT(DISTINCT ..)`; `load_with()` deliberately does not, because its closure
-/// owns the projection. `attach()` also refuses to create a second pivot row for a
+/// that with a `GROUP BY` on `Related`'s primary key, and `count()` counts the
+/// same groups; `load_with()` deliberately does not, because its closure owns
+/// the projection. `attach()` also refuses to create a second pivot row for a
 /// pair that already exists.
 ///
-/// `load()` and `count()` still disagree on one case, by construction: `count()`
-/// counts distinct keys in the pivot table without joining `Related`, so a pivot
-/// row pointing at a deleted or soft-deleted row is counted, while `load()` joins
-/// and applies `Related`'s soft-delete scope and omits it. Use `load().len()` when
-/// you need the number you could actually read back.
+/// # Soft-delete pivots
+///
+/// When `Pivot` has soft delete, a trashed pivot row no longer links its pair:
+/// `load()`, `load_with()`, eager loading and `count()` all leave it out,
+/// `attach()` restores it, and `sync()` removes it with the live rows.
 ///
 /// # Runtime-only state
 ///
@@ -211,6 +211,16 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                 format!("{}.{}", self.pivot_table, self.foreign_key),
                 pk.clone(),
             );
+        // A soft-deleted pivot row no longer links the pair.
+        let query = if Pivot::soft_delete_enabled() {
+            query.where_null(format!(
+                "{}.{}",
+                self.pivot_table,
+                Pivot::deleted_at_column()
+            ))
+        } else {
+            query
+        };
 
         if deduplicate {
             deduplicate_by_identity(query)
@@ -279,26 +289,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             .await
     }
 
-    /// Count associated rows.
-    ///
-    /// Counts distinct [`related_key`](Self::related_key) values on the *pivot*
-    /// table rather than joining to `Related`, so it is cheaper than
-    /// `load().len()` — but it therefore counts associations, and a pivot row
-    /// pointing at a deleted `Related` row still counts. Always queries; the
-    /// cache is not consulted.
+    /// Count the related rows [`load`](Self::load) would return, without
+    /// reading them: the same join, deduplication and soft-delete scopes, so a
+    /// pivot row pointing at a deleted or soft-deleted `Related` row is not
+    /// counted. Always queries; the cache is not consulted.
     pub async fn count(&self) -> Result<u64> {
-        let pk = self.parent_key("HasManyThrough::count")?;
-
-        // Counted over distinct related keys so that a duplicated pivot row does
-        // not report more associations than `load` returns.
-        self.source
-            .query::<Pivot>()
-            .where_eq(
-                format!("{}.{}", self.pivot_table, self.foreign_key),
-                pk.clone(),
-            )
-            .count_distinct(self.related_key)
-            .await
+        self.load_query("HasManyThrough::count")?.count().await
     }
 
     /// Associate `related_id` with the owner by inserting a pivot row.
@@ -315,13 +311,27 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     ///
     /// Only the two key columns are written. A pivot table with extra
     /// `NOT NULL` columns and no defaults needs a direct `Pivot::create`
-    /// instead.
+    /// instead. On a soft-delete pivot, a trashed row for the pair is restored
+    /// rather than left to block the insert.
     pub async fn attach(&self, related_id: impl serde::Serialize) -> Result<()> {
         let pk = self.parent_key("HasManyThrough::attach")?;
         let related_id = crate::query::filter_value(related_id);
         let related_id = require_scalar_relation_key(&related_id, "HasManyThrough::attach")?;
         let db = self.source.database()?;
-        let db_type = db.backend();
+        let db_type = db.execution_backend();
+
+        if Pivot::soft_delete_enabled()
+            && self
+                .source
+                .query::<Pivot>()
+                .where_eq(self.foreign_key, pk.clone())
+                .where_eq(self.related_key, related_id.clone())
+                .restore()
+                .await?
+                > 0
+        {
+            return Ok(());
+        }
 
         if matches!(
             db_type,
@@ -375,8 +385,9 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// Replace the whole association set with exactly `related_ids`.
     ///
     /// Delete-then-reinsert, not a diff: every existing pivot row for this owner
-    /// is removed and the wanted ids are inserted fresh, so any extra columns on
-    /// a pivot row are lost. Passing an empty vector detaches everything.
+    /// is removed, soft-deleted ones included, and the wanted ids are inserted
+    /// fresh, so any extra columns on a pivot row are lost. Passing an empty
+    /// vector detaches everything.
     /// Duplicates in `related_ids` are collapsed, and every id is validated up
     /// front so a bad one cannot be discovered halfway through.
     ///
@@ -407,12 +418,14 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         // independent top-level transaction.
         db.transaction(move |_| {
             Box::pin(async move {
+                // A trashed pivot row left behind would keep a wanted pair
+                // from being inserted again.
                 Pivot::query_with(&scoped_db)
                     .where_eq(foreign_key, pk.clone())
-                    .delete()
+                    .force_delete()
                     .await?;
 
-                let db_type = scoped_db.backend();
+                let db_type = scoped_db.execution_backend();
                 for id in &wanted {
                     let (sql, params) = build_pivot_insert::<Pivot>(
                         db_type,

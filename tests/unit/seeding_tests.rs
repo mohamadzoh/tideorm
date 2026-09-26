@@ -223,6 +223,45 @@ async fn a_seed_that_fails_part_way_leaves_nothing_behind() {
     Database::reset_global();
 }
 
+/// Inside a transaction the seeder reads and creates its ledger on that
+/// transaction: on a one-connection pool, asking the pool for another
+/// connection never returned, and a run again in the same transaction saw
+/// nothing its first run had recorded.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn seeding_inside_a_transaction_uses_that_transaction() {
+    Database::reset_global();
+    let db = Database::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .build()
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    Database::set_global(db.clone()).expect("setting global database should succeed");
+
+    let (first, second) = db
+        .transaction(|_| {
+            Box::pin(async move {
+                let seeder = Seeder::new().add(TestSeed {
+                    name: "once",
+                    priority: 0,
+                    dependencies: Vec::new(),
+                });
+                let first = seeder.run().await?;
+                let second = seeder.run().await?;
+                Ok((first, second))
+            })
+        })
+        .await
+        .expect("seeding inside a transaction should succeed");
+    assert_eq!(first.executed.len(), 1);
+    assert_eq!(second.executed.len(), 0);
+    assert_eq!(second.skipped.len(), 1);
+
+    Database::reset_global();
+}
+
 #[test]
 fn test_a_seed_that_becomes_ready_later_still_runs_by_priority() {
     // B only becomes ready once A has run. A FIFO queue ran it after every

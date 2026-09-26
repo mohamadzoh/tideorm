@@ -240,3 +240,17 @@ pub(crate) fn add_column(db_type: DatabaseType, table: &str, column: &ColumnDefi
         column.to_sql(db_type)
     )
 }
+
+/// Render the statement that renames table `from` to `to`.
+///
+/// MySQL and MariaDB spell it `RENAME TABLE`; PostgreSQL and SQLite take
+/// `ALTER TABLE ... RENAME TO`.
+pub(crate) fn rename_table(db_type: DatabaseType, from: &str, to: &str) -> String {
+    let (from, to) = (quote_ident(db_type, from), quote_ident(db_type, to));
+    match db_type {
+        DatabaseType::MySQL | DatabaseType::MariaDB => format!("RENAME TABLE {from} TO {to}"),
+        DatabaseType::Postgres | DatabaseType::SQLite => {
+            format!("ALTER TABLE {from} RENAME TO {to}")
+        }
+    }
+}

@@ -14,6 +14,12 @@ pub struct OrBranchBuilder<M: Model> {
     current_branch: OrGroup,
 }
 
+impl<M: Model> crate::columns::ConditionOwner for OrBranchBuilder<M> {
+    fn own_table() -> Option<&'static str> {
+        Some(M::table_name())
+    }
+}
+
 impl<M: Model> OrBranchBuilder<M> {
     #[must_use]
     pub fn new(query: QueryBuilder<M>) -> Self {

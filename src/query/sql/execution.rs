@@ -1,13 +1,12 @@
 use super::*;
 
-use crate::internal::InternalConnection;
-use parking_lot::Mutex;
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, OnceLock, Weak};
 
 mod hash_helpers;
 mod mutation_safety;
+mod shaped_reads;
+
+pub use shaped_reads::Paginated;
 
 use hash_helpers::{hash_bound_values, hash_having_clause, hash_or_group, hash_where_condition};
 
@@ -103,13 +102,47 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Run a row-returning statement and hand the rows back as JSON objects,
     /// with `M`'s own columns decoded as `M` reads them.
+    ///
+    /// A column the projection reads from a joined table is decoded by its own
+    /// declared type, even when one of `M`'s columns has the same name.
     pub(in crate::query) async fn fetch_json(
         &self,
         sql: &str,
         params: Vec<Value>,
     ) -> Result<Vec<serde_json::Value>> {
+        self.fetch_json_with_types(sql, params, &[]).await
+    }
+
+    /// [`fetch_json`](Self::fetch_json), decoding each named output of
+    /// `output_types` as its type: an aggregate of a joined model's column
+    /// comes back as that column does.
+    pub(in crate::query) async fn fetch_json_with_types(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        output_types: &[(String, crate::orm::ColumnType)],
+    ) -> Result<Vec<serde_json::Value>> {
         let db = self.current_db()?;
-        let rows = db.__raw_json_typed(sql, params, crate::internal::column_type_of::<M>);
+        let joined_names: Vec<String> = self
+            .projection_outputs()
+            .into_iter()
+            .filter(|(_, table)| {
+                table
+                    .as_deref()
+                    .is_some_and(|table| table != M::table_name())
+            })
+            .map(|(name, _)| name)
+            .collect();
+        let model_type = |name: &str| {
+            if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
+                Some(column_type.clone())
+            } else if joined_names.iter().any(|joined| joined == name) {
+                None
+            } else {
+                crate::internal::column_type_of::<M>(name)
+            }
+        };
+        let rows = db.__raw_json_typed(sql, params, &model_type);
         self.logged(sql, rows, |rows| rows.len() as u64).await
     }
 
@@ -123,23 +156,29 @@ impl<M: Model> QueryBuilder<M> {
         Ok(rows_affected)
     }
 
-    /// Mix the identity of an explicitly attached connection into the cache key.
+    /// Mix the identity of the connection this query runs on into the cache key.
     ///
     /// Without this, `query_with(&tenant_a).cache()` and `query_with(&tenant_b)`
-    /// hash identically and one tenant's rows get served to the other. What is
-    /// mixed in is the pooled connection's [`connection_identity`], never its
-    /// address: an allocator reuses an address as soon as the connection at it is
-    /// dropped, so tenant A's closed connection and tenant B's freshly opened one
-    /// can hash the same and B would be served A's rows for the rest of the TTL.
+    /// hash identically and one tenant's rows get served to the other, and so
+    /// would a query cached before `Database::set_global()` switched databases.
+    /// What is mixed in is the pooled connection's [`connection_identity`], never
+    /// its address: an allocator reuses an address as soon as the connection at
+    /// it is dropped, so tenant A's closed connection and tenant B's freshly
+    /// opened one can hash the same and B would be served A's rows for the rest
+    /// of the TTL.
     fn hash_database_identity<H: std::hash::Hasher>(&self, hasher: &mut H) {
         use std::hash::Hash;
 
-        let Some(database) = &self.database else {
-            return;
+        let database = match self.current_db() {
+            Ok(database) => database,
+            Err(_) => {
+                "tideorm::no-connection".hash(hasher);
+                return;
+            }
         };
 
         match database.current_inner() {
-            Ok(connection) => connection_identity(&connection).hash(hasher),
+            Ok(connection) => crate::database::connection_identity(&connection).hash(hasher),
             // A transaction handle carries no pooled identity of its own; keep it
             // out of the ambient-connection keyspace rather than sharing it.
             Err(_) => "tideorm::unresolved-connection".hash(hasher),
@@ -194,6 +233,20 @@ impl<M: Model> QueryBuilder<M> {
             collect_tables_from_sql(&subquery.query_sql, &mut tables);
         }
 
+        // Raw SQL in the projection, HAVING and ORDER BY can read other
+        // tables through subqueries of its own.
+        for expression in &self.raw_select_expressions {
+            collect_tables_from_sql(expression, &mut tables);
+        }
+        for (having, _) in self.having_clauses() {
+            collect_tables_from_sql(having, &mut tables);
+        }
+        for (column, _) in &self.order_by {
+            if let Some(expression) = crate::query::builder::raw_order_by_expression(column) {
+                collect_tables_from_sql(expression, &mut tables);
+            }
+        }
+
         for condition in &self.conditions {
             collect_condition_tables(condition, &mut tables);
         }
@@ -210,6 +263,10 @@ impl<M: Model> QueryBuilder<M> {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
+        // Two models can read one table (a full model and a narrower one), and
+        // two schemas can hold tables of one name.
+        std::any::type_name::<M>().hash(&mut hasher);
+        M::schema_name().hash(&mut hasher);
         M::table_name().hash(&mut hasher);
         self.hash_database_identity(&mut hasher);
 
@@ -283,23 +340,28 @@ impl<M: Model> QueryBuilder<M> {
         // A read performed inside a transaction never touches the process-global
         // cache: the payload would outlive a rollback for the rest of its TTL, and
         // a hit would hide rows the transaction itself has already written.
-        let cache_fill =
-            if self.cache_options.is_some() && !self.lock_for_update && !self.runs_in_transaction()
-            {
-                let cache = crate::cache::QueryCache::global();
-                cache.warn_once_if_disabled();
-                let key = self.generate_cache_key();
-                if let Some(cached) = cache.get::<Vec<M>>(&key) {
-                    #[cfg(feature = "dirty-tracking")]
-                    crate::model::__remember_dirty_snapshots(&cached);
-                    return Ok(cached);
-                }
-                // Taken before the read: a write that lands while it runs may
-                // replace the rows it returns.
-                Some((key, cache.fill_point()))
-            } else {
-                None
-            };
+        // A model whose own serde skips or converts a stored field is not
+        // cached: the copy read back would lack those values.
+        let cache_fill = if self.cache_options.is_some()
+            && M::__serde_round_trips()
+            && !self.lock_for_update
+            && !self.runs_in_transaction()
+        {
+            let cache = crate::cache::QueryCache::global();
+            cache.warn_once_if_disabled();
+            let key = self.generate_cache_key();
+            if let Some(cached) = cache.get::<Vec<M>>(&key) {
+                let cached: Vec<M> = cached.into_iter().map(M::__rebuild_relations).collect();
+                #[cfg(feature = "dirty-tracking")]
+                crate::model::__remember_dirty_snapshots(&cached);
+                return Ok(cached);
+            }
+            // Taken before the read: a write that lands while it runs may
+            // replace the rows it returns.
+            Some((key, cache.fill_point()))
+        } else {
+            None
+        };
 
         let (sql, params) = self.build_select_sql_with_params();
         let db = self.current_db()?;
@@ -344,6 +406,10 @@ impl<M: Model> QueryBuilder<M> {
     /// safely update or delete already-processed rows without causing later batches to skip.
     /// Existing filters, caching, and any pre-applied `limit()` remain in effect. When you need
     /// descending traversal, order explicitly by the primary key before calling `chunk()`.
+    ///
+    /// A join can repeat a primary key: the rows sharing one key are always handed to the
+    /// callback in the same batch, so a key that repeats more often than `chunk_size` fails the
+    /// call. A `union()` is refused, since its other branches do not follow the cursor.
     pub async fn chunk<F, Fut>(self, chunk_size: u64, mut callback: F) -> Result<()>
     where
         F: FnMut(Vec<M>) -> Fut,
@@ -363,6 +429,12 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
+        if !self.unions.is_empty() {
+            return Err(Error::invalid_query(
+                "chunk() pages by the model's primary key, which the other branches of a union() do not follow; read a union with get(), or page() it",
+            ));
+        }
+
         let primary_key = self.chunk_primary_key_column()?;
         let order = self.chunk_order(primary_key)?;
         let mut remaining = self.limit_value;
@@ -374,7 +446,13 @@ impl<M: Model> QueryBuilder<M> {
             base_query = base_query.order_by(format!("{}.{}", M::table_name(), primary_key), order);
         }
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
-        let mut last_seen_primary_key: Option<serde_json::Value> = None;
+        // A join can repeat a row's primary key. A full batch that ends inside
+        // such a run hands its tail to the next batch, which starts at that key.
+        let joins_repeat_keys = !base_query.joins.is_empty();
+        let key_of = |model: &M| serde_json::to_value(model.primary_key()).map_err(Error::from);
+        // The last key handed to the callback, and whether the next batch
+        // starts at it rather than after it.
+        let mut cursor: Option<(serde_json::Value, bool)> = None;
 
         loop {
             let batch_limit =
@@ -384,19 +462,22 @@ impl<M: Model> QueryBuilder<M> {
             }
 
             let mut batch_query = base_query.clone().limit(batch_limit);
-            if let Some(cursor) = &last_seen_primary_key {
-                batch_query = match order {
-                    crate::query::Order::Asc => {
-                        batch_query.where_gt(&cursor_column, cursor.clone())
-                    }
-                    crate::query::Order::Desc => {
-                        batch_query.where_lt(&cursor_column, cursor.clone())
-                    }
+            if let Some((key, inclusive)) = &cursor {
+                let key = key.clone();
+                batch_query = match (order, inclusive) {
+                    (crate::query::Order::Asc, false) => batch_query.where_gt(&cursor_column, key),
+                    (crate::query::Order::Asc, true) => batch_query.where_gte(&cursor_column, key),
+                    (crate::query::Order::Desc, false) => batch_query.where_lt(&cursor_column, key),
+                    (crate::query::Order::Desc, true) => batch_query.where_lte(&cursor_column, key),
                 };
             }
             if let Some(cache_key) = &explicit_cache_key {
-                let cursor_marker = match &last_seen_primary_key {
-                    Some(cursor) => serde_json::to_string(cursor).map_err(Error::from)?,
+                let cursor_marker = match &cursor {
+                    Some((key, inclusive)) => format!(
+                        "{}{}",
+                        if *inclusive { "=" } else { "" },
+                        serde_json::to_string(key).map_err(Error::from)?
+                    ),
                     None => "null".to_string(),
                 };
                 batch_query.cache_key = Some(format!(
@@ -405,28 +486,44 @@ impl<M: Model> QueryBuilder<M> {
                 ));
             }
 
-            let batch = batch_query.get().await?;
-            if batch.is_empty() {
+            let mut batch = batch_query.get().await?;
+            let Some(last) = batch.last() else {
                 break;
+            };
+            let last_key = key_of(last)?;
+            let fetched = batch.len() as u64;
+
+            let mut starts_at_last_key = false;
+            if joins_repeat_keys && fetched == batch_limit {
+                let mut tail = 0;
+                for model in batch.iter().rev() {
+                    if key_of(model)? != last_key {
+                        break;
+                    }
+                    tail += 1;
+                }
+                if tail == batch.len() {
+                    return Err(Error::invalid_query(format!(
+                        "chunk({}) fetched a batch in which every row has the key {}: the join repeats it more often than a batch holds, so pass a larger chunk size",
+                        chunk_size, last_key
+                    )));
+                }
+                batch.truncate(batch.len() - tail);
+                starts_at_last_key = true;
             }
 
-            let batch_len = batch.len() as u64;
-            let last_primary_key = batch
-                .last()
-                .map(Model::primary_key)
-                .ok_or_else(|| Error::internal("chunk() fetched an empty batch unexpectedly"))?;
-            let next_cursor = serde_json::to_value(last_primary_key).map_err(Error::from)?;
+            let processed = batch.len() as u64;
             callback(batch).await?;
-            last_seen_primary_key = Some(next_cursor);
+            cursor = Some((last_key, starts_at_last_key));
 
             if let Some(limit) = &mut remaining {
-                *limit = limit.saturating_sub(batch_len);
+                *limit = limit.saturating_sub(processed);
                 if *limit == 0 {
                     break;
                 }
             }
 
-            if batch_len < batch_limit {
+            if fetched < batch_limit {
                 break;
             }
         }
@@ -439,10 +536,11 @@ impl<M: Model> QueryBuilder<M> {
     /// Ordering, `limit()` and `offset()` are ignored, so a paged query counts
     /// its total across every page. The aggregates honour them.
     pub async fn count(self) -> Result<u64> {
-        self.ensure_query_is_executable()?;
+        let query = self.without_distinct_ordering();
+        query.ensure_query_is_executable()?;
 
-        let (sql, params) = self.build_count_sql_with_params();
-        let rows = self.fetch_json(&sql, params).await?;
+        let (sql, params) = query.build_count_sql_with_params();
+        let rows = query.fetch_json(&sql, params).await?;
         Self::decode_count_value(rows.first().and_then(|row| row.get("count")), "count")
     }
 
@@ -474,11 +572,14 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// Whether any row matches the query; its ordering, limit and offset are
+    /// ignored.
     pub async fn exists(self) -> Result<bool> {
-        self.ensure_query_is_executable()?;
+        let query = self.without_distinct_ordering();
+        query.ensure_query_is_executable()?;
 
-        let (sql, params) = self.build_exists_sql_with_params();
-        let rows = self.fetch_json(&sql, params).await?;
+        let (sql, params) = query.build_exists_sql_with_params();
+        let rows = query.fetch_json(&sql, params).await?;
 
         // `build_exists_sql_with_params` renders one of two shapes. The
         // `SELECT EXISTS(..) AS "exists_result"` shape always returns a single
@@ -540,7 +641,15 @@ impl<M: Model> QueryBuilder<M> {
         Ok((sql, params))
     }
 
+    /// Delete the rows this query matches. On a soft-delete model they are
+    /// marked deleted, as [`soft_delete()`](Self::soft_delete) marks them;
+    /// [`force_delete()`](Self::force_delete) removes them for good. At least
+    /// one explicit filter is required.
     pub async fn delete(self) -> Result<u64> {
+        if M::soft_delete_enabled() {
+            self.ensure_not_only_trashed("delete")?;
+            return self.soft_delete().await;
+        }
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("delete")?;
         self.ensure_mutation_has_explicit_filters("delete")?;
@@ -553,16 +662,50 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// This is an explicit opt-in escape hatch for full-table deletion and is kept
     /// separate from `delete()` so accidental unfiltered bulk deletes remain blocked.
+    ///
+    /// On a soft-delete model the live rows are marked deleted, as `delete()`
+    /// marks them; `only_trashed().force_delete()` empties the trash.
     pub async fn delete_all(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("delete_all")?;
         self.ensure_mutation_has_no_explicit_filters("delete_all")?;
 
-        let sql = format!(
-            "DELETE FROM {}",
-            db_sql::quote_table::<M>(self.db_type_for_sql())
-        );
-        self.run_mutation(&sql, Vec::new()).await
+        let db_type = self.db_type_for_sql();
+        if M::soft_delete_enabled() {
+            self.ensure_not_only_trashed("delete_all")?;
+            // The live rows: marking a trashed row again would change nothing
+            // but its stamp.
+            let query = self.live_rows_only();
+            let (scope_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
+            let sql = format!(
+                "UPDATE {} SET {} = {} WHERE {}",
+                db_sql::quote_table::<M>(db_type),
+                db_sql::quote_ident(db_type, M::deleted_at_column()),
+                Self::current_timestamp_sql(db_type),
+                scope_sql
+            );
+            return query.run_mutation(&sql, params).await;
+        }
+        let (scope_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
+        let mut sql = format!("DELETE FROM {}", db_sql::quote_table::<M>(db_type));
+        if !scope_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&scope_sql);
+        }
+        self.run_mutation(&sql, params).await
+    }
+
+    /// Refuse to soft-delete the trash: its rows are deleted already, and a
+    /// caller asking for it means to remove them.
+    fn ensure_not_only_trashed(&self, operation: &str) -> Result<()> {
+        if self.only_trashed {
+            return Err(Error::invalid_query(format!(
+                "{}() on only_trashed() rows of {} would mark rows that are already deleted; force_delete() removes them for good",
+                operation,
+                M::table_name()
+            )));
+        }
+        Ok(())
     }
 
     /// Render the soft-delete UPDATE and the values its WHERE clause binds.
@@ -661,58 +804,6 @@ impl<M: Model> QueryBuilder<M> {
     }
 }
 
-/// The process-wide identities handed out by [`connection_identity`].
-static CONNECTION_IDENTITIES: OnceLock<Mutex<ConnectionIdentities>> = OnceLock::new();
-
-/// The identity assigned to every pooled connection a cache key has named.
-#[derive(Default)]
-struct ConnectionIdentities {
-    /// The last identity handed out. Identities are never reused within a
-    /// process, so a stale cache entry can never be mistaken for a live one.
-    last_id: u64,
-    /// Address of the connection's `Arc` allocation to its identity, alongside a
-    /// `Weak` to that allocation.
-    assigned: HashMap<usize, (Weak<InternalConnection>, u64)>,
-}
-
-impl ConnectionIdentities {
-    /// The identity of `connection`, assigning one if it has none yet.
-    ///
-    /// The map is keyed by address, which is only trustworthy because of the
-    /// `Weak` stored beside it: a `Weak` keeps its `Arc` allocation reserved even
-    /// after the connection itself is dropped, so no second connection can ever
-    /// be allocated at the address of an entry that is still on record. Dead
-    /// entries are dropped before a new identity is handed out — that releases
-    /// the address *and* the mapping together, so a connection that later lands
-    /// there misses this map and is issued a fresh identity rather than
-    /// inheriting the dropped connection's cached rows.
-    fn identify(&mut self, connection: &Arc<InternalConnection>) -> u64 {
-        let address = Arc::as_ptr(connection) as usize;
-        if let Some((_, id)) = self.assigned.get(&address) {
-            return *id;
-        }
-
-        self.assigned
-            .retain(|_, (tracked, _)| tracked.strong_count() > 0);
-        self.last_id += 1;
-        self.assigned
-            .insert(address, (Arc::downgrade(connection), self.last_id));
-        self.last_id
-    }
-}
-
-/// A process-unique identity for a pooled connection.
-///
-/// Stable for as long as the connection lives and never handed to another
-/// connection afterwards, which is what a cache key needs: the address the
-/// connection happens to occupy is neither.
-fn connection_identity(connection: &Arc<InternalConnection>) -> u64 {
-    CONNECTION_IDENTITIES
-        .get_or_init(|| Mutex::new(ConnectionIdentities::default()))
-        .lock()
-        .identify(connection)
-}
-
 /// Record `table` as a cache tag, ignoring duplicates and unusable names.
 fn push_table_tag(tables: &mut Vec<String>, table: &str) {
     let Some(table) = normalize_table_name(table) else {
@@ -798,7 +889,8 @@ fn collect_condition_tables(condition: &crate::query::WhereCondition, tables: &m
         crate::query::ConditionValue::RawExpr(query_sql) => {
             collect_tables_from_sql(query_sql, tables);
         }
-        crate::query::ConditionValue::RawExprWithValues { sql, .. } => {
+        crate::query::ConditionValue::RawExprWithValues { sql, .. }
+        | crate::query::ConditionValue::RawTemplate { sql, .. } => {
             collect_tables_from_sql(sql, tables);
         }
         _ => {}

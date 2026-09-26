@@ -372,8 +372,8 @@ fn test_connection_identity_is_stable_for_one_connection() {
     let same_connection = Arc::clone(&connection);
 
     assert_eq!(
-        super::connection_identity(&connection),
-        super::connection_identity(&same_connection),
+        crate::database::connection_identity(&connection),
+        crate::database::connection_identity(&same_connection),
         "one connection must keep one identity, or its own cache entries never hit"
     );
 }
@@ -382,7 +382,7 @@ fn test_connection_identity_is_stable_for_one_connection() {
 fn test_connection_identity_is_never_inherited_from_a_recycled_address() {
     let first = disconnected_connection();
     let first_address = Arc::as_ptr(&first) as usize;
-    let first_identity = super::connection_identity(&first);
+    let first_identity = crate::database::connection_identity(&first);
     drop(first);
 
     // A batch of identically-sized allocations is exactly what lands on a
@@ -397,7 +397,7 @@ fn test_connection_identity_is_never_inherited_from_a_recycled_address() {
             "an identity on record must keep its connection's address reserved"
         );
         assert_ne!(
-            super::connection_identity(connection),
+            crate::database::connection_identity(connection),
             first_identity,
             "a new connection must never inherit a dropped connection's cache identity"
         );
@@ -552,11 +552,9 @@ fn a_distinct_aggregate_runs_over_the_distinct_rows() {
     let (sql, _) = CacheKeyTestUser::query()
         .distinct()
         .select(vec!["name"])
-        .build_aggregate_sql_with_params_for_db(
-            DatabaseType::Postgres,
-            "name",
-            "names",
-            |column| format!("COUNT({column})"),
-        );
+        .build_aggregate_sql_with_params_for_db(DatabaseType::Postgres, "name", "names", |column| {
+            format!("COUNT({column})")
+        })
+        .expect("aggregate sql");
     assert!(sql.contains("FROM (SELECT DISTINCT"), "{sql}");
 }

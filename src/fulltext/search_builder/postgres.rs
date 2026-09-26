@@ -77,9 +77,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(" AS double precision) AS _fts_rank FROM ")
             .raw(&crate::query::db_sql::quote_table::<T>(PG))
             .raw(" WHERE ")
-            .raw(&tsvector)
-            .raw(" @@ ")
-            .raw(&tsquery)
+            .raw(&self.scoped(PG, format!("{tsvector} @@ {tsquery}"), None))
             .into_sql();
 
         if let Some(min_rank) = min_rank {
@@ -101,7 +99,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// would read the whole table to match nothing.
     fn pg_predicate(&self, params: &mut Vec<Value>) -> Result<String> {
         Ok(match self.pg_match_parts(params)? {
-            Some((tsvector, tsquery)) => format!("{tsvector} @@ {tsquery}"),
+            Some((tsvector, tsquery)) => self.scoped(PG, format!("{tsvector} @@ {tsquery}"), None),
             None => MATCH_NOTHING.to_string(),
         })
     }
@@ -115,7 +113,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let language = self.pg_language()?;
         let tsvector = format!(
             "to_tsvector({language}, {})",
-            pg_search_document(&self.columns)
+            pg_search_document(&self.column_names())
         );
         let tsquery = self.build_pg_tsquery_expr(&language, params);
         Ok(Some((tsvector, tsquery)))

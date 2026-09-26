@@ -8,6 +8,14 @@ pub struct OrGroup {
     pub combine_with: LogicalOp,
 }
 
+/// An OR group belongs to no model yet, so a typed column in it keeps its
+/// table; a query of that model reads the qualified name as its own column.
+impl crate::columns::ConditionOwner for OrGroup {
+    fn own_table() -> Option<&'static str> {
+        None
+    }
+}
+
 impl OrGroup {
     #[must_use]
     pub fn new() -> Self {

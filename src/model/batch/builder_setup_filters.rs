@@ -10,12 +10,18 @@ use super::*;
 /// - Filters are combined with `AND`, except the `or_where_*` family, which
 ///   collects into one `OR` group that is then `AND`ed with the rest. At least
 ///   one filter is required: an unfiltered batch update is refused.
+impl<M: Model> crate::columns::ConditionOwner for BatchUpdateBuilder<M> {
+    fn own_table() -> Option<&'static str> {
+        Some(M::table_name())
+    }
+}
+
 impl<M: Model> BatchUpdateBuilder<M> {
     /// Start an empty batch update for `M`.
     ///
     /// Prefer [`Model::update_all`](crate::model::Model::update_all), which
-    /// calls this for you. Soft-deleted rows are in scope by default; see the
-    /// type-level docs.
+    /// calls this for you. Soft-deleted rows are left out, as a query leaves
+    /// them out; see [`with_trashed`](Self::with_trashed).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -23,33 +29,36 @@ impl<M: Model> BatchUpdateBuilder<M> {
             updates: std::collections::HashMap::new(),
             conditions: Vec::new(),
             or_group: OrGroup::new(),
-            returning: false,
             limit_value: None,
-            // Batch updates are scoped like `with_trashed()` unless the caller
-            // opts out; see the type-level docs on `BatchUpdateBuilder`.
-            include_trashed: true,
+            include_trashed: None,
+            base: None,
         }
     }
 
-    /// Restrict this update to rows that are not soft-deleted.
-    ///
-    /// A batch update includes trashed rows by default, which is what makes a
-    /// bulk restore possible. Call this when the update should behave like a
-    /// normal query and skip soft-deleted rows. On a model without soft delete
-    /// it changes nothing.
+    /// An update of the rows `query` matches, as
+    /// [`QueryBuilder::update_all`](crate::query::QueryBuilder::update_all)
+    /// starts one.
+    pub(crate) fn from_query(query: crate::query::QueryBuilder<M>) -> Self {
+        let mut builder = Self::new();
+        builder.base = Some(query);
+        builder
+    }
+
+    /// Restrict this update to rows that are not soft-deleted — the default,
+    /// and what an update started from a `with_trashed()` query can return to.
+    /// On a model without soft delete it changes nothing.
     #[must_use]
     pub fn without_trashed(mut self) -> Self {
-        self.include_trashed = false;
+        self.include_trashed = Some(false);
         self
     }
 
-    /// Explicitly include soft-deleted rows in this update.
-    ///
-    /// This is already the default; it exists so the intent can be written down
-    /// at the call site.
+    /// Include soft-deleted rows in this update, which leaves them out by
+    /// default: a backfill that should reach the trash too. To restore trashed
+    /// rows, `Model::query().only_trashed().restore()` says so directly.
     #[must_use]
     pub fn with_trashed(mut self) -> Self {
-        self.include_trashed = true;
+        self.include_trashed = Some(true);
         self
     }
 
@@ -197,17 +206,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
     #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
         self.limit_value = Some(n);
-        self
-    }
-
-    /// Ask for the updated rows to be returned.
-    ///
-    /// Only [`BatchUpdateBuilder::execute_returning`] can hand rows back;
-    /// [`BatchUpdateBuilder::execute`] reports the affected row count and
-    /// therefore rejects a builder that was marked with `returning()`.
-    #[must_use]
-    pub fn returning(mut self) -> Self {
-        self.returning = true;
         self
     }
 

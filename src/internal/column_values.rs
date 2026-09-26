@@ -29,6 +29,12 @@ pub(crate) fn column_type_of<M: Model>(column: &str) -> Option<ColumnType> {
         .map(|candidate| candidate.def().get_column_type().clone())
 }
 
+/// [`column_type_of`] for the model registration a generated model submits.
+#[doc(hidden)]
+pub fn __column_type_of<M: Model>(column: &str) -> Option<ColumnType> {
+    column_type_of::<M>(column)
+}
+
 /// Bind `value` for a column of `column_type`, or generically when the type is
 /// unknown or the value does not parse as that type — the database then
 /// reports the mismatch exactly as it did before.

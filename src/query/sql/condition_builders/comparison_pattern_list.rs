@@ -117,6 +117,29 @@ impl<M: Model> QueryBuilder<M> {
         operator: ListOperator,
         values: &[&serde_json::Value],
     ) -> SimpleExpr {
+        // A JSON column compares documents, one per listed value, as
+        // `where_eq`/`where_not` do.
+        if matches!(
+            self.column_type(column),
+            Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
+        ) {
+            let negated = matches!(operator, ListOperator::NotIn | ListOperator::NeAll);
+            let column_sql = self.format_column_for_db(db_type, column);
+            let mut documents = values.iter().map(|value| {
+                let bound = db_sql::json_equals_bound(db_type, &column_sql, value, negated);
+                self.build_custom_expression(bound.sql, bound.values)
+            });
+            if let Some(first) = documents.next() {
+                return documents.fold(first, |all, document| {
+                    if negated {
+                        all.and(document)
+                    } else {
+                        all.or(document)
+                    }
+                });
+            }
+        }
+
         let sea_values: Vec<Value> = values
             .iter()
             .map(|value| self.column_value(column, value))

@@ -162,6 +162,18 @@ pub fn __clear_dirty_snapshots() {
     dirty_tracking::clear_all();
 }
 
+/// Mark the row with this primary key deleted, as `Model::delete` does for a
+/// soft-delete model; a trashed row is left alone.
+#[doc(hidden)]
+pub async fn __soft_delete_by_primary_key<M: Model>(
+    primary_key: &M::PrimaryKey,
+) -> crate::error::Result<u64> {
+    M::query()
+        .where_primary_key(primary_key)?
+        .soft_delete()
+        .await
+}
+
 #[doc(hidden)]
 #[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
 pub fn __forget_dirty_snapshot<M: Model>(model: &M) {
@@ -183,6 +195,15 @@ pub fn __forget_dirty_snapshot_by_pk<M: Model>(primary_key: &M::PrimaryKey) {
 pub fn __invalidate_dirty_snapshots<M: Model>() {
     #[cfg(feature = "dirty-tracking")]
     dirty_tracking::invalidate_model::<M>();
+}
+
+/// Run `load` with the models it builds remembered as read from `origin`.
+#[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
+pub(crate) fn __loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -> T {
+    #[cfg(feature = "dirty-tracking")]
+    return dirty_tracking::loading_from(origin, load);
+    #[cfg(not(feature = "dirty-tracking"))]
+    load()
 }
 
 #[doc(hidden)]

@@ -17,7 +17,7 @@ use crate::orm::ColumnType;
 use super::Database;
 
 /// The model column type of a result column, for rows read by a model query.
-pub(crate) type ColumnTypeLookup = fn(&str) -> Option<ColumnType>;
+pub(crate) type ColumnTypeLookup<'a> = &'a (dyn Fn(&str) -> Option<ColumnType> + Sync);
 
 /// How one result column is decoded. Every row of a result carries the same
 /// columns, so this is worked out once per result rather than per row.
@@ -35,7 +35,7 @@ impl Database {
     /// `model_type` knows it and by its declared type otherwise.
     pub(super) fn query_rows_to_json(
         rows: &[QueryResult],
-        model_type: ColumnTypeLookup,
+        model_type: ColumnTypeLookup<'_>,
     ) -> Vec<serde_json::Value> {
         let Some(first) = rows.first() else {
             return Vec::new();
@@ -57,7 +57,7 @@ impl Database {
             .collect()
     }
 
-    fn column_plan(row: &QueryResult, model_type: ColumnTypeLookup) -> Vec<ColumnPlan> {
+    fn column_plan(row: &QueryResult, model_type: ColumnTypeLookup<'_>) -> Vec<ColumnPlan> {
         #[cfg(feature = "postgres")]
         if let Some(pg_row) = row.try_as_pg_row() {
             return Self::sqlx_column_plan(pg_row, model_type, Self::postgres_column_to_json);
@@ -195,8 +195,10 @@ impl Database {
     ///
     /// Text comes back verbatim unless it holds a JSON object or array, which
     /// is how SQLite's JSON functions and `JSON` columns hand documents over.
-    /// A real, as from `AVG()` or a `DECIMAL` column, is a decimal, as the
-    /// exact numerics of the other backends are.
+    /// A real, as from `SUM()` over a `REAL` column or from a `DECIMAL`
+    /// column, is the number SQLite stores: the driver cannot tell the two
+    /// apart, and a decimal would turn a float sum into a string. A model
+    /// query still reads its own `Decimal` fields as decimals.
     #[cfg(feature = "sqlite")]
     fn sqlite_value_to_json(row: &QueryResult, index: usize) -> serde_json::Value {
         use crate::internal::sqlx::{Row, TypeInfo, ValueRef};
@@ -208,7 +210,7 @@ impl Database {
         match storage_class.as_deref() {
             Some("NULL") => serde_json::Value::Null,
             Some("INTEGER") => Self::typed_or_fallback::<i64>(row, index),
-            Some("REAL") => Self::decimal_or_fallback(row, index),
+            Some("REAL") => Self::float_or_fallback::<f64>(row, index),
             Some("TEXT") => match row.try_get_by_index::<Option<String>>(index) {
                 Ok(Some(text)) => match serde_json::from_str(&text) {
                     Ok(document @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
@@ -407,7 +409,7 @@ impl Database {
     #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
     fn sqlx_column_plan<R>(
         row: &R,
-        model_type: ColumnTypeLookup,
+        model_type: ColumnTypeLookup<'_>,
         decoder: fn(&QueryResult, usize, &str) -> serde_json::Value,
     ) -> Vec<ColumnPlan>
     where

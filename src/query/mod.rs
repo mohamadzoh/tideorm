@@ -26,11 +26,13 @@ mod predicates;
 mod sql;
 mod structure;
 
-pub use advanced::Aggregate;
+pub(crate) use advanced::page_offset;
+pub use advanced::{Aggregate, AggregateCondition, HavingCondition};
 pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
 pub(crate) use filters::{condition_is_vacuous, condition_methods, filter_value};
+pub use sql::execution::Paginated;
 pub use structure::{
     CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, QueryFragment,
     UnionClause, UnionType, WindowFunction, WindowFunctionType,
@@ -58,9 +60,12 @@ pub struct QueryBuilder<M: Model> {
     lock_for_update: bool,
     joins: Vec<JoinClause>,
     invalid_query_reason: Option<String>,
+    /// A page number or size `page()` refused, as the field it names and why:
+    /// reported as the validation error `Model::paginate` gives the same input.
+    invalid_page: Option<(&'static str, String)>,
     group_by: Vec<String>,
     having_conditions: Vec<String>,
-    having_bindings: Vec<Vec<serde_json::Value>>,
+    having_bindings: Vec<Vec<crate::internal::Value>>,
     unions: Vec<UnionClause>,
     window_functions: Vec<WindowFunction>,
     ctes: Vec<CTE>,

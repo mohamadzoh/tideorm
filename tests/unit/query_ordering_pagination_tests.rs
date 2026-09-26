@@ -15,9 +15,10 @@ fn test_page_rejects_an_overflowing_offset() {
         .expect_err("an overflowing offset must invalidate the query");
 
     assert!(
-        err.to_string().contains("overflows the maximum offset"),
+        matches!(&err, crate::error::Error::Validation { field, .. } if field == "page"),
         "{err}"
     );
+    assert!(err.to_string().contains("exceeds i64::MAX"), "{err}");
 }
 
 #[test]
@@ -27,7 +28,20 @@ fn test_page_rejects_zero_page_number() {
         .ensure_query_is_valid()
         .expect_err("page 0 must invalidate the query");
 
+    assert!(
+        matches!(&err, crate::error::Error::Validation { field, .. } if field == "page"),
+        "{err}"
+    );
     assert!(err.to_string().contains("at least 1"), "{err}");
+
+    let err = PaginationUser::query()
+        .page(1, 0)
+        .ensure_query_is_valid()
+        .expect_err("a zero page size must invalidate the query");
+    assert!(
+        matches!(&err, crate::error::Error::Validation { field, .. } if field == "per_page"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -266,23 +266,19 @@ impl EntityManager {
     /// references it.
     ///
     /// On failure the transaction rolls back and the context is restored to its
-    /// state before the flush. Inside an enclosing save or flush it joins that
-    /// unit of work instead of opening its own.
+    /// state before the flush, as it is when the flush is cancelled part way or
+    /// a transaction enclosing it rolls back afterwards. Inside an enclosing
+    /// save or flush it joins that unit of work instead of opening its own.
     pub async fn flush(self: &Arc<Self>) -> crate::error::Result<()> {
         if save::in_entity_manager_transaction_scope() {
             return self.flush_in_scope().await;
         }
 
-        let rollback_state = save::capture_entity_manager_rollback_state(self.as_ref());
-        let checkpoints = Arc::new(parking_lot::Mutex::new(Vec::<
-            Box<dyn managed::ManagedCheckpoint>,
-        >::new()));
-        let identity_rollback = save::new_identity_rollback_log();
+        let rollback = save::PendingRollback::new(self, Vec::new());
         let entity_manager = self.clone();
-        let transaction_checkpoints = checkpoints.clone();
-        let transaction_identity_rollback = identity_rollback.clone();
-        let result = self
-            .db
+        let transaction_checkpoints = rollback.checkpoints();
+        let transaction_identity_rollback = rollback.identity_rollback();
+        self.db
             .transaction(move |_| {
                 Box::pin(async move {
                     save::with_entity_manager_transaction_scope(
@@ -293,18 +289,8 @@ impl EntityManager {
                     .await
                 })
             })
-            .await;
-
-        if let Err(error) = result {
-            let checkpoints = std::mem::take(&mut *checkpoints.lock());
-            save::rollback_entity_manager_state(
-                self.as_ref(),
-                checkpoints,
-                rollback_state,
-                &identity_rollback,
-            );
-            return Err(error);
-        }
+            .await?;
+        rollback.committed();
 
         Ok(())
     }

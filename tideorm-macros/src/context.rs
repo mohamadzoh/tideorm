@@ -27,6 +27,10 @@ pub(crate) struct BuildContext {
     pub(crate) should_gen_default: bool,
     pub(crate) should_gen_serialize: bool,
     pub(crate) should_gen_deserialize: bool,
+    /// Whether serializing the model and reading the JSON back reproduces
+    /// every stored field: always for TideORM's own serde impls, and for a
+    /// user's derive unless its attributes skip or convert a stored field.
+    pub(crate) serde_round_trips: bool,
     pub(crate) hidden_attrs: Vec<String>,
     pub(crate) translatable_fields: Vec<String>,
     pub(crate) encrypted_fields: Vec<String>,
@@ -231,6 +235,18 @@ impl BuildContext {
             should_gen_default,
             should_gen_serialize,
             should_gen_deserialize,
+            serde_round_trips: {
+                let derived_serialize = should_gen_serialize || existing_derives.has_serialize;
+                let derived_deserialize =
+                    should_gen_deserialize || existing_derives.has_deserialize;
+                derived_serialize
+                    && derived_deserialize
+                    && ((should_gen_serialize && should_gen_deserialize)
+                        || crate::serde_names::round_trips(
+                            &input.attrs,
+                            db_fields.iter().map(|field| field.attrs.as_slice()),
+                        ))
+            },
             hidden_attrs,
             translatable_fields,
             encrypted_fields,

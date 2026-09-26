@@ -9,8 +9,11 @@ impl<M: Model> QueryBuilder<M> {
     /// joined table or alias and optionally followed by `ASC`/`DESC`. Anything
     /// else — parentheses, operators, subselects — is rejected as an invalid
     /// query when the builder executes, because ORDER BY is rendered outside a
-    /// quoted literal and is therefore a direct injection point. This makes it
-    /// safe to feed a `?sort=` request parameter straight into this method.
+    /// quoted literal and is therefore a direct injection point.
+    ///
+    /// A direction written after the column has to agree with `direction`:
+    /// `order_by("name desc", Order::Asc)` names two, and fails the query. Take
+    /// a request's sort string with [`sort()`](Self::sort) instead.
     ///
     /// Use [`QueryBuilder::order_by_raw`] when you need a real SQL expression.
     #[must_use]
@@ -19,7 +22,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         direction: Order,
     ) -> Self {
-        let column = column.column_name().to_string();
+        let column = crate::columns::column_reference(&column, Some(M::table_name()));
 
         if contains_raw_order_by_marker(&column) {
             self.invalidate_query(format!(
@@ -29,8 +32,65 @@ impl<M: Model> QueryBuilder<M> {
             return self;
         }
 
+        if let Some((_, written)) = split_direction(&column)
+            && written != direction
+        {
+            self.invalidate_query(format!(
+                "order_by('{}', Order::{:?}) names two directions; pass the direction once, or sort() a request's sort string",
+                column, direction
+            ));
+            return self;
+        }
+
         self.order_by.push((column, direction));
         self
+    }
+
+    /// Order by a sort string such as a request's `?sort=` parameter: terms
+    /// separated by commas, each a column written as `order_by` takes it and,
+    /// optionally, a direction — `name`, `name desc`, or `-created_at`, a
+    /// leading `-` meaning descending and `+` ascending.
+    ///
+    /// ```ignore
+    /// // ?sort=-created_at,name
+    /// let posts = Post::query().sort(&params.sort).get().await?;
+    /// ```
+    ///
+    /// Every column is checked as `order_by` checks one, so an expression in
+    /// the string fails the query; an empty string orders nothing.
+    #[must_use]
+    pub fn sort(mut self, spec: &str) -> Self {
+        for term in spec
+            .split(',')
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+        {
+            let (column, direction) = if let Some(column) = term.strip_prefix('-') {
+                (column.trim(), Order::Desc)
+            } else if let Some(column) = term.strip_prefix('+') {
+                (column.trim(), Order::Asc)
+            } else {
+                split_direction(term).unwrap_or((term, Order::Asc))
+            };
+            if column.is_empty() {
+                self.invalidate_query(format!("sort('{}') has a term with no column", spec));
+                return self;
+            }
+            self = self.order_by(column, direction);
+        }
+        self
+    }
+
+    /// Replace every ordering the query has so far — one a scope added, say —
+    /// with this one, as [`order_by`](Self::order_by) takes it.
+    #[must_use]
+    pub fn reorder(
+        mut self,
+        column: impl crate::columns::IntoColumnName,
+        direction: Order,
+    ) -> Self {
+        self.order_by.clear();
+        self.order_by(column, direction)
     }
 
     /// Add an ORDER BY clause from a raw SQL expression.
@@ -105,34 +165,22 @@ impl<M: Model> QueryBuilder<M> {
     /// without one PostgreSQL returns rows in heap order, which an UPDATE
     /// changes, so consecutive pages can repeat one row and skip another.
     ///
-    /// A zero page or page size, or a `(page - 1) * per_page` product that does
-    /// not fit in a `u64`, invalidates the query instead of panicking in debug
-    /// builds and wrapping to a bogus offset in release builds.
+    /// A zero page or page size, or a page whose offset passes `i64::MAX`, fails
+    /// the query with the validation error
+    /// [`Model::paginate`] gives the same
+    /// numbers, naming `page` or `per_page` — what a request handler reports as
+    /// bad input.
     #[must_use]
-    pub fn page(self, page: u64, per_page: u64) -> Self {
-        let mut query = self;
-
-        if page == 0 {
-            query.invalidate_query("invalid pagination: page must be at least 1".to_string());
-            return query;
+    pub fn page(mut self, page: u64, per_page: u64) -> Self {
+        match page_offset(page, per_page) {
+            Ok(offset) => self.limit(per_page).offset(offset),
+            Err(refusal) => {
+                if self.invalid_page.is_none() {
+                    self.invalid_page = Some(refusal);
+                }
+                self
+            }
         }
-
-        if per_page == 0 {
-            query.invalidate_query(
-                "invalid pagination: per_page must be greater than 0".to_string(),
-            );
-            return query;
-        }
-
-        let Some(offset) = (page - 1).checked_mul(per_page) else {
-            query.invalidate_query(format!(
-                "invalid pagination: page {} of {} per page overflows the maximum offset",
-                page, per_page
-            ));
-            return query;
-        };
-
-        query.limit(per_page).offset(offset)
     }
 
     /// Take only the first N records
@@ -146,6 +194,48 @@ impl<M: Model> QueryBuilder<M> {
     pub fn skip(self, n: u64) -> Self {
         self.offset(n)
     }
+}
+
+/// A column reference and the `ASC`/`DESC` written after it, if one is.
+fn split_direction(term: &str) -> Option<(&str, Order)> {
+    let (column, direction) = term.trim().rsplit_once(char::is_whitespace)?;
+    let direction = if direction.eq_ignore_ascii_case("asc") {
+        Order::Asc
+    } else if direction.eq_ignore_ascii_case("desc") {
+        Order::Desc
+    } else {
+        return None;
+    };
+    Some((column.trim_end(), direction))
+}
+
+/// The offset of page `page` (1-based) of `per_page` rows, or the field it
+/// refuses and why: a zero page or page size, or a page or size past what the
+/// backends take (`i64::MAX`). `page()` and `Model::paginate` share it, so the
+/// same numbers are refused alike.
+pub(crate) fn page_offset(
+    page: u64,
+    per_page: u64,
+) -> std::result::Result<u64, (&'static str, String)> {
+    if page == 0 {
+        return Err(("page", "must be at least 1".to_string()));
+    }
+    if per_page == 0 {
+        return Err(("per_page", "must be greater than 0".to_string()));
+    }
+    if i64::try_from(per_page).is_err() {
+        return Err(("per_page", "must be at most i64::MAX".to_string()));
+    }
+    (page - 1)
+        .checked_mul(per_page)
+        .filter(|offset| i64::try_from(*offset).is_ok())
+        .ok_or_else(|| {
+            (
+                "page",
+                "page is too large for this page size; (page - 1) * per_page exceeds i64::MAX"
+                    .to_string(),
+            )
+        })
 }
 
 #[cfg(test)]

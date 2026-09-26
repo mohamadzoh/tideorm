@@ -54,6 +54,8 @@ pub use builders::{CacheKeyBuilder, CacheOptions};
 pub use prepared_statements::{
     CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
 };
+#[cfg(feature = "entity-manager")]
+pub(crate) use query_cache::undo_on_rollback;
 pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
 pub(crate) use query_cache::{PendingInvalidations, install_pending_invalidations};
 

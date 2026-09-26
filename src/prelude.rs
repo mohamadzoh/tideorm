@@ -18,9 +18,10 @@ pub use crate::model::{
     OnConflictBuilder, UpdateValue,
 };
 pub use crate::query::{
-    Aggregate, CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, LogicalOp,
-    OrBranchBuilder, OrGroup, Order, QueryBuilder, QueryFragment, SortOrder, UnionClause,
-    UnionType, WindowFunction, WindowFunctionType,
+    Aggregate, AggregateCondition, CTE, FrameBound, FrameType, HavingCondition, JoinClause,
+    JoinResultConsolidator, JoinType, LogicalOp, OrBranchBuilder, OrGroup, Order, Paginated,
+    QueryBuilder, QueryFragment, SortOrder, UnionClause, UnionType, WindowFunction,
+    WindowFunctionType,
 };
 pub use crate::schema::{
     ColumnSchema, SchemaGenerator, SchemaWriter, TableSchema, TableSchemaBuilder,

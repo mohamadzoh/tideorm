@@ -52,23 +52,42 @@ impl<'a> Ledger<'a> {
     }
 
     /// Create the ledger table if it is missing.
+    ///
+    /// Inside a transaction this runs on it on PostgreSQL and SQLite, whose DDL
+    /// is transactional: SQLite's pool may hold nothing but the transaction's
+    /// connection, and waiting for a second one would never end. MySQL and
+    /// MariaDB commit an open transaction before any DDL, so there the table is
+    /// created on a pooled connection instead.
     pub(crate) async fn ensure(&self, db: &Database) -> Result<()> {
-        db.__internal_connection()?
-            .execute_unprepared(&self.create_table_sql(db.backend()))
-            .await
-            .map_err(translate_error)?;
+        let db_type = db.execution_backend();
+        let sql = self.create_table_sql(db_type);
+        if matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) {
+            db.__internal_connection()?
+                .execute_unprepared(&sql)
+                .await
+                .map_err(translate_error)?;
+        } else {
+            db.__get_connection()?
+                .executor()
+                .execute_unprepared(&sql)
+                .await
+                .map_err(translate_error)?;
+        }
 
         Ok(())
     }
 
-    /// Every recorded key, in the order the entries were written.
+    /// Every recorded key, in the order the entries were written, read on the
+    /// ambient connection, so an entry recorded earlier in the same transaction
+    /// is seen.
     pub(crate) async fn keys(&self, db: &Database) -> Result<Vec<String>> {
-        let connection = db.__internal_connection()?;
+        let connection = db.__get_connection()?;
+        let executor = connection.executor();
         let statement = build_statement(
-            connection.get_database_backend(),
-            self.keys_sql(db.backend()),
+            executor.get_database_backend(),
+            self.keys_sql(db.execution_backend()),
         );
-        let rows = connection
+        let rows = executor
             .query_all_raw(statement)
             .await
             .map_err(translate_error)?;
@@ -83,7 +102,7 @@ impl<'a> Ledger<'a> {
     /// This runs on the ambient connection, so an entry recorded inside the
     /// transaction that applied it commits or rolls back with it.
     pub(crate) async fn record(&self, db: &Database, key: &str, details: &[&str]) -> Result<()> {
-        let (sql, params) = self.insert_sql(db.backend(), key, details);
+        let (sql, params) = self.insert_sql(db.execution_backend(), key, details);
         db.__execute_with_params(&sql, params).await?;
 
         Ok(())
@@ -91,7 +110,7 @@ impl<'a> Ledger<'a> {
 
     /// Remove the entry recorded under `key`, on the ambient connection.
     pub(crate) async fn remove(&self, db: &Database, key: &str) -> Result<()> {
-        let (sql, params) = self.delete_sql(db.backend(), key);
+        let (sql, params) = self.delete_sql(db.execution_backend(), key);
         db.__execute_with_params(&sql, params).await?;
 
         Ok(())

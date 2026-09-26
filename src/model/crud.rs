@@ -54,7 +54,10 @@ where
     }
 
     let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::insert_many::<M>(&connection.executor(), models).await
+    let inserted =
+        crate::internal::QueryExecutor::insert_many::<M>(&connection.executor(), models).await?;
+    crate::query::QueryBuilder::<M>::invalidate_model_state(inserted.len() as u64);
+    Ok(inserted)
 }
 
 pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
@@ -88,55 +91,32 @@ pub(crate) async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
 where
     M: Model,
 {
-    if page == 0 {
-        return Err(Error::validation("page", "must be at least 1"));
-    }
-
-    if per_page == 0 {
-        return Err(Error::validation("per_page", "must be greater than 0"));
-    }
-
-    // `page` is already known to be non-zero, but the product can still
-    // overflow for an out-of-range page number; report that as bad input.
-    let offset = (page - 1).checked_mul(per_page).ok_or_else(|| {
-        Error::validation(
-            "page",
-            "page is too large for this page size; (page - 1) * per_page overflows",
-        )
-    })?;
-
-    // Every backend takes LIMIT and OFFSET as signed 64-bit integers.
-    let limit = i64::try_from(per_page)
-        .map_err(|_| Error::validation("per_page", "must be at most i64::MAX"))?;
-    let offset = i64::try_from(offset).map_err(|_| {
-        Error::validation(
-            "page",
-            "page is too large for this page size; (page - 1) * per_page exceeds i64::MAX",
-        )
-    })?;
+    // The same check `QueryBuilder::page` makes, so both refuse alike. Every
+    // backend takes LIMIT and OFFSET as signed 64-bit integers, which it
+    // already bounds both by.
+    let offset = crate::query::page_offset(page, per_page)
+        .map_err(|(field, message)| Error::validation(field, message))?;
+    let (limit, offset) = (per_page as i64, offset as i64);
 
     let connection = crate::database::__current_connection()?;
     crate::internal::QueryExecutor::paginate::<M, _>(&connection.executor(), limit, offset).await
 }
 
-/// Look up a model by primary key while honoring its soft-delete scope.
-///
-/// The macro-generated `Model::find` intentionally applies no scope, so callers that
-/// should hide trashed rows (`exists`, `find_or_fail`) go through here instead; for a
-/// model without soft delete the scope is empty and this finds what `Model::find` does.
-pub(crate) async fn find_active<M>(id: M::PrimaryKey) -> Result<Option<M>>
+/// Read the row with this primary key whether or not it is soft-deleted, for
+/// `reload`, whose record is the one in hand.
+async fn find_including_trashed<M>(id: M::PrimaryKey) -> Result<Option<M>>
 where
     M: Model,
 {
-    use crate::internal::{InternalModel, QueryFilter};
+    use crate::internal::{EntityTrait, InternalModel, QueryFilter};
 
     // Resolved outside the profiled statement so an outage keeps its
-    // `Error::Connection` class, exactly as it does for `find`.
+    // `Error::Connection` class, exactly as it does for `find`. A key matches
+    // at most one row; `all` reads it without the bound `LIMIT` that `one`
+    // adds, which recent SQLite releases recompile on every run.
     let connection = crate::database::__current_connection()?;
-    // A key matches at most one row; `all` reads it without the bound `LIMIT`
-    // that `one` adds, which recent SQLite releases recompile on every run.
     let rows = crate::profiling::__profile_future(
-        crate::internal::scoped_find::<M>()
+        <M as InternalModel>::Entity::find()
             .filter(<M as InternalModel>::primary_key_condition(&id))
             .all(&connection.executor()),
     )
@@ -155,13 +135,15 @@ where
     let primary_key = model.primary_key();
     let id_display = M::primary_key_display(&primary_key);
 
-    M::find(primary_key).await?.ok_or_else(|| {
-        Error::not_found(format!(
-            "{} with {} no longer exists",
-            M::table_name(),
-            id_display
-        ))
-    })
+    find_including_trashed::<M>(primary_key)
+        .await?
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "{} with {} no longer exists",
+                M::table_name(),
+                id_display
+            ))
+        })
 }
 
 pub(crate) fn is_new<M>(model: &M) -> bool

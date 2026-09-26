@@ -53,10 +53,18 @@ enum ConditionSpec<'a> {
     Raw {
         raw_sql: &'a str,
         values: &'a [Value],
+        /// Whether `raw_sql` is a caller's template, whose `?`s become the
+        /// backend's markers at rendering.
+        template: bool,
     },
     Compare {
         operator: ComparisonOperator,
         value: &'a serde_json::Value,
+    },
+    /// The column compared with another column of the same row.
+    CompareColumns {
+        operator: ComparisonOperator,
+        other: &'a str,
     },
     Pattern {
         negated: bool,
@@ -73,6 +81,7 @@ enum ConditionSpec<'a> {
     Between {
         low: &'a serde_json::Value,
         high: &'a serde_json::Value,
+        negated: bool,
     },
     JsonValue {
         operator: JsonValueOperator,

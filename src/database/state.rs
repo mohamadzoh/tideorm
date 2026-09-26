@@ -1,7 +1,9 @@
 use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Weak;
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
@@ -15,7 +17,8 @@ static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 static GLOBAL_CONNECTION: RwLock<Option<Arc<InternalConnection>>> = RwLock::new(None);
 
 thread_local! {
-    static DB_OVERRIDE: RefCell<Option<ConnectionRef>> = const { RefCell::new(None) };
+    /// The scope's connection, and the identity of the pool it belongs to.
+    static DB_OVERRIDE: RefCell<Option<(ConnectionRef, Option<u64>)>> = const { RefCell::new(None) };
 }
 
 const NOT_INITIALIZED: &str = "Global database connection not initialized. \
@@ -73,7 +76,7 @@ pub fn has_global_db() -> bool {
     GLOBAL_CONNECTION.read().is_some()
 }
 
-struct ResetDbOverride(Option<ConnectionRef>);
+struct ResetDbOverride(Option<(ConnectionRef, Option<u64>)>);
 
 impl Drop for ResetDbOverride {
     fn drop(&mut self) {
@@ -83,9 +86,28 @@ impl Drop for ResetDbOverride {
     }
 }
 
-fn install_db_override(connection: &ConnectionRef) -> ResetDbOverride {
-    let previous = DB_OVERRIDE.with(|slot| slot.replace(Some(connection.clone())));
+fn install_db_override(connection: &ConnectionRef, origin: Option<u64>) -> ResetDbOverride {
+    let previous = DB_OVERRIDE.with(|slot| slot.replace(Some((connection.clone(), origin))));
     ResetDbOverride(previous)
+}
+
+/// The identity of the pool `connection` belongs to: its own for a pooled
+/// connection, and for a transaction the one of the scope it was opened in.
+pub(crate) fn origin_of(connection: &ConnectionRef) -> Option<u64> {
+    match connection {
+        ConnectionRef::Database(inner) => Some(connection_identity(inner)),
+        ConnectionRef::Transaction(_) => __scope_origin(),
+    }
+}
+
+/// The identity of the pool the current scope's statements run on: the
+/// enclosing transaction's, if any, otherwise the global connection's.
+#[doc(hidden)]
+pub fn __scope_origin() -> Option<u64> {
+    match DB_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|(_, origin)| *origin)) {
+        Some(origin) => origin,
+        None => GLOBAL_CONNECTION.read().as_ref().map(connection_identity),
+    }
 }
 
 /// The database handle for the current scope: the enclosing transaction, if
@@ -99,7 +121,11 @@ pub fn __current_db() -> Result<Database> {
 /// otherwise the global connection.
 #[doc(hidden)]
 pub fn __current_connection() -> Result<ConnectionRef> {
-    match DB_OVERRIDE.with(|slot| slot.borrow().clone()) {
+    match DB_OVERRIDE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|(connection, _)| connection.clone())
+    }) {
         Some(connection) => Ok(connection),
         None => global_connection(),
     }
@@ -114,6 +140,7 @@ pub fn __current_connection() -> Result<ConnectionRef> {
 /// work-stealing runtime moves it to another thread.
 pub(super) fn with_connection_override<F>(
     connection: ConnectionRef,
+    origin: Option<u64>,
     pending: Option<Arc<Mutex<PendingInvalidations>>>,
     future: F,
 ) -> impl Future<Output = F::Output>
@@ -122,6 +149,7 @@ where
 {
     struct ScopedOverrideFuture<F> {
         connection: Option<ConnectionRef>,
+        origin: Option<u64>,
         pending: Option<Arc<Mutex<PendingInvalidations>>>,
         future: Pin<Box<F>>,
     }
@@ -136,7 +164,7 @@ where
             let this = self.get_mut();
             let result = match this.connection.as_ref() {
                 Some(connection) => {
-                    let guard = install_db_override(connection);
+                    let guard = install_db_override(connection, this.origin);
                     let pending = this.pending.as_ref().map(install_pending_invalidations);
                     let result = this.future.as_mut().poll(cx);
                     drop(pending);
@@ -160,8 +188,61 @@ where
     }
 
     ScopedOverrideFuture {
+        origin,
         connection: Some(connection),
         pending,
         future: Box::pin(future),
     }
+}
+
+/// The process-wide identities handed out by [`connection_identity`].
+static CONNECTION_IDENTITIES: OnceLock<Mutex<ConnectionIdentities>> = OnceLock::new();
+
+/// The identity assigned to every pooled connection a cache key has named.
+#[derive(Default)]
+struct ConnectionIdentities {
+    /// The last identity handed out. Identities are never reused within a
+    /// process, so a stale cache entry can never be mistaken for a live one.
+    last_id: u64,
+    /// Address of the connection's `Arc` allocation to its identity, alongside a
+    /// `Weak` to that allocation.
+    assigned: HashMap<usize, (Weak<InternalConnection>, u64)>,
+}
+
+impl ConnectionIdentities {
+    /// The identity of `connection`, assigning one if it has none yet.
+    ///
+    /// The map is keyed by address, which is only trustworthy because of the
+    /// `Weak` stored beside it: a `Weak` keeps its `Arc` allocation reserved even
+    /// after the connection itself is dropped, so no second connection can ever
+    /// be allocated at the address of an entry that is still on record. Dead
+    /// entries are dropped before a new identity is handed out — that releases
+    /// the address *and* the mapping together, so a connection that later lands
+    /// there misses this map and is issued a fresh identity rather than
+    /// inheriting the dropped connection's cached rows.
+    fn identify(&mut self, connection: &Arc<InternalConnection>) -> u64 {
+        let address = Arc::as_ptr(connection) as usize;
+        if let Some((_, id)) = self.assigned.get(&address) {
+            return *id;
+        }
+
+        self.assigned
+            .retain(|_, (tracked, _)| tracked.strong_count() > 0);
+        self.last_id += 1;
+        self.assigned
+            .insert(address, (Arc::downgrade(connection), self.last_id));
+        self.last_id
+    }
+}
+
+/// A process-unique identity for a pooled connection.
+///
+/// Stable for as long as the connection lives and never handed to another
+/// connection afterwards, which is what a cache key or a dirty-tracking
+/// baseline needs: the address the connection happens to occupy is neither.
+pub(crate) fn connection_identity(connection: &Arc<InternalConnection>) -> u64 {
+    CONNECTION_IDENTITIES
+        .get_or_init(|| Mutex::new(ConnectionIdentities::default()))
+        .lock()
+        .identify(connection)
 }

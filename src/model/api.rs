@@ -138,10 +138,9 @@ pub trait Model:
 
     /// Start a filtered bulk `UPDATE`.
     ///
-    /// The returned builder requires at least one explicit filter, and — unlike
-    /// [`Model::query`] — it **includes soft-deleted rows by default**, so a
-    /// bulk restore or backfill reaches trashed rows. Call
-    /// [`BatchUpdateBuilder::without_trashed`] for the usual active-only scope.
+    /// The returned builder requires at least one explicit filter and, like
+    /// [`Model::query`], leaves soft-deleted rows out; call
+    /// [`BatchUpdateBuilder::with_trashed`] for a backfill that reaches them.
     fn update_all() -> BatchUpdateBuilder<Self> {
         BatchUpdateBuilder::new()
     }
@@ -207,12 +206,9 @@ pub trait Model:
 
     /// Look up a record by primary key.
     ///
-    /// **This is the one read path that ignores soft delete**: a trashed row is
-    /// returned like any other. That is deliberate — it is what lets a soft-deleted
-    /// record be inspected or restored by id — but it means `find(id)` and
-    /// [`Model::exists`] can disagree for the same id. Use [`Model::exists`],
-    /// [`Model::find_or_fail`], or a filtered [`Model::query`] when trashed rows
-    /// should stay invisible.
+    /// On a soft-delete model a trashed row is not found, as it is not by any
+    /// other read; `Model::query().with_trashed().find(id)` reads one, to
+    /// inspect or restore it.
     async fn find(id: Self::PrimaryKey) -> Result<Option<Self>>;
 
     /// Look up a record by primary key on a specific database handle.
@@ -224,13 +220,11 @@ pub trait Model:
         db: &crate::database::Database,
     ) -> Result<Option<Self>>;
 
-    /// Look up a record by primary key, returning a not-found error when it is missing.
-    ///
-    /// Soft-delete-enabled models only resolve rows that are not trashed. Use
-    /// `Model::find` when a trashed row should still be returned.
+    /// Look up a record by primary key, returning a not-found error when it is
+    /// missing, as [`Model::find`] reads it.
     async fn find_or_fail(id: Self::PrimaryKey) -> Result<Self> {
         let id_display = Self::primary_key_display(&id);
-        crud::find_active::<Self>(id).await?.ok_or_else(|| {
+        Self::find(id).await?.ok_or_else(|| {
             Error::not_found(format!(
                 "{} with {} not found",
                 Self::table_name(),
@@ -244,7 +238,7 @@ pub trait Model:
     /// Soft-delete-enabled models report trashed rows as not existing, matching
     /// `all()`, `count()`, and `query()`.
     async fn exists(id: Self::PrimaryKey) -> Result<bool> {
-        Ok(crud::find_active::<Self>(id).await?.is_some())
+        Ok(Self::find(id).await?.is_some())
     }
 
     /// Insert a new record.
@@ -255,13 +249,9 @@ pub trait Model:
 
     /// Delete the record with this primary key.
     ///
-    /// The row is loaded first so `before_delete` and `after_delete` callbacks
-    /// run exactly as they would for [`Model::delete`]; a `before_delete` guard
-    /// therefore holds on both entry points. Returns `Ok(0)` when no such row
-    /// exists.
-    ///
-    /// This is a hard delete even on a soft-delete model — call
-    /// `SoftDelete::soft_delete` on the loaded model to only mark it.
+    /// The row is loaded and handed to [`Model::delete`], so its callbacks run
+    /// and a soft-delete model is marked rather than removed. Returns `Ok(0)`
+    /// when no such row exists, or when it is already trashed.
     async fn destroy(id: Self::PrimaryKey) -> Result<u64>;
 
     /// Persist this model.
@@ -277,11 +267,16 @@ pub trait Model:
 
     /// Delete this record's row.
     ///
-    /// A hard `DELETE` keyed on the primary key, even for a model that declares
-    /// `soft_delete` — use `SoftDelete::soft_delete` when the row should be
-    /// marked rather than removed. Runs the delete callbacks and returns the
-    /// number of rows removed, which is `0` if the row was already gone.
+    /// On a soft-delete model the row is marked deleted, as
+    /// `SoftDelete::soft_delete` marks it; `SoftDelete::force_delete` removes it
+    /// for good. Runs the delete callbacks and returns the number of rows
+    /// deleted, which is `0` if the row was already gone or trashed.
     async fn delete(self) -> Result<u64>;
+
+    /// Remove this record's row for good, even on a soft-delete model, running
+    /// the delete callbacks. `SoftDelete::force_delete` calls it.
+    #[doc(hidden)]
+    async fn __force_delete(self) -> Result<u64>;
 
     #[doc(hidden)]
     async fn __insert_with_conflict(model: Self, builder: OnConflictBuilder<Self>) -> Result<Self>;
@@ -290,8 +285,8 @@ pub trait Model:
     ///
     /// Returns a new value rather than mutating in place, so the stale one stays
     /// available for comparison. Errors with a not-found error when the row has
-    /// been deleted in the meantime. Like [`Model::find`], it reads by primary
-    /// key and so still sees soft-deleted rows.
+    /// been deleted in the meantime. Unlike [`Model::find`], it still reads a
+    /// soft-deleted row: the record in hand is the one to refresh.
     async fn reload(&self) -> Result<Self> {
         crud::reload(self).await
     }

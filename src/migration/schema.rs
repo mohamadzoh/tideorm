@@ -77,6 +77,16 @@ impl Schema {
         self.execute(&sql).await
     }
 
+    /// Rename a table
+    ///
+    /// Its rows, columns and indexes move with it. Foreign keys in other
+    /// tables follow the rename on every backend, including SQLite 3.26 and
+    /// later.
+    pub async fn rename_table(&mut self, from: &str, to: &str) -> Result<()> {
+        self.execute(&ddl::rename_table(self.database_type, from, to))
+            .await
+    }
+
     /// Create an index
     pub async fn create_index(
         &mut self,

@@ -77,12 +77,12 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
     .await
     .expect("failed to seed third local user");
 
-    let active_sum = CiUser::query_with(&db)
+    let active_sum: i64 = CiUser::query_with(&db)
         .where_eq("active", true)
         .sum("id")
         .await
         .expect("sum with explicit db should succeed");
-    assert_eq!(active_sum, (first.id + second.id) as f64);
+    assert_eq!(active_sum, first.id + second.id);
 
     let inactive_distinct = CiUser::query_with(&db)
         .where_eq("active", false)
@@ -91,11 +91,14 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         .expect("count_distinct with explicit db should succeed");
     assert_eq!(inactive_distinct, 1);
 
-    let total_avg = CiUser::query_with(&db)
+    let total_avg: Option<f64> = CiUser::query_with(&db)
         .avg("id")
         .await
         .expect("avg with explicit db should succeed");
-    assert_eq!(total_avg, (first.id + second.id + third.id) as f64 / 3.0);
+    assert_eq!(
+        total_avg,
+        Some((first.id + second.id + third.id) as f64 / 3.0)
+    );
 }
 
 #[tokio::test]

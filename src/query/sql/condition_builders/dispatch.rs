@@ -11,11 +11,60 @@ impl<M: Model> QueryBuilder<M> {
         let column_sql = || self.format_column_for_db(db_type, column);
 
         Some(match Self::condition_spec(condition)? {
-            ConditionSpec::Raw { raw_sql, values } => {
-                self.build_raw_condition_expression(db_type, column, raw_sql, values.to_vec())
+            ConditionSpec::Raw {
+                raw_sql,
+                values,
+                template,
+            } => {
+                // A template whose placeholders do not match its values has
+                // already failed validation; it is rendered without them, as
+                // the engine would index past the values otherwise, on paths
+                // such as `debug()` that render before they validate.
+                if template && db_sql::count_template_placeholders(raw_sql) != values.len() {
+                    return Some(self.build_raw_condition_expression(
+                        db_type,
+                        column,
+                        raw_sql,
+                        Vec::new(),
+                    ));
+                }
+                let sql = if template {
+                    let mut index = 0;
+                    db_sql::map_template_placeholders(raw_sql, || {
+                        index += 1;
+                        db_sql::placeholder(db_type, index)
+                    })
+                } else {
+                    raw_sql.to_string()
+                };
+                self.build_raw_condition_expression(db_type, column, &sql, values.to_vec())
+            }
+            // A JSON column compares documents, not their text.
+            ConditionSpec::Compare {
+                operator: operator @ (ComparisonOperator::Eq | ComparisonOperator::NotEq),
+                value,
+            } if matches!(
+                self.column_type(column),
+                Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
+            ) =>
+            {
+                let negated = matches!(operator, ComparisonOperator::NotEq);
+                let bound = db_sql::json_equals_bound(db_type, &column_sql(), value, negated);
+                self.build_custom_expression(bound.sql, bound.values)
             }
             ConditionSpec::Compare { operator, value } => {
                 self.build_compare_expression(column, column_expr(), operator, value)
+            }
+            ConditionSpec::CompareColumns { operator, other } => {
+                let (left, right) = (column_expr(), self.sea_column_expr(db_type, other));
+                match operator {
+                    ComparisonOperator::Eq => left.eq(right),
+                    ComparisonOperator::NotEq => left.ne(right),
+                    ComparisonOperator::Gt => left.gt(right),
+                    ComparisonOperator::Gte => left.gte(right),
+                    ComparisonOperator::Lt => left.lt(right),
+                    ComparisonOperator::Lte => left.lte(right),
+                }
             }
             ConditionSpec::Pattern {
                 negated,
@@ -28,8 +77,8 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::NullCheck { negated } => {
                 self.build_null_check_expression(column_expr(), negated)
             }
-            ConditionSpec::Between { low, high } => {
-                self.build_between_expression(column, column_expr(), low, high)
+            ConditionSpec::Between { low, high, negated } => {
+                self.build_between_expression(column, column_expr(), low, high, negated)
             }
             ConditionSpec::JsonValue { operator, value } => {
                 self.build_json_value_expression(db_type, &column_sql(), operator, value)

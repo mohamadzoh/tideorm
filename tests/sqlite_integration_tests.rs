@@ -99,7 +99,7 @@ async fn global_profiler_records_every_execution_path() {
     .await;
     assert_profiled_operation(
         "TestUser::query().sum(\"age\")",
-        TestUser::query().sum("age"),
+        TestUser::query().sum::<i64>("age"),
     )
     .await;
     assert_profiled_operation(

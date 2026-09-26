@@ -48,6 +48,12 @@ where
     {
         let url_generator = M::file_url_generator();
         for relation in M::files_relations() {
+            // An attachment named among the hidden attributes stays hidden.
+            if hidden.contains(&relation)
+                || global_hidden.iter().any(|attr| attr.as_str() == relation)
+            {
+                continue;
+            }
             if let Some(file_data) = files_obj.get(relation) {
                 let processed = process_file_for_json(relation, file_data, &hidden, url_generator);
                 json.insert(relation.to_string(), processed);

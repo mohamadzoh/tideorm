@@ -220,3 +220,20 @@ fn a_model_beside_the_crate_result_alias_validates() {
     assert!(models_beside_the_crate_result::validates("ok").unwrap());
     assert!(!models_beside_the_crate_result::validates("x").unwrap());
 }
+
+#[test]
+fn integer_bounds_are_compared_exactly_past_two_to_the_53() {
+    let max = ValidationRule::Max(9_007_199_254_740_992.0);
+    let one_past: i64 = 9_007_199_254_740_993;
+    assert!(Validator::validate_rule(&one_past, &max, "id").is_some());
+    assert!(Validator::validate_rule(&9_007_199_254_740_992_i64, &max, "id").is_none());
+
+    let min = ValidationRule::Min(9_007_199_254_740_992.0);
+    assert!(Validator::validate_rule(&9_007_199_254_740_991_i64, &min, "id").is_some());
+    assert!(Validator::validate_rule(&Some(u64::MAX), &ValidationRule::Max(1e30), "id").is_none());
+
+    // A fractional bound still admits the integers on its side.
+    assert!(Validator::validate_rule(&3_i32, &ValidationRule::Range(2.5, 3.5), "n").is_none());
+    assert!(Validator::validate_rule(&4_i32, &ValidationRule::Range(2.5, 3.5), "n").is_some());
+    assert!(Validator::validate_rule(&f64::NAN, &ValidationRule::Min(0.0), "n").is_some());
+}

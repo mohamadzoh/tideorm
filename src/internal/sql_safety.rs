@@ -199,8 +199,13 @@ fn consume_numeric_literal(chars: &[char], index: &mut usize) {
 
 /// One top-level lexical unit of a raw fragment.
 enum SqlToken {
-    /// A bare word — keyword or identifier — at the given parenthesis depth.
-    Word { text: String, depth: usize },
+    /// A bare word — keyword or identifier — at the given parenthesis depth;
+    /// `called` when a `(` follows it, as it does a function's name.
+    Word {
+        text: String,
+        depth: usize,
+        called: bool,
+    },
     /// Any other character outside a literal, a number or a parenthesis.
     Symbol(char),
 }
@@ -259,9 +264,14 @@ fn scan_sql_tokens(
                     index += 1;
                 }
 
+                let mut next = index;
+                while next < chars.len() && chars[next].is_whitespace() {
+                    next += 1;
+                }
                 visit(SqlToken::Word {
                     text: chars[start..index].iter().collect(),
                     depth: paren_depth,
+                    called: chars.get(next) == Some(&'('),
                 })?;
             }
             _ => {
@@ -280,15 +290,32 @@ fn scan_sql_tokens(
 
 /// The lowercased words of `sql` outside any parentheses.
 fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Vec<String>, String> {
-    let mut tokens = Vec::new();
+    Ok(collect_top_level_sql_words(sql, kind)?
+        .into_iter()
+        .map(|(word, _)| word)
+        .collect())
+}
+
+/// The lowercased words of `sql` outside any parentheses, each with whether a
+/// `(` follows it.
+fn collect_top_level_sql_words(
+    sql: &str,
+    kind: &str,
+) -> std::result::Result<Vec<(String, bool)>, String> {
+    let mut words = Vec::new();
     scan_sql_tokens(sql, kind, |token| {
-        if let SqlToken::Word { text, depth: 0 } = token {
-            tokens.push(text.to_ascii_lowercase());
+        if let SqlToken::Word {
+            text,
+            depth: 0,
+            called,
+        } = token
+        {
+            words.push((text.to_ascii_lowercase(), called));
         }
         Ok(())
     })?;
 
-    Ok(tokens)
+    Ok(words)
 }
 
 fn is_forbidden_top_level_subquery_keyword(token: &str) -> bool {
@@ -340,9 +367,11 @@ fn validate_subquery_sql_with_mode(
         );
     }
 
-    if let Some(token) = top_level_tokens
-        .iter()
-        .find(|token| is_forbidden_top_level_subquery_keyword(token))
+    // A forbidden word followed by `(` names a function — `REPLACE(name, ..)`
+    // — not the statement.
+    if let Some((token, _)) = collect_top_level_sql_words(sql, "subquery")?
+        .into_iter()
+        .find(|(token, called)| !called && is_forbidden_top_level_subquery_keyword(token))
     {
         return Err(format!(
             "unsafe subquery: keyword '{}' is not allowed in raw subquery fragments",
@@ -401,6 +430,12 @@ pub(crate) fn validate_having_sql_fragment(
     validate_raw_sql_fragment(kind, sql)?;
 
     scan_sql_tokens(sql, kind, |token| match token {
+        // `LEFT(name, 1)` and `RIGHT(..)` are string functions, not joins.
+        SqlToken::Word {
+            ref text,
+            called: true,
+            ..
+        } if matches!(text.to_ascii_lowercase().as_str(), "left" | "right") => Ok(()),
         SqlToken::Word { text, .. } if is_forbidden_having_keyword(&text.to_ascii_lowercase()) => {
             Err(format!(
                 "unsafe {}: keyword '{}' is not allowed in raw HAVING clauses",

@@ -108,6 +108,13 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
         }
     });
+    let serde_round_trips_impl = (!ctx.serde_round_trips).then(|| {
+        quote! {
+            fn __serde_round_trips() -> bool {
+                false
+            }
+        }
+    });
     let serialized_name_impl = (!ctx.serialized_names.is_empty()).then(|| {
         let (fields, keys): (Vec<_>, Vec<_>) = ctx.serialized_names.iter().cloned().unzip();
         quote! {
@@ -242,6 +249,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             fn field_names() -> &'static [&'static str] { &[#(#field_names),*] }
             fn hidden_attributes() -> Vec<&'static str> { vec![#(#hidden_attrs),*] }
             #serialized_name_impl
+            #serde_round_trips_impl
             fn relation_payload_filters() -> Vec<(&'static str, ::tideorm::model::RelationPayloadFilter)> {
                 vec![#(#relation_payload_filters),*]
             }
@@ -588,6 +596,8 @@ fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
             ::tideorm::sync::CompiledModelRegistration {
                 source_path: file!(),
                 sync_schema: #struct_name::__get_sync_schema,
+                table_name: <#struct_name as ::tideorm::model::ModelMeta>::table_name,
+                column_type: ::tideorm::internal::__column_type_of::<#struct_name>,
             }
         }
     }
@@ -599,6 +609,7 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
     let field_idents = &ctx.field_idents;
     let field_types = &ctx.field_types;
     let column_names = &ctx.column_names;
+    let table_name = &ctx.table_name;
 
     quote! {
         #[allow(non_camel_case_types)]
@@ -610,7 +621,7 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
         impl #struct_name {
             #[allow(non_upper_case_globals)]
             pub const columns: #columns_struct_name = #columns_struct_name {
-                #(#field_idents: ::tideorm::columns::Column::new(#column_names)),*
+                #(#field_idents: ::tideorm::columns::Column::of(#table_name, #column_names)),*
             };
         }
     }

@@ -164,6 +164,27 @@ struct EntityManagerAggregatePostTag {
     tag_id: i64,
 }
 
+/// Raised by [`EntityManagerFlaggedUser`]'s callback once the flush reaches a
+/// user named "second", which is where the cancellation scenario drops it.
+static SECOND_SAVE_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[tideorm::model(table = "entity_manager_test_users")]
+struct EntityManagerFlaggedUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+impl Callbacks for EntityManagerFlaggedUser {
+    fn before_save(&mut self) -> tideorm::Result<()> {
+        if self.name == "second" {
+            SECOND_SAVE_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 const TABLES: [&str; 15] = [
     "entity_manager_test_users",
     "entity_manager_test_posts",
@@ -1630,6 +1651,149 @@ async fn entity_manager_flush_rolls_back_all_managed_writes_on_error() -> tideor
             .count()
             .await?,
         2
+    );
+
+    Ok(())
+}
+
+/// A managed entity whose primary key was changed is not saved: writing it
+/// under the new key overwrote whichever row held that key.
+#[tokio::test]
+async fn entity_manager_refuses_to_save_a_changed_primary_key() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+
+    let bystander = EntityManagerUser {
+        id: 0,
+        name: "Bystander".to_string(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    let moved = EntityManagerUser {
+        id: 0,
+        name: "Moved".to_string(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let managed = entity_manager
+        .find_managed::<EntityManagerUser>(moved.id)
+        .await?
+        .expect("managed entity should load");
+    managed.edit(|user| {
+        user.id = bystander.id;
+        user.name = "Overwritten".to_string();
+    });
+
+    let error = entity_manager
+        .flush()
+        .await
+        .expect_err("a changed primary key must not be saved");
+    assert!(error.to_string().contains("primary key"), "{error}");
+    for (id, name) in [(bystander.id, "Bystander"), (moved.id, "Moved")] {
+        let row = EntityManagerUser::find_with(id, db.as_ref())
+            .await?
+            .expect("row should still exist");
+        assert_eq!(row.name, name);
+    }
+
+    Ok(())
+}
+
+/// A flush dropped part way rolls its transaction back, and the context too:
+/// the entities it had already written kept their ids and `Managed` state, so
+/// the next flush never inserted them.
+#[tokio::test]
+async fn entity_manager_cancelled_flush_leaves_the_context_unflushed() -> tideorm::Result<()> {
+    use std::future::Future;
+    use std::sync::atomic::Ordering;
+    use std::task::Poll;
+
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+
+    let entity_manager = EntityManager::new(db.clone());
+    let first = entity_manager.persist(EntityManagerFlaggedUser {
+        id: 0,
+        name: "first".to_string(),
+    });
+    let second = entity_manager.persist(EntityManagerFlaggedUser {
+        id: 0,
+        name: "second".to_string(),
+    });
+
+    SECOND_SAVE_STARTED.store(false, Ordering::SeqCst);
+    let mut flush = Box::pin(entity_manager.flush());
+    std::future::poll_fn(|cx| match flush.as_mut().poll(cx) {
+        Poll::Ready(result) => panic!("the flush ended before it was cancelled: {result:?}"),
+        Poll::Pending if SECOND_SAVE_STARTED.load(Ordering::SeqCst) => Poll::Ready(()),
+        Poll::Pending => Poll::Pending,
+    })
+    .await;
+    drop(flush);
+
+    assert_eq!(first.state(), EntityState::New);
+    assert_eq!(first.get().id, 0);
+    assert_eq!(second.state(), EntityState::New);
+
+    entity_manager.flush().await?;
+    assert!(first.get().id > 0);
+    assert!(second.get().id > 0);
+    assert_eq!(
+        EntityManagerFlaggedUser::query_with(db.as_ref())
+            .count()
+            .await?,
+        2
+    );
+
+    Ok(())
+}
+
+/// A flush inside a transaction that then rolls back leaves the context as it
+/// was before the flush, since none of what it wrote was committed.
+#[tokio::test]
+async fn entity_manager_flush_is_undone_by_an_enclosing_rollback() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+
+    let entity_manager = EntityManager::new(db.clone());
+    let managed = entity_manager.persist(EntityManagerUser {
+        id: 0,
+        name: "Rolled Back".to_string(),
+        posts: Default::default(),
+    });
+
+    let flushing = entity_manager.clone();
+    let outcome: tideorm::Result<()> = db
+        .transaction(move |_| {
+            Box::pin(async move {
+                flushing.flush().await?;
+                Err(Error::query("the enclosing work failed"))
+            })
+        })
+        .await;
+    assert!(outcome.is_err());
+    assert_eq!(managed.state(), EntityState::New);
+    assert_eq!(managed.get().id, 0);
+    assert_eq!(EntityManagerUser::query_with(db.as_ref()).count().await?, 0);
+
+    // Committed, the same flush keeps what it wrote.
+    let flushing = entity_manager.clone();
+    db.transaction(move |_| Box::pin(async move { flushing.flush().await }))
+        .await?;
+    assert_eq!(managed.state(), EntityState::Managed);
+    let id = managed.get().id;
+    assert!(id > 0);
+    assert!(
+        EntityManagerUser::find_with(id, db.as_ref())
+            .await?
+            .is_some()
     );
 
     Ok(())

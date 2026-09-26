@@ -32,7 +32,20 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(format!("invalid subquery for {}(): {}", method, err));
         }
 
-        let (sql, values) = subquery.to_subquery_sql_with_params(self.db_type_for_sql());
+        let db_type = self.db_type_for_sql();
+        let (mut sql, values) = subquery.to_subquery_sql_with_params(db_type);
+        // MySQL and MariaDB take no LIMIT in an IN subquery, but do one level
+        // further down.
+        if keyword.ends_with("IN")
+            && matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB)
+            && (subquery.limit_value.is_some() || subquery.offset_value.is_some())
+        {
+            sql = format!(
+                "SELECT * FROM ({}) AS {}",
+                sql,
+                db_sql::quote_ident(db_type, "tideorm_in_subquery")
+            );
+        }
         if let Err(reason) = db_sql::validate_compound_subquery_sql(&sql) {
             self.invalidate_query(format!("invalid subquery for {}(): {}", method, reason));
         }
@@ -55,7 +68,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
-        self.push_subquery_condition("where_in_subquery", column.column_name(), "IN", &subquery)
+        let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        self.push_subquery_condition("where_in_subquery", &column, "IN", &subquery)
     }
 
     /// Add a WHERE NOT IN (subquery) condition.
@@ -65,12 +79,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
-        self.push_subquery_condition(
-            "where_not_in_subquery",
-            column.column_name(),
-            "NOT IN",
-            &subquery,
-        )
+        let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        self.push_subquery_condition("where_not_in_subquery", &column, "NOT IN", &subquery)
     }
 
     /// Add a WHERE EXISTS (subquery) condition.
@@ -131,13 +141,31 @@ impl<M: Model> QueryBuilder<M> {
         let mut values = Vec::new();
 
         if let Some((condition_column, value)) = condition {
-            sql.push_str(&format!(
-                " AND {}.{} = {}",
+            let column = format!(
+                "{}.{}",
                 related,
-                db_sql::quote_ident(db_type, condition_column),
-                db_sql::placeholder(db_type, 1),
-            ));
-            values.push(crate::internal::json_to_db_value(&value));
+                db_sql::quote_ident(db_type, condition_column)
+            );
+            // A NULL condition means a NULL column, as for `where_eq`: `= NULL`
+            // is never true, which would turn `has_no_related` into a filter
+            // that every row passes.
+            if value.is_null() {
+                sql.push_str(&format!(" AND {} IS NULL", column));
+            } else {
+                sql.push_str(&format!(
+                    " AND {} = {}",
+                    column,
+                    db_sql::placeholder(db_type, 1)
+                ));
+                // Bound as the column's type when a model maps the table, so a
+                // UUID or a timestamp is not compared as text.
+                let column_type =
+                    crate::sync::registered_column_type(related_table, condition_column);
+                values.push(crate::internal::json_to_column_value(
+                    &value,
+                    column_type.as_ref(),
+                ));
+            }
         }
 
         sql.push(')');
@@ -156,6 +184,9 @@ impl<M: Model> QueryBuilder<M> {
     /// invalidates the query instead of being spliced into SQL. The table is
     /// named, not modeled, so its soft-deleted rows count too; to skip them,
     /// pass the related model's query to [`where_exists`](Self::where_exists).
+    ///
+    /// [`where_has`](Self::where_has) is the typed form: it names the related
+    /// model, applies its soft-delete scope, and takes any filter.
     #[must_use]
     pub fn has_related(
         self,
@@ -163,7 +194,7 @@ impl<M: Model> QueryBuilder<M> {
         foreign_key: &str,
         local_key: &str,
         condition_column: &str,
-        condition_value: impl Into<serde_json::Value>,
+        condition_value: impl serde::Serialize,
     ) -> Self {
         self.push_related_exists_condition(
             "has_related",
@@ -171,8 +202,187 @@ impl<M: Model> QueryBuilder<M> {
             related_table,
             foreign_key,
             local_key,
-            Some((condition_column, condition_value.into())),
+            Some((
+                condition_column,
+                crate::query::filter_value(condition_value),
+            )),
         )
+    }
+
+    /// Check that no related record matches a condition.
+    ///
+    /// A row with related records, none of them matching, passes, as does a
+    /// row with none at all. Every identifier must be a plain `table`/`column`
+    /// name; anything else invalidates the query instead of being spliced into
+    /// SQL. The table is named, not modeled, so its soft-deleted rows count
+    /// too; to skip them, pass the related model's query to
+    /// [`where_not_exists`](Self::where_not_exists).
+    ///
+    /// [`where_doesnt_have`](Self::where_doesnt_have) is the typed form.
+    #[must_use]
+    pub fn has_no_related(
+        self,
+        related_table: &str,
+        foreign_key: &str,
+        local_key: &str,
+        condition_column: &str,
+        condition_value: impl serde::Serialize,
+    ) -> Self {
+        self.push_related_exists_condition(
+            "has_no_related",
+            true,
+            related_table,
+            foreign_key,
+            local_key,
+            Some((
+                condition_column,
+                crate::query::filter_value(condition_value),
+            )),
+        )
+    }
+
+    /// Keep the rows with at least one related `R` row that `constrain`
+    /// keeps.
+    ///
+    /// `foreign_key` is `R`'s column that holds this model's `local_key`, and
+    /// either may be a typed column. The related rows are `R`'s own query, so
+    /// `R`'s soft-delete scope applies, its filter values bind as its columns'
+    /// types, and every query method works inside `constrain`:
+    ///
+    /// ```ignore
+    /// // Users with a published post
+    /// User::query().where_has::<Post>(Post::columns.user_id, User::columns.id, |posts| {
+    ///     posts.where_eq(Post::columns.published, true)
+    /// });
+    ///
+    /// // Posts whose author is active: here the key sits on this side
+    /// Post::query().where_has::<User>(User::columns.id, Post::columns.user_id, |users| {
+    ///     users.where_eq(User::columns.active, true)
+    /// });
+    /// ```
+    ///
+    /// Pass `|q| q` to ask only that a related row exists. A related query
+    /// that could not run fails this one; so does one that joins, pages or
+    /// unions, which a correlated `EXISTS` cannot keep.
+    #[must_use]
+    pub fn where_has<R: Model>(
+        self,
+        foreign_key: impl IntoColumnName,
+        local_key: impl IntoColumnName,
+        constrain: impl FnOnce(QueryBuilder<R>) -> QueryBuilder<R>,
+    ) -> Self {
+        let related = constrain(QueryBuilder::<R>::new());
+        self.push_has_condition(
+            "where_has",
+            false,
+            foreign_key.column_name(),
+            local_key.column_name(),
+            &related,
+        )
+    }
+
+    /// Keep the rows with no related `R` row that `constrain` keeps; the
+    /// opposite of [`where_has`](Self::where_has), whose rules it follows. A
+    /// row with no related rows at all passes.
+    #[must_use]
+    pub fn where_doesnt_have<R: Model>(
+        self,
+        foreign_key: impl IntoColumnName,
+        local_key: impl IntoColumnName,
+        constrain: impl FnOnce(QueryBuilder<R>) -> QueryBuilder<R>,
+    ) -> Self {
+        let related = constrain(QueryBuilder::<R>::new());
+        self.push_has_condition(
+            "where_doesnt_have",
+            true,
+            foreign_key.column_name(),
+            local_key.column_name(),
+            &related,
+        )
+    }
+
+    /// Push `[NOT] EXISTS (SELECT 1 FROM R WHERE R.fk = M.lk AND <related>)`,
+    /// the correlated form of `related`'s own filters and scope.
+    fn push_has_condition<R: Model>(
+        mut self,
+        method: &str,
+        negated: bool,
+        foreign_key: &str,
+        local_key: &str,
+        related: &QueryBuilder<R>,
+    ) -> Self {
+        if let Err(err) = related.ensure_query_is_executable() {
+            self.invalidate_query(format!("invalid related query for {}(): {}", method, err));
+        }
+        if let Some(part) = related.update_blocker() {
+            self.invalidate_query(format!(
+                "{}() correlates the related rows through their filters only; the related query cannot hold {}",
+                method, part
+            ));
+        }
+        let keys = (
+            Self::own_key_column::<R>(foreign_key),
+            Self::own_key_column::<M>(local_key),
+        );
+        let (Some(foreign_key), Some(local_key)) = keys else {
+            self.invalidate_query(format!(
+                "{}(): '{}' must be a column of {} and '{}' a column of {}",
+                method,
+                foreign_key,
+                R::table_name(),
+                local_key,
+                M::table_name()
+            ));
+            return self;
+        };
+
+        let db_type = self.db_type_for_sql();
+        let (where_sql, values) = related.build_where_clause_with_condition_for_db(db_type);
+        // A model related to itself reads the related rows under an alias, so
+        // the key on the outer row stays reachable.
+        let (from, related_ref) = if R::table_name() == M::table_name() {
+            let alias = db_sql::quote_ident(db_type, "tideorm_related");
+            (
+                format!("{} AS {}", db_sql::quote_table::<R>(db_type), alias),
+                alias,
+            )
+        } else {
+            (
+                db_sql::quote_table::<R>(db_type),
+                db_sql::quote_ident(db_type, R::table_name()),
+            )
+        };
+        let mut sql = format!(
+            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
+            if negated { "NOT " } else { "" },
+            from,
+            related_ref,
+            db_sql::quote_ident(db_type, foreign_key),
+            db_sql::quote_ident(db_type, M::table_name()),
+            db_sql::quote_ident(db_type, local_key),
+        );
+        if !where_sql.is_empty() {
+            sql.push_str(&format!(" AND ({})", where_sql));
+        }
+        sql.push(')');
+
+        self.conditions.push(WhereCondition {
+            column: String::new(),
+            operator: Operator::Raw,
+            value: ConditionValue::RawExprWithValues { sql, values },
+        });
+        self
+    }
+
+    /// `name` as a column of `N`, a field name or column name, bare or
+    /// qualified with `N`'s table; `None` when `N` has no such column.
+    fn own_key_column<N: Model>(name: &str) -> Option<&'static str> {
+        let name = match name.split_once('.') {
+            Some((table, column)) if table == N::table_name() => column,
+            Some(_) => return None,
+            None => name,
+        };
+        N::canonical_column_name(name)
     }
 
     /// Check if any related records exist (without condition).
@@ -249,10 +459,40 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(reason);
         }
 
-        self.push_condition(WhereCondition::new(
+        self.push_condition(WhereCondition::of::<M>(
             "",
             Operator::Raw,
             ConditionValue::RawExpr(raw_sql.to_string()),
+        ))
+    }
+
+    /// Add a raw WHERE condition whose `?` placeholders bind `params`, in
+    /// order.
+    ///
+    /// The fragment is **trusted SQL**, checked like [`where_raw`](Self::where_raw)'s;
+    /// the values are bound, never written into it, so they may come from a
+    /// request:
+    ///
+    /// ```ignore
+    /// User::query()
+    ///     .where_raw_with("LOWER(email) = LOWER(?)", vec![email.into()])
+    ///     .where_raw_with("age BETWEEN ? AND ?", vec![18.into(), 65.into()])
+    ///     .get()
+    ///     .await?;
+    /// ```
+    ///
+    /// Write `?` on every backend: each becomes the backend's own marker when
+    /// the statement is rendered. A `?` inside a quoted literal is text, and a
+    /// count of placeholders other than `params.len()` fails the query.
+    #[must_use]
+    pub fn where_raw_with(self, raw_sql: &str, params: Vec<crate::internal::DbValue>) -> Self {
+        self.push_condition(WhereCondition::of::<M>(
+            "",
+            Operator::Raw,
+            ConditionValue::RawTemplate {
+                sql: raw_sql.to_string(),
+                values: params,
+            },
         ))
     }
 
@@ -295,8 +535,12 @@ impl<M: Model> QueryBuilder<M> {
     /// Rendered as `column IN (..)`, which is what `= ANY(ARRAY[..])` means and
     /// which binds correctly on every backend.
     #[must_use]
-    pub fn eq_any<V: serde::Serialize>(self, column: impl IntoColumnName, values: Vec<V>) -> Self {
-        self.push_condition(WhereCondition::new(
+    pub fn eq_any<V: serde::Serialize>(
+        self,
+        column: impl IntoColumnName,
+        values: impl IntoIterator<Item = V>,
+    ) -> Self {
+        self.push_condition(WhereCondition::of::<M>(
             column,
             Operator::EqAny,
             ConditionValue::List(values.into_iter().map(crate::query::filter_value).collect()),
@@ -305,8 +549,12 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add a WHERE column <> ALL(array) condition, rendered as `column NOT IN (..)`.
     #[must_use]
-    pub fn ne_all<V: serde::Serialize>(self, column: impl IntoColumnName, values: Vec<V>) -> Self {
-        self.push_condition(WhereCondition::new(
+    pub fn ne_all<V: serde::Serialize>(
+        self,
+        column: impl IntoColumnName,
+        values: impl IntoIterator<Item = V>,
+    ) -> Self {
+        self.push_condition(WhereCondition::of::<M>(
             column,
             Operator::NeAll,
             ConditionValue::List(values.into_iter().map(crate::query::filter_value).collect()),
@@ -321,6 +569,11 @@ impl<M: Model> QueryBuilder<M> {
             operator,
             value,
         } = condition;
+        // A column of this query's own model needs no qualifier.
+        let column = match column.split_once('.') {
+            Some((table, name)) if table == M::table_name() => name.to_string(),
+            _ => column,
+        };
 
         let value = match (operator, value) {
             (Operator::IsNull | Operator::IsNotNull, _) => ConditionValue::None,
@@ -349,116 +602,13 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    /// Add a JSON contains condition (column @> value).
-    #[must_use]
-    pub fn where_json_contains(
-        self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::JsonContains,
-            ConditionValue::Single(value.into()),
-        ))
-    }
-
-    /// Add a JSON contained by condition (column <@ value).
-    #[must_use]
-    pub fn where_json_contained_by(
-        self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::JsonContainedBy,
-            ConditionValue::Single(value.into()),
-        ))
-    }
-
-    /// Add a JSON key exists condition (column ? key).
-    #[must_use]
-    pub fn where_json_key_exists(self, column: impl IntoColumnName, key: &str) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::JsonKeyExists,
-            json_text(key),
-        ))
-    }
-
-    /// Add a JSON key does not exist condition.
-    #[must_use]
-    pub fn where_json_key_not_exists(self, column: impl IntoColumnName, key: &str) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::JsonKeyNotExists,
-            json_text(key),
-        ))
-    }
-
-    /// Add a JSON path exists condition.
-    ///
-    /// On MySQL, MariaDB and SQLite a path that cannot be expressed there
-    /// renders a condition that matches nothing.
-    #[must_use]
-    pub fn where_json_path_exists(self, column: impl IntoColumnName, path: &str) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::JsonPathExists,
-            json_text(path),
-        ))
-    }
-
-    /// Add an array contains condition (column @> value).
-    #[must_use]
-    pub fn where_array_contains<V: Into<serde_json::Value>>(
-        self,
-        column: impl IntoColumnName,
-        value: Vec<V>,
-    ) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::ArrayContains,
-            json_list(value),
-        ))
-    }
-
-    /// Add an array contained by condition (column <@ value).
-    #[must_use]
-    pub fn where_array_contained_by<V: Into<serde_json::Value>>(
-        self,
-        column: impl IntoColumnName,
-        value: Vec<V>,
-    ) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::ArrayContainedBy,
-            json_list(value),
-        ))
-    }
-
-    /// Add an array overlaps condition (column && value).
-    #[must_use]
-    pub fn where_array_overlaps<V: Into<serde_json::Value>>(
-        self,
-        column: impl IntoColumnName,
-        value: Vec<V>,
-    ) -> Self {
-        self.push_condition(WhereCondition::new(
-            column,
-            Operator::ArrayOverlaps,
-            json_list(value),
-        ))
-    }
-
     /// Add an array contains any element condition; the same test as
     /// [`where_array_overlaps`](Self::where_array_overlaps).
     #[must_use]
-    pub fn where_array_contains_any<V: Into<serde_json::Value>>(
+    pub fn where_array_contains_any<V: serde::Serialize>(
         self,
         column: impl IntoColumnName,
-        value: Vec<V>,
+        value: impl IntoIterator<Item = V>,
     ) -> Self {
         self.where_array_overlaps(column, value)
     }
@@ -466,21 +616,19 @@ impl<M: Model> QueryBuilder<M> {
     /// Add an array contains all elements condition; the same test as
     /// [`where_array_contains`](Self::where_array_contains).
     #[must_use]
-    pub fn where_array_contains_all<V: Into<serde_json::Value>>(
+    pub fn where_array_contains_all<V: serde::Serialize>(
         self,
         column: impl IntoColumnName,
-        value: Vec<V>,
+        value: impl IntoIterator<Item = V>,
     ) -> Self {
         self.where_array_contains(column, value)
     }
 }
 
-fn json_text(text: &str) -> ConditionValue {
-    ConditionValue::Single(serde_json::Value::String(text.to_string()))
-}
-
-fn json_list<V: Into<serde_json::Value>>(values: Vec<V>) -> ConditionValue {
-    ConditionValue::List(values.into_iter().map(Into::into).collect())
+impl<M: Model> crate::columns::ConditionOwner for QueryBuilder<M> {
+    fn own_table() -> Option<&'static str> {
+        Some(M::table_name())
+    }
 }
 
 crate::query::condition_methods! {

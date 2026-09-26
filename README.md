@@ -19,6 +19,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Auto Schema Sync** - Automatic table management during development
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
+- **Typed Results** - Aggregates read as the type you ask for (`sum::<Decimal>`, `min::<DateTime<Utc>>`), `pluck`/`value` read one column, `get_as::<T>()` reads rows into your own struct, and `paginate()` returns a page with its total
 - **Profiling & Logging** - Built-in query logging plus execution counters and slow-query stats
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles

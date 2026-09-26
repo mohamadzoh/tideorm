@@ -193,6 +193,60 @@ impl<M: Model> QueryBuilder<M> {
         self.join(JoinType::Left, table, None, left_column, right_column)
     }
 
+    /// Add a LEFT JOIN clause with an alias
+    ///
+    /// The alias is what lets a table join itself. The columns are
+    /// `alias.column` or `table.column`, as for [`inner_join`](Self::inner_join).
+    #[must_use]
+    pub fn left_join_as(
+        self,
+        table: &str,
+        alias: &str,
+        left_column: &str,
+        right_column: &str,
+    ) -> Self {
+        self.join(
+            JoinType::Left,
+            table,
+            Some(alias),
+            left_column,
+            right_column,
+        )
+    }
+
+    /// Add a RIGHT JOIN clause
+    ///
+    /// Returns all rows from the right table, and matched rows from the left.
+    /// A right-table row with no match has `NULL` in every model column, which
+    /// `get()` cannot turn into a model, so read the query with
+    /// [`get_json()`](Self::get_json) and `select()` the columns you need. The
+    /// columns are `table.column`, as for [`inner_join`](Self::inner_join).
+    #[must_use]
+    pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
+        self.join(JoinType::Right, table, None, left_column, right_column)
+    }
+
+    /// Add a RIGHT JOIN clause with an alias
+    ///
+    /// The columns are `alias.column` or `table.column`, as for
+    /// [`inner_join`](Self::inner_join).
+    #[must_use]
+    pub fn right_join_as(
+        self,
+        table: &str,
+        alias: &str,
+        left_column: &str,
+        right_column: &str,
+    ) -> Self {
+        self.join(
+            JoinType::Right,
+            table,
+            Some(alias),
+            left_column,
+            right_column,
+        )
+    }
+
     /// Register a join, invalidating the query instead when any part of it is
     /// not a plain identifier.
     fn join(

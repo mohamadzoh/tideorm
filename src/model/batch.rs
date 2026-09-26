@@ -34,10 +34,14 @@ pub struct BatchUpdateBuilder<M: Model> {
     conditions: Vec<WhereCondition>,
     /// The group every `or_where_*` call joins, ANDed with `conditions`.
     or_group: OrGroup,
-    returning: bool,
     limit_value: Option<u64>,
-    /// Whether soft-deleted rows are in scope. Defaults to `true`.
-    include_trashed: bool,
+    /// Whether soft-deleted rows are in scope, when the update chose: by
+    /// default they are, except for an update started from a query, which
+    /// keeps that query's scope.
+    include_trashed: Option<bool>,
+    /// The query an update started from, whose filters, scope and database
+    /// it keeps.
+    base: Option<crate::query::QueryBuilder<M>>,
 }
 
 /// What a batch update writes into one column.

@@ -191,3 +191,32 @@ fn to_json_keeps_a_hidden_translatable_field_hidden() {
     assert!(payload.get("translations").is_none(), "{payload}");
     assert_eq!(payload["id"], json!(1));
 }
+
+#[cfg(feature = "attachments")]
+#[tideorm::model(
+    table = "serialization_test_hidden_attachments",
+    has_one_files = "avatar,cover",
+    hidden = "avatar"
+)]
+struct HiddenAttachmentModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    files: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "attachments")]
+#[test]
+fn to_json_keeps_a_hidden_attachment_hidden() {
+    let attachment =
+        |key: &str| json!({"key": key, "filename": key, "created_at": "2026-01-01T00:00:00Z"});
+    let model = HiddenAttachmentModel {
+        id: 1,
+        files: Some(json!({"avatar": attachment("a.png"), "cover": attachment("c.png")})),
+    };
+
+    let payload = to_json(&model, None);
+
+    assert!(payload.get("avatar").is_none(), "{payload}");
+    assert!(payload.get("cover").is_some(), "{payload}");
+    assert!(payload.get("files").is_none(), "{payload}");
+}

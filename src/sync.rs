@@ -53,8 +53,9 @@ use crate::{tide_info, tide_warn};
 mod registry;
 mod schema;
 
+pub(crate) use registry::registered_column_type;
 #[doc(hidden)]
-pub use registry::CompiledModelRegistration;
+pub use registry::{ColumnTypeOf, CompiledModelRegistration};
 use registry::{MODEL_SCHEMAS, register_compiled_models_matching};
 pub use registry::{RegisterModels, SyncModel};
 use schema::sync_model_schemas;

@@ -1,10 +1,16 @@
-//! Cache invalidations an open transaction replays when it commits.
+//! Cache invalidations an open transaction replays when it commits, and the
+//! in-memory state it restores if it does not.
 //!
 //! A write invalidates the cached reads of its table at once, but until the
 //! transaction commits, every other connection still reads the rows it
 //! replaced. A cached read made meanwhile would serve them for its whole TTL,
 //! so each transaction records what its writes invalidated and invalidates it
 //! again once it has committed.
+//!
+//! State kept outside the database, such as an entity manager's ids and clean
+//! snapshots, is only true once the transaction that wrote it commits. Such
+//! state registers how to undo itself, which runs when the transaction rolls
+//! back, fails to commit, or is dropped unfinished.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -14,11 +20,23 @@ use parking_lot::Mutex;
 
 use super::QueryCache;
 
-/// What the writes inside one open transaction invalidated.
-#[derive(Debug, Default)]
+/// What the writes inside one open transaction invalidated, and what to undo
+/// if it never commits.
+#[derive(Default)]
 pub(crate) struct PendingInvalidations {
     tables: HashSet<String>,
     all: bool,
+    undo: Vec<Box<dyn FnOnce() + Send>>,
+}
+
+impl Drop for PendingInvalidations {
+    /// A record dropped before [`replay`](Self::replay) belongs to a
+    /// transaction that did not commit.
+    fn drop(&mut self) {
+        while let Some(undo) = self.undo.pop() {
+            undo();
+        }
+    }
 }
 
 thread_local! {
@@ -39,8 +57,14 @@ impl PendingInvalidations {
 
     /// Invalidate again what the transaction's writes invalidated, now that it
     /// has committed. Inside an enclosing transaction this records it there
-    /// as well, to be replayed when that one commits.
-    pub(crate) fn replay(self) {
+    /// as well, to be replayed when that one commits, and hands it the undo
+    /// steps, since rolling that one back still undoes this one.
+    pub(crate) fn replay(mut self) {
+        let undo = std::mem::take(&mut self.undo);
+        if !undo.is_empty() {
+            record(|enclosing| enclosing.undo.extend(undo));
+        }
+
         let cache = QueryCache::global();
         if self.all {
             cache.clear();
@@ -66,6 +90,13 @@ impl Drop for PendingGuard {
 /// Record the current poll's invalidations in `pending`.
 pub(crate) fn install(pending: &Arc<Mutex<PendingInvalidations>>) -> PendingGuard {
     PendingGuard(CURRENT.with(|slot| slot.replace(Some(pending.clone()))))
+}
+
+/// Run `undo` if the innermost open transaction does not commit. Outside a
+/// transaction nothing can roll back, and `undo` is dropped unrun.
+#[cfg(feature = "entity-manager")]
+pub(crate) fn undo_on_rollback(undo: impl FnOnce() + Send + 'static) {
+    record(|pending| pending.undo.push(Box::new(undo)));
 }
 
 /// Note an invalidation against the innermost open transaction, if any.

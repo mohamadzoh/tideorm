@@ -63,7 +63,9 @@ fn hash_condition_value<H: Hasher>(value: &ConditionValue, hasher: &mut H) {
         }
         ConditionValue::None => {}
         ConditionValue::RawExpr(expression) => expression.hash(hasher),
-        ConditionValue::RawExprWithValues { sql, values } => {
+        ConditionValue::Column(other) => other.hash(hasher),
+        ConditionValue::RawExprWithValues { sql, values }
+        | ConditionValue::RawTemplate { sql, values } => {
             sql.hash(hasher);
             hash_bound_values(values, hasher);
         }
@@ -86,13 +88,9 @@ pub(super) fn hash_bound_values<H: Hasher>(values: &[Value], hasher: &mut H) {
     }
 }
 
-pub(super) fn hash_having_clause<H: Hasher>(
-    sql: &str,
-    params: &[serde_json::Value],
-    hasher: &mut H,
-) {
+pub(super) fn hash_having_clause<H: Hasher>(sql: &str, params: &[Value], hasher: &mut H) {
     sql.hash(hasher);
-    hash_json_values(params, hasher);
+    hash_bound_values(params, hasher);
 }
 
 pub(super) fn hash_where_condition<H: Hasher>(condition: &WhereCondition, hasher: &mut H) {

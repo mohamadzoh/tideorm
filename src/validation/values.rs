@@ -26,6 +26,12 @@ pub trait ValidatableValue {
 
     /// Return a numeric representation for numeric rules.
     fn as_f64_value(&self) -> Option<f64>;
+
+    /// Return the value as an exact integer, for an integer value: numeric
+    /// rules compare it exactly, where an integer past 2^53 has no exact `f64`.
+    fn as_i128_value(&self) -> Option<i128> {
+        None
+    }
 }
 
 impl ValidatableValue for String {
@@ -40,6 +46,10 @@ impl ValidatableValue for String {
     fn as_f64_value(&self) -> Option<f64> {
         self.parse().ok()
     }
+
+    fn as_i128_value(&self) -> Option<i128> {
+        self.parse().ok()
+    }
 }
 
 impl ValidatableValue for &str {
@@ -52,6 +62,10 @@ impl ValidatableValue for &str {
     }
 
     fn as_f64_value(&self) -> Option<f64> {
+        self.parse().ok()
+    }
+
+    fn as_i128_value(&self) -> Option<i128> {
         self.parse().ok()
     }
 }
@@ -71,10 +85,14 @@ impl<T: ValidatableValue> ValidatableValue for Option<T> {
     fn as_f64_value(&self) -> Option<f64> {
         self.as_ref().and_then(|value| value.as_f64_value())
     }
+
+    fn as_i128_value(&self) -> Option<i128> {
+        self.as_ref().and_then(|value| value.as_i128_value())
+    }
 }
 
-macro_rules! impl_validatable_for_int {
-    ($($t:ty),*) => {
+macro_rules! impl_validatable_for_number {
+    ($($t:ty),* ; $($int:ty),*) => {
         $(
             impl ValidatableValue for $t {
                 fn is_empty_value(&self) -> bool {
@@ -90,9 +108,29 @@ macro_rules! impl_validatable_for_int {
                 }
             }
         )*
+        $(
+            impl ValidatableValue for $int {
+                fn is_empty_value(&self) -> bool {
+                    false
+                }
+
+                fn as_str_value(&self) -> Option<&str> {
+                    None
+                }
+
+                fn as_f64_value(&self) -> Option<f64> {
+                    Some(*self as f64)
+                }
+
+                fn as_i128_value(&self) -> Option<i128> {
+                    i128::try_from(*self).ok()
+                }
+            }
+        )*
     };
 }
 
-impl_validatable_for_int!(
-    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64
+impl_validatable_for_number!(
+    f32, f64;
+    i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize
 );

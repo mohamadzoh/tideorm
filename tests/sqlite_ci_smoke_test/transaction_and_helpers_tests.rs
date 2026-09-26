@@ -86,7 +86,9 @@ async fn sqlite_paginate_rejects_zero_page_number() {
         .get()
         .await
         .expect_err("query builder should reject page 0");
-    assert!(matches!(query_err, Error::Query { .. }));
+    // Both refuse the same numbers with the same error.
+    assert!(matches!(query_err, Error::Validation { .. }));
+    assert_eq!(query_err.to_string(), paginate_err.to_string());
     assert!(query_err.to_string().contains("page"));
     assert!(query_err.to_string().contains("at least 1"));
 }

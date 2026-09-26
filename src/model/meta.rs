@@ -135,6 +135,15 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         field
     }
 
+    /// Whether serializing this model and reading the JSON back reproduces
+    /// every stored field. A model whose own serde derive skips or converts a
+    /// stored field reports `false`, and its query results are not cached,
+    /// since a cached copy would come back without those values.
+    #[doc(hidden)]
+    fn __serde_round_trips() -> bool {
+        true
+    }
+
     /// Strip this model's hidden attributes out of one already-serialized
     /// payload of it, in place.
     ///

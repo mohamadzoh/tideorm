@@ -56,7 +56,33 @@ fn test_where_sql_includes_typed_columns_in_or_groups() {
 
     let sql = query.where_preview();
 
-    assert_eq!(sql, "\"name\" = 'alice' OR \"id\" = 7");
+    // An OR group belongs to no model, so a typed column keeps its table.
+    assert_eq!(
+        sql,
+        "\"query_test_users\".\"name\" = 'alice' OR \"query_test_users\".\"id\" = 7"
+    );
+}
+
+#[tideorm::model(table = "profiles")]
+struct QueryProfile {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    user_id: i64,
+}
+
+#[test]
+fn test_a_typed_column_of_another_model_keeps_its_table() {
+    let sql = QueryBuilder::<QueryTestUser>::new()
+        .inner_join("profiles", "query_test_users.id", "profiles.user_id")
+        .where_eq(QueryProfile::columns.user_id, 7)
+        .where_eq(QueryTestUser::columns.id, 7)
+        .order_by(QueryProfile::columns.user_id, Order::Desc)
+        .where_preview();
+
+    assert_eq!(
+        sql,
+        "\"profiles\".\"user_id\" = 7 AND \"query_test_users\".\"id\" = 7"
+    );
 }
 
 #[test]
@@ -103,6 +129,35 @@ fn test_has_no_related_at_all_renders_not_exists() {
         sql,
         "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\")"
     );
+}
+
+#[test]
+fn test_has_no_related_renders_not_exists_with_its_condition() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .has_no_related("posts", "user_id", "id", "status", "draft");
+
+    assert_eq!(
+        query.where_preview(),
+        "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" = 'draft')"
+    );
+
+    let (where_sql, params) =
+        query.build_where_clause_with_condition_for_db(DatabaseType::Postgres);
+    assert!(
+        where_sql.contains("\"posts\".\"status\" = $1)"),
+        "{where_sql}"
+    );
+    assert!(matches!(params.as_slice(), [Value::String(Some(value))] if value == "draft"));
+}
+
+#[test]
+fn test_has_no_related_rejects_unsafe_identifiers() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .has_no_related("posts", "user_id", "id", "status\" = 1 OR \"1", "draft")
+        .ensure_query_is_valid()
+        .expect_err("an unsafe condition column should invalidate the query");
+
+    assert!(err.to_string().contains("has_no_related()"), "{err}");
 }
 
 #[test]
@@ -545,7 +600,9 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_json_predicates() {
     // A top-level scalar is compared as the whole document and as an array
     // element, so the value is bound once for each.
     assert!(sql.contains("json_extract(\"data\", '$') = ?"));
-    assert!(sql.contains("json_extract(\"data\", ?) IS NOT NULL"));
+    assert!(
+        sql.contains("CASE WHEN \"data\" IS NOT NULL THEN json_type(\"data\", ?) IS NOT NULL END")
+    );
     assert!(!sql.contains("admin'"));
     assert_eq!(params.len(), 3);
     assert!(matches!(params.first(), Some(Value::String(Some(value))) if value == "admin'"));
@@ -578,9 +635,10 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_array_predicates() {
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
 
-    assert!(
-        sql.contains("NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN (?, ?))")
-    );
+    // Like PostgreSQL's `<@`: a NULL array and a null element are not contained.
+    assert!(sql.contains(
+        "(\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value IS NULL OR value NOT IN (?, ?)))"
+    ));
     assert!(sql.contains("(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?) OR EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?))"));
     assert!(!sql.contains("ops'"));
     assert_eq!(params.len(), 4);
@@ -842,7 +900,7 @@ fn test_fulltext_build_sqlite_sql_binds_escaped_fts_query() {
     assert!(sql.contains("WHERE \"query_test_users_fts\" MATCH ?"));
     assert!(sql.contains("LIMIT 5 OFFSET ?"), "{sql}");
     assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "\"say\" \"hello\" \"to\" \"it's\"")
+        matches!(params.first(), Some(Value::String(Some(query))) if query == "{\"name\" \"bio\"} : (\"say\" \"hello\" \"to\" \"it's\")")
     );
     assert!(matches!(params.get(1), Some(Value::BigInt(Some(offset))) if *offset == 2));
     assert_eq!(params.len(), 2);
@@ -856,7 +914,7 @@ fn test_fulltext_build_sqlite_sql_neutralizes_fts_operators() {
     let (_, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
 
     assert!(
-        matches!(params.first(), Some(Value::String(Some(query))) if query == "\"test*\" \"OR\" \"1\"")
+        matches!(params.first(), Some(Value::String(Some(query))) if query == "{\"name\"} : (\"test*\" \"OR\" \"1\")")
     );
 }
 
@@ -1055,5 +1113,80 @@ fn test_fragment_or_where_conditions_join_the_builders_or_group() {
     assert_eq!(
         rebuilt.where_preview(),
         "(\"name\" = 'carol' OR \"name\" = 'erin') AND (\"id\" = 1 OR \"id\" = 2)"
+    );
+}
+
+#[test]
+fn test_a_grouped_count_counts_the_groups() {
+    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
+        .group_by("name")
+        .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+    assert_eq!(
+        sql,
+        "SELECT COUNT(*) AS count FROM (SELECT \"query_test_users\".\"name\" FROM \"query_test_users\" GROUP BY \"name\") AS \"tideorm_count_subquery\""
+    );
+}
+
+#[test]
+fn test_exists_keeps_the_aliases_having_refers_to() {
+    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
+        .select_raw("name")
+        .select_raw("COUNT(*) AS n")
+        .group_by("name")
+        .having("n > 1")
+        .build_exists_sql_with_params_for_db(DatabaseType::SQLite);
+    assert!(sql.contains("COUNT(*) AS n"), "{sql}");
+
+    let (sql, _) = QueryBuilder::<QueryTestUser>::new()
+        .group_by("name")
+        .having("COUNT(*) > 1")
+        .build_exists_sql_with_params_for_db(DatabaseType::SQLite);
+    assert!(sql.starts_with("SELECT EXISTS(SELECT 1 FROM"), "{sql}");
+}
+
+#[test]
+fn test_count_and_exists_ignore_an_ordering_they_do_not_render() {
+    let query = QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["name"])
+        .distinct()
+        .order_desc("id");
+    assert!(query.clone().ensure_query_is_valid().is_err());
+    assert!(query.discarding_order().ensure_query_is_valid().is_ok());
+}
+
+#[tideorm::model(table = "hashed_rows")]
+struct HashedRow {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    sha256: String,
+}
+
+#[test]
+fn test_window_columns_take_rust_field_names() {
+    let sql = QueryBuilder::<HashedRow>::new()
+        .row_number("rn", Some("sha256"), "sha256", Order::Asc)
+        .build_select_sql_for_db(DatabaseType::Postgres);
+    assert!(sql.contains("PARTITION BY \"sha_256\""), "{sql}");
+    assert!(sql.contains("ORDER BY \"sha_256\" ASC"), "{sql}");
+    assert!(!sql.contains("\"sha256\""), "{sql}");
+}
+
+#[test]
+fn test_where_not_none_is_no_filter_for_a_mutation() {
+    let err = QueryBuilder::<QueryTestUser>::new()
+        .where_not("name", None::<String>)
+        .ensure_mutation_has_explicit_filters("delete")
+        .expect_err("`name IS NOT NULL` keeps every row of a NOT NULL column");
+    assert!(err.to_string().contains("explicit filter"), "{err}");
+}
+
+#[test]
+fn test_a_null_related_condition_tests_for_null() {
+    let sql = QueryBuilder::<QueryTestUser>::new()
+        .has_no_related("posts", "user_id", "id", "status", None::<String>)
+        .where_preview();
+    assert_eq!(
+        sql,
+        "NOT EXISTS (SELECT 1 FROM \"posts\" WHERE \"posts\".\"user_id\" = \"query_test_users\".\"id\" AND \"posts\".\"status\" IS NULL)"
     );
 }

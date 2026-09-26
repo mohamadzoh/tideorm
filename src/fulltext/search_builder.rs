@@ -18,7 +18,16 @@ pub struct FullTextSearchBuilder<T: Model> {
     offset: Option<u64>,
     min_rank: Option<f64>,
     highlight: Option<HighlightConfig>,
+    trashed: TrashedRows,
     _marker: PhantomData<T>,
+}
+
+/// Which soft-deleted rows a search reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrashedRows {
+    Excluded,
+    Included,
+    Only,
 }
 
 /// How [`FullTextSearchBuilder::highlight`] marks the matches in each result.
@@ -91,8 +100,23 @@ impl<T: Model> FullTextSearchBuilder<T> {
             offset: None,
             min_rank: None,
             highlight: None,
+            trashed: TrashedRows::Excluded,
             _marker: PhantomData,
         }
+    }
+
+    /// Search soft-deleted rows too. A search on a soft-delete model leaves
+    /// them out by default, as [`Model::query`](crate::model::Model::query)
+    /// does.
+    pub fn with_trashed(mut self) -> Self {
+        self.trashed = TrashedRows::Included;
+        self
+    }
+
+    /// Search only soft-deleted rows.
+    pub fn only_trashed(mut self) -> Self {
+        self.trashed = TrashedRows::Only;
+        self
     }
 
     /// Set the search configuration
@@ -144,14 +168,14 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// Execute the search and return results
     pub async fn get(self) -> Result<Vec<T>> {
         let db = crate::database::__current_db()?;
-        let (sql, params) = self.build_sql(db.backend())?;
+        let (sql, params) = self.build_sql(db.execution_backend())?;
         db.__raw_with_params::<T>(&sql, params).await
     }
 
     /// Execute the search and return ranked results
     pub async fn get_ranked(self) -> Result<Vec<SearchResult<T>>> {
         let db = crate::database::__current_db()?;
-        let (sql, params) = self.build_ranked_sql(db.backend())?;
+        let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
 
         let pattern = term_pattern(&self.highlight_terms());
         query_rows(&db, &sql, params)
@@ -181,7 +205,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// Count matching results
     pub async fn count(self) -> Result<u64> {
         let db = crate::database::__current_db()?;
-        let (sql, params) = self.build_count_sql(db.backend())?;
+        let (sql, params) = self.build_count_sql(db.execution_backend())?;
 
         let rows = query_rows(&db, &sql, params).await?;
         let row = rows
@@ -282,6 +306,37 @@ impl<T: Model> FullTextSearchBuilder<T> {
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_count_sql(),
             DatabaseType::SQLite => self.build_sqlite_count_sql(),
         }
+    }
+
+    /// `predicate` restricted to the rows the soft-delete scope keeps, with
+    /// the deleted-at column qualified by `table` when one is given.
+    fn scoped(&self, db_type: DatabaseType, predicate: String, table: Option<&str>) -> String {
+        if !T::soft_delete_enabled() || self.trashed == TrashedRows::Included {
+            return predicate;
+        }
+        let column = quote_ident(db_type, T::deleted_at_column());
+        let column = match table {
+            Some(table) => format!("{table}.{column}"),
+            None => column,
+        };
+        let test = match self.trashed {
+            TrashedRows::Only => "IS NOT NULL",
+            TrashedRows::Excluded | TrashedRows::Included => "IS NULL",
+        };
+        format!("{predicate} AND {column} {test}")
+    }
+
+    /// The searched columns as the database names them, so a Rust field name
+    /// searches its column.
+    fn column_names(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .map(|column| {
+                T::canonical_column_name(column)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| column.clone())
+            })
+            .collect()
     }
 
     fn append_limit_offset(

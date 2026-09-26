@@ -220,6 +220,581 @@ pub async fn seed_users(count: i32) {
     }
 }
 
+/// `pluck`, `value`, `get_as` and `paginate` read one column, one value, a
+/// caller's own row type, and a page with its total.
+#[tokio::test]
+async fn rows_read_as_columns_values_structs_and_pages() {
+    if !setup().await {
+        return;
+    }
+    seed_users(5).await;
+
+    let emails: Vec<String> = TestUser::query()
+        .where_eq("active", true)
+        .order_asc("id")
+        .pluck("email")
+        .await
+        .expect("pluck failed");
+    assert_eq!(emails, ["user2@example.com", "user4@example.com"]);
+    let flags: Vec<bool> = TestUser::query()
+        .distinct()
+        .order_asc("active")
+        .pluck(TestUser::columns.active)
+        .await
+        .expect("distinct pluck failed");
+    assert_eq!(flags, [false, true]);
+
+    let oldest: Option<i32> = TestUser::query()
+        .order_desc("age")
+        .value("age")
+        .await
+        .expect("value failed");
+    assert_eq!(oldest, Some(25));
+    let nobody: Option<String> = TestUser::query()
+        .where_eq("age", 99)
+        .value("name")
+        .await
+        .expect("value of nothing failed");
+    assert_eq!(nobody, None);
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct ActiveCount {
+        active: bool,
+        users: i64,
+    }
+    let counts: Vec<ActiveCount> = TestUser::query()
+        .select_raw("active, COUNT(*) AS users")
+        .group_by("active")
+        .order_asc("active")
+        .get_as()
+        .await
+        .expect("get_as failed");
+    assert_eq!(
+        counts,
+        [
+            ActiveCount {
+                active: false,
+                users: 3
+            },
+            ActiveCount {
+                active: true,
+                users: 2
+            },
+        ]
+    );
+
+    let page = TestUser::query()
+        .order_asc("id")
+        .paginate(2, 2)
+        .await
+        .expect("paginate failed");
+    assert_eq!(page.total, 5);
+    assert_eq!(page.last_page(), 3);
+    assert!(page.has_next_page());
+    let names: Vec<&str> = page.items.iter().map(|user| user.name.as_str()).collect();
+    assert_eq!(names, ["User 03", "User 04"]);
+    let json = serde_json::to_value(&page).expect("a page serializes");
+    assert_eq!(json["last_page"], 3);
+    assert_eq!(json["items"].as_array().map(Vec::len), Some(2));
+    assert!(TestUser::query().paginate(0, 2).await.is_err());
+}
+
+/// Lists from any iterable, raw SQL with bound values, typed `having` and
+/// `reorder` run the same on every backend.
+#[tokio::test]
+async fn builders_take_iterables_bound_raw_sql_typed_having_and_reorder() {
+    if !setup().await {
+        return;
+    }
+    seed_users(6).await;
+
+    let ids: Vec<i64> = TestUser::query()
+        .order_asc("id")
+        .pluck("id")
+        .await
+        .expect("pluck ids failed");
+    let first_two = [ids[0], ids[1]];
+    assert_eq!(
+        TestUser::query()
+            .where_in("id", first_two)
+            .count()
+            .await
+            .expect("array where_in failed"),
+        2
+    );
+    assert_eq!(
+        TestUser::query()
+            .where_not_in("id", &ids[..3])
+            .count()
+            .await
+            .expect("slice where_not_in failed"),
+        3
+    );
+    assert_eq!(
+        TestUser::query()
+            .where_col(TestUser::columns.age.is_in([21, 22, 99]))
+            .count()
+            .await
+            .expect("typed is_in failed"),
+        2
+    );
+
+    let named = TestUser::query()
+        .where_raw_with(
+            "LOWER(name) = LOWER(?) OR (age > ? AND name <> '?')",
+            vec!["user 01".into(), 25.into()],
+        )
+        .order_asc("id")
+        .pluck::<String>("name")
+        .await
+        .expect("where_raw_with failed");
+    assert_eq!(named, ["User 01", "User 06"]);
+    assert!(
+        TestUser::query()
+            .where_raw_with("age > ?", vec![])
+            .get()
+            .await
+            .is_err(),
+        "a placeholder without a value fails"
+    );
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Group {
+        active: bool,
+        users: i64,
+    }
+    let groups: Vec<Group> = TestUser::query()
+        .select_raw("active, COUNT(*) AS users")
+        .group_by("active")
+        .having(Aggregate::count().gte(3))
+        .having(Aggregate::max("age").gt(25))
+        .order_asc("active")
+        .get_as()
+        .await
+        .expect("typed having failed");
+    assert_eq!(
+        groups,
+        [Group {
+            active: true,
+            users: 3
+        }]
+    );
+
+    let names: Vec<String> = TestUser::query()
+        .order_asc("age")
+        .reorder("age", Order::Desc)
+        .limit(2)
+        .pluck("name")
+        .await
+        .expect("reorder failed");
+    assert_eq!(names, ["User 06", "User 05"]);
+
+    // Ages run 21..=26.
+    assert_eq!(
+        TestUser::query()
+            .where_not_between("age", 22, 25)
+            .count()
+            .await
+            .expect("where_not_between failed"),
+        2
+    );
+    assert!(
+        TestUser::query()
+            .where_not_between("age", 22, None::<i32>)
+            .count()
+            .await
+            .is_err(),
+        "a NULL bound is refused"
+    );
+}
+
+#[tideorm::model(table = "joined_owners")]
+pub struct JoinedOwner {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub token: uuid::Uuid,
+    pub joined_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[tideorm::model(table = "joined_pets")]
+pub struct JoinedPet {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub owner_id: i64,
+    pub name: String,
+}
+
+/// A filter on a joined table's UUID or timestamp column binds the value as
+/// that column's type: bound as text, PostgreSQL refused `uuid = text` and
+/// MySQL and SQLite, which store a UUID as bytes, matched nothing.
+#[tokio::test]
+async fn filters_on_a_joined_table_bind_its_column_types() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("joined_owners", |t| {
+        t.id();
+        t.uuid("token").not_null();
+        t.timestamptz("joined_at").not_null();
+    })
+    .await;
+    fresh_table("joined_pets", |t| {
+        t.id();
+        t.big_integer("owner_id").not_null();
+        t.string("name").not_null();
+    })
+    .await;
+
+    let joined_at = chrono::Utc::now() - chrono::Duration::days(1);
+    let mut tokens = Vec::new();
+    for name in ["Rex", "Tom"] {
+        let owner = JoinedOwner {
+            id: 0,
+            token: uuid::Uuid::new_v4(),
+            joined_at,
+        }
+        .save()
+        .await
+        .expect("save owner failed");
+        JoinedPet {
+            id: 0,
+            owner_id: owner.id,
+            name: name.into(),
+        }
+        .save()
+        .await
+        .expect("save pet failed");
+        tokens.push(owner.token);
+    }
+
+    let by_token = JoinedPet::query()
+        .inner_join("joined_owners", "joined_pets.owner_id", "joined_owners.id")
+        .where_eq("joined_owners.token", tokens[1])
+        .where_gt(
+            "joined_owners.joined_at",
+            joined_at - chrono::Duration::hours(1),
+        )
+        .pluck::<String>("joined_pets.name")
+        .await
+        .expect("filtering on the joined table failed");
+    assert_eq!(by_token, ["Tom"]);
+
+    let by_alias = JoinedPet::query()
+        .inner_join_as("joined_owners", "o", "joined_pets.owner_id", "o.id")
+        .where_in("o.token", [tokens[0]])
+        .pluck::<String>("joined_pets.name")
+        .await
+        .expect("filtering on an aliased join failed");
+    assert_eq!(by_alias, ["Rex"]);
+
+    // Another model's typed column reads that model's column in an aggregate.
+    let latest: Option<chrono::DateTime<chrono::Utc>> = JoinedPet::query()
+        .inner_join("joined_owners", "joined_pets.owner_id", "joined_owners.id")
+        .max(JoinedOwner::columns.joined_at)
+        .await
+        .expect("max over a joined model's column failed");
+    assert_eq!(
+        latest.map(|at| at.timestamp_micros()),
+        Some(joined_at.timestamp_micros())
+    );
+
+    // A typed HAVING compares as the column: a timestamp is not text.
+    let recent = JoinedOwner::query()
+        .select_raw("token")
+        .group_by("token")
+        .having(Aggregate::max("joined_at").gt(joined_at - chrono::Duration::hours(1)))
+        .get_json()
+        .await
+        .expect("a typed having on a timestamp failed");
+    assert_eq!(recent.len(), 2);
+
+    // A typed HAVING written before the join names its own table.
+    let grouped = JoinedPet::query()
+        .select_raw("joined_pets.owner_id")
+        .group_by("joined_pets.owner_id")
+        .having(Aggregate::count_distinct("id").gte(1))
+        .inner_join("joined_owners", "joined_pets.owner_id", "joined_owners.id")
+        .get_json()
+        .await
+        .expect("a having before the join was ambiguous");
+    assert_eq!(grouped.len(), 2);
+
+    // `pluck` finds its column beside other projections.
+    let names: Vec<String> = JoinedPet::query()
+        .select_raw("1 AS a")
+        .order_asc("joined_pets.id")
+        .pluck("name")
+        .await
+        .expect("pluck beside select_raw failed");
+    assert_eq!(names, ["Rex", "Tom"]);
+
+    // `has_related` binds its value as the related column's type too.
+    let by_related: Vec<String> = JoinedPet::query()
+        .has_related("joined_owners", "id", "owner_id", "token", tokens[0])
+        .pluck("name")
+        .await
+        .expect("has_related on a UUID column failed");
+    assert_eq!(by_related, ["Rex"]);
+
+    // A linked partial select reads into a struct of the caller's.
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct PetToken {
+        name: String,
+        token: uuid::Uuid,
+    }
+    let linked: Vec<PetToken> = JoinedPet::query()
+        .select_with_linked(
+            vec!["name"],
+            "joined_owners",
+            "owner_id",
+            "id",
+            vec!["token"],
+        )
+        .order_asc("joined_pets.id")
+        .get_as()
+        .await
+        .expect("linked select failed");
+    assert_eq!(
+        linked,
+        [
+            PetToken {
+                name: "Rex".into(),
+                token: tokens[0],
+            },
+            PetToken {
+                name: "Tom".into(),
+                token: tokens[1],
+            },
+        ]
+    );
+}
+
+/// An update started from a query keeps its filters and its soft-delete
+/// scope, where `Model::update_all()` reaches trashed rows too.
+#[tokio::test]
+async fn updating_from_a_query_keeps_its_filters_and_scope() {
+    if !setup().await {
+        return;
+    }
+    for name in ["a", "b", "c"] {
+        TestSoftDelete {
+            id: 0,
+            name: name.into(),
+            deleted_at: None,
+        }
+        .save()
+        .await
+        .expect("save failed");
+    }
+    TestSoftDelete::query()
+        .where_eq("name", "c")
+        .soft_delete()
+        .await
+        .expect("soft delete failed");
+
+    let live = TestSoftDelete::query()
+        .where_in("name", ["a", "c"])
+        .update_all()
+        .set("name", "z")
+        .execute()
+        .await
+        .expect("update from a query failed");
+    assert_eq!(
+        live, 1,
+        "the trashed row stays out, as the query leaves it out"
+    );
+    let trashed = TestSoftDelete::query()
+        .only_trashed()
+        .where_eq("name", "c")
+        .update_all()
+        .set("name", "y")
+        .execute()
+        .await
+        .expect("update of the trash failed");
+    assert_eq!(trashed, 1);
+    let live = TestSoftDelete::update_all()
+        .where_in("name", ["z", "y"])
+        .set("name", "x")
+        .execute()
+        .await
+        .expect("Model::update_all failed");
+    assert_eq!(live, 1, "Model::update_all() leaves trashed rows out");
+    let everything = TestSoftDelete::update_all()
+        .with_trashed()
+        .where_in("name", ["x", "y"])
+        .set("name", "w")
+        .execute()
+        .await
+        .expect("Model::update_all().with_trashed() failed");
+    assert_eq!(everything, 2, "with_trashed() reaches them");
+
+    assert!(
+        TestSoftDelete::query()
+            .update_all()
+            .set("name", "w")
+            .execute()
+            .await
+            .is_err(),
+        "an unfiltered update is still refused"
+    );
+    assert!(
+        TestSoftDelete::query()
+            .where_eq("name", "b")
+            .limit(1)
+            .update_all()
+            .set("name", "w")
+            .execute()
+            .await
+            .is_err(),
+        "a paged query is not an UPDATE"
+    );
+}
+
+#[tideorm::model(table = "has_posts", soft_delete)]
+pub struct HasPost {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub user_id: i64,
+    pub published: bool,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `where_has` and `where_doesnt_have` read the related model's own query, so
+/// its soft-delete scope applies, where the table-level `has_related` counts
+/// trashed rows too.
+#[tokio::test]
+async fn where_has_filters_by_the_related_models_own_query() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("has_posts", |t| {
+        t.id();
+        t.big_integer("user_id").not_null();
+        t.boolean("published").not_null();
+        t.soft_deletes();
+    })
+    .await;
+    seed_users(3).await;
+    let ids: Vec<i64> = TestUser::query()
+        .order_asc("id")
+        .pluck("id")
+        .await
+        .expect("pluck ids failed");
+    for (user_id, published) in [(ids[0], true), (ids[1], false), (ids[2], true)] {
+        HasPost {
+            id: 0,
+            user_id,
+            published,
+            deleted_at: None,
+        }
+        .save()
+        .await
+        .expect("save post failed");
+    }
+    HasPost::query()
+        .where_eq("user_id", ids[2])
+        .soft_delete()
+        .await
+        .expect("soft delete failed");
+
+    let names = |query: QueryBuilder<TestUser>| async move {
+        query
+            .order_asc("id")
+            .pluck::<String>("name")
+            .await
+            .expect("where_has failed")
+    };
+    let published = |posts: QueryBuilder<HasPost>| posts.where_eq(HasPost::columns.published, true);
+    assert_eq!(
+        names(TestUser::query().where_has::<HasPost>(
+            HasPost::columns.user_id,
+            TestUser::columns.id,
+            published
+        ))
+        .await,
+        ["User 01"]
+    );
+    assert_eq!(
+        names(TestUser::query().where_doesnt_have::<HasPost>(
+            HasPost::columns.user_id,
+            TestUser::columns.id,
+            published
+        ))
+        .await,
+        ["User 02", "User 03"]
+    );
+    assert_eq!(
+        names(TestUser::query().where_has::<HasPost>("user_id", "id", |posts| posts)).await,
+        ["User 01", "User 02"]
+    );
+    // The table-level form counts the trashed post.
+    assert_eq!(
+        names(TestUser::query().has_related("has_posts", "user_id", "id", "published", true)).await,
+        ["User 01", "User 03"]
+    );
+
+    // With the key on this side: posts of active users (User 02).
+    let posts: Vec<i64> = HasPost::query()
+        .where_has::<TestUser>(TestUser::columns.id, HasPost::columns.user_id, |users| {
+            users.where_eq(TestUser::columns.active, true)
+        })
+        .pluck("user_id")
+        .await
+        .expect("inverse where_has failed");
+    assert_eq!(posts, [ids[1]]);
+
+    assert!(
+        TestUser::query()
+            .where_has::<HasPost>("nope", "id", |posts| posts)
+            .get()
+            .await
+            .is_err(),
+        "an unknown key column is refused"
+    );
+
+    // Two columns of the same row, alone and across a join.
+    let count = |query: QueryBuilder<HasPost>| async move {
+        query.count().await.expect("column comparison failed")
+    };
+    assert_eq!(
+        count(HasPost::query().where_column_eq("user_id", "user_id")).await,
+        2
+    );
+    assert_eq!(
+        count(HasPost::query().where_column_ne("user_id", "user_id")).await,
+        0
+    );
+    let joined = || HasPost::query().inner_join("test_users", "has_posts.user_id", "test_users.id");
+    assert_eq!(
+        count(joined().where_column_eq(HasPost::columns.user_id, TestUser::columns.id)).await,
+        2
+    );
+    assert_eq!(
+        count(joined().where_column_lt("test_users.age", "has_posts.user_id")).await,
+        0
+    );
+    assert_eq!(
+        count(joined().or_where_column_gt("test_users.age", "has_posts.user_id")).await,
+        2
+    );
+
+    // `when` works on a batch update as it does on a query.
+    let changed = TestUser::update_all()
+        .where_eq("name", "User 01")
+        .when(false, |update| update.set("age", 99))
+        .when_some(Some(50), |update, age| update.set("age", age))
+        .execute()
+        .await
+        .expect("conditional update failed");
+    assert_eq!(changed, 1);
+    let age: Option<i32> = TestUser::query()
+        .where_eq("name", "User 01")
+        .value("age")
+        .await
+        .expect("value failed");
+    assert_eq!(age, Some(50));
+}
+
 fn user(email: &str, name: &str, age: i32, active: bool) -> TestUser {
     TestUser {
         id: 0,
@@ -471,14 +1046,49 @@ async fn aggregations() {
 
     seed_users(10).await;
 
-    let sum = TestUser::query().sum("age").await.expect("Sum failed");
-    assert_eq!(sum as i64, 255, "21 + 22 + ... + 30");
-    let avg = TestUser::query().avg("age").await.expect("Avg failed");
-    assert!((avg - 25.5).abs() < 0.01, "avg was {avg}");
-    let min = TestUser::query().min("age").await.expect("Min failed");
-    assert_eq!(min as i64, 21);
-    let max = TestUser::query().max("age").await.expect("Max failed");
-    assert_eq!(max as i64, 30);
+    let sum: i64 = TestUser::query().sum("age").await.expect("Sum failed");
+    assert_eq!(sum, 255, "21 + 22 + ... + 30");
+    let avg: Option<f64> = TestUser::query().avg("age").await.expect("Avg failed");
+    assert!(
+        avg.is_some_and(|avg| (avg - 25.5).abs() < 0.01),
+        "avg was {avg:?}"
+    );
+    let min: Option<i32> = TestUser::query().min("age").await.expect("Min failed");
+    assert_eq!(min, Some(21));
+    let max: Option<i32> = TestUser::query()
+        .max(TestUser::columns.age)
+        .await
+        .expect("Max failed");
+    assert_eq!(max, Some(30));
+
+    // Any column type, read as the model reads it.
+    let first: Option<String> = TestUser::query()
+        .min("name")
+        .await
+        .expect("min(name) failed");
+    let last: Option<String> = TestUser::query()
+        .max("name")
+        .await
+        .expect("max(name) failed");
+    assert_eq!(
+        (first.as_deref(), last.as_deref()),
+        (Some("User 01"), Some("User 10"))
+    );
+
+    // Over no rows a sum is zero and the others are None.
+    let nobody = || TestUser::query().where_gt("age", 1000);
+    assert_eq!(
+        nobody().sum::<i64>("age").await.expect("empty sum failed"),
+        0
+    );
+    assert_eq!(
+        nobody().avg::<f64>("age").await.expect("empty avg failed"),
+        None
+    );
+    assert_eq!(
+        nobody().max::<i32>("age").await.expect("empty max failed"),
+        None
+    );
     let distinct = TestUser::query()
         .count_distinct("active")
         .await
@@ -1887,6 +2497,65 @@ pub struct PlainJsonDoc {
     pub body: serde_json::Value,
 }
 
+/// `where_eq`, `where_not`, `where_in` and `where_not_in` on a JSON column
+/// compare documents: PostgreSQL has no `=` for `json` and failed, and MySQL
+/// compared the document with a string and matched nothing.
+#[tokio::test]
+async fn equality_filters_compare_json_documents() {
+    use serde_json::json;
+
+    if !setup().await {
+        return;
+    }
+    fresh_table("plain_json_docs", |t| {
+        t.id();
+        t.json("body").not_null();
+    })
+    .await;
+    for body in [json!({"a": 1, "b": [1, 2]}), json!({"a": 2}), json!([1, 2])] {
+        PlainJsonDoc { id: 0, body }
+            .save()
+            .await
+            .expect("save failed");
+    }
+    let count = |query: QueryBuilder<PlainJsonDoc>| async move {
+        query.count().await.expect("json equality filter failed")
+    };
+
+    assert_eq!(
+        count(PlainJsonDoc::query().where_eq("body", json!({"a": 1, "b": [1, 2]}))).await,
+        1
+    );
+    assert_eq!(
+        count(PlainJsonDoc::query().where_not("body", json!({"a": 2}))).await,
+        2
+    );
+    assert_eq!(
+        count(PlainJsonDoc::query().where_in("body", [json!({"a": 2}), json!([1, 2])])).await,
+        2
+    );
+    assert_eq!(
+        count(PlainJsonDoc::query().where_not_in("body", [json!({"a": 2}), json!([1, 2])])).await,
+        1
+    );
+    // An array's order is part of the document.
+    assert_eq!(
+        count(PlainJsonDoc::query().where_eq("body", json!([2, 1]))).await,
+        0
+    );
+
+    // The JSON filters join an OR group like any other.
+    assert_eq!(
+        count(
+            PlainJsonDoc::query()
+                .or_where_json_contains("body", json!({"a": 2}))
+                .or_where_json_key_exists("body", "b")
+        )
+        .await,
+        2
+    );
+}
+
 /// A `json` column (`t.json(..)`), which PostgreSQL gives none of the `jsonb`
 /// operators, in both directions of containment.
 #[tokio::test]
@@ -2104,6 +2773,20 @@ async fn renamed_serde_keys_keep_hidden_fields_hidden_and_children_attached() {
         .expect("eager load failed")
         .expect("row should exist");
     assert_eq!(loaded.pets.get_cached().map(|pets| pets.len()), Some(2));
+
+    // Any query method shapes the root query of an eager load.
+    let shaped = CamelOwner::query()
+        .with("pets")
+        .query(|query| {
+            query
+                .where_starts_with("display_name", "Ad")
+                .order_desc("id")
+        })
+        .get()
+        .await
+        .expect("shaped eager load failed");
+    assert_eq!(shaped.len(), 1);
+    assert_eq!(shaped[0].pets.get_cached().map(|pets| pets.len()), Some(2));
 }
 
 #[tideorm::model(table = "unsigned_keyed_rows")]
@@ -2321,6 +3004,235 @@ async fn attach_stores_one_pivot_row_even_when_calls_race() {
     assert_eq!(labels.len(), 5);
 }
 
+#[tideorm::model(table = "binned_articles")]
+pub struct BinnedArticle {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub title: String,
+    #[tideorm(
+        has_many_through = "LinkedLabel",
+        pivot = "binned_article_labels",
+        foreign_key = "article_id",
+        related_key = "label_id"
+    )]
+    pub labels: HasManyThrough<LinkedLabel, BinnedArticleLabel>,
+}
+
+#[tideorm::model(table = "binned_article_labels", soft_delete)]
+pub struct BinnedArticleLabel {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub article_id: i64,
+    pub label_id: i64,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A soft-deleted pivot row unlinks its pair for every read, `attach()`
+/// brings it back, and `sync()` clears it with the live rows.
+#[tokio::test]
+async fn a_soft_deleted_pivot_row_unlinks_its_pair() {
+    if !setup().await {
+        return;
+    }
+
+    fresh_table("binned_articles", |t| {
+        t.id();
+        t.string("title").not_null();
+    })
+    .await;
+    fresh_table("linked_labels", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("binned_article_labels", |t| {
+        t.id();
+        t.big_integer("article_id").not_null();
+        t.big_integer("label_id").not_null();
+        t.soft_deletes();
+        t.unique_index(&["article_id", "label_id"]);
+    })
+    .await;
+    let article = BinnedArticle {
+        id: 0,
+        title: "Release notes".into(),
+        labels: Default::default(),
+    }
+    .save()
+    .await
+    .expect("save article failed");
+    let mut label_ids = Vec::new();
+    for name in ["news", "draft"] {
+        let label = LinkedLabel {
+            id: 0,
+            name: name.into(),
+        }
+        .save()
+        .await
+        .expect("save label failed");
+        label_ids.push(label.id);
+    }
+    let (news, draft) = (label_ids[0], label_ids[1]);
+    for id in [news, draft] {
+        article.labels.attach(id).await.expect("attach failed");
+    }
+
+    let names = |labels: Vec<LinkedLabel>| {
+        let mut names: Vec<String> = labels.into_iter().map(|label| label.name).collect();
+        names.sort();
+        names
+    };
+    let pivot_rows = || async {
+        BinnedArticleLabel::query()
+            .with_trashed()
+            .count()
+            .await
+            .expect("pivot count failed")
+    };
+
+    BinnedArticleLabel::query()
+        .where_eq("label_id", news)
+        .soft_delete()
+        .await
+        .expect("soft delete failed");
+    assert_eq!(
+        names(article.labels.load().await.expect("load failed")),
+        ["draft"]
+    );
+    assert_eq!(article.labels.count().await.expect("count failed"), 1);
+    let eager = BinnedArticle::query()
+        .with("labels")
+        .first()
+        .await
+        .expect("eager load failed")
+        .expect("row should exist");
+    assert_eq!(
+        eager
+            .labels
+            .get_cached()
+            .map(|labels| names(labels.to_vec())),
+        Some(vec!["draft".to_string()])
+    );
+
+    // Attaching the pair again restores its row instead of adding one.
+    article.labels.attach(news).await.expect("re-attach failed");
+    assert_eq!(
+        names(article.labels.load().await.expect("load failed")),
+        ["draft", "news"]
+    );
+    assert_eq!(pivot_rows().await, 2);
+    assert_eq!(article.labels.count().await.expect("count failed"), 2);
+
+    // A pivot row whose related row is gone counts no more than it loads.
+    LinkedLabel::query()
+        .where_eq("id", draft)
+        .delete()
+        .await
+        .expect("delete label failed");
+    assert_eq!(
+        names(article.labels.load().await.expect("load failed")),
+        ["news"]
+    );
+    assert_eq!(article.labels.count().await.expect("count failed"), 1);
+
+    BinnedArticleLabel::query()
+        .where_eq("label_id", news)
+        .soft_delete()
+        .await
+        .expect("soft delete failed");
+    article.labels.sync(vec![news]).await.expect("sync failed");
+    assert_eq!(
+        names(article.labels.load().await.expect("load failed")),
+        ["news"]
+    );
+    assert_eq!(pivot_rows().await, 1);
+
+    article
+        .labels
+        .sync(Vec::<i64>::new())
+        .await
+        .expect("sync to nothing failed");
+    assert!(article.labels.load().await.expect("load failed").is_empty());
+    assert_eq!(pivot_rows().await, 0);
+}
+
+/// On a soft-delete model every read leaves trashed rows out, `find` included,
+/// and every delete marks the row; `force_delete` removes it.
+#[tokio::test]
+async fn soft_delete_models_hide_and_mark_rather_than_remove() {
+    use tideorm::SoftDelete;
+
+    if !setup().await {
+        return;
+    }
+    let mut ids = Vec::new();
+    for name in ["a", "b", "c"] {
+        let row = TestSoftDelete {
+            id: 0,
+            name: name.into(),
+            deleted_at: None,
+        }
+        .save()
+        .await
+        .expect("save failed");
+        ids.push(row.id);
+    }
+    let (a, b) = (ids[0], ids[1]);
+
+    let row = TestSoftDelete::find(a)
+        .await
+        .expect("find failed")
+        .expect("row a exists");
+    assert_eq!(row.delete().await.expect("delete failed"), 1);
+    assert!(
+        TestSoftDelete::find(a)
+            .await
+            .expect("find failed")
+            .is_none()
+    );
+    assert!(!TestSoftDelete::exists(a).await.expect("exists failed"));
+    let trashed = TestSoftDelete::query()
+        .with_trashed()
+        .find(a)
+        .await
+        .expect("with_trashed().find failed")
+        .expect("with_trashed().find reads a trashed row");
+    assert!(trashed.deleted_at.is_some(), "delete() marked the row");
+    let trashed = trashed.reload().await.expect("reload reads a trashed row");
+
+    assert_eq!(TestSoftDelete::destroy(b).await.expect("destroy failed"), 1);
+    assert_eq!(
+        TestSoftDelete::destroy(b).await.expect("destroy failed"),
+        0,
+        "a trashed row is not destroyed again"
+    );
+    let marked = TestSoftDelete::query().where_eq("name", "c").delete().await;
+    assert_eq!(marked.expect("query delete failed"), 1);
+    let total = || async {
+        TestSoftDelete::query()
+            .with_trashed()
+            .count()
+            .await
+            .expect("count failed")
+    };
+    assert_eq!(total().await, 3, "every delete marked, none removed");
+    assert!(
+        TestSoftDelete::query()
+            .only_trashed()
+            .where_eq("name", "b")
+            .delete()
+            .await
+            .is_err(),
+        "deleting the trash asks for force_delete()"
+    );
+
+    assert_eq!(
+        trashed.force_delete().await.expect("force_delete failed"),
+        1
+    );
+    assert_eq!(total().await, 2);
+}
+
 /// `only_trashed()` is filter enough to restore or empty the whole trash, and
 /// `force_delete()` under it never reaches a live row.
 #[tokio::test]
@@ -2371,6 +3283,35 @@ async fn the_trash_can_be_restored_or_emptied_as_a_whole() {
     assert_eq!(names, ["binned", "kept"], "live rows must survive");
     let trash = TestSoftDelete::query().only_trashed().count().await;
     assert_eq!(trash.expect("count failed"), 0);
+
+    // On a soft-delete model, delete() and delete_all() mark live rows; the
+    // trash is emptied with force_delete().
+    binned().soft_delete().await.expect("soft delete failed");
+    assert!(
+        TestSoftDelete::query()
+            .only_trashed()
+            .delete_all()
+            .await
+            .is_err(),
+        "only_trashed().delete_all() would mark rows already deleted"
+    );
+    let marked = TestSoftDelete::query().delete_all().await;
+    assert_eq!(marked.expect("delete_all() failed"), 1);
+    let total = || async {
+        TestSoftDelete::query()
+            .with_trashed()
+            .count()
+            .await
+            .expect("count failed")
+    };
+    assert_eq!(
+        TestSoftDelete::query().count().await.expect("count failed"),
+        0
+    );
+    assert_eq!(total().await, 2, "delete_all() marks, it does not remove");
+    let emptied = TestSoftDelete::query().only_trashed().force_delete().await;
+    assert_eq!(emptied.expect("emptying the trash failed"), 2);
+    assert_eq!(total().await, 0);
 }
 
 /// `aggregates()` answers several aggregates in one statement, with the values
@@ -2390,18 +3331,19 @@ async fn aggregates_match_the_single_terminals() {
         Aggregate::max("age"),
         Aggregate::count_distinct("active"),
     ];
+    type Stats = (u64, i64, Option<f64>, Option<i32>, Option<i32>, u64);
     let adults = || TestUser::query().where_gt("age", 22);
     let limited = || adults().order_by("age", SortOrder::Desc).limit(3);
     for (label, query) in [("plain", adults()), ("limited", limited())] {
-        let together = query
+        let together: Stats = query
             .clone()
             .aggregates(&wanted)
             .await
             .expect("aggregates failed");
         // `count()` ignores the limit; the aggregates count the rows it leaves.
         let rows = query.clone().get().await.expect("get failed").len();
-        let one_by_one = vec![
-            rows as f64,
+        let one_by_one: Stats = (
+            rows as u64,
             query.clone().sum("age").await.expect("sum failed"),
             query.clone().avg("age").await.expect("avg failed"),
             query.clone().min("age").await.expect("min failed"),
@@ -2410,22 +3352,35 @@ async fn aggregates_match_the_single_terminals() {
                 .clone()
                 .count_distinct("active")
                 .await
-                .expect("count_distinct failed") as f64,
-        ];
+                .expect("count_distinct failed"),
+        );
         assert_eq!(together, one_by_one, "{label}");
     }
 
-    let none = TestUser::query()
+    let none: Stats = TestUser::query()
         .where_gt("age", 1000)
         .aggregates(&wanted)
-        .await;
-    assert_eq!(none.expect("empty aggregates failed"), [0.0; 6]);
-    assert!(
-        TestUser::query()
-            .aggregates(&[])
-            .await
-            .expect("no aggregates")
-            .is_empty()
+        .await
+        .expect("empty aggregates failed");
+    assert_eq!(none, (0, 0, None, None, None, 0));
+    let nothing: Vec<f64> = TestUser::query()
+        .aggregates(&[])
+        .await
+        .expect("no aggregates");
+    assert!(nothing.is_empty());
+
+    // Any column type, and the same column twice.
+    let (first, last, oldest): (Option<String>, Option<String>, Option<i32>) = TestUser::query()
+        .aggregates(&[
+            Aggregate::min("name"),
+            Aggregate::max("name"),
+            Aggregate::max("age"),
+        ])
+        .await
+        .expect("aggregates over text failed");
+    assert_eq!(
+        (first.as_deref(), last.as_deref(), oldest),
+        (Some("User 01"), Some("User 06"), Some(26))
     );
 }
 
@@ -2588,4 +3543,419 @@ async fn a_union_operand_and_a_cte_body_keep_their_limit() {
         .await
         .expect("a query over a limited CTE failed");
     assert_eq!(oldest, 2);
+}
+
+#[tideorm::model(table = "join_authors")]
+pub struct JoinAuthor {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub mentor_id: Option<i64>,
+}
+
+/// `right_join`, `right_join_as` and a self-join through `left_join_as` keep
+/// the rows of their outer side that match nothing.
+#[tokio::test]
+async fn right_and_aliased_left_joins_keep_the_unmatched_rows() {
+    if !setup().await {
+        return;
+    }
+
+    fresh_table("join_authors", |t| {
+        t.id();
+        t.string("name").not_null();
+        t.big_integer("mentor_id");
+    })
+    .await;
+    fresh_table("join_books", |t| {
+        t.id();
+        t.string("title").not_null();
+        t.big_integer("author_id").not_null();
+    })
+    .await;
+    for (name, mentor_id) in [("Ada", None), ("Grace", Some(1))] {
+        JoinAuthor {
+            id: 0,
+            name: name.to_string(),
+            mentor_id,
+        }
+        .save()
+        .await
+        .expect("save failed");
+    }
+    for (title, author_id) in [("Notes", 1_i64), ("Compilers", 2), ("Orphan", 9)] {
+        Database::execute_with_params(
+            &format!(
+                "INSERT INTO join_books (title, author_id) VALUES ({}, {})",
+                param(1),
+                param(2)
+            ),
+            vec![title.into(), author_id.into()],
+        )
+        .await
+        .expect("insert failed");
+    }
+
+    let pairs = |query: QueryBuilder<JoinAuthor>, left: &'static str, right: &'static str| async move {
+        let mut rows: Vec<(String, Option<String>)> = query
+            .get_json()
+            .await
+            .expect("join failed")
+            .into_iter()
+            .map(|row| {
+                (
+                    row[left].as_str().expect("left column").to_string(),
+                    row[right].as_str().map(str::to_string),
+                )
+            })
+            .collect();
+        rows.sort();
+        rows
+    };
+    let books = vec![
+        ("Compilers".to_string(), Some("Grace".to_string())),
+        ("Notes".to_string(), Some("Ada".to_string())),
+        ("Orphan".to_string(), None),
+    ];
+
+    let right = JoinAuthor::query()
+        .right_join("join_books", "join_authors.id", "join_books.author_id")
+        .select_raw("join_books.title AS title")
+        .select_raw("join_authors.name AS author");
+    assert_eq!(pairs(right, "title", "author").await, books);
+
+    let right_aliased = JoinAuthor::query()
+        .right_join_as("join_books", "b", "join_authors.id", "b.author_id")
+        .select_raw("b.title AS title")
+        .select_raw("join_authors.name AS author");
+    assert_eq!(pairs(right_aliased, "title", "author").await, books);
+
+    // The orphan's row has NULL in every author column, which is no model.
+    assert!(
+        JoinAuthor::query()
+            .right_join("join_books", "join_authors.id", "join_books.author_id")
+            .get()
+            .await
+            .is_err()
+    );
+
+    let mentors = JoinAuthor::query()
+        .left_join_as(
+            "join_authors",
+            "mentor",
+            "join_authors.mentor_id",
+            "mentor.id",
+        )
+        .select_raw("join_authors.name AS name")
+        .select_raw("mentor.name AS mentor");
+    assert_eq!(
+        pairs(mentors, "name", "mentor").await,
+        [
+            ("Ada".to_string(), None),
+            ("Grace".to_string(), Some("Ada".to_string()))
+        ]
+    );
+}
+
+/// A JSON member holding `null` exists, a missing one does not, and a `NULL`
+/// column matches neither the test nor its negation.
+#[tokio::test]
+async fn json_existence_counts_a_null_member_and_skips_a_null_column() {
+    use serde_json::json;
+
+    if !setup().await {
+        return;
+    }
+
+    for metadata in [
+        Some(json!({"a": {"b": 1}})),
+        Some(json!({"a": {"b": null}})),
+        Some(json!({"a": {}})),
+        None,
+    ] {
+        TestProduct {
+            id: 0,
+            name: "Widget".to_string(),
+            category: "tools".to_string(),
+            price: 1,
+            metadata,
+        }
+        .save()
+        .await
+        .expect("save failed");
+    }
+    let ids = |query: QueryBuilder<TestProduct>| async move {
+        let mut ids: Vec<i64> = query
+            .get()
+            .await
+            .expect("json filter failed")
+            .into_iter()
+            .map(|product| product.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    assert_eq!(
+        ids(TestProduct::query().where_json_path_exists("metadata", "$.a.b")).await,
+        [1, 2]
+    );
+    assert_eq!(
+        ids(TestProduct::query().where_json_path_not_exists("metadata", "$.a.b")).await,
+        [3]
+    );
+    assert_eq!(
+        ids(TestProduct::query().where_json_key_exists("metadata", "a")).await,
+        [1, 2, 3]
+    );
+    assert_eq!(
+        ids(TestProduct::query().where_json_key_not_exists("metadata", "z")).await,
+        [1, 2, 3]
+    );
+}
+
+/// `has_no_related` keeps a row whose related rows all fail the condition, and
+/// a row with none at all.
+#[tokio::test]
+async fn has_no_related_keeps_rows_without_a_matching_related_row() {
+    if !setup().await {
+        return;
+    }
+
+    seed_users(3).await;
+    fresh_table("user_posts", |t| {
+        t.id();
+        t.big_integer("user_id").not_null();
+        t.string("status").not_null();
+    })
+    .await;
+    for (user_id, status) in [(1_i64, "published"), (1, "draft"), (2, "draft")] {
+        Database::execute_with_params(
+            &format!(
+                "INSERT INTO user_posts (user_id, status) VALUES ({}, {})",
+                param(1),
+                param(2)
+            ),
+            vec![user_id.into(), status.into()],
+        )
+        .await
+        .expect("insert failed");
+    }
+    let ids = |query: QueryBuilder<TestUser>| async move {
+        let mut ids: Vec<i64> = query
+            .get()
+            .await
+            .expect("related filter failed")
+            .into_iter()
+            .map(|user| user.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+
+    assert_eq!(
+        ids(TestUser::query().has_no_related("user_posts", "user_id", "id", "status", "published"))
+            .await,
+        [2, 3]
+    );
+    assert_eq!(
+        ids(TestUser::query().has_related("user_posts", "user_id", "id", "status", "published"))
+            .await,
+        [1]
+    );
+}
+
+/// `rename_table` keeps the rows, and a foreign key in another table follows
+/// the rename and is still enforced.
+#[tokio::test]
+async fn rename_table_keeps_rows_and_incoming_foreign_keys() {
+    if !setup().await {
+        return;
+    }
+
+    let mut schema = Schema::new(backend::DATABASE_TYPE);
+    for table in ["rename_children", "renamed_parents", "rename_parents"] {
+        schema
+            .drop_table_if_exists(table)
+            .await
+            .expect("drop failed");
+    }
+    schema
+        .raw("CREATE TABLE rename_parents (id BIGINT PRIMARY KEY, name VARCHAR(50) NOT NULL)")
+        .await
+        .expect("create parents failed");
+    schema
+        .raw(
+            "CREATE TABLE rename_children (id BIGINT PRIMARY KEY, parent_id BIGINT NOT NULL, \
+             FOREIGN KEY (parent_id) REFERENCES rename_parents (id))",
+        )
+        .await
+        .expect("create children failed");
+    Database::execute("INSERT INTO rename_parents (id, name) VALUES (1, 'kept')")
+        .await
+        .expect("insert failed");
+
+    schema
+        .rename_table("rename_parents", "renamed_parents")
+        .await
+        .expect("rename failed");
+
+    assert_eq!(
+        Database::raw_json("SELECT name FROM renamed_parents")
+            .await
+            .expect("the renamed table should be readable"),
+        [serde_json::json!({"name": "kept"})]
+    );
+    assert!(
+        Database::raw_json("SELECT name FROM rename_parents")
+            .await
+            .is_err(),
+        "the old name should be gone"
+    );
+    Database::execute("INSERT INTO rename_children (id, parent_id) VALUES (1, 1)")
+        .await
+        .expect("the foreign key should follow the rename");
+    assert!(
+        Database::execute("INSERT INTO rename_children (id, parent_id) VALUES (2, 99)")
+            .await
+            .is_err(),
+        "the foreign key should still be enforced"
+    );
+}
+
+/// `SchemaWriter::write_schema` reads a live table back well enough to
+/// recreate it: run from the file, the table takes rows again and its unique
+/// index still rejects a duplicate.
+#[tokio::test]
+async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
+    if !setup().await {
+        return;
+    }
+
+    fresh_table("exported_rows", |t| {
+        t.id();
+        t.string("code").not_null();
+        t.integer("score");
+        t.unique_index(&["code"]);
+    })
+    .await;
+
+    let path = std::env::temp_dir().join(format!(
+        "tideorm_schema_{:?}_{}.sql",
+        backend::DATABASE_TYPE,
+        std::process::id()
+    ));
+    SchemaWriter::write_schema(&path)
+        .await
+        .expect("write_schema failed");
+    let file = std::fs::read_to_string(&path).expect("schema file missing");
+    let _ = std::fs::remove_file(&path);
+
+    let quoted = match backend::DATABASE_TYPE {
+        DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_rows`",
+        _ => "\"exported_rows\"",
+    };
+    let statements: Vec<String> = file
+        .split(";\n")
+        .map(|chunk| {
+            chunk
+                .lines()
+                .filter(|line| !line.starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        })
+        .filter(|statement| statement.contains(quoted))
+        .collect();
+    let create = statements
+        .iter()
+        .find(|statement| statement.starts_with("CREATE TABLE"))
+        .unwrap_or_else(|| panic!("no CREATE TABLE for exported_rows in:\n{file}"));
+    let index = statements
+        .iter()
+        .find(|statement| statement.starts_with("CREATE UNIQUE INDEX"))
+        .unwrap_or_else(|| panic!("no unique index for exported_rows in:\n{file}"));
+
+    Schema::new(backend::DATABASE_TYPE)
+        .drop_table("exported_rows")
+        .await
+        .expect("drop failed");
+    Database::execute(create)
+        .await
+        .unwrap_or_else(|error| panic!("the exported table did not run: {error}\n{create}"));
+    Database::execute(index)
+        .await
+        .unwrap_or_else(|error| panic!("the exported index did not run: {error}\n{index}"));
+
+    Database::execute("INSERT INTO exported_rows (code, score) VALUES ('a', 1)")
+        .await
+        .expect("the recreated table should take a row");
+    Database::execute("INSERT INTO exported_rows (code) VALUES ('b')")
+        .await
+        .expect("score should stay nullable");
+    assert!(
+        Database::execute("INSERT INTO exported_rows (code, score) VALUES ('a', 2)")
+            .await
+            .is_err(),
+        "the recreated unique index should reject a duplicate"
+    );
+}
+
+#[tideorm::model(table = "tagged_rows")]
+pub struct TaggedRow {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub tags: serde_json::Value,
+}
+
+/// On a JSON array, `array_remove` drops every element equal to the value and
+/// keeps the others, types and order included, and leaves an array without
+/// it as it was; `array_append` adds a JSON value, an object included.
+/// PostgreSQL's arrays are native and take neither path.
+#[tokio::test]
+async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
+    use serde_json::json;
+
+    if !setup().await || backend::DATABASE_TYPE == DatabaseType::Postgres {
+        return;
+    }
+
+    fresh_table("tagged_rows", |t| {
+        t.id();
+        t.json("tags").not_null();
+    })
+    .await;
+    for tags in [json!(["a", 1, true, null, "b", "a", "1"]), json!(["keep"])] {
+        TaggedRow { id: 0, tags }.save().await.expect("save failed");
+    }
+
+    TaggedRow::update_all()
+        .where_gt("id", 0)
+        .array_remove("tags", "a")
+        .execute()
+        .await
+        .expect("array_remove failed");
+    TaggedRow::update_all()
+        .where_gt("id", 0)
+        .array_append("tags", json!({"x": 1}))
+        .execute()
+        .await
+        .expect("array_append failed");
+
+    let tags: Vec<serde_json::Value> = TaggedRow::query()
+        .order_asc("id")
+        .get()
+        .await
+        .expect("query failed")
+        .into_iter()
+        .map(|row| row.tags)
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            json!([1, true, null, "b", "1", {"x": 1}]),
+            json!(["keep", {"x": 1}])
+        ]
+    );
 }

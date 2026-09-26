@@ -8,7 +8,7 @@ use serde_json::json;
 impl<T> Column<T> {
     fn cond(self, operator: Operator, value: serde_json::Value) -> ColumnCondition {
         ColumnCondition {
-            column: self.name.to_string(),
+            column: super::column_reference(&self, None),
             operator,
             value,
         }
@@ -59,15 +59,24 @@ macro_rules! impl_ord {
 }
 
 macro_rules! impl_in {
-    ($value:ty => $($column:ty),+) => {$(
-        impl ColumnIn<$value> for Column<$column> {
-            fn is_in(self, values: Vec<$value>) -> ColumnCondition {
-                self.cond(Operator::In, json!(values))
-            }
+    (@methods $value:ty) => {
+        fn is_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
+            self.cond(
+            Operator::In,
+            serde_json::Value::Array(values.into_iter().map(crate::query::filter_value).collect()),
+        )
+        }
 
-            fn not_in(self, values: Vec<$value>) -> ColumnCondition {
-                self.cond(Operator::NotIn, json!(values))
-            }
+        fn not_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
+            self.cond(
+            Operator::NotIn,
+            serde_json::Value::Array(values.into_iter().map(crate::query::filter_value).collect()),
+        )
+        }
+    };
+    (<$lifetime:lifetime> $value:ty => $($column:ty),+) => {$(
+        impl<$lifetime> ColumnIn<$value> for Column<$column> {
+            impl_in!(@methods $value);
         }
     )+};
 }
@@ -123,9 +132,7 @@ macro_rules! impl_nullable {
 
 macro_rules! impl_ordered {
     ($($t:ty),*) => {$(
-        impl_eq!($t => $t, Option<$t>);
         impl_ord!($t => $t, Option<$t>);
-        impl_in!($t => $t);
         impl_nullable!(Option<$t>);
     )*};
 }
@@ -141,11 +148,38 @@ impl_ordered!(
 );
 
 impl_eq!(&str => String, Option<String>);
-impl_eq!(String => String);
 impl_like!(String, Option<String>);
-impl_in!(&str => String);
-impl_in!(String => String);
+impl_in!(<'a> &'a str => String, Option<String>);
 impl_nullable!(Option<String>);
 
-impl_eq!(bool => bool, Option<bool>);
 impl_nullable!(Option<bool>);
+// Equality and IN lists work for a column of any type that serializes — an
+// enum, a newtype, a JSON value — and a nullable column (`Column<Option<T>>`)
+// compares with a plain `T` too.
+impl<T: serde::Serialize> ColumnEq<T> for Column<T> {
+    fn eq(self, value: T) -> ColumnCondition {
+        self.cond(Operator::Eq, crate::query::filter_value(value))
+    }
+
+    fn ne(self, value: T) -> ColumnCondition {
+        self.cond(Operator::NotEq, crate::query::filter_value(value))
+    }
+}
+
+impl<T: serde::Serialize> ColumnEq<T> for Column<Option<T>> {
+    fn eq(self, value: T) -> ColumnCondition {
+        self.cond(Operator::Eq, crate::query::filter_value(value))
+    }
+
+    fn ne(self, value: T) -> ColumnCondition {
+        self.cond(Operator::NotEq, crate::query::filter_value(value))
+    }
+}
+
+impl<T: serde::Serialize> ColumnIn<T> for Column<T> {
+    impl_in!(@methods T);
+}
+
+impl<T: serde::Serialize> ColumnIn<T> for Column<Option<T>> {
+    impl_in!(@methods T);
+}

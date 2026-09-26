@@ -26,7 +26,7 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(reason);
         }
 
-        if let Err(err) = query.ensure_query_is_valid() {
+        if let Err(err) = query.ensure_query_is_executable() {
             self.invalidate_query(format!("invalid subquery for with_query(): {}", err));
         }
 
@@ -126,31 +126,5 @@ impl<M: Model> QueryBuilder<M> {
         F: FnOnce(Self) -> Self,
     {
         f(self)
-    }
-
-    /// Apply a conditional scope
-    ///
-    /// Only applies the scope function if the condition is true.
-    #[must_use]
-    pub fn when<F>(self, condition: bool, f: F) -> Self
-    where
-        F: FnOnce(Self) -> Self,
-    {
-        if condition { f(self) } else { self }
-    }
-
-    /// Apply a scope based on an Option value
-    ///
-    /// If the option is Some, applies the scope function with the value.
-    /// If None, returns the query unchanged.
-    #[must_use]
-    pub fn when_some<T, F>(self, option: Option<T>, f: F) -> Self
-    where
-        F: FnOnce(Self, T) -> Self,
-    {
-        match option {
-            Some(value) => f(self, value),
-            None => self,
-        }
     }
 }

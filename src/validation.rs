@@ -281,24 +281,18 @@ impl Validator {
                     return Some(rule.message(field));
                 }
             }
-            // NaN compares false with every bound, so it is refused by name.
             ValidationRule::Min(min) => {
-                if let Some(n) = value.as_f64_value()
-                    && (n.is_nan() || n < *min)
-                {
+                if below_bound(value, *min) == Some(true) {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Max(max) => {
-                if let Some(n) = value.as_f64_value()
-                    && (n.is_nan() || n > *max)
-                {
+                if above_bound(value, *max) == Some(true) {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Range(min, max) => {
-                if let Some(n) = value.as_f64_value()
-                    && (n.is_nan() || n < *min || n > *max)
+                if below_bound(value, *min) == Some(true) || above_bound(value, *max) == Some(true)
                 {
                     return Some(rule.message(field));
                 }
@@ -401,6 +395,37 @@ pub trait Validate {
         self.validate()?;
         Ok(self)
     }
+}
+
+/// Whether a numeric `value` lies below `bound`; `None` for a value that is
+/// not a number. An integer is compared exactly: past 2^53 it has no exact
+/// `f64`, and rounding it would let a value one past the bound through. NaN
+/// lies outside every bound.
+fn below_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bool> {
+    if let Some(integer) = value.as_i128_value() {
+        return Some(if bound > i128::MAX as f64 {
+            true
+        } else if bound <= i128::MIN as f64 {
+            false
+        } else {
+            integer < bound.ceil() as i128
+        });
+    }
+    value.as_f64_value().map(|n| n.is_nan() || n < bound)
+}
+
+/// Whether a numeric `value` lies above `bound`, as [`below_bound`] compares.
+fn above_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bool> {
+    if let Some(integer) = value.as_i128_value() {
+        return Some(if bound >= i128::MAX as f64 {
+            false
+        } else if bound < i128::MIN as f64 {
+            true
+        } else {
+            integer > bound.floor() as i128
+        });
+    }
+    value.as_f64_value().map(|n| n.is_nan() || n > bound)
 }
 
 #[cfg(test)]

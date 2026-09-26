@@ -14,9 +14,13 @@ pub(crate) use crate::internal::sql_safety::{
     validate_subquery_sql,
 };
 pub(crate) use arrays::{
-    postgres_array_contained_by, postgres_array_contains, postgres_array_overlaps,
+    array_contained_by, postgres_array_contained_by, postgres_array_contains,
+    postgres_array_overlaps,
 };
-pub(crate) use placeholders::{inline_parameters, offset_postgres_placeholders, placeholders};
+pub(crate) use placeholders::{
+    count_template_placeholders, inline_parameters, map_template_placeholders,
+    offset_postgres_placeholders, placeholders,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoundSql {
@@ -109,6 +113,43 @@ pub(crate) fn postgres_jsonb(column_sql: &str) -> String {
     format!("({column_sql})::jsonb")
 }
 
+/// Render "`column` holds the JSON document `value`" (or does not, when
+/// `negated`), compared as JSON rather than as text: PostgreSQL, MySQL and
+/// MariaDB ignore key order and spacing, and SQLite compares the minified
+/// text. PostgreSQL's `json` type has no `=` at all, and MySQL compared the
+/// document with a string, which never matched.
+pub(crate) fn json_equals_bound(
+    db_type: DatabaseType,
+    column_sql: &str,
+    value: &serde_json::Value,
+    negated: bool,
+) -> BoundSql {
+    let operator = if negated { "<>" } else { "=" };
+    let text = || vec![Value::String(Some(value.to_string()))];
+    match db_type {
+        DatabaseType::Postgres => BoundSql::new(
+            format!("{} {} $1", postgres_jsonb(column_sql), operator),
+            vec![json_native_parameter(value)],
+        ),
+        DatabaseType::MySQL => BoundSql::new(
+            format!("{} {} CAST(? AS JSON)", column_sql, operator),
+            text(),
+        ),
+        // MariaDB has no `CAST(.. AS JSON)`.
+        DatabaseType::MariaDB => BoundSql::new(
+            format!(
+                "{}JSON_EQUALS({}, ?)",
+                if negated { "NOT " } else { "" },
+                column_sql
+            ),
+            text(),
+        ),
+        DatabaseType::SQLite => {
+            BoundSql::new(format!("json({}) {} json(?)", column_sql, operator), text())
+        }
+    }
+}
+
 pub(crate) fn json_contains_bound(
     db_type: DatabaseType,
     column_sql: &str,
@@ -165,6 +206,11 @@ pub(crate) enum JsonExistence {
 /// PostgreSQL tests a key with `?` and a path with `@?`. MySQL/MariaDB and
 /// SQLite have no key operator, so a key is tested as the one-member path that
 /// names it. `None` means the path cannot be expressed on this backend.
+///
+/// On SQLite, `json_type` finds a member that holds JSON `null`, which
+/// `json_extract` reports as SQL `NULL`, and the `CASE` leaves a `NULL`
+/// column unknown, as the other backends do, so that the negation does not
+/// match it either.
 pub(crate) fn json_exists_bound(
     db_type: DatabaseType,
     column_sql: &str,
@@ -172,6 +218,11 @@ pub(crate) fn json_exists_bound(
     target: &str,
     negated: bool,
 ) -> Option<BoundSql> {
+    let sqlite_exists = || {
+        format!(
+            "CASE WHEN {column_sql} IS NOT NULL THEN json_type({column_sql}, ?) IS NOT NULL END"
+        )
+    };
     let (sql, bound) = match (db_type, existence) {
         (DatabaseType::Postgres, JsonExistence::Key) => (
             format!("{} ? $1", postgres_jsonb(column_sql)),
@@ -181,14 +232,12 @@ pub(crate) fn json_exists_bound(
             format!("{} @? ($1::jsonpath)", postgres_jsonb(column_sql)),
             target.to_string(),
         ),
-        (DatabaseType::SQLite, JsonExistence::Key) => (
-            format!("json_extract({}, ?) IS NOT NULL", column_sql),
-            canonical_json_member_path(target),
-        ),
-        (DatabaseType::SQLite, JsonExistence::Path) => (
-            format!("json_extract({}, ?) IS NOT NULL", column_sql),
-            normalize_mysql_sqlite_json_path(target)?,
-        ),
+        (DatabaseType::SQLite, JsonExistence::Key) => {
+            (sqlite_exists(), canonical_json_member_path(target))
+        }
+        (DatabaseType::SQLite, JsonExistence::Path) => {
+            (sqlite_exists(), normalize_mysql_sqlite_json_path(target)?)
+        }
         (DatabaseType::MySQL | DatabaseType::MariaDB, JsonExistence::Key) => (
             format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
             canonical_json_member_path(target),
@@ -334,13 +383,4 @@ pub(crate) fn format_column_or_trusted_expression(
 pub(crate) fn format_column(db_type: DatabaseType, column: &str) -> String {
     let trimmed = column.trim();
     format_identifier_reference(db_type, trimmed).unwrap_or_else(|| quote_ident(db_type, trimmed))
-}
-
-/// Cast `expr` to the backend's double-precision float type.
-pub(crate) fn cast_to_float(db_type: DatabaseType, expr: &str) -> String {
-    match db_type {
-        DatabaseType::Postgres => format!("CAST({} AS FLOAT8)", expr),
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!("CAST({} AS DOUBLE)", expr),
-        DatabaseType::SQLite => format!("CAST({} AS REAL)", expr),
-    }
 }

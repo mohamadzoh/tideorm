@@ -425,6 +425,19 @@ where
             }
             EntityState::New | EntityState::Managed => {
                 let current = self.current.read().clone();
+                // A saved row is identified by its primary key, so writing
+                // this entity under a changed key would write another row.
+                if let Some(persisted) = self.persisted_key.read().as_deref() {
+                    let key = current.tide_pk_key();
+                    if key != persisted {
+                        return Err(crate::error::Error::invalid_query(format!(
+                            "the primary key of a managed {} row changed from {persisted} to \
+                             {key}; a managed entity keeps its key, so detach it and persist \
+                             a new one",
+                            <T as crate::model::ModelMeta>::table_name()
+                        )));
+                    }
+                }
                 let snapshot = self.snapshot.read().clone();
                 let columns_changed = match snapshot.as_ref() {
                     Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),

@@ -281,7 +281,7 @@ User::query()
     .await?;
 ```
 
-`delete()`, `destroy()` and `query().delete()` remove the row even on a soft-delete model; use `soft_delete()` to keep it.
+On a soft-delete model `delete()`, `destroy()` and `query().delete()` mark the row deleted instead of removing it; `force_delete()` removes it for good.
 
 ---
 
@@ -363,6 +363,13 @@ let trashed_posts = Post::query()
     .get()
     .await?;
 ```
+
+The scope applies everywhere: `find(id)`, `exists(id)`, every query terminal, `update_all()`, relation loads and full-text search leave trashed rows out. To reach them:
+
+- `Post::query().with_trashed().find(id)` reads a trashed row by key; `reload()` refreshes the record in hand even when it is trashed.
+- `Post::update_all().with_trashed()` updates the trash too; `Post::query().only_trashed().restore()` restores it.
+
+Deleting marks: `delete()`, `destroy(id)`, `query().delete()` and `delete_all()` set `deleted_at` instead of removing the row. `force_delete()` — on a model, or on a query such as `only_trashed().force_delete()`, which empties the trash — removes rows for good. Deleting `only_trashed()` rows with `delete()` is an error, since they are deleted already.
 
 ### Soft Delete Operations
 
@@ -621,7 +628,17 @@ let affected = User::update_all()
     .where_eq("last_login_before", "2024-01-01")
     .execute()
     .await?;
+
+// Or update the rows a query already selects, scopes included
+let affected = User::query()
+    .inactive()
+    .update_all()
+    .set("status", "dormant")
+    .execute()
+    .await?;
 ```
+
+Like a query, `update_all()` leaves soft-deleted rows out; `.with_trashed()` reaches them. `query().update_all()` keeps the query's own scope, filters and the database `query_with` names. A query that joins, groups, pages or unions cannot become an `UPDATE`, and running one fails.
 
 ---
 
@@ -961,7 +978,7 @@ User::query().where_lt(User::columns.age, 65)                    // <
 User::query().where_lte(User::columns.age, 65)                   // <=
 User::query().where_like(User::columns.email, "%@test.com")      // LIKE
 User::query().where_not_like(User::columns.email, "%spam%")      // NOT LIKE
-User::query().where_in(User::columns.role, vec!["admin", "mod"]) // IN
+User::query().where_in(User::columns.role, ["admin", "mod"])     // IN, from any list
 User::query().where_not_in(User::columns.status, vec!["banned"]) // NOT IN
 User::query().where_null(User::columns.deleted_at)               // IS NULL
 User::query().where_not_null(User::columns.email)                // IS NOT NULL
@@ -975,10 +992,10 @@ User::query()
     .get()
     .await?;
 
-// Aggregations with typed columns:
-let total = Order::query().sum(Order::columns.amount).await?;
-let average = Product::query().avg(Product::columns.price).await?;
-let max_age = User::query().max(User::columns.age).await?;
+// Aggregations with typed columns, read as the type you ask for:
+let total: Decimal = Order::query().sum(Order::columns.amount).await?;
+let average: Option<f64> = Product::query().avg(Product::columns.price).await?;
+let max_age: Option<i32> = User::query().max(User::columns.age).await?;
 
 // OR conditions with typed columns. All or_where_* calls are combined into one
 // OR group, ANDed with the rest of the query:
@@ -1104,16 +1121,13 @@ Each nested operation runs in one transaction — a savepoint when you are alrea
 
 ### Join Result Consolidation
 
-Transform flat JOIN results into nested structures:
+`JoinResultConsolidator` turns flat pairs — such as rows of a join read into `(Order, LineItem)` tuples — into nested structures:
 
 ```rust
 use tideorm::prelude::JoinResultConsolidator;
 
-// Flat JOIN results: Vec<(Order, LineItem)>
-let flat = Order::query()
-    .find_also_related::<LineItem>()
-    .get()
-    .await?;
+// Flat pairs: Vec<(Order, LineItem)>
+let flat: Vec<(Order, LineItem)> = orders_with_items;
 // [(order1, item1), (order1, item2), (order2, item3)]
 
 // Consolidate into nested: Vec<(Order, Vec<LineItem>)>
@@ -1131,35 +1145,54 @@ let nested3 = JoinResultConsolidator::consolidate_three(flat3, |o| o.id, |i| i.i
 
 ### Linked Partial Select
 
-Select specific columns from related tables with automatic JOINs:
+`select_with_linked` left-joins another table and selects columns from both; `select_also_linked` selects every model column plus the linked ones. Read the rows into a struct of your own with `get_as()`, whose fields are the column names:
 
 ```rust
-// Select specific columns from both tables
-let results = User::query()
-    .select_with_linked::<Profile>(
-        &["id", "name"],           // Local columns
-        &["bio", "avatar_url"],    // Linked columns
-        "user_id"                  // Foreign key for join
-    )
-    .get::<(i64, String, String, Option<String>)>()
+#[derive(serde::Deserialize)]
+struct UserBio {
+    id: i64,
+    name: String,
+    bio: Option<String>,
+}
+
+// users.id = profiles.user_id
+let rows: Vec<UserBio> = User::query()
+    .select_with_linked(vec!["id", "name"], "profiles", "id", "user_id", vec!["bio"])
+    .get_as()
     .await?;
 
-// All local columns + specific linked columns
-let results = User::query()
-    .select_also_linked::<Profile>(
-        &["bio"],                  // Just the linked columns
-        "user_id"
-    )
-    .get::<(User, String)>()
+// Every user column, plus the profile's bio
+let rows: Vec<serde_json::Value> = User::query()
+    .select_also_linked("profiles", "id", "user_id", vec!["bio"])
+    .get_json()
     .await?;
 ```
+
+A linked column that shares a name with a selected one must be aliased: two outputs cannot share a name.
 
 ### Additional Advanced Features
 
 ```rust
+// where_has() - the related model's own query: its scope, types and any filter
+let authors = User::query()
+    .where_has::<Post>(Post::columns.user_id, User::columns.id, |posts| {
+        posts.where_eq(Post::columns.published, true)
+    })
+    .get().await?;
+
+// where_doesnt_have() - no related row passes the closure
+let idle = User::query()
+    .where_doesnt_have::<Post>(Post::columns.user_id, User::columns.id, |posts| posts)
+    .get().await?;
+
 // has_related() - EXISTS subqueries over a table, soft-deleted rows included
 let cakes = Cake::query()
     .has_related("fruits", "cake_id", "id", "name", "Mango")
+    .get().await?;
+
+// has_no_related() - no related row matches; a cake with no fruits at all passes too
+let cakes = Cake::query()
+    .has_no_related("fruits", "cake_id", "id", "name", "Mango")
     .get().await?;
 
 // where_exists() with a model query applies that model's soft-delete scope

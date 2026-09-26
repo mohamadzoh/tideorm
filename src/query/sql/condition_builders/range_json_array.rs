@@ -24,11 +24,17 @@ impl<M: Model> QueryBuilder<M> {
         column_expr: SimpleExpr,
         low: &serde_json::Value,
         high: &serde_json::Value,
+        negated: bool,
     ) -> SimpleExpr {
-        column_expr.between(
+        let (low, high) = (
             self.column_value(column, low),
             self.column_value(column, high),
-        )
+        );
+        if negated {
+            column_expr.not_between(low, high)
+        } else {
+            column_expr.between(low, high)
+        }
     }
 
     pub(in crate::query::sql) fn build_json_value_expression(
@@ -71,19 +77,35 @@ impl<M: Model> QueryBuilder<M> {
     ) -> SimpleExpr {
         match db_type {
             DatabaseType::Postgres => {
-                let operands = db_sql::placeholders(db_type, values.len());
-                let sql = match operator {
-                    ArrayOperator::Contains => {
-                        db_sql::postgres_array_contains(column_sql, &operands)
-                    }
+                let (sql, bound) = match operator {
+                    ArrayOperator::Contains => (
+                        db_sql::postgres_array_contains(
+                            column_sql,
+                            &db_sql::placeholders(db_type, values.len()),
+                        ),
+                        values.to_vec(),
+                    ),
                     ArrayOperator::ContainedBy => {
-                        db_sql::postgres_array_contained_by(column_sql, &operands)
+                        let (listed, null_allowed) = split_nulls(values);
+                        let operands = db_sql::placeholders(db_type, listed.len());
+                        (
+                            db_sql::postgres_array_contained_by(
+                                column_sql,
+                                &operands,
+                                null_allowed,
+                            ),
+                            listed,
+                        )
                     }
-                    ArrayOperator::Overlaps => {
-                        db_sql::postgres_array_overlaps(column_sql, &operands)
-                    }
+                    ArrayOperator::Overlaps => (
+                        db_sql::postgres_array_overlaps(
+                            column_sql,
+                            &db_sql::placeholders(db_type, values.len()),
+                        ),
+                        values.to_vec(),
+                    ),
                 };
-                self.build_custom_expression(sql, Self::sea_value_list(values))
+                self.build_custom_expression(sql, Self::sea_value_list(&bound))
             }
             // The JSON text is bound as is: `JSON_CONTAINS` parses it on both
             // servers, and MariaDB has no `CAST(.. AS JSON)`.
@@ -117,18 +139,20 @@ impl<M: Model> QueryBuilder<M> {
                         repeated_check(element_matches, values.len(), " AND "),
                         Self::sea_value_list(values),
                     ),
-                    ArrayOperator::ContainedBy if values.is_empty() => Expr::cust(format!(
-                        "NOT EXISTS (SELECT 1 FROM json_each({}))",
-                        column_sql
-                    )),
-                    ArrayOperator::ContainedBy => self.build_custom_expression(
-                        format!(
-                            "NOT EXISTS (SELECT 1 FROM json_each({}) WHERE value NOT IN ({}))",
-                            column_sql,
-                            db_sql::placeholders(db_type, values.len()).join(", ")
-                        ),
-                        Self::sea_value_list(values),
-                    ),
+                    ArrayOperator::ContainedBy => {
+                        let (listed, null_allowed) = split_nulls(values);
+                        let operands = db_sql::placeholders(db_type, listed.len());
+                        self.build_custom_expression(
+                            db_sql::array_contained_by(
+                                column_sql,
+                                &format!("json_each({})", column_sql),
+                                "value",
+                                &operands,
+                                null_allowed,
+                            ),
+                            Self::sea_value_list(&listed),
+                        )
+                    }
                     ArrayOperator::Overlaps if values.is_empty() => Expr::cust("0 = 1".to_string()),
                     ArrayOperator::Overlaps => self.build_custom_expression(
                         repeated_check(element_matches, values.len(), " OR "),
@@ -138,4 +162,15 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
     }
+}
+
+/// The non-NULL values of a list, and whether it also held a NULL.
+fn split_nulls(values: &[serde_json::Value]) -> (Vec<serde_json::Value>, bool) {
+    let listed: Vec<serde_json::Value> = values
+        .iter()
+        .filter(|value| !value.is_null())
+        .cloned()
+        .collect();
+    let null_allowed = listed.len() < values.len();
+    (listed, null_allowed)
 }

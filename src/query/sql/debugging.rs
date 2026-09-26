@@ -20,6 +20,7 @@ impl<M: Model> QueryBuilder<M> {
             Operator::IsNull => "IS NULL",
             Operator::IsNotNull => "IS NOT NULL",
             Operator::Between => "BETWEEN",
+            Operator::NotBetween => "NOT BETWEEN",
             Operator::JsonContains => "JSON_CONTAINS",
             Operator::JsonContainedBy => "JSON_CONTAINED_BY",
             Operator::JsonKeyExists => "JSON_KEY_EXISTS",
@@ -42,14 +43,17 @@ impl<M: Model> QueryBuilder<M> {
             ConditionValue::Range(low, high) => format!("{}..{}", low, high),
             ConditionValue::None => "NULL".to_string(),
             ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
-            ConditionValue::RawExprWithValues { sql, .. } => sql.clone(),
+            ConditionValue::RawExprWithValues { sql, .. }
+            | ConditionValue::RawTemplate { sql, .. } => sql.clone(),
+            ConditionValue::Column(other) => other.clone(),
         }
     }
 
     fn describe_condition(condition: &WhereCondition) -> String {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(sql))
-            | (Operator::Raw, ConditionValue::RawExprWithValues { sql, .. }) => {
+            | (Operator::Raw, ConditionValue::RawExprWithValues { sql, .. })
+            | (Operator::Raw, ConditionValue::RawTemplate { sql, .. }) => {
                 if condition.column.is_empty() {
                     sql.clone()
                 } else {
@@ -73,21 +77,15 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// A HAVING template with each `?` replaced by the JSON value bound to it.
-    fn describe_having_clause(template: &str, bindings: &[serde_json::Value]) -> String {
+    fn describe_having_clause(template: &str, bindings: &[crate::internal::Value]) -> String {
         let mut values = bindings.iter();
-        let mut described = String::with_capacity(template.len());
-
-        for ch in template.chars() {
-            if ch == '?'
-                && let Some(value) = values.next()
-            {
-                described.push_str(&value.to_string());
-            } else {
-                described.push(ch);
+        db_sql::map_template_placeholders(template, || match values.next() {
+            // The value as the statement preview writes it.
+            Some(value) => {
+                db_sql::inline_parameters(DatabaseType::Postgres, "$1", std::slice::from_ref(value))
             }
-        }
-
-        described
+            None => "?".to_string(),
+        })
     }
 
     fn describe_or_group(group: &OrGroup) -> String {
@@ -233,6 +231,13 @@ impl<M: Model> QueryBuilder<M> {
         for condition in &self.conditions {
             info.add_condition(Self::describe_condition(condition));
         }
+        for group in &self.or_groups {
+            let group = Self::describe_or_group(group);
+            if !group.is_empty() {
+                info.add_condition(group);
+            }
+        }
+        info.error = self.validate().err().map(|error| error.to_string());
 
         for (column, direction) in &self.order_by {
             info.add_order_by(format!("{} {}", column, direction.as_str()));
@@ -261,6 +266,18 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         info
+    }
+
+    /// Check the query without running it: `Err` with the reason when a
+    /// terminal would refuse it — an unsafe column, a bad raw fragment, a
+    /// zero page — which is otherwise reported only when it runs.
+    ///
+    /// ```ignore
+    /// let query = Post::query().order_by(params.sort.as_str(), Order::Asc);
+    /// query.validate()?; // answer 400 before touching the database
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        self.ensure_query_is_executable()
     }
 
     /// The statement [`get()`](Self::get) would run, with its bound values

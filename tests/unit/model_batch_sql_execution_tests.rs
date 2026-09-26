@@ -120,42 +120,34 @@ fn filtered_soft_delete_builder() -> BatchUpdateBuilder<BatchSqlSoftDeleteUser> 
 }
 
 #[test]
-fn batch_update_includes_trashed_rows_by_default() {
+fn batch_update_leaves_trashed_rows_out_by_default() {
     let (sql, _) = filtered_soft_delete_builder()
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
-
-    assert!(
-        !sql.contains("deleted_at"),
-        "the default scope must not filter soft-deleted rows: {sql}"
-    );
-}
-
-#[test]
-fn batch_update_without_trashed_restores_the_active_only_scope() {
-    let (sql, _) = filtered_soft_delete_builder()
-        .without_trashed()
         .build_update_statement(crate::config::DatabaseType::SQLite)
         .expect("statement should build");
 
     assert!(
         sql.contains(r#""deleted_at" IS NULL"#),
-        "without_trashed() must scope out soft-deleted rows: {sql}"
+        "the default scope leaves soft-deleted rows out, as a query does: {sql}"
     );
+    let (explicit_sql, _) = filtered_soft_delete_builder()
+        .with_trashed()
+        .without_trashed()
+        .build_update_statement(crate::config::DatabaseType::SQLite)
+        .expect("statement should build");
+    assert_eq!(sql, explicit_sql);
 }
 
 #[test]
-fn batch_update_with_trashed_is_the_default_scope() {
-    let (default_sql, _) = filtered_soft_delete_builder()
-        .build_update_statement(crate::config::DatabaseType::SQLite)
-        .expect("statement should build");
-    let (explicit_sql, _) = filtered_soft_delete_builder()
-        .without_trashed()
+fn batch_update_with_trashed_reaches_the_trash_too() {
+    let (sql, _) = filtered_soft_delete_builder()
         .with_trashed()
         .build_update_statement(crate::config::DatabaseType::SQLite)
         .expect("statement should build");
 
-    assert_eq!(default_sql, explicit_sql);
+    assert!(
+        !sql.contains("deleted_at"),
+        "with_trashed() must not filter soft-deleted rows: {sql}"
+    );
 }
 
 #[test]
@@ -224,20 +216,6 @@ fn batch_update_without_limit_keeps_a_plain_where_clause() {
         sql.ends_with(r#" WHERE "id" = $3"#),
         "unexpected sql: {sql}"
     );
-}
-
-#[test]
-fn batch_update_execute_rejects_a_returning_flag_it_cannot_honour() {
-    let err = filtered_builder()
-        .returning()
-        .ensure_returning_terminal()
-        .unwrap_err();
-
-    assert!(
-        err.to_string().contains("requires execute_returning()"),
-        "unexpected error: {err}"
-    );
-    assert!(filtered_builder().ensure_returning_terminal().is_ok());
 }
 
 #[test]

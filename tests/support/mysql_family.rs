@@ -109,3 +109,95 @@ async fn json_extract_filters_on_a_json_column() {
     .expect("JSON_EXTRACT query should run");
     assert_eq!(rows, vec![serde_json::json!({ "name": "Laptop" })]);
 }
+
+/// A migrator cancelled while it holds the migration lock frees the lock. The
+/// named lock belongs to a session, whose pooled connection used to go back to
+/// the pool still holding it, so every later migrator waited out its timeout.
+#[tokio::test]
+async fn a_cancelled_migration_run_frees_the_migration_lock() {
+    use std::time::{Duration, Instant};
+    use tideorm::migration::{Migration, Migrator, Schema};
+
+    struct Stalls;
+
+    #[async_trait]
+    impl Migration for Stalls {
+        fn version(&self) -> &str {
+            "20260926_001"
+        }
+
+        fn name(&self) -> &str {
+            "stalls"
+        }
+
+        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+
+    if !backend::connect().await {
+        return;
+    }
+    let ledger = "cancelled_lock_migrations";
+    let migrator = Migrator::new().migrations_table(ledger).add(Stalls);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), migrator.run())
+            .await
+            .is_err(),
+        "the stalled migration should still be running"
+    );
+
+    let lock_is_free = || async {
+        let rows = Database::raw_json("SELECT IS_FREE_LOCK('tideorm_migrations') AS free")
+            .await
+            .expect("IS_FREE_LOCK failed");
+        rows[0]["free"] == serde_json::json!(1)
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lock_is_free().await {
+        assert!(
+            Instant::now() < deadline,
+            "the cancelled migrator still holds the migration lock"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A run that completes takes the lock and gives it back.
+    struct Quick;
+
+    #[async_trait]
+    impl Migration for Quick {
+        fn version(&self) -> &str {
+            "20260926_002"
+        }
+
+        fn name(&self) -> &str {
+            "quick"
+        }
+
+        async fn up(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+
+        async fn down(&self, _schema: &mut Schema) -> tideorm::Result<()> {
+            Ok(())
+        }
+    }
+    let result = Migrator::new()
+        .migrations_table(ledger)
+        .add(Quick)
+        .run()
+        .await
+        .expect("a migrator after the cancelled one should run");
+    assert_eq!(result.applied.len(), 1);
+    assert!(lock_is_free().await, "a finished run releases the lock");
+
+    Database::execute(&format!("DROP TABLE IF EXISTS `{ledger}`"))
+        .await
+        .expect("failed to drop the ledger");
+}

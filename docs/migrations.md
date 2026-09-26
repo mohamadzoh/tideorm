@@ -134,6 +134,20 @@ pub struct User {
 }
 ```
 
+### Renaming a Table
+
+```rust
+async fn up(&self, schema: &mut Schema) -> Result<()> {
+    schema.rename_table("posts", "articles").await
+}
+
+async fn down(&self, schema: &mut Schema) -> Result<()> {
+    schema.rename_table("articles", "posts").await
+}
+```
+
+MySQL and MariaDB run `RENAME TABLE`, PostgreSQL and SQLite `ALTER TABLE ... RENAME TO`. The rows, columns and indexes move with the table, and foreign keys in other tables follow it.
+
 ---
 
 ## Schema Synchronization (Development Only)
@@ -160,6 +174,8 @@ TideConfig::init()
     .connect()
     .await?;
 ```
+
+`SchemaWriter::write_schema("schema.sql").await?` writes the same file at any time: it reads every table of the connected database, with its columns, primary key and indexes.
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
 

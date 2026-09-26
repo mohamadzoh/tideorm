@@ -841,3 +841,25 @@ fn a_mysql_array_column_default_is_written_as_an_expression() {
             .contains("TEXT[] DEFAULT '[]'")
     );
 }
+
+#[test]
+fn test_rename_table_uses_each_backends_statement() {
+    assert_eq!(
+        ddl::rename_table(DatabaseType::Postgres, "users", "members"),
+        "ALTER TABLE \"users\" RENAME TO \"members\""
+    );
+    assert_eq!(
+        ddl::rename_table(DatabaseType::SQLite, "users", "members"),
+        "ALTER TABLE \"users\" RENAME TO \"members\""
+    );
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(
+            ddl::rename_table(db_type, "users", "members"),
+            "RENAME TABLE `users` TO `members`"
+        );
+    }
+    assert_eq!(
+        ddl::rename_table(DatabaseType::Postgres, "we\"ird", "members"),
+        "ALTER TABLE \"we\"\"ird\" RENAME TO \"members\""
+    );
+}

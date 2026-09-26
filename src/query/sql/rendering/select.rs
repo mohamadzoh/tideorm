@@ -11,11 +11,28 @@ impl<M: Model> QueryBuilder<M> {
     /// some other table, and anything that is not a column reference at all,
     /// round-trips unchanged because the qualifier and the remainder are
     /// rejoined exactly as they were split.
-    fn canonical_model_identifier<'a>(&self, identifier: &'a str) -> std::borrow::Cow<'a, str> {
+    ///
+    /// On a query with joins, an unqualified model column is qualified with the
+    /// model's table: a joined table can have a column of the same name, which
+    /// the database would otherwise reject as ambiguous.
+    pub(in crate::query) fn canonical_model_identifier<'a>(
+        &self,
+        identifier: &'a str,
+    ) -> std::borrow::Cow<'a, str> {
         match M::canonical_column_parts(identifier) {
             (Some(table), column) => std::borrow::Cow::Owned(format!("{}.{}", table, column)),
+            (None, column) if self.qualifies_model_column(column) => {
+                std::borrow::Cow::Owned(format!("{}.{}", M::table_name(), column))
+            }
             (None, column) => std::borrow::Cow::Borrowed(column),
         }
+    }
+
+    /// Whether an unqualified reference to `column`, a database column name,
+    /// is written with the model's table: when it is one of the model's
+    /// columns and the query joins another table.
+    pub(in crate::query) fn qualifies_model_column(&self, column: &str) -> bool {
+        !self.joins.is_empty() && M::column_names().contains(&column)
     }
 
     pub(crate) fn format_column_for_db(&self, db_type: DatabaseType, column: &str) -> String {
@@ -69,7 +86,7 @@ impl<M: Model> QueryBuilder<M> {
             db_sql::quote_ident(db_type, table),
             db_sql::quote_ident(
                 db_type,
-                self.canonical_model_identifier(identifier).as_ref()
+                M::canonical_column_name(identifier).unwrap_or(identifier)
             )
         )
     }
@@ -164,8 +181,15 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
+        // Window columns are Rust field names or database columns, as in every
+        // other slot, so they are rendered the way the query renders those.
+        let canonical = |column: &str| self.canonical_model_identifier(column).into_owned();
         for window_function in &self.window_functions {
-            expressions.push(window_function.to_sql_for_db(db_type));
+            expressions.push(
+                window_function
+                    .map_columns(&canonical)
+                    .to_sql_for_db(db_type),
+            );
         }
 
         let keyword = if self.is_distinct() {
@@ -217,16 +241,11 @@ impl<M: Model> QueryBuilder<M> {
             return template.to_string();
         }
 
-        let mut rendered = String::with_capacity(template.len());
-        for ch in template.chars() {
-            if ch == '?' {
-                rendered.push_str(&db_sql::placeholder(db_type, *next_index));
-                *next_index += 1;
-            } else {
-                rendered.push(ch);
-            }
-        }
-        rendered
+        db_sql::map_template_placeholders(template, || {
+            let placeholder = db_sql::placeholder(db_type, *next_index);
+            *next_index += 1;
+            placeholder
+        })
     }
 
     fn append_group_by_and_having_sql(
@@ -255,7 +274,7 @@ impl<M: Model> QueryBuilder<M> {
                         db_type,
                         &mut next_index,
                     );
-                    params.extend(bindings.iter().map(crate::internal::json_to_db_value));
+                    params.extend(bindings.iter().cloned());
                     clause
                 })
                 .collect();
@@ -442,11 +461,25 @@ impl<M: Model> QueryBuilder<M> {
     /// This query as an operand of another's `UNION`, with its own ordering,
     /// limit and offset. PostgreSQL and MySQL parenthesize an operand, which may
     /// then carry them; SQLite takes a bare select there, so an ordered or
-    /// limited operand is read through a derived table.
+    /// limited operand is read through a derived table. An operand with unions
+    /// or CTEs of its own is read whole through a derived table on every
+    /// backend, so none of its branches and none of its CTEs are lost.
     pub(crate) fn build_compound_operand_sql_for_db(
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
+        if !self.unions.is_empty() || !self.ctes.is_empty() {
+            let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
+            return (
+                format!(
+                    "SELECT * FROM ({}) AS {}",
+                    sql,
+                    db_sql::quote_ident(db_type, "tideorm_union_operand")
+                ),
+                params,
+            );
+        }
+
         let (mut sql, mut params) = self.build_base_select_sql_with_params_for_db(db_type);
         if self.order_by.is_empty() && self.limit_value.is_none() && self.offset_value.is_none() {
             return (sql, params);

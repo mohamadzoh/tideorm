@@ -370,10 +370,10 @@ pub trait HasTranslations {
             _ => return serde_json::json!({}),
         };
 
-        let translations = json
-            .get("translations")
-            .map(TranslationsData::from_json)
-            .unwrap_or_default();
+        // Read through the accessor, as every translation lookup does: the
+        // serialized JSON need not carry the raw column under that name, or at
+        // all, when the model's own serde renames or skips it.
+        let translations = self.get_translations_data().unwrap_or_default();
 
         // A field without a translation keeps the default value already in `json`.
         for field in Self::translatable_fields() {

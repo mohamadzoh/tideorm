@@ -752,7 +752,7 @@ fn unrenderable_query() -> crate::query::QueryBuilder<MutationGuardUser> {
 async fn aggregates_reject_a_condition_that_cannot_be_rendered() {
     // The aggregates' SeaORM path used to drop such a condition from its WHERE
     // clause, so the aggregate silently covered every row.
-    let sum = unrenderable_query().sum("id").await.unwrap_err();
+    let sum = unrenderable_query().sum::<i64>("id").await.unwrap_err();
     assert!(
         sum.to_string().contains("cannot be rendered as SQL"),
         "{sum}"
@@ -864,11 +864,11 @@ async fn aggregates_run_through_the_logged_statement_path() {
     let distinct = MutationGuardUser::query().count_distinct("name").await;
     let total = MutationGuardUser::query()
         .where_eq("name", "b")
-        .sum("id")
+        .sum::<i64>("id")
         .await;
     let empty = MutationGuardUser::query()
         .where_eq("name", "nobody")
-        .max("id")
+        .max::<i64>("id")
         .await;
     let history = crate::logging::QueryLogger::history();
 
@@ -880,8 +880,8 @@ async fn aggregates_run_through_the_logged_statement_path() {
     cleanup_query_mutation_cache_test_state();
 
     assert_eq!(distinct.expect("count_distinct should succeed"), 2);
-    assert_eq!(total.expect("sum should succeed"), 5.0);
-    assert_eq!(empty.expect("an aggregate over no rows is zero"), 0.0);
+    assert_eq!(total.expect("sum should succeed"), 5);
+    assert_eq!(empty.expect("a MAX over no rows is None"), None);
     // The SeaORM path the unjoined aggregates used to take bypassed the query log.
     assert!(
         history
@@ -893,4 +893,21 @@ async fn aggregates_run_through_the_logged_statement_path() {
         history.iter().any(|entry| entry.sql.contains("SUM(")),
         "{history:?}"
     );
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn a_query_renders_for_the_transaction_it_runs_in() {
+    let _guard = query_mutation_cache_test_guard().lock().await;
+    crate::Database::reset_global();
+    let db = crate::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite should connect");
+
+    let rendered = db
+        .transaction(|_| Box::pin(async { Ok(MutationGuardUser::query().db_type_for_sql()) }))
+        .await
+        .expect("transaction should run");
+
+    assert_eq!(rendered, crate::config::DatabaseType::SQLite);
 }

@@ -64,9 +64,17 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     let kind = field
         .relation_kind()
         .expect("relation fields have a relation wrapper type");
-    let related_ty = match field.related_types().into_iter().next() {
-        Some(related_ty) => related_ty,
-        None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
+    let related_types = field.related_types();
+    let Some(related_ty) = related_types.first() else {
+        return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind);
+    };
+    // The loader joins a `has_many_through` pivot in, so its soft-delete scope
+    // can filter the same query.
+    let find = match (kind, related_types.get(1)) {
+        (RelationKind::HasManyThrough, Some(pivot_ty)) => {
+            quote! { ::tideorm::internal::scoped_find_through::<#related_ty, #pivot_ty>() }
+        }
+        _ => quote! { ::tideorm::internal::scoped_find::<#related_ty>() },
     };
 
     // Resolve the related rows of every parent in one query, as `Vec<Vec<R>>` for a
@@ -79,7 +87,7 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
                     for parents in entity_models.chunks(#EAGER_LOAD_CHUNK) {
                         related.extend(
                             parents
-                                .load_many(::tideorm::internal::scoped_find::<#related_ty>(), &connection.executor())
+                                .load_many(#find, &connection.executor())
                                 .await
                                 .map_err(::tideorm::Error::from)?,
                         );
@@ -122,7 +130,7 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
             false,
         ),
         RelationKind::MorphOne | RelationKind::MorphMany => {
-            match morph_lookup(ctx, field, &related_ty, kind == RelationKind::MorphMany) {
+            match morph_lookup(ctx, field, related_ty, kind == RelationKind::MorphMany) {
                 Some(lookup) => (lookup, kind == RelationKind::MorphMany),
                 None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
             }

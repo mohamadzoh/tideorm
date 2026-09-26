@@ -90,6 +90,10 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 #primary_key_condition_impl
             }
 
+            fn __rebuild_relations(self) -> Self {
+                self.with_relations()
+            }
+
             fn refresh_runtime_relations_from(&mut self, previous: &Self) {
                 #(#relation_state_refreshes)*
             }

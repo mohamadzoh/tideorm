@@ -272,3 +272,43 @@ pub(crate) fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
 
     output
 }
+
+/// Replace each `?` of a template that stands outside a quoted literal or
+/// identifier with `next()`, keeping the rest as written. A `?` inside quotes
+/// is text, such as a LIKE pattern, not a parameter; so is one inside `[..]`,
+/// which the engine's statement tokenizer reads as quoted too and would never
+/// bind.
+pub(crate) fn map_template_placeholders(
+    template: &str,
+    mut next: impl FnMut() -> String,
+) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    // The character that closes the quoted run the scan is inside.
+    let mut quote: Option<char> = None;
+    for ch in template.chars() {
+        match quote {
+            // A doubled quote re-enters the literal on its next character.
+            Some(close) if ch == close => quote = None,
+            Some(_) => {}
+            None if matches!(ch, '\'' | '"' | '`') => quote = Some(ch),
+            None if ch == '[' => quote = Some(']'),
+            None if ch == '?' => {
+                rendered.push_str(&next());
+                continue;
+            }
+            None => {}
+        }
+        rendered.push(ch);
+    }
+    rendered
+}
+
+/// How many parameters a template takes: its `?`s outside quotes.
+pub(crate) fn count_template_placeholders(template: &str) -> usize {
+    let mut count = 0;
+    map_template_placeholders(template, || {
+        count += 1;
+        String::new()
+    });
+    count
+}

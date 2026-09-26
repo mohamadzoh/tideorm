@@ -11,6 +11,12 @@ impl<M: Model> QueryBuilder<M> {
         count_query.order_by.clear();
         count_query.limit_value = None;
         count_query.offset_value = None;
+        // A grouped query counts its groups. Its grouping columns identify
+        // them, and the model's other columns are not grouped, so the inner
+        // query selects only those unless the caller chose a projection.
+        if !count_query.group_by.is_empty() && !count_query.has_explicit_projection() {
+            count_query.select_columns = Some(count_query.group_by.clone());
+        }
 
         if count_query.unions.is_empty()
             && count_query.ctes.is_empty()
@@ -55,10 +61,16 @@ impl<M: Model> QueryBuilder<M> {
         exists_query.offset_value = None;
 
         if exists_query.unions.is_empty() {
-            exists_query.select_columns = None;
-            exists_query.raw_select_expressions = vec!["1".to_string()];
-            exists_query.subquery_select_expressions.clear();
-            exists_query.window_functions.clear();
+            // HAVING can name one of the caller's select aliases, so a query
+            // with both keeps its projection.
+            let having_needs_projection = !exists_query.having_conditions.is_empty()
+                && exists_query.has_explicit_projection();
+            if !having_needs_projection {
+                exists_query.select_columns = None;
+                exists_query.raw_select_expressions = vec!["1".to_string()];
+                exists_query.subquery_select_expressions.clear();
+                exists_query.window_functions.clear();
+            }
 
             if exists_query.ctes.is_empty() && !exists_query.lock_for_update {
                 let (inner_sql, params) =

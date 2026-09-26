@@ -161,6 +161,8 @@ impl Database {
         // Whether this is a SAVEPOINT inside a caller's transaction rather than
         // a top-level one, which decides how a leaked handle can be terminated.
         let nested = matches!(connection, ConnectionRef::Transaction(_));
+        // The pool the transaction runs on, for what is remembered per database.
+        let origin = super::state::origin_of(&connection);
         let txn = Arc::new(
             connection
                 .executor()
@@ -173,6 +175,7 @@ impl Database {
         let pending = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
         let outcome = with_connection_override(
             ConnectionRef::Transaction(txn.clone()),
+            origin,
             Some(pending.clone()),
             f(&tx),
         )

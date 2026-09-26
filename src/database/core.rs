@@ -176,6 +176,19 @@ impl Database {
         }
     }
 
+    /// The backend of the connection this handle's statements run on: the
+    /// enclosing transaction's when there is one, since a handle used inside a
+    /// transaction executes on it.
+    pub(crate) fn execution_backend(&self) -> crate::config::DatabaseType {
+        match self.__get_connection() {
+            Ok(connection) => Self::resolve_backend(
+                crate::config::TideConfig::get_database_type(),
+                connection.backend(),
+            ),
+            Err(_) => self.backend(),
+        }
+    }
+
     /// Reconcile the handle's real backend with the configured database type.
     fn resolve_backend(
         configured: Option<crate::config::DatabaseType>,

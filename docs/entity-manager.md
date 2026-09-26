@@ -107,6 +107,10 @@ Managed entities expose:
 
 `merge(...)` attaches a detached instance into the current context. `detach(...)` keeps the in-memory value but removes it from future flushes. `clear()` detaches the whole context.
 
+A managed entity keeps the primary key it was loaded or saved with: a flush refuses one whose key was changed, rather than write it over the row holding the new key. Detach it and persist a new entity instead.
+
+A flush that fails, is cancelled part way, or runs inside a transaction that later rolls back leaves the context as it was before the flush, since none of what it wrote was committed.
+
 ## Compatibility Helpers
 
 The `EntityManager` facade is the recommended API, but the generated compatibility entry points remain available:

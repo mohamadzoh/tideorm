@@ -210,6 +210,79 @@ pub(super) fn rollback_entity_manager_state(
     *entity_manager.snapshots.write() = rollback_state.snapshots;
 }
 
+/// The entity manager's state before a unit of work, restored unless the work
+/// commits: when it fails, when its future is dropped part way (which rolls
+/// its transaction back as well), and when a transaction enclosing it rolls
+/// back later. Otherwise the manager would keep ids and clean snapshots for
+/// rows that were never committed.
+pub(super) struct PendingRollback {
+    entity_manager: Arc<EntityManager>,
+    checkpoints: Arc<Mutex<ManagedCheckpoints>>,
+    identity_rollback: Arc<Mutex<IdentityRollbackLog>>,
+    state: Option<EntityManagerRollbackState>,
+}
+
+impl PendingRollback {
+    /// Capture the state to restore, with `checkpoints` taken so far; a flush
+    /// adds the rest through [`checkpoints`](Self::checkpoints) as it goes.
+    pub(super) fn new(
+        entity_manager: &Arc<EntityManager>,
+        checkpoints: ManagedCheckpoints,
+    ) -> Self {
+        Self {
+            state: Some(capture_entity_manager_rollback_state(entity_manager)),
+            entity_manager: entity_manager.clone(),
+            checkpoints: Arc::new(Mutex::new(checkpoints)),
+            identity_rollback: new_identity_rollback_log(),
+        }
+    }
+
+    pub(super) fn checkpoints(&self) -> Arc<Mutex<ManagedCheckpoints>> {
+        self.checkpoints.clone()
+    }
+
+    pub(super) fn identity_rollback(&self) -> Arc<Mutex<IdentityRollbackLog>> {
+        self.identity_rollback.clone()
+    }
+
+    /// The work's transaction committed: keep what it did, unless a
+    /// transaction around it rolls back.
+    pub(super) fn committed(mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        let entity_manager = self.entity_manager.clone();
+        let checkpoints = self.checkpoints.clone();
+        let identity_rollback = self.identity_rollback.clone();
+        crate::cache::undo_on_rollback(move || {
+            restore_entity_manager_state(&entity_manager, &checkpoints, state, &identity_rollback);
+        });
+    }
+}
+
+impl Drop for PendingRollback {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            restore_entity_manager_state(
+                &self.entity_manager,
+                &self.checkpoints,
+                state,
+                &self.identity_rollback,
+            );
+        }
+    }
+}
+
+fn restore_entity_manager_state(
+    entity_manager: &EntityManager,
+    checkpoints: &Mutex<ManagedCheckpoints>,
+    state: EntityManagerRollbackState,
+    identity_rollback: &Arc<Mutex<IdentityRollbackLog>>,
+) {
+    let checkpoints = std::mem::take(&mut *checkpoints.lock());
+    rollback_entity_manager_state(entity_manager, checkpoints, state, identity_rollback);
+}
+
 pub async fn save_with_entity_manager<T>(
     entity: &T,
     entity_manager: &Arc<EntityManager>,
@@ -221,14 +294,15 @@ where
         return save_in_scope(entity, entity_manager).await;
     }
 
-    let rollback_state = capture_entity_manager_rollback_state(entity_manager.as_ref());
-    let checkpoints = capture_managed_checkpoints(entity_manager.as_ref());
-    let identity_rollback = new_identity_rollback_log();
+    let rollback = PendingRollback::new(
+        entity_manager,
+        capture_managed_checkpoints(entity_manager.as_ref()),
+    );
     let db = entity_manager.db.clone();
     let entity_manager_for_txn = entity_manager.clone();
-    let identity_rollback_for_txn = identity_rollback.clone();
+    let identity_rollback_for_txn = rollback.identity_rollback();
     let entity = entity.clone();
-    let result = db
+    let saved = db
         .transaction(move |_| {
             Box::pin(async move {
                 with_entity_manager_transaction_scope(
@@ -238,20 +312,9 @@ where
                 .await
             })
         })
-        .await;
-
-    match result {
-        Ok(saved) => Ok(saved),
-        Err(error) => {
-            rollback_entity_manager_state(
-                entity_manager.as_ref(),
-                checkpoints,
-                rollback_state,
-                &identity_rollback,
-            );
-            Err(error)
-        }
-    }
+        .await?;
+    rollback.committed();
+    Ok(saved)
 }
 
 /// Save `entity` and sync its loaded relations inside the unit of work the caller

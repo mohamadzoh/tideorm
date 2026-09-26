@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
@@ -8,7 +9,9 @@ use crate::error::{Error, Result};
 
 use super::Model;
 
-type IdentityKey = (TypeId, String);
+/// A baseline's model type, the pool its row was read from, and its primary
+/// key: the same key in two databases is two rows.
+type IdentityKey = (TypeId, Option<u64>, String);
 type SnapshotValues = HashMap<String, serde_json::Value>;
 
 /// Upper bound on how many dirty-tracking baselines are kept in memory.
@@ -77,7 +80,7 @@ impl SnapshotStore {
 
     fn remove_model_type(&mut self, model_type: TypeId) {
         let mut evicted = Vec::new();
-        self.entries.retain(|(type_id, _), entry| {
+        self.entries.retain(|(type_id, _, _), entry| {
             if *type_id == model_type {
                 evicted.push(entry.sequence);
                 false
@@ -98,6 +101,27 @@ impl SnapshotStore {
     }
 }
 
+thread_local! {
+    /// The pool a load in progress reads from, when it is not the scope's.
+    static LOADING_ORIGIN: Cell<Option<Option<u64>>> = const { Cell::new(None) };
+}
+
+/// Run `load` with the rows it converts remembered as read from `origin`,
+/// for a load through a handle other than the scope's own connection.
+pub(crate) fn loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -> T {
+    let previous = LOADING_ORIGIN.with(|slot| slot.replace(Some(origin)));
+    let result = load();
+    LOADING_ORIGIN.with(|slot| slot.set(previous));
+    result
+}
+
+/// The pool the baselines being remembered or read belong to.
+fn origin() -> Option<u64> {
+    LOADING_ORIGIN
+        .with(Cell::get)
+        .unwrap_or_else(crate::database::__scope_origin)
+}
+
 fn snapshot_store() -> &'static RwLock<SnapshotStore> {
     static STORE: OnceLock<RwLock<SnapshotStore>> = OnceLock::new();
     STORE.get_or_init(|| RwLock::new(SnapshotStore::new(DEFAULT_SNAPSHOT_CAPACITY)))
@@ -111,7 +135,7 @@ fn snapshot_key_for_primary_key<M: Model>(
     }
 
     let key = serde_json::to_string(primary_key).map_err(Error::from)?;
-    Ok(Some((TypeId::of::<M>(), key)))
+    Ok(Some((TypeId::of::<M>(), origin(), key)))
 }
 
 fn snapshot_key_for_model<M: Model>(model: &M) -> Result<Option<IdentityKey>> {

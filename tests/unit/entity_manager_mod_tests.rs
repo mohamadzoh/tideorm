@@ -289,6 +289,13 @@ impl Model for RefreshAwareSyncOnlyModel {
         Ok(0)
     }
 
+    async fn __force_delete(self) -> crate::error::Result<u64>
+    where
+        Self: Sized,
+    {
+        Ok(0)
+    }
+
     async fn __insert_with_conflict(
         model: Self,
         _builder: OnConflictBuilder<Self>,

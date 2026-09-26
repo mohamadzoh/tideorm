@@ -10,9 +10,17 @@ mod builder_test_model {
         pub title: String,
         pub content: String,
     }
+
+    #[tideorm::model(table = "fulltext_test_notes", soft_delete)]
+    pub struct FullTextTestNote {
+        #[tideorm(primary_key, auto_increment)]
+        pub id: i64,
+        pub body: String,
+        pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
 }
 
-use builder_test_model::FullTextTestArticle;
+use builder_test_model::{FullTextTestArticle, FullTextTestNote};
 
 #[test]
 fn test_search_mode_display() {
@@ -63,7 +71,7 @@ fn test_term_filters_leave_words_out_of_the_search() {
     assert!(sql.contains("MATCH ?"), "{sql}");
     assert_eq!(
         params[0],
-        Value::String(Some("\"+rust\" \"ownership\"".to_string()))
+        Value::String(Some("{\"title\"} : (\"+rust\" \"ownership\")".to_string()))
     );
 
     let nothing_left = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "the go")
@@ -168,6 +176,16 @@ fn test_generate_snippet() {
     let snippet = generate_snippet(text, "fox", 5, "<mark>", "</mark>");
     assert!(snippet.contains("<mark>fox</mark>"));
     assert!(snippet.contains("..."));
+
+    // The match is always in the snippet, with as many words on each side.
+    assert_eq!(
+        generate_snippet(text, "fox", 0, "<b>", "</b>"),
+        "...<b>fox</b>..."
+    );
+    assert_eq!(
+        generate_snippet(text, "fox", 1, "<b>", "</b>"),
+        "...brown <b>fox</b> jumps..."
+    );
 }
 
 #[test]
@@ -220,9 +238,14 @@ fn test_fulltext_index_sqlite() {
         vec!["title".to_string(), "content".to_string()],
     );
     let sqls = index.to_sqlite_sql();
-    assert!(sqls.len() == 4);
+    assert_eq!(sqls.len(), 5);
     assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
     assert!(sqls[0].contains("fts5"));
+    // Rows the table held before the index existed are indexed too.
+    assert_eq!(
+        sqls[4],
+        "INSERT INTO \"articles_fts\"(\"articles_fts\") VALUES('rebuild')"
+    );
 }
 
 #[test]
@@ -459,7 +482,7 @@ fn test_mysql_and_sqlite_fulltext_sql_parameterize_pagination() {
     assert_eq!(
         sqlite_params,
         vec![
-            Value::String(Some("\"portable\" \"query\"".to_string())),
+            Value::String(Some("{\"title\"} : (\"portable\" \"query\")".to_string())),
             Value::BigInt(Some(4)),
         ]
     );
@@ -664,7 +687,10 @@ fn test_sqlite_termless_query_matches_nothing_instead_of_empty_fts5_operand() {
     let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust");
     let (sql, params) = builder.build_sql(DatabaseType::SQLite).unwrap();
     assert!(sql.contains("\"fulltext_test_articles_fts\" MATCH ?"));
-    assert_eq!(params, vec![Value::String(Some("\"rust\"".to_string()))]);
+    assert_eq!(
+        params,
+        vec![Value::String(Some("{\"title\"} : (\"rust\")".to_string()))]
+    );
 }
 
 #[test]
@@ -740,6 +766,8 @@ fn test_each_search_mode_renders_its_own_operand() {
         builder.build_sql(db_type).unwrap().1.remove(0)
     };
     let text = |value: &str| Value::String(Some(value.to_string()));
+    // FTS5 searches every column of the index unless the operand names them.
+    let in_title = |value: &str| text(&format!("{{\"title\"}} : ({value})"));
 
     assert_eq!(
         operand(SearchMode::Phrase, DatabaseType::MySQL),
@@ -755,15 +783,15 @@ fn test_each_search_mode_renders_its_own_operand() {
     );
     assert_eq!(
         operand(SearchMode::Phrase, DatabaseType::SQLite),
-        text("\"rust async\"")
+        in_title("\"rust async\"")
     );
     assert_eq!(
         operand(SearchMode::Prefix, DatabaseType::SQLite),
-        text("\"rust\"* \"async\"*")
+        in_title("\"rust\"* \"async\"*")
     );
     assert_eq!(
         operand(SearchMode::Proximity(3), DatabaseType::SQLite),
-        text("NEAR(\"rust\" \"async\", 3)")
+        in_title("NEAR(\"rust\" \"async\", 3)")
     );
     assert_eq!(
         operand(SearchMode::Boolean, DatabaseType::Postgres),
@@ -805,4 +833,173 @@ fn test_postgres_search_without_words_matches_nothing() {
         assert!(!sql.contains("tsquery"), "{sql}");
         assert!(params.is_empty(), "{params:?}");
     }
+}
+
+#[test]
+fn test_search_leaves_soft_deleted_rows_out_unless_asked() {
+    let search = || FullTextSearchBuilder::<FullTextTestNote>::new(&["body"], "rust");
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::SQLite,
+    ] {
+        let deleted_at = crate::query::db_sql::quote_ident(db_type, "deleted_at");
+        let rendered = |builder: FullTextSearchBuilder<FullTextTestNote>| {
+            [
+                builder.build_sql(db_type).unwrap().0,
+                builder.build_ranked_sql(db_type).unwrap().0,
+                builder.build_count_sql(db_type).unwrap().0,
+            ]
+        };
+        for sql in rendered(search()) {
+            assert!(sql.contains(&format!("{deleted_at} IS NULL")), "{sql}");
+        }
+        for sql in rendered(search().only_trashed()) {
+            assert!(sql.contains(&format!("{deleted_at} IS NOT NULL")), "{sql}");
+        }
+        for sql in rendered(search().with_trashed()) {
+            assert!(!sql.contains(&format!("{deleted_at} IS")), "{sql}");
+        }
+    }
+
+    // A model without soft delete has no scope to add.
+    let (sql, _) = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust")
+        .build_sql(DatabaseType::SQLite)
+        .unwrap();
+    assert!(!sql.contains("deleted_at"), "{sql}");
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+async fn sqlite_execute(db: &crate::database::Database, statements: &[&str]) {
+    for statement in statements {
+        db.__execute_with_params(statement, Vec::new())
+            .await
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn test_sqlite_search_reads_earlier_rows_and_only_the_named_columns() {
+    let db = crate::database::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    sqlite_execute(
+        &db,
+        &[
+            "CREATE TABLE fulltext_test_articles (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT)",
+            "INSERT INTO fulltext_test_articles (title, content) VALUES ('Rust ORMs', 'Tomatoes')",
+            "INSERT INTO fulltext_test_articles (title, content) VALUES ('Gardening', 'rust on the shovel')",
+        ],
+    )
+    .await;
+    let index = FullTextIndex::new(
+        "idx_fulltext_test_articles",
+        "fulltext_test_articles",
+        vec!["title".to_string(), "content".to_string()],
+    );
+    let statements = index.to_sqlite_sql();
+    sqlite_execute(
+        &db,
+        &statements.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await;
+
+    crate::database::__in_db_scope(&db, async {
+        // Both rows predate the index.
+        let both = FullTextTestArticle::search(&["title", "content"], "rust")
+            .count()
+            .await?;
+        assert_eq!(both, 2);
+
+        let in_title = FullTextTestArticle::search(&["title"], "rust")
+            .get()
+            .await?;
+        assert_eq!(in_title.len(), 1);
+        assert_eq!(in_title[0].title, "Rust ORMs");
+        assert_eq!(
+            FullTextTestArticle::search(&["content"], "rust")
+                .count()
+                .await?,
+            1
+        );
+        assert_eq!(
+            FullTextTestArticle::search(&["content"], "gardening")
+                .count()
+                .await?,
+            0
+        );
+
+        // Applying the index again keeps each row indexed once.
+        for statement in index.to_sqlite_sql() {
+            db.__execute_with_params(&statement, Vec::new()).await?;
+        }
+        assert_eq!(
+            FullTextTestArticle::search(&["title", "content"], "rust")
+                .count()
+                .await?,
+            2
+        );
+        Ok(())
+    })
+    .await
+    .expect("searching rows written before the index should succeed");
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn test_sqlite_search_skips_soft_deleted_rows() {
+    let db = crate::database::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    sqlite_execute(
+        &db,
+        &[
+            "CREATE TABLE fulltext_test_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL, deleted_at TEXT)",
+            "INSERT INTO fulltext_test_notes (body) VALUES ('rust is live')",
+            "INSERT INTO fulltext_test_notes (body, deleted_at) VALUES ('rust is trashed', '2026-01-01T00:00:00Z')",
+        ],
+    )
+    .await;
+    let index = FullTextIndex::new(
+        "idx_fulltext_test_notes",
+        "fulltext_test_notes",
+        vec!["body".to_string()],
+    );
+    let statements = index.to_sqlite_sql();
+    sqlite_execute(
+        &db,
+        &statements.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await;
+
+    crate::database::__in_db_scope(&db, async {
+        let live = FullTextTestNote::search(&["body"], "rust").get().await?;
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].body, "rust is live");
+        assert_eq!(
+            FullTextTestNote::search(&["body"], "rust")
+                .get_ranked()
+                .await?
+                .len(),
+            1
+        );
+
+        let trashed = FullTextTestNote::search(&["body"], "rust")
+            .only_trashed()
+            .get()
+            .await?;
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].body, "rust is trashed");
+        assert_eq!(
+            FullTextTestNote::search(&["body"], "rust")
+                .with_trashed()
+                .count()
+                .await?,
+            2
+        );
+        Ok(())
+    })
+    .await
+    .expect("searching a soft-delete model should succeed");
 }

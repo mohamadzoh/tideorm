@@ -112,6 +112,48 @@ pub(crate) fn field_key(
     Some(rename.unwrap_or_else(|| rule.map_or_else(|| name.to_owned(), |rule| rule.apply(name))))
 }
 
+/// Whether a model's own serde derive writes every stored field and reads it
+/// back as written, which a skipped field, a field serialized by a custom
+/// function, or a struct converted `from`/`into` another type does not.
+pub(crate) fn round_trips<'a>(
+    container: &[Attribute],
+    fields: impl IntoIterator<Item = &'a [Attribute]>,
+) -> bool {
+    const CONTAINER_CONVERSIONS: [&str; 4] = ["from", "try_from", "into", "remote"];
+    const LOSSY_FIELD_ITEMS: [&str; 8] = [
+        "skip",
+        "skip_serializing",
+        "skip_deserializing",
+        "skip_serializing_if",
+        "serialize_with",
+        "deserialize_with",
+        "with",
+        "getter",
+    ];
+    let mut lossless = true;
+    for_each_serde_item(container, |meta| {
+        if CONTAINER_CONVERSIONS
+            .iter()
+            .any(|item| meta.path.is_ident(item))
+        {
+            lossless = false;
+        }
+        skip_item(meta)
+    });
+    for attrs in fields {
+        for_each_serde_item(attrs, |meta| {
+            if LOSSY_FIELD_ITEMS
+                .iter()
+                .any(|item| meta.path.is_ident(item))
+            {
+                lossless = false;
+            }
+            skip_item(meta)
+        });
+    }
+    lossless
+}
+
 /// Visit every item of every `#[serde(..)]` attribute. Malformed input is
 /// serde's to report, so a parse failure just ends the visit.
 fn for_each_serde_item(

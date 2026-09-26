@@ -82,17 +82,63 @@ This release is breaking: read the upgrade notes and the removal list before upg
   value — are numbers instead of strings. `get_json()` returns a model's own columns as the
   model's JSON has them on every backend, so SQLite booleans, JSON and timestamps no longer arrive
   in storage form; raw SQL, which has no model, still reports what the database stores. MariaDB
-  declares a JSON column as text, so raw SQL returns its text, which used to be parsed.
+  declares a JSON column as text, so raw SQL returns its text, which used to be parsed. SQLite
+  reports a value it declares no type for (an expression, or a `DECIMAL` column) by what it
+  stores, so a `REAL` such as a float `SUM()` or a running total is a number.
+- **`sum()`, `avg()`, `min()` and `max()` return the type you ask for.** They returned an `f64`,
+  which rounded an integer or decimal total past 2^53 and made the `min`/`max` of a text or date
+  column `0`, a year, or an error. `sum::<T>()` returns `T` (the column's integer type, `Decimal`
+  for an exact total, or `f64`); `avg`, `min` and `max` return `Option<T>`, `None` over no rows,
+  in the model's own type for that column (`min::<DateTime<Utc>>("created_at")`). Annotate the
+  binding — `let total: i64 = query.sum("price").await?;` — or use a turbofish. `aggregates()`
+  returns the tuple you ask for the same way.
+- **A soft-delete model hides and marks trashed rows everywhere.**
+  - `find(id)`, `find_with`, `find_or_fail` and `exists` leave a trashed row out, as every other
+    read does; `find` returned it, so `find(id)` and `exists(id)` could disagree. Read one with
+    `Model::query().with_trashed().find(id)`; `reload()` still reads the record in hand.
+  - `delete()`, `destroy(id)`, `query().delete()` and `delete_all()` mark rows deleted instead of
+    removing them; `force_delete()` (on a model or a query) removes them for good. `delete()` or
+    `delete_all()` of `only_trashed()` rows is an error pointing at `force_delete()`, and
+    `only_trashed().delete_all()` no longer deletes every live row as it used to.
+  - `Model::update_all()` leaves trashed rows out, as a query does; `.with_trashed()` reaches them,
+    and `query().only_trashed().restore()` restores them.
+- **`page(0, n)`, a zero page size and an out-of-range page fail with `Error::Validation`** naming
+  `page` or `per_page`, the error `Model::paginate` gives the same numbers; `page()` reported
+  `Error::Query`.
+- **`order_by("name desc", Order::Asc)` fails** instead of sorting descending: a column may carry
+  a direction only when it agrees with the argument. Read a request's sort string with `sort()`.
+- **`HasManyThrough::count()` counts what `load()` returns**: a pivot row pointing at a deleted or
+  soft-deleted related row no longer counts.
+- **A query with a join qualifies the model's own columns.** A bare model column in a filter, the
+  soft-delete predicate, `latest()`/`oldest()`, `select()` and the aggregates is written
+  `table.column` once the query joins, so a name both tables have is the model's column instead
+  of an "ambiguous column" error. Name a joined table's column as `table.column`, as before.
+- **A projection whose outputs share a name is refused.** `select(vec!["items.id", "tags.id"])`
+  returned one `id` from `get_json()`, and `get()` could fill the model from the joined table;
+  MySQL rejected the same statement as a derived table. Alias one of them (`tags.id AS tag_id`).
+- **Full-text search leaves soft-deleted rows out**, as a query does; `with_trashed()` and
+  `only_trashed()` on the search builder read them. On SQLite a search reads only the columns it
+  names, where it searched every column of the index, and `FullTextIndex::to_sqlite_sql()`
+  returns a fifth statement that indexes the rows the table already holds: rows written before
+  the index was created were never found.
+- **A soft-deleted pivot row unlinks its pair.** `HasManyThrough::load()`, `load_with()`, eager
+  loading and `count()` leave it out, `attach()` restores it instead of finding the pair present,
+  and `sync()` deletes it with the live rows; it used to keep the pair loaded after `sync([])` and
+  block re-attaching it.
+- **The entity manager refuses to flush a managed entity whose primary key was changed.** The
+  flush saved it under the new key, overwriting whichever row held that key. Detach the entity
+  and persist a new one.
 
 ### Removed — Breaking
 
+- **`BatchUpdateBuilder::returning()`**: `execute_returning()` returns the rows by itself, and
+  `execute()` refused a builder marked with `returning()`. Drop the call.
 - **Query builder:** `QueryBuilder::{cache_with_options, begin_or_where_eq, begin_or_where_gt,
   begin_or_where_gte, begin_or_where_lt, begin_or_where_lte, begin_or_where_like,
   begin_or_where_contains, begin_or_where_starts_with, begin_or_where_ends_with, begin_or_where_in,
   begin_or_where_null, begin_or_where_not_null, begin_or_where_between, having_count_gte,
-  having_count_lt, having_count_lte, group_by_columns, left_join_as, right_join, right_join_as,
-  where_column_raw, where_json_path_not_exists, has_no_related, without_trashed, running_avg,
-  last_value}` (use `begin_or().or_where_*()` and the general helpers);
+  having_count_lt, having_count_lte, group_by_columns, where_column_raw, without_trashed,
+  running_avg, last_value}` (use `begin_or().or_where_*()` and the general helpers);
   `OrBranchBuilder::{branch_count, total_conditions}`; `query::OrBranch` (an AND-combined
   `OrGroup` now); `AggregateFunction`; `columns::ColumnOperator` (`ColumnCondition.operator` is a
   `query::Operator`); `WindowFunctionType::as_sql`, `WindowFunction::to_sql`, `CTE::to_sql`;
@@ -131,11 +177,12 @@ This release is breaking: read the upgrade notes and the removal list before upg
   `Transaction::__internal_transaction` (use `connection()`), `database::__current_backend`.
 - **Migrations, schema and sync:** `SyncRegistry::{register_entity, build_schema_builder,
   entity_count}`, `sync::{EntityRegistrationFn, normalize_rust_type}`, `schema::rust_type_to_sql`;
-  `SchemaWriter::{register_schema, get_registered_schemas, clear_registry, write_schema_from_db}`;
+  `SchemaWriter::{register_schema, get_registered_schemas, clear_registry, write_schema_from_db}`
+  (`write_schema` reads the connected database, as `write_schema_from_db` did);
   the 18 typed `TableSchemaBuilder` helpers (`bigint` through `double`) — use
   `.column(ColumnSchema::new(..))`; `TableSchema.primary_key`; `AlterTableBuilder::{add_index,
-  drop_index}` (use `Schema::create_index` / `drop_index`); `Schema::{rename_table,
-  database_type}`; `TableBuilder::index_named`; `MigrationResult::has_rolled_back`;
+  drop_index}` (use `Schema::create_index` / `drop_index`); `Schema::database_type`;
+  `TableBuilder::index_named`; `MigrationResult::has_rolled_back`;
   `SeedResult::{has_rolled_back, total}`; `ModelSchema::columns`;
   `Migrator::migrations_table_name`; the public `CompositePrimaryKey` / `UniqueConstraint`;
   `RegisterModels` for tuples longer than 16. The `schema-sync` SeaORM feature is no longer
@@ -164,8 +211,53 @@ This release is breaking: read the upgrade notes and the removal list before upg
   database, so the second of two competing transactions fails with a retryable
   `LockNotAvailable` error instead.
 - **`QueryBuilder::aggregates(&[Aggregate::count(), Aggregate::sum("amount"), ..])`** computes
-  several aggregates over the same rows in one statement and returns them in order, where five
-  metrics used to take five queries.
+  several aggregates over the same rows in one statement and returns them as the tuple you ask
+  for (`(u64, Decimal, Option<Decimal>)`), where five metrics used to take five queries.
+- **`FullTextSearchBuilder::with_trashed()` and `only_trashed()`** select soft-deleted rows, which
+  a search now leaves out.
+- **`pluck::<T>(column)`, `value::<T>(column)`, `get_as::<T>()` and `paginate(page, per_page)` on
+  `QueryBuilder`** read one column of every row, the column of the first row, each row as your own
+  `Deserialize` type (the shape of a join or a grouped `select_raw()`), and a page together with
+  the count of every matching row, as a `Paginated<M>` that serializes with its `last_page`.
+- **`where_raw_with(sql, params)`**, with `or_where_raw_with` and `and_where_raw_with`, binds values
+  into a raw fragment through `?` placeholders on every backend, so a raw condition no longer needs
+  a value written into its SQL.
+- **`having()` takes a typed comparison**, `having(Aggregate::sum("revenue").gt(5_000))`, with
+  `gt`, `gte`, `lt`, `lte`, `eq` and `ne` on `Aggregate` and the value bound; a raw string still
+  works. **`reorder(column, direction)`** replaces the orders a query has so far.
+- **`QueryBuilder::validate()`** reports why a query would be refused — an unsafe `order_by`
+  from a request, a bad raw fragment, a zero page — without running it, so a handler can answer
+  400 first; `debug()` shows the same reason as `Invalid:` and now lists the OR groups too.
+  `QueryDebugInfo` has a new `error` field.
+- **`EagerQueryBuilder::query(|q| ..)`** shapes the root query of an eager load with any
+  `QueryBuilder` method, so a `.with("posts")` no longer cuts a query off from the methods the
+  eager builder does not forward.
+- **`where_not_between`**, with `or_where_not_between` and `and_where_not_between` on every
+  builder, renders `NOT BETWEEN`; like `where_between`, a NULL bound is refused.
+- **`QueryBuilder::update_all()`** starts a bulk update of the rows a query selects — scopes,
+  filters, OR groups, its soft-delete scope and the database `query_with` names carry over — so a
+  chain of scopes can be updated without restating its filters. A query that joins, groups, pages
+  or unions is refused when the update runs. Batch updates also render for the backend of the
+  connection that runs them.
+- **`where_has::<R>(fk, lk, |q| ..)` and `where_doesnt_have::<R>(..)`** filter by a related
+  model's own query: its soft-delete scope applies, its values bind as its columns' types, and
+  any filter works inside the closure — the typed form of the table-level `has_related`.
+- **`QueryBuilder::find(id)` and `find_or_fail(id)`** look a key up among the rows a query
+  matches, its filters and scope applied.
+- **`sort("-created_at,name")`** orders by a request's sort string — terms separated by commas,
+  `-` or `desc` for descending — checking every column as `order_by` does.
+- **Column comparisons**: `where_column_eq`, `_ne`, `_gt`, `_gte`, `_lt` and `_lte`, with
+  `or_`/`and_` forms, compare two columns of the same row, across a join too.
+- **Every builder has every filter**: the JSON and array filters gained `or_`/`and_` forms and
+  work inside OR groups and batch updates, and `when`/`when_some` work on batch updates, OR
+  groups and eager queries.
+- **Lists come from any iterable.** `where_in`, `where_not_in`, `eq_any`, `ne_all`, the
+  `where_array_*` filters and a typed column's `is_in`/`not_in` take a `Vec`, an array, `&ids` or
+  a set; the array filters take any `Serialize` value, as the other filters do, where they
+  refused a `Uuid`, a timestamp or a `Decimal`.
+- **A typed column of any type compares**: `eq`, `ne`, `is_in` and `not_in` work for a column of
+  any `Serialize` type — an enum, a newtype, a JSON value — and a nullable column
+  (`Column<Option<T>>`) compares with a plain `T`.
 - **`SortOrder`**, the `Order` enum under a second name, for a crate whose own `Order` type (an
   `Order` model) shadows the prelude's.
 - **`t.string_with(name, length)` and `ColumnType::Varchar(n)`** declare a `VARCHAR(n)` column;
@@ -385,6 +477,10 @@ This release is breaking: read the upgrade notes and the removal list before upg
   except below an array, where MySQL's reading stays. On MariaDB, which has no `CAST(.. AS JSON)`,
   these filters and `where_array_*` failed with a syntax error; the document is bound as JSON text
   now.
+- **SQLite's JSON key and path tests disagreed with PostgreSQL and MySQL.** A member holding JSON
+  `null` counted as missing, so `where_json_key_exists` and `where_json_path_exists` skipped it,
+  and a `NULL` column matched `where_json_key_not_exists`, which on the other backends matches
+  neither way. SQLite now tests with `json_type` and leaves a `NULL` column unknown.
 - **`where_in` with more non-integer values than one statement binds failed** (32,766 on SQLite,
   65,535 elsewhere). Past 1,000 values PostgreSQL takes the list as one array parameter and SQLite
   a text list as one JSON value; MySQL keeps its limit.
@@ -403,9 +499,74 @@ This release is breaking: read the upgrade notes and the removal list before upg
 - **`lag()` and `lead()` with a default failed on MariaDB** with a syntax error: its `LAG` and
   `LEAD` take no default. On MySQL and MariaDB a `CASE` around the call supplies it, exactly where
   no row is that far away, as the three-argument form does; a NULL value one row away stays NULL.
+- **Query builder, statements.** `group_by(..).count()` failed on PostgreSQL and MySQL: the counted
+  subquery kept the model's columns. `union()`/`union_all()` never validated their operand, so an
+  unsafe `order_by` and a deferred error went through, and dropped the operand's own unions and
+  CTEs. `distinct()` slipped past the check that `get()` reads every model column.
+  `select("*")` over a join filled the model from the joined table. An aggregate of a joined
+  column on a limited or distinct query read the model's column of that name, and
+  `count_distinct` over a join was ambiguous. `exists()` dropped the select aliases its `HAVING`
+  used. Window functions named Rust fields, so a renamed column was not found. A `HAVING`
+  template counted a `?` inside a quoted literal as a parameter. `where_in_subquery(q.limit(n))`
+  failed on MySQL and MariaDB, which take no `LIMIT` in an `IN` subquery; it reads through a
+  derived table. `count()` and `exists()` of a `distinct()` query with an order failed. A statement
+  inside a transaction or on a `query_with` handle was written for the global connection's backend.
+  The check on raw subqueries refused a function named like a statement keyword (`REPLACE(..)`)
+  and a CTE body holding a `UNION`, and a raw `HAVING` refused `LEFT(..)`/`RIGHT(..)`.
+- **Query builder, filters.** `has_related()` and `has_no_related()` bound a `None` value as
+  `= NULL`, which is never true, so `has_no_related(.., None).delete()` deleted every row; it means
+  `IS NULL` now. `where_not(col, None)` alone passed the guard against unfiltered writes although it
+  keeps every row of a `NOT NULL` column. `where_array_contained_by` matched a NULL array and an
+  array holding a NULL on SQLite, and a NULL in the list made every array match on PostgreSQL and
+  SQLite; a NULL in the list now allows NULL elements. A filter on a joined table's column —
+  `where_eq("users.token", uuid)`, `where_gt("u.created_at", ts)` through an alias — bound its
+  value as text, which PostgreSQL refused (`uuid = text`) and MySQL and SQLite, which store a UUID
+  as bytes, matched nothing on; it is bound as the column's type whenever a model maps that table.
+  A typed column of another model named the query's own column of that name:
+  `Post::query().where_eq(User::columns.id, 5)` filtered `posts.id`. A typed column carries its
+  model's table now, and a filter, `order_by`, `group_by`, aggregate, `pluck` or IN subquery on
+  another model's column is written `users.id`, which fails loudly unless the query joins that
+  table. `has_related`/`has_no_related` bound their value as text and refused a `Uuid` or a
+  timestamp; they take any `Serialize` value and bind it as the related column's type.
+  `where_eq`, `where_not`, `where_in` and `where_not_in` on a JSON column failed on PostgreSQL, whose
+  `json` type has no `=`, and never matched on MySQL, which compared the document with a string;
+  they compare documents now, ignoring key order and spacing (SQLite compares the minified text).
+- **Query builder, results.** `get_json()` decoded a joined column that shares a name with a model
+  column as the model's type. `chunk()` over a union repeated rows and never ended, and over a join
+  that repeats a key skipped rows (8 of 10); a union is refused, and a join reads every row. The query
+  cache keyed entries by table name only, so two models on one table, a model in two schemas, and
+  two databases — a replaced global connection, a `query_with` handle — shared cached rows; keys
+  carry the model type, schema and connection now. Cached rows went through the model's serde, so
+  a `#[serde(skip)]` column came back empty and relations came back unusable. Reads through
+  `select_raw()`, `having()` and raw orders were never invalidated by writes to their tables.
+  `insert_all()` left the cache stale, and `execute_returning()` invalidated it only once its rows
+  decoded.
+- **JSON arrays.** `array_remove()` turned the whole array NULL on MySQL and MariaDB when the value
+  was absent, never found a number or boolean, and read `%` and `_` as wildcards; on SQLite it
+  turned booleans into `1`/`0`, dropped nulls and turned a NULL column into `[]`. `array_append()`
+  on SQLite stored an object or array as a string.
+- **Validation.** `min`, `max` and `range` compared integers through `f64`, so past 2^53 a value
+  one past the bound passed. Integers are compared exactly.
+- **Serialization.** `to_json` put an attachment back when it was hidden, and
+  `to_translated_json` read a `translations` key instead of the model's translations. A
+  highlighted snippet with `fragment_words: Some(0)` left the match out.
+- **Dirty tracking** kept one snapshot for rows of two databases that share a key, so a model
+  loaded from one could save against the other's baseline.
+- **Entity manager.** A flush cancelled part way, or rolled back with a transaction around it
+  after it had succeeded, left the context holding ids and clean snapshots for rows never
+  committed, so the next flush skipped them. The context is restored to its state before the
+  flush in both cases, as it already was when the flush failed.
+- **Migrations and seeding.** A `Migrator::run()` cancelled on MySQL or MariaDB left the named
+  migration lock held by a pooled connection, so every other migrator waited 300 s and failed; the
+  lock lives on a connection of its own now, which closes with the run. Seeding inside a
+  transaction read and created its ledger outside it: a second run in the same transaction ran
+  every seed again, and a one-connection SQLite pool waited forever for a second connection.
 
 ### Changed — Breaking
 
+- `ConditionValue` has a `RawTemplate` variant, which `where_raw_with` builds, so an exhaustive
+  `match` on it needs an arm; `ColumnIn::is_in`/`not_in` take `impl IntoIterator<Item = T>`, so an
+  implementation outside TideORM changes its signature. Calls are unaffected.
 - The crate root re-exports the whole prelude, plus `Result`, `chrono`, `async_trait` and
   `inventory`, so `tideorm::X` and `tideorm::prelude::X` can no longer drift apart.
 - `profiling::GlobalStats` is a type alias of `QueryStats`, so `GlobalProfiler::stats()` prints in
@@ -460,6 +621,13 @@ This release is breaking: read the upgrade notes and the removal list before upg
   UUID-keyed rows on SQLite take one statement instead of 1,000. A batch that repeats a key is still
   inserted a row at a time, so the database's own constraint decides it.
 - `get_json()` works out how to decode each column once per result instead of once per row.
+- **`having_sum_gt` compares `COALESCE(SUM(..), 0)`**, as `Aggregate::sum` and `sum()` read a
+  sum, so a group whose values are all NULL counts as 0 instead of failing every comparison.
+- **`get()` does not cache a model whose own serde does not read back what it writes** (a
+  `#[serde(skip)]` field, `with`/`serialize_with`, a container `from`/`into`), since the cached copy
+  would come back without those columns.
+- **The MySQL and MariaDB migration lock takes a connection of its own**, closed after each run
+  instead of returned to the pool; the pool still needs a second connection for the migrations.
 
 ### Internal
 

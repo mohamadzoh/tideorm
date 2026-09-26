@@ -33,7 +33,10 @@ use std::future::Future;
 
 pub use builder::DatabaseBuilder;
 pub use core::Database;
+#[cfg(feature = "dirty-tracking")]
+pub(crate) use state::__scope_origin;
 pub use state::{__current_connection, __current_db, db, has_global_db, require_db, try_db};
+pub(crate) use state::{connection_identity, origin_of};
 pub use transaction::Transaction;
 pub(crate) use transaction::transaction_error;
 
@@ -44,7 +47,9 @@ pub(crate) async fn __in_db_scope<F, T>(db: &Database, future: F) -> crate::erro
 where
     F: Future<Output = crate::error::Result<T>>,
 {
-    state::with_connection_override(db.__get_connection()?, None, future).await
+    let connection = db.__get_connection()?;
+    let origin = state::origin_of(&connection);
+    state::with_connection_override(connection, origin, None, future).await
 }
 
 #[cfg(test)]
