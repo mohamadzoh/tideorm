@@ -78,7 +78,7 @@ pub(crate) fn postgres_array_contained_by(
 ///
 /// Without them a NULL array column silently matches, which widens a SELECT and,
 /// on a mutation terminal, widens the set of rows written or deleted.
-pub(crate) fn array_contained_by(
+fn array_contained_by(
     column: &str,
     source: &str,
     element: &str,

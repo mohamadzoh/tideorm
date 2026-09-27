@@ -1,5 +1,8 @@
 #![allow(missing_docs)]
 
+use std::any::Any;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::error::{Error, Result};
@@ -44,7 +47,7 @@ impl<R: Model> RelationSaveOp for OneRelationSaveFn<R> {
         let saved = apply_foreign_key(related, &foreign_key, &parent_pk_value)?
             .save()
             .await?;
-        related_to_json(&saved).map(SavedRelation::one)
+        Ok(SavedRelation::one(saved))
     }
 }
 
@@ -56,31 +59,45 @@ impl<R: Model> RelationSaveOp for ManyRelationSaveFn<R> {
             foreign_key,
         } = *self;
         let saved = save_related(related, &foreign_key, &parent_pk_value).await?;
-        saved
-            .iter()
-            .map(related_to_json)
-            .collect::<Result<Vec<_>>>()
-            .map(SavedRelation::many)
+        Ok(SavedRelation::many(saved))
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// The models one relation saved, as they were stored: a model's own serde
+/// may leave a field out of its JSON, which a round trip through it would
+/// lose.
+#[derive(Clone)]
 enum SavedRelationInner {
-    One(serde_json::Value),
-    Many(Vec<serde_json::Value>),
+    /// A model `R`.
+    One(Arc<dyn Any + Send + Sync>),
+    /// A `Vec<R>`.
+    Many(Arc<dyn Any + Send + Sync>),
 }
 
 /// Saved nested relation payload returned by [`NestedSaveBuilder::save`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub struct SavedRelation(SavedRelationInner);
 
+impl std::fmt::Debug for SavedRelation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shape = match self.0 {
+            SavedRelationInner::One(_) => "one",
+            SavedRelationInner::Many(_) => "many",
+        };
+        formatter
+            .debug_struct("SavedRelation")
+            .field("shape", &shape)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SavedRelation {
-    fn one(value: serde_json::Value) -> Self {
-        Self(SavedRelationInner::One(value))
+    fn one<R: Model>(saved: R) -> Self {
+        Self(SavedRelationInner::One(Arc::new(saved)))
     }
 
-    fn many(values: Vec<serde_json::Value>) -> Self {
-        Self(SavedRelationInner::Many(values))
+    fn many<R: Model>(saved: Vec<R>) -> Self {
+        Self(SavedRelationInner::Many(Arc::new(saved)))
     }
 
     /// Returns true when this result came from `with_one`.
@@ -93,34 +110,38 @@ impl SavedRelation {
         matches!(self.0, SavedRelationInner::Many(_))
     }
 
-    /// Convert a single related-model result into its concrete model type.
+    /// The model a `with_one` saved, as it was stored.
     pub fn into_one<R: Model>(self) -> Result<R> {
         match self.0 {
-            SavedRelationInner::One(value) => serde_json::from_value(value).map_err(|e| {
-                Error::conversion(format!("Failed to deserialize related model: {}", e))
-            }),
+            SavedRelationInner::One(saved) => downcast_saved(saved),
             SavedRelationInner::Many(_) => Err(Error::conversion(
                 "Expected a single related model but received a relation collection".to_string(),
             )),
         }
     }
 
-    /// Convert a collection result into concrete model values.
+    /// The models a `with_many` saved, as they were stored.
     pub fn into_many<R: Model>(self) -> Result<Vec<R>> {
         match self.0 {
-            SavedRelationInner::Many(values) => values
-                .into_iter()
-                .map(|value| {
-                    serde_json::from_value(value).map_err(|e| {
-                        Error::conversion(format!("Failed to deserialize related model: {}", e))
-                    })
-                })
-                .collect(),
+            SavedRelationInner::Many(saved) => downcast_saved(saved),
             SavedRelationInner::One(_) => Err(Error::conversion(
                 "Expected a related model collection but received a single relation".to_string(),
             )),
         }
     }
+}
+
+/// The saved value as `T`, cloned only when a clone of the result shares it.
+fn downcast_saved<T: Clone + Send + Sync + 'static>(
+    saved: Arc<dyn Any + Send + Sync>,
+) -> Result<T> {
+    let saved = saved.downcast::<T>().map_err(|_| {
+        Error::conversion(format!(
+            "the saved relation does not hold {}",
+            std::any::type_name::<T>()
+        ))
+    })?;
+    Ok(Arc::try_unwrap(saved).unwrap_or_else(|shared| (*shared).clone()))
 }
 
 fn require_scalar_primary_key<M: Model>(
@@ -194,11 +215,6 @@ async fn save_related<R: Model>(
     }
 
     Ok(saved)
-}
-
-fn related_to_json<R: Model>(related: &R) -> Result<serde_json::Value> {
-    serde_json::to_value(related)
-        .map_err(|e| Error::conversion(format!("Failed to serialize related model: {}", e)))
 }
 
 /// Extension trait for cascade save operations.

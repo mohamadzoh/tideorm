@@ -215,3 +215,57 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
 
     cleanup_model_cache_test_state();
 }
+
+/// A baseline recorded inside a transaction that rolls back is withdrawn:
+/// the row is what it was, so the baseline from before comes back. The
+/// update's "Bob" stayed, and an unchanged model read before it reported a
+/// change.
+#[cfg(all(
+    feature = "dirty-tracking",
+    feature = "sqlite",
+    feature = "runtime-tokio"
+))]
+#[tokio::test]
+async fn a_rolled_back_update_restores_the_baseline() {
+    let _guard = model_cache_test_guard().lock().await;
+    let db = setup_model_cache_test_db().await;
+
+    let saved = AutoIncrementModel {
+        id: 0,
+        name: "Alice".to_string(),
+    }
+    .save()
+    .await
+    .expect("seed save should succeed");
+    let loaded = AutoIncrementModel::find(saved.id)
+        .await
+        .expect("find should succeed")
+        .expect("saved model should exist");
+
+    let edited = AutoIncrementModel {
+        name: "Bob".to_string(),
+        ..loaded.clone()
+    };
+    let result: crate::error::Result<()> = db
+        .transaction(|_| {
+            Box::pin(async move {
+                edited.update().await?;
+                Err(crate::error::Error::invalid_query("roll it back"))
+            })
+        })
+        .await;
+    assert!(result.is_err(), "the transaction should roll back");
+
+    assert_eq!(
+        loaded.changed_fields().expect("dirty check should succeed"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        loaded
+            .original_value("name")
+            .expect("original value lookup should succeed"),
+        Some(Some(serde_json::json!("Alice")))
+    );
+
+    cleanup_model_cache_test_state();
+}

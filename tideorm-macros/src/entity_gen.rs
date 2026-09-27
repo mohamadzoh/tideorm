@@ -77,7 +77,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let searchable_fields = &ctx.searchable_fields;
     let index_impls = &ctx.index_impls;
     let unique_index_impls = &ctx.unique_index_impls;
-    let morph_owner_key_impl = build_morph_owner_key_impl(ctx);
+    let morph_owner_key_impl = build_morph_owner_key_impl(ctx)?;
     let soft_delete_impl = ctx.soft_delete.as_ref().map(|(_, deleted_at_column)| {
         quote! {
             fn soft_delete_enabled() -> bool { true }
@@ -272,38 +272,71 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
 }
 
 /// `ModelMeta::__morph_owner_key`: the column each `MorphOne`/`MorphMany` of
-/// the model keys its children by, found by the child's `{morph}_id` column.
-fn build_morph_owner_key_impl(ctx: &BuildContext) -> Option<TokenStream2> {
-    let arms: Vec<_> = ctx
-        .relation_fields
-        .iter()
-        .filter(|field| {
-            matches!(
-                field.relation_kind(),
-                Some(RelationKind::MorphOne | RelationKind::MorphMany)
-            )
-        })
-        .filter_map(|field| {
-            let id_column = format!("{}_id", field.morph_name.as_deref()?);
-            let local_key = field
-                .local_key
-                .as_deref()
-                .unwrap_or(ctx.default_local_key());
-            let key_column = find_db_field(&ctx.db_fields, local_key)?.column_name();
-            Some(quote!(#id_column => Some(#key_column),))
-        })
-        .collect();
-    if arms.is_empty() {
-        return None;
-    }
-    Some(quote! {
-        fn __morph_owner_key(id_column: &str) -> Option<&'static str> {
-            match id_column {
-                #(#arms)*
-                _ => None,
-            }
+/// the model keys its children by, found by the child's `{morph}_id` column
+/// and the child model's table, since two relations may share a morph name.
+///
+/// Two relations to one child model under one morph name that key it by
+/// different columns are refused: a child row could not tell which it
+/// belongs to.
+fn build_morph_owner_key_impl(ctx: &BuildContext) -> syn::Result<Option<TokenStream2>> {
+    let mut declared: Vec<(String, String, String)> = Vec::new();
+    let mut arms = Vec::new();
+    for field in ctx.relation_fields.iter().filter(|field| {
+        matches!(
+            field.relation_kind(),
+            Some(RelationKind::MorphOne | RelationKind::MorphMany)
+        )
+    }) {
+        let Some(morph_name) = field.morph_name.as_deref() else {
+            continue;
+        };
+        let id_column = format!("{morph_name}_id");
+        let local_key = field
+            .local_key
+            .as_deref()
+            .unwrap_or(ctx.default_local_key());
+        let Some(key_column) =
+            find_db_field(&ctx.db_fields, local_key).map(ModelField::column_name)
+        else {
+            continue;
+        };
+        let Some(child) = field.related_types().into_iter().next() else {
+            continue;
+        };
+
+        let child_name = quote!(#child).to_string();
+        if let Some((_, _, other_key)) = declared.iter().find(|(name, morph, key)| {
+            *name == child_name && morph == morph_name && *key != key_column
+        }) {
+            return Err(syn::Error::new_spanned(
+                field.ident(),
+                format!(
+                    "another relation to {child_name} with morph_name = \"{morph_name}\" keys it by \
+                     `{other_key}`, and this one by `{key_column}`: a {child_name} row could not tell \
+                     which it belongs to; give the two relations different morph names"
+                ),
+            ));
         }
-    })
+        declared.push((child_name, morph_name.to_string(), key_column.clone()));
+
+        arms.push(quote! {
+            if id_column == #id_column
+                && (child_table.is_empty()
+                    || child_table == <#child as ::tideorm::model::ModelMeta>::table_name())
+            {
+                return Some(#key_column);
+            }
+        });
+    }
+    if arms.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(quote! {
+        fn __morph_owner_key(id_column: &str, child_table: &str) -> Option<&'static str> {
+            #(#arms)*
+            None
+        }
+    }))
 }
 
 fn sea_orm_field_def(field: &ModelField) -> TokenStream2 {

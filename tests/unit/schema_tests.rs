@@ -1,6 +1,4 @@
-use super::writer::{
-    CatalogColumn, CatalogIndexColumn, catalog_table, group_indexes, sqlite_index_export_name,
-};
+use super::writer::{CatalogColumn, CatalogIndexColumn, catalog_table, group_indexes};
 use super::*;
 use crate::config::DatabaseType;
 use crate::model::IndexDefinition;
@@ -674,21 +672,5 @@ fn test_mysql_defaults_are_restored_to_a_default_clause() {
     assert_eq!(
         mysql_default(Some("'draft'".to_string()), "varchar(20)", "", true).as_deref(),
         Some("'draft'")
-    );
-}
-
-#[test]
-fn test_sqlite_unique_constraint_indexes_export_under_a_creatable_name() {
-    // SQLite refuses `CREATE INDEX "sqlite_autoindex_..."`, so exporting the
-    // index behind a UNIQUE constraint under its own name made the schema
-    // file fail on replay.
-    let columns = vec!["tenant_id".to_string(), "email".to_string()];
-    assert_eq!(
-        sqlite_index_export_name("users", "sqlite_autoindex_users_1".to_string(), &columns),
-        "idx_users_tenant_id_email_unique"
-    );
-    assert_eq!(
-        sqlite_index_export_name("users", "idx_users_email".to_string(), &columns),
-        "idx_users_email"
     );
 }

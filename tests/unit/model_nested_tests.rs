@@ -314,13 +314,56 @@ async fn nested_save_builder_can_be_spawned() {
 
 #[test]
 fn saved_relation_rejects_wrong_shape_conversions() {
-    let one = SavedRelation::one(serde_json::json!({"id": 1, "user_id": 1, "bio": "x"}));
-    let many = SavedRelation::many(vec![
-        serde_json::json!({"id": 1, "parent_id": 1, "name": "x"}),
-    ]);
+    let one = SavedRelation::one(nested_profile());
+    let many = SavedRelation::many(nested_children(&["x"]));
 
-    assert!(one.into_many::<NestedTestChild>().is_err());
-    assert!(many.into_one::<NestedTestProfile>().is_err());
+    assert!(one.clone().into_many::<NestedTestChild>().is_err());
+    assert!(many.clone().into_one::<NestedTestProfile>().is_err());
+    // Another model of the same shape is not what was saved.
+    assert!(one.into_one::<NestedTestChild>().is_err());
+    assert!(many.into_many::<NestedTestProfile>().is_err());
+}
+
+/// A child whose own serde derive leaves a field out of its JSON.
+#[tideorm::model(table = "nested_test_children")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct NestedTestQuietChild {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    parent_id: i64,
+    #[serde(skip_serializing)]
+    name: String,
+}
+
+/// The builder hands back each child as it was stored. It went through the
+/// child's JSON, where a `skip_serializing` field is missing, so reading the
+/// result failed after the save had committed.
+#[tokio::test]
+async fn nested_save_builder_returns_the_saved_models_themselves() {
+    let _db = setup_nested_test_db().await;
+
+    let (_, saved) = NestedSaveBuilder::new(NestedTestParent {
+        id: 0,
+        name: "parent".to_string(),
+    })
+    .with_one(
+        NestedTestQuietChild {
+            id: 0,
+            parent_id: 0,
+            name: "kept".to_string(),
+        },
+        "parent_id",
+    )
+    .save()
+    .await
+    .expect("nested builder save should succeed");
+
+    let child = saved[0]
+        .clone()
+        .into_one::<NestedTestQuietChild>()
+        .expect("the saved child should come back");
+    assert!(child.id > 0);
+    assert_eq!(child.name, "kept");
 }
 
 #[test]

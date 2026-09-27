@@ -54,7 +54,7 @@ pub use builders::{CacheKeyBuilder, CacheOptions};
 pub use prepared_statements::{
     CachedStatementInfo, PreparedStatementCache, PreparedStatementConfig, PreparedStatementStats,
 };
-#[cfg(feature = "entity-manager")]
+#[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use query_cache::undo_on_rollback;
 pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
 pub(crate) use query_cache::{

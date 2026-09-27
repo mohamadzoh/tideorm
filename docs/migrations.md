@@ -177,7 +177,7 @@ TideConfig::init()
     .await?;
 ```
 
-`SchemaWriter::write_schema("schema.sql").await?` writes the same file at any time: it reads every table of the connected database, with its columns, primary key and indexes. What those cannot describe comes after the tables as the catalog declares it: a full-text, expression, partial or prefix index, and on SQLite an FTS5 table with the triggers that keep it in step (its shadow tables are left out). An index MySQL builds on an expression is named in a comment instead.
+`SchemaWriter::write_schema("schema.sql").await?` writes the same file at any time. On PostgreSQL, MySQL and MariaDB it reads every table of the connected database, with its columns, primary key and indexes. What those cannot describe comes after the tables as the catalog declares it: a full-text, expression, partial or prefix index. An index MySQL builds on an expression is named in a comment instead. SQLite keeps the statement that created each table, view, index and trigger, so its file is those statements, generated columns, collations, constraints and `AUTOINCREMENT` included; an FTS5 table's shadow tables are left out, since the FTS5 table recreates them.
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
 

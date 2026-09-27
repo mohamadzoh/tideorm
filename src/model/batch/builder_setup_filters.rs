@@ -134,8 +134,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Multiply the column's current value by `by` in the database.
     ///
-    /// On an integer column the product is rounded to the nearest integer, as
-    /// PostgreSQL and MySQL do when they store it.
+    /// On an integer column the product is exact, taking `by` as the decimal
+    /// it is written as, and rounded half away from zero on every backend.
     #[must_use]
     pub fn multiply(self, field: impl IntoColumnName, by: f64) -> Self {
         self.assign(field, UpdateValue::Multiply(by))
@@ -143,7 +143,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Divide the column's current value by `by` in the database.
     ///
-    /// On an integer column the quotient is rounded to the nearest integer. A
+    /// On an integer column the quotient is exact, taking `by` as the decimal
+    /// it is written as, and rounded half away from zero on every backend. A
     /// zero divisor is passed through to the backend, which normally raises a
     /// division-by-zero error for the whole statement.
     #[must_use]
@@ -219,8 +220,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self
     }
 
+    /// Keyed by the column, so a later assignment through the field's name
+    /// or the column's replaces an earlier one through the other.
     fn assign(mut self, field: impl IntoColumnName, value: UpdateValue) -> Self {
-        self.updates.insert(field.column_name().to_string(), value);
+        let name = field.column_name();
+        let column = M::canonical_column_name(name).unwrap_or(name);
+        self.updates.insert(column.to_string(), value);
         self
     }
 

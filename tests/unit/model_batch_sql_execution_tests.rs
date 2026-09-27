@@ -85,17 +85,34 @@ fn scaling_an_integer_column_stays_integral_on_sqlite() {
             .expect("statement should build")
             .0
     };
+    // SQLite scales in integers, by 11 / 10 and 1 / 2, rounding the quotient
+    // half away from zero; an `f64` would round a value past 2^53 first.
     let sqlite = scaled(DatabaseType::SQLite);
     assert!(
-        sqlite.contains(r#""age" = CAST(ROUND("age" * ?) AS INTEGER)"#),
+        sqlite.contains(
+            r#""age" = CAST((("age" * ?) + CASE WHEN ("age" * ?) < 0 THEN -? ELSE ? END) / ? AS INTEGER)"#
+        ),
         "{sqlite}"
     );
     assert!(
-        sqlite.contains(r#""id" = CAST(ROUND("id" / ?) AS INTEGER)"#),
+        sqlite.contains(
+            r#""id" = CAST((("id") + CASE WHEN ("id") < 0 THEN -? ELSE ? END) / ? AS INTEGER)"#
+        ),
         "{sqlite}"
     );
-    let postgres = scaled(DatabaseType::Postgres);
+    // The other backends take the factor as an exact decimal.
+    let (postgres, params) = BatchUpdateBuilder::<BatchSqlUser>::new()
+        .multiply("age", 1.1)
+        .where_eq("id", 1)
+        .build_update_statement(DatabaseType::Postgres)
+        .expect("statement should build");
     assert!(postgres.contains(r#""age" = "age" * $1"#), "{postgres}");
+    assert_eq!(
+        params.first(),
+        Some(&crate::internal::Value::Decimal(Some(
+            "1.1".parse().expect("a decimal")
+        )))
+    );
 
     // A text column is not touched, whatever it holds.
     let (sql, _) = BatchUpdateBuilder::<BatchSqlUser>::new()
@@ -147,6 +164,35 @@ fn batch_update_with_trashed_reaches_the_trash_too() {
     assert!(
         !sql.contains("deleted_at"),
         "with_trashed() must not filter soft-deleted rows: {sql}"
+    );
+}
+
+#[tideorm::model(table = "batch_sql_execution_profiles")]
+struct BatchSqlProfile {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    #[tideorm(column = "name")]
+    display_name: String,
+}
+
+/// A field and its column name the same assignment, so the last one wins;
+/// they were two, and `SET name = ?, name = ?` kept the first on SQLite.
+#[test]
+fn a_field_and_its_column_are_one_assignment() {
+    let (sql, params) = BatchUpdateBuilder::<BatchSqlProfile>::new()
+        .set("name", "first")
+        .set("display_name", "second")
+        .where_eq("id", 1)
+        .build_update_statement(crate::config::DatabaseType::SQLite)
+        .expect("statement should build");
+
+    assert!(
+        sql.starts_with(r#"UPDATE "batch_sql_execution_profiles" SET "name" = ? WHERE"#),
+        "{sql}"
+    );
+    assert_eq!(
+        params.first(),
+        Some(&crate::internal::Value::String(Some("second".to_string())))
     );
 }
 

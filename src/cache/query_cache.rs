@@ -12,7 +12,7 @@ mod pending;
 mod store;
 
 pub use config::{CacheConfig, CacheStrategy};
-#[cfg(feature = "entity-manager")]
+#[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
     PendingInvalidations, install as install_pending_invalidations, note_failed_statement,

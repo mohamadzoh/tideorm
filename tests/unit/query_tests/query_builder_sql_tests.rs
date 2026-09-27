@@ -635,11 +635,15 @@ fn test_build_select_sql_with_params_parameterizes_sqlite_array_predicates() {
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::SQLite);
 
-    // Like PostgreSQL's `<@`: a NULL array and a null element are not contained.
-    assert!(sql.contains(
-        "(\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value IS NULL OR value NOT IN (?, ?)))"
-    ));
-    assert!(sql.contains("(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?) OR EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = ?))"));
+    // Like PostgreSQL's `<@`: a NULL array is not contained, and an element
+    // must equal a listed value as JSON, its type included.
+    let text = "(tideorm_element.type = 'text' AND tideorm_element.atom = ?)";
+    assert!(sql.contains(&format!(
+        "(\"tags\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each(\"tags\") AS tideorm_element WHERE NOT ({text} OR {text})))"
+    )));
+    let element =
+        format!("EXISTS (SELECT 1 FROM json_each(\"tags\") AS tideorm_element WHERE {text})");
+    assert!(sql.contains(&format!("({element} OR {element})")), "{sql}");
     assert!(!sql.contains("ops'"));
     assert_eq!(params.len(), 4);
 }

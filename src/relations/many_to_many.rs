@@ -354,16 +354,15 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             return Ok(());
         }
 
-        let (sql, params) = build_pivot_insert::<Pivot>(
-            db_type,
+        insert_pivot_pair::<Pivot>(
+            &db,
             self.pivot_table,
             self.foreign_key,
             self.related_key,
             pk,
             related_id,
-        );
-
-        db.__execute_with_params(&sql, params).await?;
+        )
+        .await?;
         // The pivot row is written as raw SQL, which carries no model context, so
         // the cache has to be told which table changed. `detach` needs no
         // equivalent: it goes through `Pivot::query().delete()`, which invalidates
@@ -438,17 +437,16 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                     .force_delete()
                     .await?;
 
-                let db_type = scoped_db.execution_backend();
                 for id in &wanted {
-                    let (sql, params) = build_pivot_insert::<Pivot>(
-                        db_type,
+                    insert_pivot_pair::<Pivot>(
+                        &scoped_db,
                         pivot_table,
                         foreign_key,
                         related_key,
                         &pk,
                         id,
-                    );
-                    scoped_db.__execute_with_params(&sql, params).await?;
+                    )
+                    .await?;
                 }
 
                 Ok(())
@@ -497,6 +495,51 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 /// column.
 fn pivot_column<Pivot: Model>(name: &str) -> &str {
     Pivot::canonical_column_name(name).unwrap_or(name)
+}
+
+/// Insert the pivot row linking `parent_pk` and `related_id` unless it is
+/// there, and fail if the pair is still missing afterwards.
+///
+/// The conflict clause that turns a lost race into a no-op also swallows a
+/// conflict on any other unique key of the pivot, which linked nothing and
+/// reported success. PostgreSQL and SQLite report an insert that wrote no row;
+/// MySQL and MariaDB count a duplicate that changed nothing as a written row,
+/// so there the pair is always read back.
+async fn insert_pivot_pair<Pivot: Model>(
+    db: &crate::database::Database,
+    pivot_table: &str,
+    foreign_key: &str,
+    related_key: &str,
+    parent_pk: &serde_json::Value,
+    related_id: &serde_json::Value,
+) -> Result<()> {
+    use crate::config::DatabaseType;
+
+    let db_type = db.execution_backend();
+    let (sql, params) = build_pivot_insert::<Pivot>(
+        db_type,
+        pivot_table,
+        foreign_key,
+        related_key,
+        parent_pk,
+        related_id,
+    );
+    let written = db.__execute_with_params(&sql, params).await?;
+    let unconfirmed =
+        written == 0 || matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB);
+    if unconfirmed
+        && !Pivot::query_with(db)
+            .where_eq(foreign_key, parent_pk.clone())
+            .where_eq(related_key, related_id.clone())
+            .exists()
+            .await?
+    {
+        return Err(crate::error::Error::query(format!(
+            "no {pivot_table} row links {parent_pk} with {related_id}: another unique key of \
+             {pivot_table} refused it"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the parameterized pivot-row INSERT shared by `attach` and `sync`, with

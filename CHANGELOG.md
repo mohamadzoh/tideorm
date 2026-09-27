@@ -145,8 +145,10 @@ This release is breaking: read the upgrade notes and the removal list before upg
   `auto_increment` on a key that is not an integer (the insert left the key out); a relation
   field inside an `Option`, `Box`, `Rc` or `Arc`; `#[validate(range(a..b))]`, which leaves `b`
   out in Rust while the rule includes it (write `range(a..=b)` or `range(a, b)`); a `min`, `max`
-  or `range` bound that is not finite, which made the derive panic; and `#[index(..)]` with
-  arguments on a field, where the bare attribute now indexes that field.
+  or `range` bound that is not finite, which made the derive panic; two `MorphOne`/`MorphMany`
+  relations to one model under one `morph_name` that key it by different columns, whose child
+  rows could not tell which they belong to; and `#[index(..)]` with arguments on a field, where
+  the bare attribute now indexes that field.
 - **`connect()` syncs the schema before it seeds**, so a seed fills the tables sync creates, and
   a `force_sync` no longer drops what the seeds wrote.
 - **Generated index names past 63 bytes are shortened with a hash** (`idx_<table>_<columns>`,
@@ -158,8 +160,9 @@ This release is breaking: read the upgrade notes and the removal list before upg
   row as stored.
 - **`update_all_except` keeps the key and the conflict columns**, as the default upsert does; it
   wrote them, so a UUID-keyed row was re-keyed.
-- **An upsert keyed only by an auto-increment key the database has not numbered is `create()`**,
-  with its callbacks; it stored the placeholder `0`.
+- **An upsert keyed only by an auto-increment key the database has not numbered inserts the row**,
+  numbered by the database and with no callback run, as for every upsert; it stored the
+  placeholder `0`.
 - **`save_with_many` and `NestedSaveBuilder::with_many` save each child**, updating one already
   stored, as `save_with_one` does; they inserted it again.
 - **A model whose own `Serialize` or `Deserialize` derive renames a field is not query-cached**:
@@ -181,6 +184,21 @@ This release is breaking: read the upgrade notes and the removal list before upg
 - **Dirty tracking reports no baseline for a key two databases gave different rows**:
   `changed_fields()` and `original_value()` return `None` there, where they compared the model
   with whichever row was read last.
+- **`multiply()` and `divide()` scale an integer column exactly and round half away from zero on
+  every backend.** The factor is bound as the decimal it is written as (SQLite, which has no
+  decimal arithmetic, scales by its fraction of two integers) and a decimal column takes it as a
+  decimal too, where an `f64` changed a value past 2^53 (`9007199254740993 * 1.0` stored
+  `9007199254740992`) and PostgreSQL rounded a tie to even.
+- **`attach()` and `sync()` fail when the pivot row is not stored**, as when another unique key of
+  the pivot refuses it (a related row that may belong to one owner only): the conflict clause
+  that makes a lost race a no-op hid the conflict, and they reported success.
+- **SQLite's schema file is the statements SQLite stored** for each table, view, index and
+  trigger. It rebuilt each table from `PRAGMA` metadata, which lost generated columns, collations,
+  `AUTOINCREMENT` (a restored table reused deleted ids) and `CHECK` and foreign key constraints.
+- **`SavedRelation` holds the models a `NestedSaveBuilder` saved**: `into_one()` and
+  `into_many()` return them as stored and fail for another model type, where they read the
+  children's JSON back, which lost a field their serde skips. `SavedRelation` no longer
+  implements `PartialEq`, and its `Debug` shows only whether it holds one model or many.
 
 ### Removed — Breaking
 
@@ -460,8 +478,8 @@ This release is breaking: read the upgrade notes and the removal list before upg
   the feature itself silently lost `find_in_entity_manager` and the rest. They follow TideORM's
   own feature now, so no crate has to declare it.
 - **`multiply()`/`divide()` on an integer column** left SQLite holding a REAL
-  (`price_cents * 1.1`), after which every read of the table failed to decode. The result is
-  rounded back to an integer, as PostgreSQL and MySQL do when they store it.
+  (`price_cents * 1.1`), after which every read of the table failed to decode. The result is an
+  integer again.
 - **A seed that failed part way kept what it had written.** A seed and its `_seeds` entry were
   separate statements, so a failure left the rows written so far and no ledger entry, and the next
   run wrote them again (or failed on a unique key). Each seed now runs in one transaction with its
@@ -618,7 +636,9 @@ This release is breaking: read the upgrade notes and the removal list before upg
   turned booleans into `1`/`0`, dropped nulls and turned a NULL column into `[]`. It removes each
   element equal to the value as JSON now, as `where_eq` compares a document: an object's key order
   does not count, an array's element order and repeats do, and `1.0` is `1`. `array_append()` on
-  SQLite stored an object or array as a string.
+  SQLite stored an object or array as a string. `where_array_contains`, `where_array_overlaps`
+  and `where_array_contained_by` on SQLite compared elements without their JSON type, so `[1]`
+  matched `[true]` and a string holding `{"a":1}` matched that object.
 - **Validation.** `min`, `max` and `range` compared integers through `f64`, so past 2^53 a value
   one past the bound passed. Integers are compared exactly.
 - **Serialization.** `to_json` put an attachment back when it was hidden, and
@@ -627,7 +647,9 @@ This release is breaking: read the upgrade notes and the removal list before upg
 - **Dirty tracking** kept one snapshot for rows of two databases that share a key, so a model
   loaded from one was compared with the other's row. Each database keeps its own baseline, and a
   model, which does not record where it was read from, is compared with a baseline only when every
-  database that gave its key gave the same row.
+  database that gave its key gave the same row. A baseline recorded inside a transaction that
+  rolled back stayed, so a model read before it reported a change it never had; the one it
+  replaced comes back.
 - **Entity manager.** A flush cancelled part way, or rolled back with a transaction around it
   after it had succeeded, left the context holding ids and clean snapshots for rows never
   committed, so the next flush skipped them. The context is restored to its state before the
@@ -661,9 +683,13 @@ This release is breaking: read the upgrade notes and the removal list before upg
   `i64` id and an `i32` foreign key (or an integer owner id and a text `*_id` column of a
   `MorphMany`) loaded no children while `load()` found them. Keys match by value now. A pair the
   pivot table held twice loaded its related row twice through `with(..)` of a `HasManyThrough`.
+  Children were then grouped under their parents by exact text, where the database matches keys
+  under the column's collation, so with SQLite's `NOCASE` or MySQL's and MariaDB's default
+  collations a parent keyed `ABC` got none of the children keyed `abc` that `load()` finds.
 - **Relations and attachments.** `MorphTo::load_as` looked the owner up by its primary key even
   when the owner's `MorphOne`/`MorphMany` keyed its children by a `local_key`, and by the first
-  column of a composite key. Replacing a `has_one` child through the entity manager inserted the
+  column of a composite key; where two of the owner's relations shared a morph name, it took the
+  first one's key, whichever model it was to. Replacing a `has_one` child through the entity manager inserted the
   new row before deleting the old one, which a unique foreign key refused. `detach(relation,
   Some(key))` on a has-one attachment cleared it whatever file it held. Attachment metadata named
   like a field (`size`, `key`) could not be read back, so `get_file()` returned `None`, or
@@ -691,11 +717,13 @@ This release is breaking: read the upgrade notes and the removal list before upg
   column missing, PostgreSQL's expression, partial and GIN indexes not at all, an identity column
   as a plain one, and SQLite's FTS5 table and its shadow tables as ordinary tables; each is
   written as the catalog declares it now. A sync warning carried a run of spaces from a lost
-  line continuation.
+  line continuation. On SQLite a migration's or sync's text primary key took NULL, and more than
+  once: its `NOT NULL` was left out, which SQLite implies only for an `INTEGER` key.
 - **Validation.** `#[validate(min = 0.7)]` refused `0.7_f32`, which is `0.699999988` as an `f64`;
   `numeric` accepted `NaN`, `inf` and `1e999`.
 - **Encrypted fields.** `pluck`, `value`, `get_json` and `get_as` returned the ciphertext of an
-  encrypted column. `Hashed`'s `Debug` printed the Argon2 hash its `Display` and `Serialize`
+  encrypted column, and of one read under an alias (`select_raw("secret AS renamed")`); another
+  column read under an encrypted column's name was decrypted, and failed. `Hashed`'s `Debug` printed the Argon2 hash its `Display` and `Serialize`
   hide, and `from_token`'s not-found error named the decoded key a token exists to hide.
 - **Relations.** `query_with(db).with(..)` loaded the relations from the global database. An
   owner whose nullable `local_key` was NULL loaded every related row whose foreign key is NULL,
@@ -709,8 +737,11 @@ This release is breaking: read the upgrade notes and the removal list before upg
   with every other to drop duplicates, quadratic in the parents.
 - **Models.** A batch `set()` bound a JSON document, bytes and a PostgreSQL array as JSON text:
   PostgreSQL refused a `jsonb` column set so, and SQLite and MySQL stored the bytes' JSON text in
-  the BLOB. `insert_all` discarded every dirty-tracking baseline of the model, the new rows' among
-  them. The generated `Deserialize` read a sequence (bincode, postcard) in another order than
+  the BLOB. A batch `set()` through a field's name and another through its column's were two
+  assignments to one column, of which SQLite kept the first. `insert_all` discarded every
+  dirty-tracking baseline of the model, the new rows' among them, and a batch one
+  `INSERT .. RETURNING` holds ran outside a transaction, so when a trigger dropped a row the
+  others stayed stored though the call failed. The generated `Deserialize` read a sequence (bincode, postcard) in another order than
   `Serialize` writes one, relations among the columns; relations now follow the columns in both,
   and a non-self-describing format gets every relation, as `None` when none is cached.
 - **Entity manager.** A new root read from JSON, whose relations were built under its

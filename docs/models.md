@@ -265,7 +265,7 @@ match user.changed_fields()? {
 
 `changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
 
-Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
 
 Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row.
 
@@ -1116,13 +1116,17 @@ let (user, posts) = user.update_with_many(posts).await?;
 let deleted_count = user.delete_with_many(posts).await?;
 
 // Builder API for complex nested saves
-let (user, related_json) = NestedSaveBuilder::new(user)
+let (user, saved) = NestedSaveBuilder::new(user)
     .with_one(profile, "user_id")
     .with_many(posts, "user_id")
     .with_many(comments, "author_id")
     .save()
     .await?;
+let profile: Profile = saved[0].clone().into_one()?;
+let posts: Vec<Post> = saved[1].clone().into_many()?;
 ```
+
+`save()` returns one `SavedRelation` per `with_one`/`with_many`, in the order they were added, holding the children as they were stored.
 
 Each nested operation runs in one transaction — a savepoint when you are already inside one — so a child that fails also rolls back the parent's write. Related rows are written one at a time through each model's own `create`, `update`, or `delete`, so their callbacks and validation run as usual. The foreign key may be given as the Rust field name or the database column name.
 

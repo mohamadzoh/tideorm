@@ -115,7 +115,7 @@ pub(crate) fn install(pending: &Arc<Mutex<PendingInvalidations>>) -> PendingGuar
 
 /// Run `undo` if the innermost open transaction does not commit. Outside a
 /// transaction nothing can roll back, and `undo` is dropped unrun.
-#[cfg(feature = "entity-manager")]
+#[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) fn undo_on_rollback(undo: impl FnOnce() + Send + 'static) {
     record(|pending| pending.undo.push(Box::new(undo)));
 }

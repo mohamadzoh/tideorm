@@ -19,15 +19,16 @@ pub struct SchemaWriter;
 impl SchemaWriter {
     /// Write the connected database's schema to `path` as SQL.
     ///
-    /// Every base table is read back from the catalog - its columns, primary
-    /// key and secondary indexes - and rendered by [`SchemaGenerator`] for the
-    /// backend the global connection actually talks to.
+    /// On PostgreSQL, MySQL and MariaDB every base table is read back from
+    /// the catalog - its columns, primary key and secondary indexes - and
+    /// rendered by [`SchemaGenerator`]. What a table's columns and indexes
+    /// cannot describe comes after the tables as the catalog reports it: a
+    /// full-text, expression, partial or prefix index.
     ///
-    /// What a table's columns and indexes cannot describe comes after the
-    /// tables as the catalog reports it: a full-text, expression, partial or
-    /// prefix index, and on SQLite a virtual table (an FTS5 index) with the
-    /// triggers that keep it in step. SQLite's FTS5 shadow tables are left out;
-    /// the virtual table recreates them.
+    /// SQLite keeps the statement that created each table, view, index and
+    /// trigger, so its file is those statements, generated columns,
+    /// collations and `AUTOINCREMENT` included. Its FTS5 shadow tables are
+    /// left out; the virtual table recreates them.
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
         let db = crate::require_db()?;
         let db_type = db.backend();
@@ -550,164 +551,43 @@ pub(super) fn mysql_default(
     })
 }
 
+/// SQLite keeps every table, view, index and trigger as the statement that
+/// created it, rewritten by each `ALTER TABLE`, so the schema file carries
+/// those statements. Rebuilt from `PRAGMA` metadata, a table lost what the
+/// pragmas leave out: a generated column, a collation, `AUTOINCREMENT`, a
+/// `CHECK` or foreign key constraint, `WITHOUT ROWID`.
 async fn introspect_sqlite(conn: &OrmConnection) -> Result<Catalog> {
-    let sqlite = Backend::Sqlite;
-    // `pragma_table_list` tells a virtual table (an FTS5 index) and the shadow
-    // tables it keeps its data in from an ordinary table; the virtual table is
-    // exported as declared, and it recreates its shadow tables.
-    let table_rows = query(
+    // `pragma_table_list` tells a virtual table (an FTS5 index) and the
+    // shadow tables it keeps its data in from an ordinary table. The virtual
+    // table recreates its shadow tables, so they are left out. Tables come
+    // first, then virtual tables and views, which can read them, then the
+    // indexes (a key or `UNIQUE` constraint's is part of its table) and the
+    // triggers, which keep an FTS5 index in step with its table.
+    let statements = query(
         conn,
-        sqlite,
-        "SELECT name FROM pragma_table_list
-         WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%'
-         ORDER BY name",
+        Backend::Sqlite,
+        "SELECT sql FROM (
+             SELECT CASE l.type WHEN 'table' THEN 0 ELSE 1 END AS rank, l.name AS name, m.sql AS sql
+             FROM pragma_table_list l
+             JOIN sqlite_master m ON m.name = l.name AND m.type = 'table'
+             WHERE l.schema = 'main' AND l.type IN ('table', 'virtual')
+               AND l.name NOT LIKE 'sqlite_%'
+             UNION ALL
+             SELECT CASE type WHEN 'view' THEN 2 WHEN 'index' THEN 3 ELSE 4 END, name, sql
+             FROM sqlite_master
+             WHERE type IN ('view', 'index', 'trigger')
+               AND tbl_name NOT LIKE 'sqlite_%'
+               AND tbl_name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow')
+         )
+         WHERE sql IS NOT NULL
+         ORDER BY rank, name",
         Vec::new(),
     )
     .await?;
 
     let mut catalog = Catalog::default();
-    for row in query(
-        conn,
-        sqlite,
-        "SELECT m.sql AS sql FROM pragma_table_list l
-         JOIN sqlite_master m ON m.name = l.name AND m.type = 'table'
-         WHERE l.schema = 'main' AND l.type = 'virtual' AND m.sql IS NOT NULL
-         ORDER BY l.name",
-        Vec::new(),
-    )
-    .await?
-    {
+    for row in statements {
         catalog.verbatim.push(get(&row, "sql")?);
     }
-
-    for row in table_rows {
-        let table_name: String = get(&row, "name")?;
-        let quoted_table_name = quote_ident(DatabaseType::SQLite, &table_name);
-
-        let mut primary_key: Vec<(i64, String)> = Vec::new();
-        let mut columns = Vec::new();
-        for row in query(
-            conn,
-            sqlite,
-            &format!("PRAGMA table_info({})", quoted_table_name),
-            Vec::new(),
-        )
-        .await?
-        {
-            let name: String = get(&row, "name")?;
-            // `pk` is the column's 1-based position in the key, or 0.
-            let key_position: i64 = get(&row, "pk")?;
-            if key_position > 0 {
-                primary_key.push((key_position, name.clone()));
-            }
-
-            columns.push(CatalogColumn {
-                name,
-                sql_type: get::<String>(&row, "type")?.to_uppercase(),
-                nullable: get::<i64>(&row, "notnull")? == 0,
-                default: get(&row, "dflt_value")?,
-                // An INTEGER key is the rowid, which SQLite assigns on its own.
-                auto_increment: false,
-            });
-        }
-        primary_key.sort_unstable();
-
-        let mut index_columns = Vec::new();
-        for index_row in query(
-            conn,
-            sqlite,
-            &format!("PRAGMA index_list({})", quoted_table_name),
-            Vec::new(),
-        )
-        .await?
-        {
-            let origin: String = get(&index_row, "origin")?;
-            if origin == "pk" {
-                continue;
-            }
-
-            let index: String = get(&index_row, "name")?;
-            let unique = get::<i64>(&index_row, "unique")? == 1;
-            let partial = get::<i64>(&index_row, "partial")? == 1;
-
-            // `index_info` is already in key order. An expression key part
-            // has no column name, so an index with one, like a partial index,
-            // is exported as it was declared.
-            let mut key_columns = Vec::new();
-            let mut expression = false;
-            for info_row in query(
-                conn,
-                sqlite,
-                &format!(
-                    "PRAGMA index_info({})",
-                    quote_ident(DatabaseType::SQLite, &index)
-                ),
-                Vec::new(),
-            )
-            .await?
-            {
-                match get::<Option<String>>(&info_row, "name")? {
-                    Some(column) => key_columns.push(column),
-                    None => expression = true,
-                }
-            }
-
-            if partial || expression {
-                for row in query(
-                    conn,
-                    sqlite,
-                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ? AND sql IS NOT NULL",
-                    vec![index.clone().into()],
-                )
-                .await?
-                {
-                    catalog.verbatim.push(get(&row, "sql")?);
-                }
-                continue;
-            }
-
-            let index = sqlite_index_export_name(&table_name, index, &key_columns);
-            index_columns.extend(key_columns.into_iter().map(|column| CatalogIndexColumn {
-                index: index.clone(),
-                unique,
-                column,
-            }));
-        }
-
-        catalog.tables.push(catalog_table(
-            &table_name,
-            None,
-            columns,
-            primary_key.into_iter().map(|(_, name)| name).collect(),
-            group_indexes(index_columns),
-            false,
-        ));
-    }
-
-    // The triggers, which keep an FTS5 index in step with its table.
-    for row in query(
-        conn,
-        sqlite,
-        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name",
-        Vec::new(),
-    )
-    .await?
-    {
-        catalog.verbatim.push(get(&row, "sql")?);
-    }
-
     Ok(catalog)
-}
-
-/// The name a SQLite index is exported under.
-///
-/// SQLite names the index behind a `UNIQUE` constraint `sqlite_autoindex_*`
-/// and refuses to create an index with its reserved `sqlite_` prefix, so the
-/// export uses the name `TableBuilder::unique_index` would have given it.
-pub(super) fn sqlite_index_export_name(table: &str, index: String, columns: &[String]) -> String {
-    if index.starts_with("sqlite_") {
-        return format!("idx_{}_{}_unique", table, columns.join("_"));
-    }
-
-    index
 }

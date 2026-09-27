@@ -178,9 +178,11 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     /// The column this model's `MorphOne`/`MorphMany` keys its children by,
     /// for the morph whose child column holding that key is `id_column`
-    /// (`commentable_id`); `None` when no relation of this model declares it.
+    /// (`commentable_id`) on the child model stored in `child_table`; `None`
+    /// when no relation of this model declares it. An unknown child (`""`)
+    /// takes the first relation with that morph name.
     #[doc(hidden)]
-    fn __morph_owner_key(_id_column: &str) -> Option<&'static str> {
+    fn __morph_owner_key(_id_column: &str, _child_table: &str) -> Option<&'static str> {
         None
     }
 

@@ -1,6 +1,9 @@
 use super::*;
 
 /// `check` repeated `count` times, joined by `combine` and parenthesized.
+/// The alias of a SQLite JSON array's `json_each` rows.
+const SQLITE_ELEMENT: &str = "tideorm_element";
+
 fn repeated_check(check: String, count: usize, combine: &str) -> String {
     format!("({})", vec![check; count].join(combine))
 }
@@ -128,37 +131,48 @@ impl<M: Model> QueryBuilder<M> {
                     values.iter().map(db_sql::json_scalar_parameter).collect(),
                 ),
             },
+            // Elements are compared as JSON values, as `where_eq` compares a
+            // document: `1` is not `true`, and the string `"{\"a\":1}"` is not
+            // that object. A null in a contained-by list admits null elements,
+            // and a NULL column has no elements to test, so it is contained by
+            // nothing, as PostgreSQL's `<@` leaves it.
             DatabaseType::SQLite => {
-                let element_matches = format!(
-                    "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
-                    column_sql
-                );
-                match operator {
-                    ArrayOperator::Contains if values.is_empty() => Expr::cust("1 = 1".to_string()),
-                    ArrayOperator::Contains => self.build_custom_expression(
-                        repeated_check(element_matches, values.len(), " AND "),
-                        Self::sea_value_list(values),
-                    ),
+                let mut checks = Vec::with_capacity(values.len());
+                let mut bound = Vec::new();
+                for value in values {
+                    let equal = db_sql::sqlite_json_element_equals(SQLITE_ELEMENT, value);
+                    checks.push(equal.sql);
+                    bound.extend(equal.values);
+                }
+                let has_element = |equal: &String| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM json_each({column_sql}) AS {SQLITE_ELEMENT} WHERE {equal})"
+                    )
+                };
+                let sql = match operator {
+                    ArrayOperator::Contains if values.is_empty() => "1 = 1".to_string(),
+                    ArrayOperator::Overlaps if values.is_empty() => "0 = 1".to_string(),
+                    ArrayOperator::Contains | ArrayOperator::Overlaps => {
+                        let combine = if matches!(operator, ArrayOperator::Contains) {
+                            " AND "
+                        } else {
+                            " OR "
+                        };
+                        let checks: Vec<String> = checks.iter().map(has_element).collect();
+                        format!("({})", checks.join(combine))
+                    }
                     ArrayOperator::ContainedBy => {
-                        let (listed, null_allowed) = split_nulls(values);
-                        let operands = db_sql::placeholders(db_type, listed.len());
-                        self.build_custom_expression(
-                            db_sql::array_contained_by(
-                                column_sql,
-                                &format!("json_each({})", column_sql),
-                                "value",
-                                &operands,
-                                null_allowed,
-                            ),
-                            Self::sea_value_list(&listed),
+                        let offending = if checks.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" WHERE NOT ({})", checks.join(" OR "))
+                        };
+                        format!(
+                            "({column_sql} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each({column_sql}) AS {SQLITE_ELEMENT}{offending}))"
                         )
                     }
-                    ArrayOperator::Overlaps if values.is_empty() => Expr::cust("0 = 1".to_string()),
-                    ArrayOperator::Overlaps => self.build_custom_expression(
-                        repeated_check(element_matches, values.len(), " OR "),
-                        Self::sea_value_list(values),
-                    ),
-                }
+                };
+                self.build_custom_expression(sql, bound)
             }
         }
     }

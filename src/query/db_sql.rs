@@ -14,8 +14,7 @@ pub(crate) use crate::internal::sql_safety::{
     validate_subquery_sql,
 };
 pub(crate) use arrays::{
-    array_contained_by, postgres_array_contained_by, postgres_array_contains,
-    postgres_array_overlaps,
+    postgres_array_contained_by, postgres_array_contains, postgres_array_overlaps,
 };
 pub(crate) use placeholders::{
     count_template_placeholders, inline_parameters, map_template_placeholders,

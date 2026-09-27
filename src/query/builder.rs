@@ -396,13 +396,14 @@ impl<M: Model> QueryBuilder<M> {
         )))
     }
 
-    /// Each named result column of the projection, with the table it is read
-    /// from: its alias when it has one, otherwise the column's own name.
+    /// Each named result column of the projection, with the table and column
+    /// it is read from: its alias when it has one, otherwise the column's own
+    /// name.
     ///
     /// A plain column is read from its qualifier's table, or the model's when
-    /// unqualified; an expression has no table. Wildcards and unaliased
+    /// unqualified; an expression has no source. Wildcards and unaliased
     /// expressions name no column and are left out.
-    pub(in crate::query) fn projection_outputs(&self) -> Vec<(String, Option<String>)> {
+    pub(in crate::query) fn projection_outputs(&self) -> Vec<(String, Option<(String, String)>)> {
         let typed = self.select_columns.iter().flatten();
         let raw = self
             .raw_select_expressions
@@ -426,11 +427,14 @@ impl<M: Model> QueryBuilder<M> {
                             .to_string()
                     }
                 };
-                let table = source.map(|(table, _)| match table {
-                    "" => M::table_name().to_string(),
-                    table => table.to_string(),
+                let source = source.map(|(table, column)| {
+                    let table = match table {
+                        "" => M::table_name(),
+                        table => table,
+                    };
+                    (table.to_string(), column.to_string())
                 });
-                Some((name, table))
+                Some((name, source))
             })
             .collect()
     }

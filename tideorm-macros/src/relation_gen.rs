@@ -153,6 +153,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let id_ident = ctx.resolve_required_db_field_ident(&id_column, ident)?;
             quote! {
                 let relation = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
+                    .__on::<Self>()
                     .with_values(
                         self.#type_ident.clone(),
                         ::tideorm::prelude::json!(self.#id_ident.clone()),

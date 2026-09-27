@@ -160,6 +160,19 @@ mod stored {
         let rows: Vec<ContactRow> = EncryptedContact::query().get_as().await.expect("get_as");
         assert_eq!(rows[0].phone_number, "555");
 
+        // Read under another name, the column is decrypted all the same, and
+        // another column read under its name is left as it is; the alias
+        // came back as ciphertext, and the other column was decrypted.
+        let rows = EncryptedContact::query()
+            .select_raw("phone_number AS renamed")
+            .select(vec!["phone AS dialed", "name AS phone_number"])
+            .get_json()
+            .await
+            .expect("aliased get_json");
+        assert_eq!(rows[0]["renamed"], serde_json::json!("555"));
+        assert_eq!(rows[0]["dialed"], serde_json::json!("555"));
+        assert_eq!(rows[0]["phone_number"], serde_json::json!("c"));
+
         let refused = EncryptedContact::update_all()
             .set("phone", 5_551_234_567_i64)
             .where_eq("id", contact.id)

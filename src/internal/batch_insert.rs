@@ -61,8 +61,9 @@ struct ClientKey {
 /// inserted with multi-row statements, each read back with a `SELECT`, and
 /// any other model is inserted a row at a time. A batch needing more bind
 /// parameters than one statement takes is split, and so is a MySQL or MariaDB
-/// batch of large rows. Every multi-statement batch runs in a transaction, a
-/// savepoint inside the caller's, so it stays all-or-nothing on every backend.
+/// batch of large rows. Every batch of several rows runs in a transaction, a
+/// savepoint inside the caller's, so it stays all-or-nothing on every backend,
+/// down to a statement whose returned rows do not match the batch.
 pub(super) async fn insert_many<M>(conn: &Executor<'_>, models: Vec<M>) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
@@ -93,14 +94,10 @@ where
     };
     let rows_per_statement = (parameter_limit / M::column_names().len().max(1)).max(1);
 
-    if let Strategy::Returning(order) = &strategy
-        && batch_size <= rows_per_statement
-    {
-        return insert_returning::<M, _>(conn, active_models, order, 0, &error_context).await;
-    }
-
-    // Several statements from here on. `begin()` on an open transaction opens
-    // a SAVEPOINT, so this also nests inside a caller's transaction.
+    // One statement of several rows runs in a transaction too, since what it
+    // returns is checked after the rows are in: a trigger can leave one out.
+    // `begin()` on an open transaction opens a SAVEPOINT, so this also nests
+    // inside a caller's transaction.
     let txn = conn
         .begin()
         .await

@@ -242,6 +242,8 @@ user.roles.sync(vec![
 
 When the pivot model has soft delete, a trashed pivot row no longer links its pair: `load()`, `load_with()`, eager loading and `count()` leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
 
+`attach()` of a pair already linked succeeds without a second row, even when two calls race. When another unique key of the pivot keeps the pair out, such as one on `role_id` alone, `attach()` and `sync()` return an error rather than report a link they did not make.
+
 `load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
 
 ### Polymorphic Relations

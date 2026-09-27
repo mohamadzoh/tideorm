@@ -308,15 +308,116 @@ pub trait EagerLoadModel: Model + InternalModel {
             if let Some((type_column, type_value)) = morph_type {
                 query = query.where_eq(type_column, type_value);
             }
+            let rows = query.get().await?;
 
-            for row in query.get().await? {
-                let key = row.get_field_value(foreign_key)?;
-                grouped.entry(__relation_key(&key)).or_default().push(row);
+            // The database matched each row under the column's collation,
+            // which can ignore case (SQLite's NOCASE, MySQL's default ones),
+            // accents or trailing spaces. When a row's key is not one of the
+            // requested keys as text, or two requested keys could be one
+            // such key, the database pairs them instead.
+            let requested: std::collections::HashSet<String> =
+                chunk.iter().map(__relation_key).collect();
+            let mut keyed = Vec::with_capacity(rows.len());
+            for row in rows {
+                let key = __relation_key(&row.get_field_value(foreign_key)?);
+                keyed.push((key, row));
+            }
+            if keyed.iter().all(|(key, _)| requested.contains(key)) && !fold_together(chunk) {
+                for (key, row) in keyed {
+                    grouped.entry(key).or_default().push(row);
+                }
+                continue;
+            }
+
+            let pairs = matching_keys::<Self>(chunk, foreign_key, morph_type).await?;
+            for (key, row) in keyed {
+                match pairs.get(&key) {
+                    Some(matched) => {
+                        for matched in matched {
+                            grouped
+                                .entry(matched.clone())
+                                .or_default()
+                                .push(row.clone());
+                        }
+                    }
+                    // A key the pairing read back in another form still
+                    // keeps the parent it names exactly.
+                    None if requested.contains(&key) => {
+                        grouped.entry(key).or_default().push(row);
+                    }
+                    None => {}
+                }
             }
         }
 
         Ok(grouped)
     }
+}
+
+/// Whether two of `keys` are the same text but for case or trailing spaces,
+/// which a case-insensitive collation matches to the same rows.
+fn fold_together(keys: &[serde_json::Value]) -> bool {
+    let mut folded = std::collections::HashSet::new();
+    keys.iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|key| !folded.insert(key.trim_end_matches(' ').to_lowercase()))
+}
+
+/// How many keys one pairing query compares, one `UNION ALL` member each:
+/// SQLite takes at most 500 members in a compound select.
+const PAIRED_KEYS_PER_QUERY: usize = 200;
+
+/// Which of `keys` each stored foreign key of `M` matches, as the database
+/// compares them: `foreign_key = ?` for each key, under the column's own
+/// collation, mapped from the stored key's text to the matching keys' text.
+async fn matching_keys<M: Model>(
+    keys: &[serde_json::Value],
+    foreign_key: &str,
+    morph_type: Option<(&'static str, &'static str)>,
+) -> Result<HashMap<String, Vec<String>>> {
+    let column = M::canonical_column_name(foreign_key).unwrap_or(foreign_key);
+    let lookup = |index: usize, key: &serde_json::Value| {
+        let mut query = M::query()
+            .select(vec![column])
+            .select_raw(&format!("{index} AS tideorm_key_index"))
+            .where_eq(foreign_key, key.clone());
+        if let Some((type_column, type_value)) = morph_type {
+            query = query.where_eq(type_column, type_value);
+        }
+        query
+    };
+
+    let mut pairs: HashMap<String, Vec<String>> = HashMap::new();
+    for (batch, chunk) in keys.chunks(PAIRED_KEYS_PER_QUERY).enumerate() {
+        let offset = batch * PAIRED_KEYS_PER_QUERY;
+        let mut lookups = chunk
+            .iter()
+            .enumerate()
+            .map(|(index, key)| lookup(offset + index, key));
+        let Some(first) = lookups.next() else {
+            continue;
+        };
+        let query = lookups.fold(first, QueryBuilder::union_all);
+
+        for row in query.get_json().await? {
+            let index = row["tideorm_key_index"]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| keys.get(index))
+                .ok_or_else(|| {
+                    Error::query(format!(
+                        "an eager load of {} paired a key it did not look up",
+                        M::table_name()
+                    ))
+                })?;
+            let matches = pairs.entry(__relation_key(&row[column])).or_default();
+            let key = __relation_key(index);
+            if !matches.contains(&key) {
+                matches.push(key);
+            }
+        }
+    }
+    Ok(pairs)
 }
 
 /// How an eager load matches a key on one side of a relation with the other:

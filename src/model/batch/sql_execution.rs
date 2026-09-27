@@ -7,6 +7,80 @@ fn json_text(value: &serde_json::Value) -> crate::internal::Value {
     crate::internal::Value::String(Some(value.to_string()))
 }
 
+/// `factor` as the decimal it is written as (`0.1`, not the binary fraction
+/// nearest to it), when a `Decimal` holds it.
+fn exact_decimal(factor: f64) -> Option<rust_decimal::Decimal> {
+    use std::str::FromStr;
+
+    rust_decimal::Decimal::from_str(&factor.to_string())
+        .ok()
+        .map(|exact| exact.normalize())
+}
+
+/// `col` scaled by `factor` in SQLite's integer arithmetic: multiplied by the
+/// factor's numerator and divided by its denominator (the other way round to
+/// divide), with the quotient rounded half away from zero, as `ROUND` does.
+/// `None` when a term does not fit an `i64`.
+fn sqlite_integer_scale(
+    col: &str,
+    factor: rust_decimal::Decimal,
+    divide: bool,
+    db_type: crate::config::DatabaseType,
+    params: &mut Vec<crate::internal::Value>,
+) -> Option<String> {
+    let numerator = i64::try_from(factor.mantissa()).ok()?;
+    let denominator = 10_i64.checked_pow(factor.scale())?;
+    let common = i64::try_from(gcd(numerator.unsigned_abs(), denominator.unsigned_abs())).ok()?;
+    let (numerator, denominator) = (numerator / common, denominator / common);
+    let (times, over) = if divide {
+        (denominator, numerator)
+    } else {
+        (numerator, denominator)
+    };
+    // The divisor stays positive, so its half rounds away from zero.
+    let (times, over) = if over < 0 {
+        (times.checked_neg()?, over.checked_neg()?)
+    } else {
+        (times, over)
+    };
+
+    let product = |params: &mut Vec<crate::internal::Value>| {
+        if times == 1 {
+            col.to_string()
+        } else {
+            let placeholder =
+                push_param(db_type, params, crate::internal::Value::BigInt(Some(times)));
+            format!("{col} * {placeholder}")
+        }
+    };
+    if over == 1 {
+        return Some(product(params));
+    }
+    let first = product(params);
+    let second = product(params);
+    let half = push_param(
+        db_type,
+        params,
+        crate::internal::Value::BigInt(Some(over / 2)),
+    );
+    let half_again = push_param(
+        db_type,
+        params,
+        crate::internal::Value::BigInt(Some(over / 2)),
+    );
+    let divisor = push_param(db_type, params, crate::internal::Value::BigInt(Some(over)));
+    Some(format!(
+        "(({first}) + CASE WHEN ({second}) < 0 THEN -{half} ELSE {half_again} END) / {divisor}"
+    ))
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 impl<M: Model> BatchUpdateBuilder<M> {
     /// Bind `value` with the type of the column it is assigned to.
     fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
@@ -16,21 +90,29 @@ impl<M: Model> BatchUpdateBuilder<M> {
         )
     }
 
-    /// `arithmetic` as the value of `column`, rounded back to an integer when
-    /// the column holds one.
+    /// `col` multiplied, or with `divide` divided, by `factor`.
     ///
-    /// Scaling by an `f64` yields a floating-point result. PostgreSQL and MySQL
-    /// round it when storing it in an integer column, but SQLite stores the
-    /// REAL as it is, after which the model can no longer read the row.
-    fn keep_integral(
+    /// An integer column is scaled exactly and rounded half away from zero,
+    /// since an `f64` holds integers exactly only up to 2^53: PostgreSQL,
+    /// MySQL and MariaDB take the factor as a decimal, and SQLite, which has
+    /// no decimal arithmetic, as a fraction of two integers. SQLite would
+    /// otherwise store the REAL product, after which the model cannot read
+    /// the row. A decimal column takes the factor as a decimal too, where the
+    /// backend has one, and any other column as an `f64`.
+    fn scaled(
         column: &str,
+        col: &str,
         db_type: crate::config::DatabaseType,
-        arithmetic: String,
+        params: &mut Vec<crate::internal::Value>,
+        factor: f64,
+        divide: bool,
     ) -> String {
+        use crate::config::DatabaseType;
         use crate::orm::ColumnType;
 
+        let column_type = crate::internal::column_type_of::<M>(column);
         let integral = matches!(
-            crate::internal::column_type_of::<M>(column),
+            column_type,
             Some(
                 ColumnType::TinyInteger
                     | ColumnType::SmallInteger
@@ -42,10 +124,41 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     | ColumnType::BigUnsigned
             )
         );
-        if integral && db_type == crate::config::DatabaseType::SQLite {
-            format!("CAST(ROUND({}) AS INTEGER)", arithmetic)
+        let decimal = matches!(
+            column_type,
+            Some(ColumnType::Decimal(_) | ColumnType::Money(_))
+        );
+        let operator = if divide { "/" } else { "*" };
+
+        match (db_type, exact_decimal(factor)) {
+            (DatabaseType::SQLite, Some(exact)) if integral => {
+                if let Some(scaled) = sqlite_integer_scale(col, exact, divide, db_type, params) {
+                    return format!("CAST({scaled} AS INTEGER)");
+                }
+            }
+            (DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB, Some(exact))
+                if integral || decimal =>
+            {
+                let placeholder = push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::Decimal(Some(exact)),
+                );
+                return format!("{col} {operator} {placeholder}");
+            }
+            _ => {}
+        }
+
+        let placeholder = push_param(
+            db_type,
+            params,
+            crate::internal::Value::Double(Some(factor)),
+        );
+        let scaled = format!("{col} {operator} {placeholder}");
+        if integral && db_type == DatabaseType::SQLite {
+            format!("CAST(ROUND({scaled}) AS INTEGER)")
         } else {
-            arithmetic
+            scaled
         }
     }
 
@@ -73,26 +186,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
                 Ok(format!("{} = {} - {}", col, col, placeholder))
             }
-            UpdateValue::Multiply(by) => {
-                let placeholder =
-                    push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
-                let product = format!("{} * {}", col, placeholder);
-                Ok(format!(
-                    "{} = {}",
-                    col,
-                    Self::keep_integral(column, db_type, product)
-                ))
-            }
-            UpdateValue::Divide(by) => {
-                let placeholder =
-                    push_param(db_type, params, crate::internal::Value::Double(Some(*by)));
-                let quotient = format!("{} / {}", col, placeholder);
-                Ok(format!(
-                    "{} = {}",
-                    col,
-                    Self::keep_integral(column, db_type, quotient)
-                ))
-            }
+            UpdateValue::Multiply(by) => Ok(format!(
+                "{col} = {}",
+                Self::scaled(column, &col, db_type, params, *by, false)
+            )),
+            UpdateValue::Divide(by) => Ok(format!(
+                "{col} = {}",
+                Self::scaled(column, &col, db_type, params, *by, true)
+            )),
             UpdateValue::ArrayAppend(value) => Ok(match db_type {
                 crate::config::DatabaseType::Postgres => {
                     let placeholder =

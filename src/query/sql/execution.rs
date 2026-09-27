@@ -123,15 +123,15 @@ impl<M: Model> QueryBuilder<M> {
         output_types: &[(String, crate::orm::ColumnType)],
     ) -> Result<Vec<serde_json::Value>> {
         let db = self.current_db()?;
-        let joined_names: Vec<String> = self
-            .projection_outputs()
-            .into_iter()
-            .filter(|(_, table)| {
-                table
-                    .as_deref()
-                    .is_some_and(|table| table != M::table_name())
+        let outputs = self.projection_outputs();
+        let joined_names: Vec<String> = outputs
+            .iter()
+            .filter(|(_, source)| {
+                source
+                    .as_ref()
+                    .is_some_and(|(table, _)| table != M::table_name())
             })
-            .map(|(name, _)| name)
+            .map(|(name, _)| name.clone())
             .collect();
         let model_type = |name: &str| {
             if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
@@ -144,7 +144,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         let rows = db.__raw_json_typed(sql, params, &model_type);
         let mut rows = self.logged(sql, rows, |rows| rows.len() as u64).await?;
-        crate::model::decrypt_json_rows::<M>(&mut rows, &joined_names)?;
+        crate::model::decrypt_json_rows::<M>(&mut rows, &outputs)?;
         Ok(rows)
     }
 

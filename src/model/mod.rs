@@ -84,28 +84,50 @@ where
     }
 }
 
-/// Decrypt, in rows a query of `M` read as JSON, each output named like one
-/// of `M`'s encrypted columns, except those `joined` says another table
-/// supplied: `pluck`, `value`, `get_json` and `get_as` return what `get()`
-/// does, not the stored ciphertext.
+/// Decrypt, in rows a query of `M` read as JSON, each output holding one of
+/// `M`'s encrypted columns: `pluck`, `value`, `get_json` and `get_as` return
+/// what `get()` does, not the stored ciphertext.
+///
+/// `outputs` are the projection's named outputs with the table and column
+/// each reads, as `QueryBuilder::projection_outputs` gives them; none for
+/// the model's own columns. An output reading an encrypted column of `M` is
+/// decrypted under whatever name it has, and one named like such a column
+/// is too unless it reads a column of another table or another column: an
+/// expression over the column comes back under its name.
 pub(crate) fn decrypt_json_rows<M: ModelMeta>(
     rows: &mut [serde_json::Value],
-    joined: &[String],
+    outputs: &[(String, Option<(String, String)>)],
 ) -> crate::error::Result<()> {
     if !M::has_encrypted_fields() {
         return Ok(());
     }
-    let encrypted: Vec<(&str, &str)> = M::encrypted_fields()
+    let mut encrypted_outputs: Vec<(String, &str, &str)> = Vec::new();
+    for (field, column) in M::encrypted_fields()
         .into_iter()
         .zip(M::encrypted_column_names())
-        .filter(|(_, column)| !joined.iter().any(|name| name == column))
-        .collect();
+    {
+        let mut named_by_a_column = false;
+        for (name, source) in outputs {
+            let Some((table, source_column)) = source else {
+                continue;
+            };
+            named_by_a_column |= name == column;
+            let source_column = M::canonical_column_name(source_column).unwrap_or(source_column);
+            if table == M::table_name() && source_column == column {
+                encrypted_outputs.push((name.clone(), field, column));
+            }
+        }
+        if !named_by_a_column {
+            encrypted_outputs.push((column.to_string(), field, column));
+        }
+    }
+
     for row in rows {
         let Some(members) = row.as_object_mut() else {
             continue;
         };
-        for (field, column) in &encrypted {
-            if let Some(value) = members.get_mut(*column) {
+        for (name, field, column) in &encrypted_outputs {
+            if let Some(value) = members.get_mut(name.as_str()) {
                 *value = __decrypt_model_field(value.take(), M::table_name(), field, column)?;
             }
         }

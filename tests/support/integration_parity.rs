@@ -1332,6 +1332,41 @@ async fn raw_sql_with_params() {
     assert_eq!(inactive, 2);
 }
 
+/// `insert_all` stays all-or-nothing when a trigger leaves a row out of its
+/// one `INSERT .. RETURNING`: that statement ran outside a transaction, so
+/// the other rows stayed although the call failed on the missing one.
+#[tokio::test]
+async fn insert_all_keeps_no_row_of_a_batch_a_trigger_cut_short() {
+    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
+        return;
+    }
+    Database::execute(
+        "CREATE TRIGGER test_users_skip BEFORE INSERT ON test_users \
+         WHEN NEW.name = 'Skipped' BEGIN SELECT RAISE(IGNORE); END",
+    )
+    .await
+    .expect("creating the trigger failed");
+
+    let result = TestUser::insert_all(vec![
+        user("kept@example.com", "Kept", 25, true),
+        user("skipped@example.com", "Skipped", 30, true),
+    ])
+    .await;
+    Database::execute("DROP TRIGGER test_users_skip")
+        .await
+        .expect("dropping the trigger failed");
+
+    assert!(result.is_err(), "a row came back missing");
+    assert_eq!(
+        TestUser::query()
+            .where_eq("email", "kept@example.com")
+            .count()
+            .await
+            .expect("count failed"),
+        0
+    );
+}
+
 #[tokio::test]
 async fn insert_all_assigns_distinct_ids() {
     if !setup().await {
@@ -3018,6 +3053,67 @@ async fn attach_stores_one_pivot_row_even_when_calls_race() {
     assert_eq!(labels.len(), 5);
 }
 
+/// `attach` fails when another unique key of the pivot keeps the pair out,
+/// here a label that may belong to one article only: the conflict clause
+/// that makes a lost race a no-op swallowed that conflict, and the attach
+/// reported success without linking anything. `sync` fails the same way.
+#[tokio::test]
+async fn attach_fails_when_another_unique_key_refuses_the_pair() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("linked_articles", |t| {
+        t.id();
+        t.string("title").not_null();
+    })
+    .await;
+    fresh_table("linked_labels", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("linked_article_labels", |t| {
+        t.id();
+        t.big_integer("article_id").not_null();
+        t.big_integer("label_id").not_null();
+        t.unique_index(&["label_id"]);
+    })
+    .await;
+    let mut articles = Vec::new();
+    for title in ["first", "second"] {
+        articles.push(
+            LinkedArticle {
+                id: 0,
+                title: title.into(),
+                labels: Default::default(),
+            }
+            .save()
+            .await
+            .expect("save article failed"),
+        );
+    }
+    let label = LinkedLabel {
+        id: 0,
+        name: "news".into(),
+    }
+    .save()
+    .await
+    .expect("save label failed");
+
+    articles[0]
+        .labels
+        .attach(label.id)
+        .await
+        .expect("the first attach failed");
+    assert!(articles[1].labels.attach(label.id).await.is_err());
+    assert!(articles[1].labels.sync(vec![label.id]).await.is_err());
+    let links: Vec<i64> = LinkedArticleLabel::query()
+        .pluck("article_id")
+        .await
+        .expect("pluck failed");
+    assert_eq!(links, vec![articles[0].id]);
+}
+
 #[tideorm::model(table = "binned_articles")]
 pub struct BinnedArticle {
     #[tideorm(primary_key, auto_increment)]
@@ -3916,6 +4012,74 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
     );
 }
 
+/// SQLite's schema file recreates what `PRAGMA` metadata leaves out: a
+/// generated column, an index's collation, and `AUTOINCREMENT`, which keeps
+/// a deleted row's id from coming back. Rebuilt from the pragmas, the table
+/// lost the column, the unique index took "alice" beside "Alice", and ids
+/// were reused.
+#[tokio::test]
+async fn write_schema_keeps_what_sqlite_pragmas_leave_out() {
+    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
+        return;
+    }
+    for statement in [
+        "DROP TABLE IF EXISTS exported_kinds",
+        "CREATE TABLE exported_kinds (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+         base INTEGER, doubled INTEGER GENERATED ALWAYS AS (base * 2))",
+        "CREATE UNIQUE INDEX exported_kinds_name ON exported_kinds (name COLLATE NOCASE)",
+    ] {
+        Database::execute(statement).await.expect("setup failed");
+    }
+
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("tideorm_schema_kinds.sql");
+    SchemaWriter::write_schema(&path)
+        .await
+        .expect("write_schema failed");
+    let file = std::fs::read_to_string(&path).expect("schema file missing");
+    let _ = std::fs::remove_file(&path);
+
+    Database::execute("DROP TABLE exported_kinds")
+        .await
+        .expect("drop failed");
+    for statement in file
+        .split(";\n")
+        .filter(|statement| statement.contains("exported_kinds"))
+    {
+        Database::execute(statement.trim())
+            .await
+            .unwrap_or_else(|error| panic!("{error}\n{statement}\nin:\n{file}"));
+    }
+
+    Database::execute("INSERT INTO exported_kinds (name, base) VALUES ('Alice', 2)")
+        .await
+        .expect("insert failed");
+    let rows = Database::raw_json("SELECT id, doubled FROM exported_kinds")
+        .await
+        .expect("read failed");
+    assert_eq!(rows[0]["doubled"], serde_json::json!(4), "{file}");
+    assert!(
+        Database::execute("INSERT INTO exported_kinds (name) VALUES ('alice')")
+            .await
+            .is_err(),
+        "the index lost its collation:\n{file}"
+    );
+
+    let first = rows[0]["id"].as_i64().expect("an id");
+    Database::execute("DELETE FROM exported_kinds")
+        .await
+        .expect("delete failed");
+    Database::execute("INSERT INTO exported_kinds (name) VALUES ('Bob')")
+        .await
+        .expect("insert failed");
+    let rows = Database::raw_json("SELECT id FROM exported_kinds")
+        .await
+        .expect("read failed");
+    assert!(
+        rows[0]["id"].as_i64().expect("an id") > first,
+        "a deleted id came back:\n{file}"
+    );
+}
+
 #[tideorm::model(table = "tagged_rows")]
 pub struct TaggedRow {
     #[tideorm(primary_key, auto_increment)]
@@ -4016,6 +4180,142 @@ async fn array_remove_compares_elements_as_json_values() {
     assert_eq!(
         row.tags,
         json!([{"a": 1}, [2, 1], [1, 2, 2], [[1, 2]], "1"])
+    );
+}
+
+/// The JSON array filters compare elements as JSON values: `1` is not
+/// `true`, and a string holding `{"a":1}` is not that object. SQLite
+/// compared `json_each` values without their type, so `[1]` matched `[true]`
+/// and the string matched the object. PostgreSQL's arrays are native.
+#[tokio::test]
+async fn array_filters_compare_elements_with_their_json_type() {
+    use serde_json::json;
+
+    if !setup().await || backend::DATABASE_TYPE == DatabaseType::Postgres {
+        return;
+    }
+
+    fresh_table("tagged_rows", |t| {
+        t.id();
+        t.json("tags").not_null();
+    })
+    .await;
+    for tags in [
+        json!([1]),
+        json!([true]),
+        json!([{"a": 1}]),
+        json!(["{\"a\":1}"]),
+    ] {
+        TaggedRow { id: 0, tags }.save().await.expect("save failed");
+    }
+    let tags_of = |query: QueryBuilder<TaggedRow>| async move {
+        query
+            .order_asc("id")
+            .get()
+            .await
+            .expect("array filter failed")
+            .into_iter()
+            .map(|row| row.tags)
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        tags_of(TaggedRow::query().where_array_contains("tags", vec![json!(1)])).await,
+        [json!([1])]
+    );
+    assert_eq!(
+        tags_of(TaggedRow::query().where_array_overlaps("tags", vec![json!(true)])).await,
+        [json!([true])]
+    );
+    assert_eq!(
+        tags_of(TaggedRow::query().where_array_contained_by("tags", vec![json!(1)])).await,
+        [json!([1])]
+    );
+    assert_eq!(
+        tags_of(TaggedRow::query().where_array_contains("tags", vec![json!({"a": 1})])).await,
+        [json!([{"a": 1}])]
+    );
+    assert_eq!(
+        tags_of(TaggedRow::query().where_array_contains("tags", vec![json!("{\"a\":1}")])).await,
+        [json!(["{\"a\":1}"])]
+    );
+}
+
+#[tideorm::model(table = "scaled_amounts")]
+pub struct ScaledAmount {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub amount: i64,
+}
+
+/// `multiply` and `divide` scale an integer column exactly and round half
+/// away from zero. The factor was bound as an `f64`, so a value past 2^53
+/// changed even when multiplied by `1.0`.
+#[tokio::test]
+async fn multiply_and_divide_scale_an_integer_column_exactly() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("scaled_amounts", |t| {
+        t.id();
+        t.big_integer("amount").not_null();
+    })
+    .await;
+
+    let past_f64 = 9_007_199_254_740_993_i64;
+    let cases: [(i64, bool, f64, i64); 7] = [
+        (past_f64, false, 1.0, past_f64),
+        (past_f64, true, 1.0, past_f64),
+        (past_f64, false, 2.0, 18_014_398_509_481_986),
+        (5, false, 0.5, 3),
+        (-5, true, 2.0, -3),
+        (7, false, 1.5, 11),
+        (7, true, 2.5, 3),
+    ];
+    for (start, divide, factor, expected) in cases {
+        let row = ScaledAmount {
+            id: 0,
+            amount: start,
+        }
+        .save()
+        .await
+        .expect("save failed");
+        let update = ScaledAmount::update_all().where_eq("id", row.id);
+        let update = if divide {
+            update.divide("amount", factor)
+        } else {
+            update.multiply("amount", factor)
+        };
+        update.execute().await.expect("scaling failed");
+
+        let stored = ScaledAmount::find(row.id)
+            .await
+            .expect("find failed")
+            .expect("the row is there");
+        let operation = if divide { "/" } else { "*" };
+        assert_eq!(stored.amount, expected, "{start} {operation} {factor}");
+    }
+}
+
+/// A text primary key refuses NULL on every backend. SQLite lets any key but
+/// an `INTEGER` one hold NULL, and the migration left out the key's
+/// `NOT NULL`, so it took two rows keyed NULL.
+#[tokio::test]
+async fn a_text_primary_key_refuses_null() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("null_keyed_codes", |t| {
+        t.string("code").primary_key();
+        t.string("name");
+    })
+    .await;
+
+    assert!(
+        Database::execute("INSERT INTO null_keyed_codes (code, name) VALUES (NULL, 'a')")
+            .await
+            .is_err(),
+        "a NULL key was stored"
     );
 }
 
@@ -4166,13 +4466,26 @@ pub struct EagerPet {
     pub owner: BelongsTo<EagerOwner>,
 }
 
+/// Two morph relations under one name that key their children by different
+/// columns: a note finds its document by `code`, which `notes` names,
+/// though `photos` comes first. The first relation's key was used for both.
 #[tideorm::model(table = "morph_docs")]
 pub struct MorphDoc {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub code: String,
+    #[tideorm(morph_name = "noteable")]
+    pub photos: MorphMany<MorphPhoto>,
     #[tideorm(morph_name = "noteable", local_key = "code")]
     pub notes: MorphMany<MorphNote>,
+}
+
+#[tideorm::model(table = "morph_photos")]
+pub struct MorphPhoto {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub noteable_type: String,
+    pub noteable_id: i64,
 }
 
 #[tideorm::model(table = "morph_pages")]
@@ -4193,6 +4506,96 @@ pub struct MorphNote {
     pub body: String,
     #[tideorm(morph_name = "noteable")]
     pub owner: MorphTo<MorphDoc>,
+}
+
+#[tideorm::model(table = "cased_owners")]
+pub struct CasedOwner {
+    #[tideorm(primary_key)]
+    pub code: String,
+    #[tideorm(has_many = "CasedItem", foreign_key = "owner_code")]
+    pub items: HasMany<CasedItem>,
+}
+
+#[tideorm::model(table = "cased_items")]
+pub struct CasedItem {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub owner_code: String,
+}
+
+/// An eager load gives each parent the rows the database matches to its key,
+/// as a lazy load does, under the column's collation: SQLite's NOCASE and
+/// MySQL's and MariaDB's default collations match "ABC" with "abc". The rows
+/// were regrouped by exact text, so "ABC" got none. PostgreSQL compares
+/// case-sensitively, and both loads agree there too.
+#[tokio::test]
+async fn eager_loads_match_keys_under_the_columns_collation() {
+    if !setup().await {
+        return;
+    }
+    let mut parents = vec!["ABC"];
+    if backend::DATABASE_TYPE == DatabaseType::SQLite {
+        for statement in [
+            "DROP TABLE IF EXISTS cased_owners",
+            "DROP TABLE IF EXISTS cased_items",
+            "CREATE TABLE cased_owners (code TEXT PRIMARY KEY NOT NULL)",
+            "CREATE TABLE cased_items (id INTEGER PRIMARY KEY, owner_code TEXT NOT NULL COLLATE NOCASE)",
+        ] {
+            Database::execute(statement).await.expect("setup failed");
+        }
+        // The owners' key compares exactly, so both are owners.
+        parents.push("abc");
+    } else {
+        fresh_table("cased_owners", |t| {
+            t.string("code").primary_key();
+        })
+        .await;
+        fresh_table("cased_items", |t| {
+            t.id();
+            t.string("owner_code").not_null();
+        })
+        .await;
+    }
+    for code in &parents {
+        CasedOwner {
+            code: code.to_string(),
+            ..Default::default()
+        }
+        .save()
+        .await
+        .expect("saving an owner failed");
+    }
+    CasedItem {
+        id: 0,
+        owner_code: "abc".into(),
+    }
+    .save()
+    .await
+    .expect("saving an item failed");
+
+    let eager = CasedOwner::query()
+        .with("items")
+        .order_by("code", Order::Asc)
+        .get()
+        .await
+        .expect("eager load failed");
+    let lazy = CasedOwner::query()
+        .order_by("code", Order::Asc)
+        .get()
+        .await
+        .expect("load failed");
+    for (eager, lazy) in eager.iter().zip(&lazy) {
+        let loaded = lazy.items.load().await.expect("lazy load failed").len();
+        assert_eq!(
+            eager.items.get_cached().map_or(0, <[_]>::len),
+            loaded,
+            "owner {}",
+            lazy.code
+        );
+        if backend::DATABASE_TYPE != DatabaseType::Postgres {
+            assert_eq!(loaded, 1, "owner {}", lazy.code);
+        }
+    }
 }
 
 /// Eager loading matches keys by value, as the database does, so an `i64` key
@@ -5365,9 +5768,23 @@ async fn a_renaming_serialize_derive_does_not_corrupt_cache_hits() {
     }
 }
 
+#[tideorm::model(table = "refused_notes")]
+pub struct RefusedNote {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+}
+
+impl Callbacks for RefusedNote {
+    fn before_save(&mut self) -> tideorm::Result<()> {
+        Err(Error::validation("body", "saves are refused"))
+    }
+}
+
 /// An upsert keyed by an auto-increment key the database has not numbered
-/// yet is a `create()`; it stored the placeholder `0` (PostgreSQL, SQLite),
-/// or inserted a row and then failed to reload it (MySQL).
+/// yet inserts the row; it stored the placeholder `0` (PostgreSQL, SQLite),
+/// or inserted a row and then failed to reload it (MySQL). Like every
+/// upsert it runs no callback, where going through `create()` ran them.
 #[tokio::test]
 async fn an_upsert_on_an_unnumbered_key_creates_the_row() {
     if !setup().await {
@@ -5388,6 +5805,21 @@ async fn an_upsert_on_an_unnumbered_key_creates_the_row() {
     assert_ne!(created.id, 0);
     let ids: Vec<i64> = TestUser::query().pluck("id").await.expect("pluck failed");
     assert_eq!(ids, vec![created.id]);
+
+    fresh_table("refused_notes", |t| {
+        t.id();
+        t.string("body").not_null();
+    })
+    .await;
+    let note = || RefusedNote {
+        id: 0,
+        body: "kept".into(),
+    };
+    assert!(RefusedNote::create(note()).await.is_err());
+    let upserted = RefusedNote::insert_or_update(note(), vec!["id"])
+        .await
+        .expect("the upsert ran a callback");
+    assert_ne!(upserted.id, 0);
 }
 
 #[tideorm::model(table = "guarded_rows", soft_delete)]

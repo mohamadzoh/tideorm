@@ -49,6 +49,9 @@ pub struct MorphTo<Morphable> {
     pub type_column: &'static str,
     /// Column on this model holding the owner's key.
     pub id_column: &'static str,
+    /// The table of the model this relation sits on, which picks the owner's
+    /// `MorphOne`/`MorphMany` naming the key its children hold.
+    child_table: &'static str,
     type_value: Option<String>,
     id_value: Option<serde_json::Value>,
     _morphable: PhantomData<Morphable>,
@@ -72,6 +75,15 @@ impl<Morphable> MorphTo<Morphable> {
             id_column,
             ..Self::default()
         }
+    }
+
+    /// Record the model this relation sits on. The derive does; without it,
+    /// the owner is looked up by the key its first `MorphOne`/`MorphMany`
+    /// with this relation's morph name names, else by its primary key.
+    #[doc(hidden)]
+    pub fn __on<Child: crate::model::ModelMeta>(mut self) -> Self {
+        self.child_table = Child::table_name();
+        self
     }
 
     /// Supply the values read off this model's two columns.
@@ -126,7 +138,7 @@ impl<Morphable> MorphTo<Morphable> {
         };
 
         // The owner's `MorphOne`/`MorphMany` names the key its children hold.
-        let key_column = match Related::__morph_owner_key(self.id_column) {
+        let key_column = match Related::__morph_owner_key(self.id_column, self.child_table) {
             Some(column) => column,
             None => match Related::primary_key_names() {
                 [column] => column,
@@ -193,6 +205,7 @@ impl<Morphable> Default for MorphTo<Morphable> {
         Self {
             type_column: "",
             id_column: "",
+            child_table: "",
             type_value: None,
             id_value: None,
             _morphable: PhantomData,

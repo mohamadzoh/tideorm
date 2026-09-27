@@ -20,7 +20,8 @@ pub(crate) struct ColumnDefinition {
     /// Whether the column belongs to the primary key.
     ///
     /// The key itself is always rendered as a table constraint; this only
-    /// drops the `NOT NULL` and `UNIQUE` the key already implies.
+    /// drops the `UNIQUE` the key already implies, and its `NOT NULL` except
+    /// on SQLite, where a key other than an `INTEGER` rowid holds NULLs.
     pub(crate) primary_key: bool,
     pub(crate) auto_increment: bool,
     pub(crate) unique: bool,
@@ -58,7 +59,9 @@ impl ColumnDefinition {
             sql.push_str(" AUTO_INCREMENT");
         }
 
-        if !self.nullable && !self.primary_key {
+        // SQLite lets a text key hold NULL, twice over, so a key keeps its
+        // NOT NULL there; an `INTEGER` key still numbers a NULL insert.
+        if !self.nullable && (!self.primary_key || db_type == DatabaseType::SQLite) {
             sql.push_str(" NOT NULL");
         }
 

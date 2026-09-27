@@ -95,10 +95,22 @@ impl SnapshotStore {
         entry
     }
 
-    fn remove(&mut self, row: &RowKey, origin: Origin) {
-        if let Some(entry) = self.take(row, origin) {
+    /// Set one pool's baseline of `row` to `values`, or drop it for `None`,
+    /// and return the baseline it replaces.
+    fn replace(
+        &mut self,
+        row: RowKey,
+        origin: Origin,
+        values: Option<SnapshotValues>,
+    ) -> Option<SnapshotValues> {
+        let previous = self.take(&row, origin).map(|entry| {
             self.order.remove(&entry.sequence);
+            entry.values
+        });
+        if let Some(values) = values {
+            self.insert(row, origin, values);
         }
+        previous
     }
 
     fn remove_model_type(&mut self, model_type: TypeId) {
@@ -194,8 +206,23 @@ pub fn remember_model<M: Model>(model: &M) -> Result<()> {
     };
 
     let snapshot = capture_snapshot(model)?;
-    snapshot_store().write().insert(row, origin(), snapshot);
+    set_baseline(row, Some(snapshot));
     Ok(())
+}
+
+/// Set the current pool's baseline of `row`, or drop it for `None`.
+///
+/// A row read or written inside a transaction is only what the database
+/// holds once it commits, so if it rolls back instead, the baseline this
+/// replaced comes back.
+fn set_baseline(row: RowKey, values: Option<SnapshotValues>) {
+    let origin = origin();
+    let previous = snapshot_store()
+        .write()
+        .replace(row.clone(), origin, values);
+    crate::cache::undo_on_rollback(move || {
+        snapshot_store().write().replace(row, origin, previous);
+    });
 }
 
 /// Remember a collection of models as dirty-tracking baselines.
@@ -216,7 +243,7 @@ pub fn forget_model<M: Model>(model: &M) -> Result<()> {
         return Ok(());
     };
 
-    snapshot_store().write().remove(&row, origin());
+    set_baseline(row, None);
     Ok(())
 }
 
@@ -226,7 +253,7 @@ pub fn forget_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<()> {
         return Ok(());
     };
 
-    snapshot_store().write().remove(&row, origin());
+    set_baseline(row, None);
     Ok(())
 }
 

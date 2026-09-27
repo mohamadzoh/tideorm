@@ -69,6 +69,25 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
         }
     };
     let ensure_fields_storable = ctx.ensure_fields_storable();
+    // Insert `model` as a new row and bind `model` to the row as stored, with
+    // no callback: `create()` runs its own around it, and an upsert of a key
+    // the database has not numbered runs none, as every upsert.
+    let insert_new_row = quote! {
+        let error_context = || ::tideorm::internal::model_error_context::<Self>(
+            format!("insert into {}", #table_name),
+        );
+        let active = <Self as ::tideorm::internal::InternalModel>::try_into_active_model(model)?;
+        let connection = ::tideorm::database::__current_connection()?;
+        #ensure_fields_storable
+        let result = ::tideorm::profiling::__profile_future(
+            ::tideorm::orm::ActiveModelTrait::insert(active, &connection.executor()),
+        )
+            .await
+            .map_err(::tideorm::Error::from)
+            .map_err(|err| err.with_context(error_context()))?;
+        let model = <Self as ::tideorm::internal::InternalModel>::try_from_entity_model(result)?;
+        ::tideorm::QueryCache::global().invalidate_model(#table_name);
+    };
     let find_impl = find_body(quote! { ::tideorm::database::__current_connection()? });
     let find_with_impl = find_body(quote! { db.__get_connection()? });
 
@@ -104,7 +123,6 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     AfterCreateDispatch, AfterValidationDispatch, BeforeCreateOnlyDispatch,
                     BeforeSaveDispatch, BeforeValidationDispatch,
                 };
-                use ::tideorm::orm::ActiveModelTrait;
                 let mut model = model;
                 (&mut model).run_before_validation()?;
                 ::tideorm::validation::Validate::validate(&model)
@@ -112,18 +130,7 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 (&model).run_after_validation()?;
                 (&mut model).run_before_save()?;
                 (&mut model).run_before_create_only()?;
-                let error_context = || ::tideorm::internal::model_error_context::<Self>(
-                    format!("insert into {}", #table_name),
-                );
-                let active = <Self as ::tideorm::internal::InternalModel>::try_into_active_model(model)?;
-                let connection = ::tideorm::database::__current_connection()?;
-                #ensure_fields_storable
-                let result = ::tideorm::profiling::__profile_future(active.insert(&connection.executor()))
-                    .await
-                    .map_err(::tideorm::Error::from)
-                    .map_err(|err| err.with_context(error_context()))?;
-                let model = <Self as ::tideorm::internal::InternalModel>::try_from_entity_model(result)?;
-                ::tideorm::QueryCache::global().invalidate_model(#table_name);
+                #insert_new_row
                 (&model).run_after_create()?;
                 Ok(model)
             }
@@ -255,13 +262,15 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     })
                     .collect();
                 // A key the database has not numbered yet conflicts with no
-                // row: keyed by it alone the upsert is a `create()`, and
-                // otherwise the database numbers it as `create()` would,
-                // rather than storing its placeholder `0`.
+                // row: keyed by it alone the upsert inserts the row, running
+                // no callback, as no upsert does, and otherwise the database
+                // numbers it as an insert would, rather than storing its
+                // placeholder `0`.
                 let key_is_new = #pk_auto_increment
                     && <Self as ::tideorm::model::Model>::is_new(&model_for_lookup);
                 if key_is_new && conflict_cols.iter().all(|column| #is_pk_column) {
-                    return <Self as ::tideorm::model::Model>::create(model).await;
+                    #insert_new_row
+                    return Ok(model);
                 }
                 let include_pk = !key_is_new
                     && (conflict_cols.iter().any(|column| #is_pk_column) || !#pk_auto_increment);
