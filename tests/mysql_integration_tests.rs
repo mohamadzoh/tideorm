@@ -19,6 +19,10 @@ mod backend {
 
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::MySQL;
 
+    pub fn database_url() -> &'static str {
+        mysql_database_url()
+    }
+
     pub async fn connect() -> bool {
         if !should_run_mysql_tests() {
             println!(

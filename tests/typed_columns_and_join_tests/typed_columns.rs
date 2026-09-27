@@ -15,7 +15,7 @@ fn test_integer_column_eq() {
     let cond = user_cols::ID.eq(42i64);
     assert_eq!(cond.column, "id");
     assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, serde_json::json!(42));
+    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(42)));
 }
 
 #[test]
@@ -23,7 +23,7 @@ fn test_integer_column_ne() {
     let cond = user_cols::ID.ne(99i64);
     assert_eq!(cond.column, "id");
     assert_eq!(cond.operator, Operator::NotEq);
-    assert_eq!(cond.value, serde_json::json!(99));
+    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(99)));
 }
 
 #[test]
@@ -46,7 +46,10 @@ fn test_integer_column_between() {
     let cond = user_cols::ID.between(10i64, 100i64);
     assert_eq!(cond.column, "id");
     assert_eq!(cond.operator, Operator::Between);
-    assert_eq!(cond.value, serde_json::json!([10, 100]));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Range(serde_json::json!(10), serde_json::json!(100))
+    );
 }
 
 #[test]
@@ -54,7 +57,10 @@ fn test_integer_column_in() {
     let cond = user_cols::ID.is_in(vec![1i64, 2, 3, 4, 5]);
     assert_eq!(cond.column, "id");
     assert_eq!(cond.operator, Operator::In);
-    assert_eq!(cond.value, serde_json::json!([1, 2, 3, 4, 5]));
+    assert_eq!(
+        cond.value,
+        ConditionValue::List((1..=5).map(|id| serde_json::json!(id)).collect())
+    );
 }
 
 #[test]
@@ -68,7 +74,10 @@ fn test_string_column_eq() {
     let cond = user_cols::NAME.eq("Alice");
     assert_eq!(cond.column, "name");
     assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, serde_json::json!("Alice"));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Single(serde_json::json!("Alice"))
+    );
 }
 
 #[test]
@@ -76,7 +85,10 @@ fn test_string_column_like() {
     let cond = user_cols::NAME.like("%test%");
     assert_eq!(cond.column, "name");
     assert_eq!(cond.operator, Operator::Like);
-    assert_eq!(cond.value, serde_json::json!("%test%"));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Single(serde_json::json!("%test%"))
+    );
 }
 
 #[test]
@@ -89,28 +101,44 @@ fn test_string_column_not_like() {
 fn test_string_column_contains() {
     let cond = user_cols::NAME.contains("test");
     assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(cond.value, serde_json::json!("%test%"));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Single(serde_json::json!("%test%"))
+    );
 }
 
 #[test]
 fn test_string_column_starts_with() {
     let cond = user_cols::NAME.starts_with("Mr.");
     assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(cond.value, serde_json::json!("Mr.%"));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Single(serde_json::json!("Mr.%"))
+    );
 }
 
 #[test]
 fn test_string_column_ends_with() {
     let cond = user_cols::NAME.ends_with("son");
     assert_eq!(cond.operator, Operator::LikeEscaped);
-    assert_eq!(cond.value, serde_json::json!("%son"));
+    assert_eq!(
+        cond.value,
+        ConditionValue::Single(serde_json::json!("%son"))
+    );
 }
 
 #[test]
 fn test_string_column_in() {
     let cond = user_cols::NAME.is_in(vec!["Alice", "Bob", "Charlie"]);
     assert_eq!(cond.operator, Operator::In);
-    assert_eq!(cond.value, serde_json::json!(["Alice", "Bob", "Charlie"]));
+    assert_eq!(
+        cond.value,
+        ConditionValue::List(vec![
+            serde_json::json!("Alice"),
+            serde_json::json!("Bob"),
+            serde_json::json!("Charlie")
+        ])
+    );
 }
 
 #[test]
@@ -142,7 +170,7 @@ fn test_bool_column_eq() {
     let cond = user_cols::ACTIVE.eq(true);
     assert_eq!(cond.column, "active");
     assert_eq!(cond.operator, Operator::Eq);
-    assert_eq!(cond.value, serde_json::json!(true));
+    assert_eq!(cond.value, ConditionValue::Single(serde_json::json!(true)));
 }
 
 #[test]

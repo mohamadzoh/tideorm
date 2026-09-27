@@ -74,17 +74,17 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
     }
     let struct_name = &ctx.struct_name;
     // Relation wrappers are serialized only once something is cached in them;
-    // `MorphTo` keeps no cache, so it is never serialized.
-    let (relation_fields, other_fields): (Vec<&ModelField>, Vec<&ModelField>) = ctx
-        .fields
-        .iter()
-        .filter(|field| field.relation_kind() != Some(RelationKind::MorphTo))
-        .partition(|field| field.relation_kind().is_some());
+    // `MorphTo` keeps no cache, so it is never serialized. A format that is
+    // not self-describing (bincode, postcard) reads fields by position, so
+    // there every other relation is written, as `None` when nothing is cached,
+    // in the order `visit_seq` reads them back.
+    let (relation_fields, other_fields) = serialized_fields(ctx);
     let relation_idents: Vec<_> = relation_fields.iter().map(|field| field.ident()).collect();
     let relation_names = relation_fields.iter().map(|field| field.name());
     let other_idents = other_fields.iter().map(|field| field.ident());
     let other_names = other_fields.iter().map(|field| field.name());
     let base_field_count = other_fields.len();
+    let relation_count = relation_fields.len();
     quote! {
         impl ::tideorm::serde::Serialize for #struct_name {
             fn serialize<S>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error>
@@ -92,19 +92,33 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 S: ::tideorm::serde::Serializer,
             {
                 use ::tideorm::serde::ser::SerializeStruct;
-                let relation_field_count = 0usize #( + usize::from(self.#relation_idents.get_cached().is_some()))*;
+                let positional = !serializer.is_human_readable();
+                let relation_field_count = if positional {
+                    #relation_count
+                } else {
+                    0usize #( + usize::from(self.#relation_idents.get_cached().is_some()))*
+                };
                 let mut state = serializer.serialize_struct(
                     stringify!(#struct_name),
                     #base_field_count + relation_field_count,
                 )?;
                 #(state.serialize_field(#other_names, &self.#other_idents)?;)*
-                #(if self.#relation_idents.get_cached().is_some() {
+                #(if positional || self.#relation_idents.get_cached().is_some() {
                     state.serialize_field(#relation_names, &self.#relation_idents)?;
                 })*
                 state.end()
             }
         }
     }
+}
+
+/// The relation fields `Serialize` can write, every one but `MorphTo`, and
+/// the other fields, each in declaration order.
+fn serialized_fields(ctx: &BuildContext) -> (Vec<&ModelField>, Vec<&ModelField>) {
+    ctx.fields
+        .iter()
+        .filter(|field| field.relation_kind() != Some(RelationKind::MorphTo))
+        .partition(|field| field.relation_kind().is_some())
 }
 
 fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
@@ -146,19 +160,39 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 )
             }
         });
-    let seq_field_resolutions = temp_idents.iter().zip(&field_defaults).enumerate().map(
-        |(field_index, (temp_ident, use_default))| {
-            if *use_default {
-                quote!(let #temp_ident = seq.next_element()?.unwrap_or_default();)
-            } else {
-                quote!(
-                    let #temp_ident = seq
-                        .next_element()?
-                        .ok_or_else(|| ::tideorm::serde::de::Error::invalid_length(#field_index, &self))?;
-                )
-            }
-        },
-    );
+    // A sequence holds the fields in the order `Serialize` writes them: the
+    // non-relation fields, then the relations but `MorphTo`, which is never
+    // written and starts empty.
+    let (relation_fields, other_fields) = serialized_fields(ctx);
+    let position_of = |wanted: &ModelField| {
+        ctx.fields
+            .iter()
+            .position(|field| field.ident() == wanted.ident())
+            .expect("a serialized field is a field of the model")
+    };
+    let seq_order: Vec<usize> = other_fields
+        .iter()
+        .chain(&relation_fields)
+        .map(|field| position_of(field))
+        .collect();
+    let seq_field_resolutions = seq_order.iter().enumerate().map(|(position, &index)| {
+        let temp_ident = &temp_idents[index];
+        if field_defaults[index] {
+            quote!(let #temp_ident = seq.next_element()?.unwrap_or_default();)
+        } else {
+            quote!(
+                let #temp_ident = seq
+                    .next_element()?
+                    .ok_or_else(|| ::tideorm::serde::de::Error::invalid_length(#position, &self))?;
+            )
+        }
+    });
+    let unwritten_defaults = (0..ctx.fields.len())
+        .filter(|index| !seq_order.contains(index))
+        .map(|index| {
+            let temp_ident = &temp_idents[index];
+            quote!(let #temp_ident = ::std::default::Default::default();)
+        });
 
     quote! {
         impl<'de> ::tideorm::serde::Deserialize<'de> for #struct_name {
@@ -229,6 +263,7 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                         A: ::tideorm::serde::de::SeqAccess<'de>,
                     {
                         #(#seq_field_resolutions)*
+                        #(#unwritten_defaults)*
                         let model = #struct_name {
                             #(#field_idents: #temp_idents,)*
                         };

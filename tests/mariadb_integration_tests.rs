@@ -21,6 +21,10 @@ mod backend {
 
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::MariaDB;
 
+    pub fn database_url() -> &'static str {
+        mariadb_database_url()
+    }
+
     pub async fn connect() -> bool {
         if !should_run_mariadb_tests() {
             println!(

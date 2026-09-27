@@ -26,13 +26,14 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
                 self.#pk_ident.clone()
             }
 
+            // The error leaves the decoded key out: hiding it is what the
+            // token is for, and errors travel to logs and responses.
             async fn from_token(token: &str) -> ::tideorm::Result<Self> {
                 let id = Self::decode_token(token)?;
-                let display_id = <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id);
-                Self::find(id.clone())
+                Self::find(id)
                     .await?
                     .ok_or_else(|| ::tideorm::Error::not_found(
-                        format!("{} with decoded token ID {} not found", #struct_name_str, display_id)
+                        format!("no {} matches this token", #struct_name_str)
                     ))
             }
         }

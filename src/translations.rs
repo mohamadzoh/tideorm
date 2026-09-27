@@ -204,6 +204,15 @@ pub trait HasTranslations {
     /// Get the default (non-translated) value for a field
     fn get_default_value(&self, field: &str) -> Result<serde_json::Value, TranslationError>;
 
+    /// The key `field` is serialized under, where
+    /// [`to_translated_json`](Self::to_translated_json) writes its translation:
+    /// the field's name, unless the type's own serde derive renames it. A model
+    /// with `#[serde(rename_all = ..)]` returns
+    /// `<Self as ModelMeta>::serialized_name(field)`.
+    fn serialized_key(field: &'static str) -> &'static str {
+        field
+    }
+
     /// Set one translated value for one field and language.
     fn set_translation(
         &mut self,
@@ -378,11 +387,11 @@ pub trait HasTranslations {
         // A field without a translation keeps the default value already in `json`.
         for field in Self::translatable_fields() {
             if let Some(value) = translations.get_or_fallback(field, requested_lang, &fallback) {
-                json.insert(field.to_string(), value.clone());
+                json.insert(Self::serialized_key(field).to_string(), value.clone());
             }
         }
 
-        json.remove("translations");
+        json.remove(Self::serialized_key("translations"));
 
         serde_json::Value::Object(json)
     }

@@ -63,7 +63,7 @@ fn hash_condition_value<H: Hasher>(value: &ConditionValue, hasher: &mut H) {
         }
         ConditionValue::None => {}
         ConditionValue::RawExpr(expression) => expression.hash(hasher),
-        ConditionValue::Column(other) => other.hash(hasher),
+        ConditionValue::Column(other) | ConditionValue::Invalid(other) => other.hash(hasher),
         ConditionValue::RawExprWithValues { sql, values }
         | ConditionValue::RawTemplate { sql, values } => {
             sql.hash(hasher);

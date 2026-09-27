@@ -29,6 +29,8 @@ TideConfig::init()
     .await?;
 ```
 
+The driver has one timeout for handing out a connection, opening a new one when the pool has room, so `connect_timeout` and `acquire_timeout` set the same limit, and the longer of the two applies.
+
 ### Database Types
 
 ```rust

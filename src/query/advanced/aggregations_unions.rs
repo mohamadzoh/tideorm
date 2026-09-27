@@ -153,7 +153,7 @@ impl Aggregate {
         AggregateCondition {
             aggregate: self,
             operator,
-            value: crate::query::filter_value(value),
+            value: crate::query::checked_filter_value(value),
         }
     }
 
@@ -185,7 +185,8 @@ impl Aggregate {
 pub struct AggregateCondition {
     aggregate: Aggregate,
     operator: &'static str,
-    value: serde_json::Value,
+    /// The value compared with, or why it cannot be compared.
+    value: std::result::Result<serde_json::Value, String>,
 }
 
 /// What [`QueryBuilder::having`] keeps a group by: a comparison of an
@@ -280,8 +281,13 @@ impl<M: Model> QueryBuilder<M> {
                     | Aggregate::Min(column)
                     | Aggregate::Max(column) => self.column_type(column),
                 };
-                let value =
-                    crate::internal::json_to_column_value(&condition.value, column_type.as_ref());
+                let value = match &condition.value {
+                    Ok(value) => crate::internal::json_to_column_value(value, column_type.as_ref()),
+                    Err(reason) => {
+                        self.invalidate_query(format!("having(): {}", reason));
+                        return self;
+                    }
+                };
                 self.having_with_params(
                     format!("{} {} ?", expression, condition.operator),
                     vec![value],
@@ -505,12 +511,17 @@ impl<M: Model> QueryBuilder<M> {
     /// The query is validated like every other terminal, so a condition that
     /// cannot be rendered is rejected instead of silently widening the rows the
     /// aggregate covers.
+    ///
+    /// `reads_as_column` is set for a `MIN`/`MAX`, whose value is one of the
+    /// column's and is decoded by its type; a sum or a count is a number
+    /// whatever it adds up, so a `SUM` of a boolean is not read as one.
     async fn execute_scalar_aggregate(
         &self,
         terminal: &str,
         db_type: DatabaseType,
         column: &str,
         alias: &str,
+        reads_as_column: bool,
         render_expression: impl Fn(&str) -> String,
     ) -> Result<Option<serde_json::Value>> {
         self.ensure_query_is_executable()?;
@@ -518,7 +529,11 @@ impl<M: Model> QueryBuilder<M> {
 
         let (sql, params) =
             self.build_aggregate_sql_with_params_for_db(db_type, column, alias, render_expression)?;
-        let output_types = self.joined_output_type(alias, column);
+        let output_types = if reads_as_column {
+            self.extreme_output_type(alias, column)
+        } else {
+            Vec::new()
+        };
         let rows = self
             .fetch_json_with_types(&sql, params, &output_types)
             .await?;
@@ -550,6 +565,7 @@ impl<M: Model> QueryBuilder<M> {
                 "sum()",
                 &crate::columns::column_reference(&column, Some(M::table_name())),
                 AGGREGATE_RESULT_ALIAS,
+                false,
                 sum_expression,
             )
             .await?;
@@ -569,6 +585,7 @@ impl<M: Model> QueryBuilder<M> {
                 "avg()",
                 &crate::columns::column_reference(&column, Some(M::table_name())),
                 AGGREGATE_RESULT_ALIAS,
+                false,
                 |column| format!("AVG({})", column),
             )
             .await?;
@@ -623,7 +640,7 @@ impl<M: Model> QueryBuilder<M> {
         let terminal = format!("{}()", function.to_ascii_lowercase());
         let alias = Self::extreme_alias(column).unwrap_or(AGGREGATE_RESULT_ALIAS);
         let value = self
-            .scalar_aggregate(&terminal, column, alias, |column| {
+            .scalar_aggregate(&terminal, column, alias, true, |column| {
                 format!("{}({})", function, column)
             })
             .await?;
@@ -631,19 +648,17 @@ impl<M: Model> QueryBuilder<M> {
         decode_aggregate(value, retry, &terminal)
     }
 
-    /// The type to decode an aggregate of a joined model's column by, under
-    /// `alias`: a `MIN`/`MAX` is a value of that column, and a `SUM` or a
-    /// count that does not read as one falls back to its declared type. The
-    /// model's own columns are decoded by name already.
-    fn joined_output_type(
+    /// The type a `MIN`/`MAX` of `column`, selected as `alias`, is decoded by:
+    /// the column's own, the model's or a joined model's, so a second `MAX`
+    /// of a timestamp, under an alias of its own, still reads as one.
+    fn extreme_output_type(
         &self,
         alias: &str,
         column: &str,
     ) -> Vec<(String, crate::orm::ColumnType)> {
-        match (Self::extreme_alias(column), self.column_type(column)) {
-            (None, Some(column_type)) => vec![(alias.to_string(), column_type)],
-            _ => Vec::new(),
-        }
+        self.column_type(column)
+            .map(|column_type| vec![(alias.to_string(), column_type)])
+            .unwrap_or_default()
     }
 
     /// The name a `MIN`/`MAX` over `column` is selected as: the model's own
@@ -661,6 +676,7 @@ impl<M: Model> QueryBuilder<M> {
         terminal: &str,
         column: &str,
         alias: &str,
+        reads_as_column: bool,
         render_expression: impl Fn(&str) -> String,
     ) -> Result<serde_json::Value> {
         self.execute_scalar_aggregate(
@@ -668,6 +684,7 @@ impl<M: Model> QueryBuilder<M> {
             self.db_type_for_sql(),
             column,
             alias,
+            reads_as_column,
             render_expression,
         )
         .await?
@@ -689,6 +706,7 @@ impl<M: Model> QueryBuilder<M> {
                 self.db_type_for_sql(),
                 &crate::columns::column_reference(&column, Some(M::table_name())),
                 COUNT_RESULT_ALIAS,
+                false,
                 |column_sql| format!("COUNT(DISTINCT {})", column_sql),
             )
             .await?;
@@ -747,14 +765,14 @@ impl<M: Model> QueryBuilder<M> {
                 })
                 .collect()
         })?;
-        // A MIN or MAX of a joined model's column reads as that column.
+        // Every MIN or MAX reads as its column.
         let output_types: Vec<(String, crate::orm::ColumnType)> = aggregates
             .iter()
             .zip(&aliases)
             .filter_map(|(aggregate, alias)| {
                 aggregate.extreme_column().map(|column| (column, alias))
             })
-            .flat_map(|(column, alias)| self.joined_output_type(alias, column))
+            .flat_map(|(column, alias)| self.extreme_output_type(alias, column))
             .collect();
         let rows = self
             .fetch_json_with_types(&sql, params, &output_types)

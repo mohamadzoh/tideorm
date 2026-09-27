@@ -9,7 +9,7 @@ use crate::case::{to_pascal_case, to_snake_case};
 mod indexes;
 mod validation;
 
-pub(crate) use indexes::{IndexDef, parse_index_attributes};
+pub(crate) use indexes::{IndexDef, parse_field_index_attributes, parse_index_attributes};
 pub(crate) use validation::parse_validation_attributes;
 
 /// Returns the text of `ident` with any `r#` raw-identifier prefix removed.
@@ -27,7 +27,11 @@ pub(crate) fn unraw_ident(ident: &Ident) -> String {
 /// Handles raw identifiers, so a `r#type` field yields the `Type` variant
 /// instead of panicking on the invalid identifier `R#type`.
 pub(crate) fn variant_ident(ident: &Ident) -> Ident {
-    format_ident!("{}", to_pascal_case(&unraw_ident(ident)))
+    match to_pascal_case(&unraw_ident(ident)).as_str() {
+        // The one keyword PascalCase can produce, from a field named `self_`.
+        "Self" => format_ident!("Self_"),
+        name => format_ident!("{}", name),
+    }
 }
 
 /// The relation wrapper types a model field can be declared with.
@@ -187,6 +191,17 @@ impl ModelField {
         .map(|(kind, _)| kind)
     }
 
+    /// Whether the field holds its relation wrapper inside an `Option`, `Box`,
+    /// `Rc` or `Arc`, which the generated code cannot assign or call through.
+    pub(crate) fn wraps_relation(&self) -> bool {
+        path_segment(&self.ty).is_some_and(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "Option" | "Box" | "Rc" | "Arc"
+            )
+        }) && relation_wrapper(&self.ty).is_some()
+    }
+
     /// The relation wrapper's type arguments: the related model, then the
     /// pivot model for `HasManyThrough`.
     pub(crate) fn related_types(&self) -> Vec<Type> {
@@ -228,7 +243,7 @@ impl ModelField {
     pub(crate) fn supports_string_validations(&self) -> bool {
         matches!(
             terminal_ident(self.validation_base_type()).as_deref(),
-            Some("String" | "str")
+            Some("String" | "str" | "Text")
         )
     }
 
@@ -238,6 +253,27 @@ impl ModelField {
         matches!(
             terminal_ident(self.validation_base_type()).as_deref(),
             Some("String" | "Text")
+        )
+    }
+
+    /// Whether the field is a Rust integer, the only kind of key a database
+    /// counter can fill.
+    pub(crate) fn is_integer(&self) -> bool {
+        matches!(
+            terminal_ident(self.validation_base_type()).as_deref(),
+            Some(
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+            )
         )
     }
 
@@ -258,8 +294,10 @@ impl ModelField {
                     | "usize"
                     | "f32"
                     | "f64"
+                    | "Decimal"
                     | "String"
                     | "str"
+                    | "Text"
             )
         )
     }

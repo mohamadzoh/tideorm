@@ -276,3 +276,38 @@ fn test_get_refuses_a_projection_that_would_fill_the_model_wrongly() {
             .is_ok()
     );
 }
+
+#[tideorm::model(table = "window_owners")]
+struct WindowOwner {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+#[tideorm::model(table = "window_pets")]
+struct WindowPet {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    owner_id: i64,
+    name: String,
+}
+
+#[test]
+fn a_typed_column_of_another_model_in_a_window_keeps_its_table() {
+    use crate::config::DatabaseType;
+    use crate::query::{Order, WindowFunction, WindowFunctionType};
+
+    let sql = WindowPet::query()
+        .inner_join("window_owners", "window_pets.owner_id", "window_owners.id")
+        .window(
+            WindowFunction::new(WindowFunctionType::RowNumber, "rn")
+                .partition_by(WindowOwner::columns.name)
+                .order_by(WindowOwner::columns.id, Order::Asc),
+        )
+        .build_sql_preview_for_db(DatabaseType::Postgres);
+
+    assert!(
+        sql.contains(r#"PARTITION BY "window_owners"."name" ORDER BY "window_owners"."id" ASC"#),
+        "{sql}"
+    );
+}

@@ -150,11 +150,19 @@ impl<M: Model> QueryBuilder<M> {
                 if db_sql::is_safe_identifier_segment(table)
                     && db_sql::is_safe_identifier_segment(field) =>
             {
-                return Expr::col((Alias::new(table), Alias::new(field)));
+                let table = if table == M::table_name() {
+                    self.own_table_ref()
+                } else {
+                    std::borrow::Cow::Borrowed(table)
+                };
+                return Expr::col((Alias::new(table.into_owned()), Alias::new(field)));
             }
             (None, field) if db_sql::is_safe_identifier_segment(field) => {
                 if self.qualifies_model_column(field) {
-                    return Expr::col((Alias::new(M::table_name()), Alias::new(field)));
+                    return Expr::col((
+                        Alias::new(self.own_table_ref().into_owned()),
+                        Alias::new(field),
+                    ));
                 }
                 return Expr::col(Alias::new(field));
             }
@@ -402,6 +410,14 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn ensure_condition_is_representable(condition: &WhereCondition) -> Result<()> {
+        if let ConditionValue::Invalid(reason) = &condition.value {
+            return Err(Error::invalid_query(format!(
+                "WHERE condition on '{}' for model '{}': {}",
+                condition.column,
+                M::table_name(),
+                reason
+            )));
+        }
         Self::ensure_condition_has_no_null_bound(condition)?;
 
         if Self::condition_spec(condition).is_some() {

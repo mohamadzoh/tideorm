@@ -99,3 +99,67 @@ fn test_files_data_has_many() {
     files.clear_many("images");
     assert!(!files.has_files("images"));
 }
+
+#[test]
+fn metadata_named_like_a_field_round_trips_or_yields_to_the_field() {
+    // An unset `size` leaves the name to the metadata, which reads back.
+    let unset = FileAttachment::new("a.png")
+        .add_metadata("size", "12KB")
+        .add_metadata("width", 10);
+    let read: FileAttachment =
+        serde_json::from_value(serde_json::to_value(&unset).unwrap()).unwrap();
+    assert_eq!(read.size, None);
+    assert_eq!(read.metadata.get("size"), Some(&serde_json::json!("12KB")));
+    assert_eq!(read.metadata.get("width"), Some(&serde_json::json!(10)));
+
+    // A set field keeps its name; the metadata entry is not stored.
+    let set = FileAttachment::with_metadata("b.png", None, Some(5), None)
+        .add_metadata("size", "12KB")
+        .add_metadata("key", "other.png");
+    let json = serde_json::to_value(&set).unwrap();
+    assert_eq!(json["key"], "b.png");
+    assert_eq!(json["size"], 5);
+    let read: FileAttachment = serde_json::from_value(json).unwrap();
+    assert_eq!((read.key.as_str(), read.size), ("b.png", Some(5)));
+    assert!(read.metadata.is_empty(), "{:?}", read.metadata);
+}
+
+struct AvatarHolder {
+    files: FilesData,
+}
+
+impl HasAttachments for AvatarHolder {
+    fn has_one_files() -> Vec<&'static str> {
+        vec!["avatar"]
+    }
+
+    fn has_many_files() -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn get_files_data(&self) -> Result<FilesData, AttachmentError> {
+        Ok(self.files.clone())
+    }
+
+    fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError> {
+        self.files = data;
+        Ok(())
+    }
+}
+
+#[test]
+fn detaching_a_has_one_by_key_clears_only_that_file() {
+    let mut holder = AvatarHolder {
+        files: FilesData::new(),
+    };
+    holder.attach("avatar", "new.png").unwrap();
+
+    holder.detach("avatar", Some("old.png")).unwrap();
+    assert_eq!(
+        holder.files.get_one("avatar").map(|file| file.key),
+        Some("new.png".to_string())
+    );
+
+    holder.detach("avatar", Some("new.png")).unwrap();
+    assert!(holder.files.get_one("avatar").is_none());
+}

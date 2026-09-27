@@ -154,6 +154,34 @@ pub(crate) fn round_trips<'a>(
     lossless
 }
 
+/// Whether a model's own serde attributes rename a key. With `split_only`,
+/// only a rename whose serialize and deserialize sides are given apart
+/// (`rename(serialize = "..", deserialize = "..")`) counts: a symmetric one
+/// reads back what it wrote when the user derives both traits, while one
+/// derive and TideORM's generated other disagree on every renamed key.
+pub(crate) fn renames<'a>(
+    container: &[Attribute],
+    fields: impl IntoIterator<Item = &'a [Attribute]>,
+    split_only: bool,
+) -> bool {
+    let mut renamed = false;
+    let mut visit = |meta: &ParseNestedMeta, items: &[&str]| {
+        if items.iter().any(|item| meta.path.is_ident(item))
+            && (!split_only || meta.input.peek(syn::token::Paren))
+        {
+            renamed = true;
+        }
+        skip_item(meta)
+    };
+    for_each_serde_item(container, |meta| {
+        visit(meta, &["rename", "rename_all", "rename_all_fields"])
+    });
+    for attrs in fields {
+        for_each_serde_item(attrs, |meta| visit(meta, &["rename"]));
+    }
+    renamed
+}
+
 /// Visit every item of every `#[serde(..)]` attribute. Malformed input is
 /// serde's to report, so a parse failure just ends the visit.
 fn for_each_serde_item(

@@ -27,7 +27,12 @@ impl CacheEntry {
         let now = Instant::now();
         Self {
             data,
-            expires_at: now.checked_add(ttl).unwrap_or(now),
+            // A TTL past what an `Instant` can reach, such as `Duration::MAX`
+            // for "keep it", lasts a century rather than expiring at once.
+            expires_at: now
+                .checked_add(ttl)
+                .or_else(|| now.checked_add(Duration::from_secs(100 * 365 * 24 * 60 * 60)))
+                .unwrap_or(now),
             tables,
             insert_order: order,
             access_order: order,

@@ -35,27 +35,27 @@ macro_rules! condition_methods {
             [where_eq, or_where_eq, and_where_eq]
                 "Match rows where `column` equals `value`."
                 (value: impl serde::Serialize)
-                => Eq, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => Eq, $crate::query::ConditionValue::single(value);
             [where_not, or_where_not, and_where_not]
                 "Match rows where `column` differs from `value`; like SQL `<>`, a NULL column never matches."
                 (value: impl serde::Serialize)
-                => NotEq, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => NotEq, $crate::query::ConditionValue::single(value);
             [where_gt, or_where_gt, and_where_gt]
                 "Match rows where `column` is greater than `value`."
                 (value: impl serde::Serialize)
-                => Gt, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => Gt, $crate::query::ConditionValue::single(value);
             [where_gte, or_where_gte, and_where_gte]
                 "Match rows where `column` is greater than or equal to `value`."
                 (value: impl serde::Serialize)
-                => Gte, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => Gte, $crate::query::ConditionValue::single(value);
             [where_lt, or_where_lt, and_where_lt]
                 "Match rows where `column` is less than `value`."
                 (value: impl serde::Serialize)
-                => Lt, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => Lt, $crate::query::ConditionValue::single(value);
             [where_lte, or_where_lte, and_where_lte]
                 "Match rows where `column` is less than or equal to `value`."
                 (value: impl serde::Serialize)
-                => Lte, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => Lte, $crate::query::ConditionValue::single(value);
             [where_like, or_where_like, and_where_like]
                 "Match rows against a raw `LIKE` pattern, used as written: `%` and `_` stay wildcards."
                 (pattern: &str)
@@ -85,11 +85,11 @@ macro_rules! condition_methods {
             [where_in, or_where_in, and_where_in] <V: serde::Serialize>
                 "Match rows where `column` is one of `values` — a `Vec`, an array, `&ids`, a set — each bound as its own parameter."
                 (values: impl IntoIterator<Item = V>)
-                => In, $crate::query::ConditionValue::List(values.into_iter().map($crate::query::filter_value).collect());
+                => In, $crate::query::ConditionValue::list(values);
             [where_not_in, or_where_not_in, and_where_not_in] <V: serde::Serialize>
                 "Match rows where `column` is none of `values`, any list as for `where_in`; like SQL `NOT IN`, a NULL column never matches."
                 (values: impl IntoIterator<Item = V>)
-                => NotIn, $crate::query::ConditionValue::List(values.into_iter().map($crate::query::filter_value).collect());
+                => NotIn, $crate::query::ConditionValue::list(values);
             [where_null, or_where_null, and_where_null]
                 "Match rows where `column` is NULL."
                 ()
@@ -101,17 +101,11 @@ macro_rules! condition_methods {
             [where_between, or_where_between, and_where_between]
                 "Match rows where `column` lies between `min` and `max`, inclusive."
                 (min: impl serde::Serialize, max: impl serde::Serialize)
-                => Between, $crate::query::ConditionValue::Range(
-                    $crate::query::filter_value(min),
-                    $crate::query::filter_value(max),
-                );
+                => Between, $crate::query::ConditionValue::range(min, max);
             [where_not_between, or_where_not_between, and_where_not_between]
                 "Match rows where `column` lies outside `min` and `max`; like SQL `NOT BETWEEN`, a NULL column never matches."
                 (min: impl serde::Serialize, max: impl serde::Serialize)
-                => NotBetween, $crate::query::ConditionValue::Range(
-                    $crate::query::filter_value(min),
-                    $crate::query::filter_value(max),
-                );
+                => NotBetween, $crate::query::ConditionValue::range(min, max);
             [where_column_eq, or_where_column_eq, and_where_column_eq]
                 "Match rows where `column` equals the row's `other` column: `where_column_eq(\"shipped_on\", \"ordered_on\")`."
                 (other: impl $crate::columns::IntoColumnName)
@@ -157,11 +151,11 @@ macro_rules! condition_methods {
             [where_json_contains, or_where_json_contains, and_where_json_contains]
                 "Match rows whose JSON `column` contains `value`: every key and element of `value` is in it, as PostgreSQL's `@>` reads it, on every backend."
                 (value: impl serde::Serialize)
-                => JsonContains, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => JsonContains, $crate::query::ConditionValue::single(value);
             [where_json_contained_by, or_where_json_contained_by, and_where_json_contained_by]
                 "Match rows whose JSON `column` is contained by `value`, as PostgreSQL's `<@` reads it."
                 (value: impl serde::Serialize)
-                => JsonContainedBy, $crate::query::ConditionValue::Single($crate::query::filter_value(value));
+                => JsonContainedBy, $crate::query::ConditionValue::single(value);
             [where_json_key_exists, or_where_json_key_exists, and_where_json_key_exists]
                 "Match rows whose JSON `column` has the top-level `key`, one holding JSON `null` included; a NULL column matches neither this nor `where_json_key_not_exists`."
                 (key: &str)
@@ -181,15 +175,15 @@ macro_rules! condition_methods {
             [where_array_contains, or_where_array_contains, and_where_array_contains] <V: serde::Serialize>
                 "Match rows whose array `column` holds every one of `values` (`@>`), any list of any serializable value."
                 (values: impl IntoIterator<Item = V>)
-                => ArrayContains, $crate::query::ConditionValue::List(values.into_iter().map($crate::query::filter_value).collect());
+                => ArrayContains, $crate::query::ConditionValue::list(values);
             [where_array_contained_by, or_where_array_contained_by, and_where_array_contained_by] <V: serde::Serialize>
                 "Match rows whose array `column` holds nothing but `values` (`<@`); a NULL in the list allows NULL elements."
                 (values: impl IntoIterator<Item = V>)
-                => ArrayContainedBy, $crate::query::ConditionValue::List(values.into_iter().map($crate::query::filter_value).collect());
+                => ArrayContainedBy, $crate::query::ConditionValue::list(values);
             [where_array_overlaps, or_where_array_overlaps, and_where_array_overlaps] <V: serde::Serialize>
                 "Match rows whose array `column` holds at least one of `values` (`&&`)."
                 (values: impl IntoIterator<Item = V>)
-                => ArrayOverlaps, $crate::query::ConditionValue::List(values.into_iter().map($crate::query::filter_value).collect());
+                => ArrayOverlaps, $crate::query::ConditionValue::list(values);
         );
         $($crate::query::condition_methods!(@raw $raw $family => $push, $doc);)?
     };
@@ -271,7 +265,7 @@ macro_rules! condition_methods {
                 operator: $crate::query::Operator::Raw,
                 value: $crate::query::ConditionValue::RawTemplate {
                     sql: raw_sql.to_string(),
-                    values: params,
+                    values: params.into_iter().map($crate::internal::bindable_value).collect(),
                 },
             })
         }
@@ -335,8 +329,11 @@ conditional_methods!(impl[M: Model] OrBranchBuilder<M>);
 conditional_methods!(impl[M: Model] crate::model::BatchUpdateBuilder<M>);
 conditional_methods!(impl[M: Model] crate::relations::EagerQueryBuilder<M>);
 
+mod finite;
 mod or_branch_builder;
 mod or_group;
+
+pub(crate) use finite::checked_filter_value;
 
 pub use or_branch_builder::OrBranchBuilder;
 pub use or_group::OrGroup;
@@ -434,7 +431,7 @@ pub(crate) fn filter_value(value: impl serde::Serialize) -> serde_json::Value {
 }
 
 /// Value for a where condition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConditionValue {
     Single(serde_json::Value),
     List(Vec<serde_json::Value>),
@@ -472,6 +469,51 @@ pub enum ConditionValue {
     /// Another column of the same row, which the condition's column is
     /// compared with (`where_column_gt("updated_at", "created_at")`).
     Column(String),
+    /// A value no SQL comparison can take, such as a NaN float, with the
+    /// reason the query fails with when it runs.
+    Invalid(String),
+}
+
+/// The value as JSON — a list as an array, a range as `low..high` — or the
+/// SQL or column it carries.
+impl std::fmt::Display for ConditionValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Single(value) => write!(f, "{}", value),
+            Self::List(values) => write!(f, "{}", serde_json::Value::Array(values.clone())),
+            Self::Range(low, high) => write!(f, "{}..{}", low, high),
+            Self::None => f.write_str("NULL"),
+            Self::RawExpr(sql)
+            | Self::RawExprWithValues { sql, .. }
+            | Self::RawTemplate { sql, .. } => f.write_str(sql),
+            Self::Column(column) => f.write_str(column),
+            Self::Invalid(reason) => write!(f, "<invalid: {}>", reason),
+        }
+    }
+}
+
+impl ConditionValue {
+    /// One filter value; [`Invalid`](Self::Invalid) for one SQL cannot compare.
+    pub(crate) fn single(value: impl serde::Serialize) -> Self {
+        checked_filter_value(value).map_or_else(Self::Invalid, Self::Single)
+    }
+
+    /// A list of filter values, refused as a whole when one cannot be compared.
+    pub(crate) fn list<V: serde::Serialize>(values: impl IntoIterator<Item = V>) -> Self {
+        values
+            .into_iter()
+            .map(checked_filter_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_or_else(Self::Invalid, Self::List)
+    }
+
+    /// The bounds of a range.
+    pub(crate) fn range(low: impl serde::Serialize, high: impl serde::Serialize) -> Self {
+        match (checked_filter_value(low), checked_filter_value(high)) {
+            (Ok(low), Ok(high)) => Self::Range(low, high),
+            (Err(reason), _) | (_, Err(reason)) => Self::Invalid(reason),
+        }
+    }
 }
 
 /// Logical operator for combining conditions
@@ -516,6 +558,11 @@ pub(crate) fn condition_is_vacuous(condition: &WhereCondition) -> bool {
         // `where_not(col, None)` renders the same `col IS NOT NULL`.
         (Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => true,
         (Operator::ArrayContains, ConditionValue::List(values)) => values.is_empty(),
+        // Every object document contains `{}`, and every array `[]`.
+        (Operator::JsonContains, ConditionValue::Single(document)) => {
+            document.as_object().is_some_and(serde_json::Map::is_empty)
+                || document.as_array().is_some_and(Vec::is_empty)
+        }
         _ => false,
     }
 }

@@ -32,6 +32,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
             limit_value: None,
             include_trashed: None,
             base: None,
+            invalid_reason: None,
         }
     }
 
@@ -68,7 +69,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// the last assignment.
     #[must_use]
     pub fn set(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
-        self.assign(field, UpdateValue::Value(crate::query::filter_value(value)))
+        match crate::query::checked_filter_value(value) {
+            Ok(value) => self.assign(field, UpdateValue::Value(value)),
+            Err(reason) => self.invalidate(format!("set(): {}", reason)),
+        }
+    }
+
+    /// Keep the first reason the update cannot run.
+    fn invalidate(mut self, reason: String) -> Self {
+        self.invalid_reason.get_or_insert(reason);
+        self
     }
 
     /// Assign a raw SQL expression, spliced into the `SET` clause verbatim.
@@ -189,10 +199,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// the update is safe to re-run.
     #[must_use]
     pub fn coalesce(self, field: impl IntoColumnName, default: impl serde::Serialize) -> Self {
-        self.assign(
-            field,
-            UpdateValue::Coalesce(crate::query::filter_value(default)),
-        )
+        match crate::query::checked_filter_value(default) {
+            Ok(default) => self.assign(field, UpdateValue::Coalesce(default)),
+            Err(reason) => self.invalidate(format!("coalesce(): {}", reason)),
+        }
     }
 
     /// Cap how many rows the update may touch.

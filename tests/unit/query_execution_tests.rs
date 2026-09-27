@@ -269,6 +269,29 @@ fn test_collect_tables_from_sql_reads_from_and_join_targets() {
 }
 
 #[test]
+fn test_collect_tables_from_sql_reads_every_table_of_a_from_list() {
+    let mut tables = Vec::new();
+    super::collect_tables_from_sql(
+        "SELECT * FROM a, b AS bee, (SELECT 1 FROM c) d, e \
+         WHERE x IN (SELECT y FROM f, g) AND z = 'from h, i'",
+        &mut tables,
+    );
+
+    assert_eq!(tables, ["a", "b", "c", "e", "f", "g"]);
+}
+
+#[test]
+fn test_collect_tables_from_sql_reads_the_table_after_only() {
+    let mut tables = Vec::new();
+    super::collect_tables_from_sql(
+        "SELECT * FROM ONLY posts WHERE id IN (SELECT post_id FROM ONLY \"comments\")",
+        &mut tables,
+    );
+
+    assert_eq!(tables, ["posts", "comments"]);
+}
+
+#[test]
 fn test_collect_tables_from_sql_skips_derived_table_keywords() {
     let mut tables = Vec::new();
     super::collect_tables_from_sql("SELECT * FROM (SELECT * FROM \"users\") t", &mut tables);
@@ -361,9 +384,7 @@ fn test_cte_bound_values_participate_in_the_cache_key() {
 
 /// A connection that never dialled anything, for identity bookkeeping only.
 fn disconnected_connection() -> Arc<InternalConnection> {
-    Arc::new(InternalConnection {
-        conn: Default::default(),
-    })
+    Arc::new(InternalConnection::new(Default::default()))
 }
 
 #[test]

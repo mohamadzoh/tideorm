@@ -85,6 +85,7 @@ A typed column names its model's table, so in another model's query it means tha
 Values are anything `serde::Serialize`, and they are bound as the column's own type, so pass the native value: a `Uuid`, a `chrono` date or timestamp, or a `Decimal` compares correctly on every backend (`where_eq("id", user_id)`, `where_gt("created_at", since)`). A few rules worth knowing:
 
 - **NULL.** `where_eq(col, None::<T>)` is `IS NULL`. `where_not` and `where_not_in` follow SQL and never match a NULL column. A `None` inside `where_in` also matches NULL rows, and one inside `where_not_in` keeps the non-NULL rows outside the list.
+- **NaN and infinity.** A filter value holding a NaN or infinite float fails the query, as does `set()` or `having()` given one: JSON has no such number, and the `null` it would become means SQL NULL. Check a float parsed from a request with `is_finite()`.
 - **Columns are identifiers.** The column argument is a column, `table.column`, or a typed column; anything else is rejected when the query runs. SQL expressions go through `where_raw()`, whose SQL you vouch for — never pass user input to it. When the expression needs a value, write a `?` for it and pass the value to `where_raw_with()`, which binds it: `where_raw_with("LOWER(email) = LOWER(?)", vec![email.into()])`. The `?` works on every backend, and `or_where_raw_with`/`and_where_raw_with` join an OR group the same way.
 - **Long lists.** A `where_in`/`where_not_in` list of more than 1,000 integers is rendered inline instead of bound, so an id list of any length works. Other values are bound one parameter each, which caps them at the backend's limit: 32,766 on SQLite, 65,535 on PostgreSQL and MySQL.
 - **`LIKE` and case.** `where_contains`/`where_starts_with`/`where_ends_with` escape `%` and `_`, so they are safe for user input. Whether they are case-sensitive is the backend's: PostgreSQL is, MySQL (with its default collations) and SQLite (for ASCII) are not.
@@ -374,7 +375,7 @@ User::query()
     .await?;
 ```
 
-`chunk()` walks the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal.
+`chunk()` walks the current query by a single-column primary-key cursor instead of loading the full result set into memory at once. That means callbacks may safely update or delete already-processed rows without later batches skipping records. Existing filters, `limit()`, and cache settings remain in effect. If you want descending traversal, order explicitly by the primary key before calling `chunk()`. `chunk()` rejects `offset()` and other custom ordering because those conflict with stable cursor traversal. On a join that repeats a key, the rows that share it are handed over in one batch, so only a key repeated more often than the chunk size fails.
 
 ### Execution Methods
 
@@ -525,11 +526,13 @@ Post::query().where_has::<User>(User::columns.id, Post::columns.user_id, |users|
 });
 ```
 
-`find(id)` on a query looks a key up among the rows the query matches: `Post::query().where_eq("author_id", me).find(post_id)`.
+A model related to itself works the same way: `Category::query().where_has::<Category>("parent_id", "id", |children| children.where_eq("active", true))` keeps the categories with an active child. The related rows are read under an alias of their own, so a nested `where_has`, a typed column or a qualified `"categories.active"` inside the closure names the child, not the outer row.
+
+`find(id)` on a query looks a key up among the rows the query matches: `Post::query().where_eq("author_id", me).find(post_id)`. A union is refused, since the key would filter its first query only.
 
 ### Columns, Values, Your Own Types and Pages
 
-`pluck` reads one column of every row, `value` the column of the first row, and `get_as` each row as a type of your own whose fields are the columns or their aliases — the shape of a join or a grouped `select_raw()` that no model has:
+`pluck` reads one column of every row, `value` the column of the first row, and `get_as` each row as a type of your own whose fields are the columns or their aliases — the shape of a join or a grouped `select_raw()` that no model has. On a `union()` the column is read off the union's rows, and an encrypted column comes back decrypted, as `get()` returns it:
 
 ```rust
 let emails: Vec<String> = User::query().where_eq("active", true).pluck("email").await?;
@@ -580,6 +583,8 @@ let results = User::query()
     .get()
     .await?;
 ```
+
+A union's `order_by` sorts the combined rows, so a column is written by its bare output name there even when a query of the union joins another table.
 
 ### Window Functions
 
@@ -880,6 +885,8 @@ for statement in &statements {
 }
 ```
 
+The SQLite index follows the table's rowid, which a `VACUUM` keeps only for a table with an `INTEGER PRIMARY KEY`. After vacuuming a UUID- or text-keyed table, run `index.sqlite_rebuild_sql()` before anything else touches it, or searches return other rows.
+
 MySQL's boolean-mode operators (`+ - < > ( ) ~ * " @`) are sanitized before a query reaches `MATCH ... AGAINST`: each term keeps one leading operator and a trailing `*`, a quoted phrase stays a phrase, and a query left with no searchable term matches nothing instead of failing with a syntax error. In natural-language mode the operators are dropped.
 
 ### PostgreSQL-Specific Features
@@ -1053,6 +1060,8 @@ let affected = Database::execute_with_params(
 ```
 
 Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection, and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
+
+A raw statement that is not a plain read clears the whole query cache when it runs, since its tables cannot be known; a read is one statement that starts with `SELECT`, `SHOW`, `EXPLAIN`, `DESCRIBE`, `PRAGMA`, `VALUES` or a `WITH` holding no write. A `SELECT` that calls a function which writes is read as a read, so clear the cache after one yourself: `QueryCache::global().clear()`.
 
 ---
 

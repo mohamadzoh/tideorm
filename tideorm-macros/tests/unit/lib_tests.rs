@@ -879,15 +879,15 @@ fn skipped_fields_are_defaulted_in_generated_constructors() {
     assert!(!expanded.contains("cached_label:model.cached_label"));
 }
 
-/// Two relations to the same model are rejected rather than deduplicated.
+/// Two relations to the same model both compile, each with its own join.
 ///
-/// Rust permits one `Related<X>` impl per entity pair, and sea-orm's eager loaders
-/// resolve through that impl alone. Keeping only the first one compiled, but made
-/// `.with("editor")` join on `author_id` and turned a mixed `HasMany`/`HasOne` pair
-/// into a runtime cardinality error. A compile error beats silently wrong rows.
+/// Rust permits one `Related<X>` impl per entity pair, so only the first
+/// relation to a model gets one. TideORM reads no relation through `Related` —
+/// `with(..)` and `load()` go by each field's own keys — so `author` and
+/// `editor` still load their own rows.
 #[test]
-fn two_relations_to_the_same_model_are_rejected() {
-    let error = build_context_for(&parse_quote! {
+fn two_relations_to_the_same_model_each_keep_their_join() {
+    let article = expand_model_tokens(parse_quote! {
         struct Article {
             #[tideorm(primary_key, auto_increment)]
             id: i64,
@@ -898,14 +898,12 @@ fn two_relations_to_the_same_model_are_rejected() {
             #[tideorm(belongs_to = "User", foreign_key = "editor_id")]
             editor: BelongsTo<User>,
         }
-    })
-    .and_then(|ctx| crate::entity_gen::generate_entity_support(&ctx))
-    .expect_err("two relations to one model should be rejected")
-    .to_string();
+    });
 
-    assert!(error.contains("relations `author` and `editor` both target `User`"));
-    assert!(error.contains("sea-orm permits one `Related<User>` impl per entity pair"));
-    assert!(error.contains("load `editor` explicitly with its own query instead of eagerly"));
+    assert!(!article.contains("compile_error!"));
+    assert_eq!(article.matches("impl::tideorm::orm::Related<").count(), 1);
+    assert!(article.contains("Self::Author=>"));
+    assert!(article.contains("Self::Editor=>"));
 
     // Distinct targets are untouched: one `Related` impl and one `def` arm each.
     let ok = expand_model_tokens(parse_quote! {
@@ -1508,4 +1506,31 @@ fn a_user_serialize_derive_maps_fields_to_their_serde_keys() {
         }
     });
     assert!(!expanded.contains("fnserialized_name"));
+}
+
+/// A generated index name past 63 bytes is shortened with a hash, as the
+/// runtime shortens a migration's, so both name the index alike.
+#[test]
+fn a_long_generated_index_name_is_bounded_like_a_migration_one() {
+    let expanded = expand_model_tokens(parse_quote! {
+        #[tideorm(table = "organization_membership_invitations")]
+        #[unique_index("organization_id,invited_email")]
+        #[index("email")]
+        struct Invitation {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            organization_id: i64,
+            invited_email: String,
+            email: String,
+        }
+    });
+
+    assert!(
+        expanded.contains("uidx_organization_membership_invitations_organization__9ea98e76"),
+        "{expanded}"
+    );
+    assert!(
+        expanded.contains("\"idx_organization_membership_invitations_email\""),
+        "{expanded}"
+    );
 }

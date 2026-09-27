@@ -276,11 +276,11 @@ pub trait EagerLoadModel: Model + InternalModel {
     /// stays one query instead of N+1. `morph_type` adds the polymorphic type
     /// discriminator as `(column, value)`.
     ///
-    /// Groups are keyed by the JSON rendering of the foreign key
-    /// (`serde_json::Value::to_string`), which is what callers must look up with.
+    /// Groups are keyed by [`__relation_key`] of the foreign key, which is what
+    /// callers must look up with.
     async fn __load_grouped_by_key(
         keys: &[serde_json::Value],
-        foreign_key: &'static str,
+        foreign_key: &str,
         morph_type: Option<(&'static str, &'static str)>,
     ) -> Result<HashMap<String, Vec<Self>>>
     where
@@ -288,13 +288,14 @@ pub trait EagerLoadModel: Model + InternalModel {
     {
         let mut grouped: HashMap<String, Vec<Self>> = HashMap::new();
 
-        let mut lookup_keys: Vec<serde_json::Value> = Vec::new();
-        for key in keys {
-            if key.is_null() || lookup_keys.contains(key) {
-                continue;
-            }
-            lookup_keys.push(key.clone());
-        }
+        // Each key once, by the text the rows are grouped by: a scan of the
+        // list per key would be quadratic in the number of parents.
+        let mut seen = std::collections::HashSet::new();
+        let lookup_keys: Vec<serde_json::Value> = keys
+            .iter()
+            .filter(|key| !key.is_null() && seen.insert(__relation_key(key)))
+            .cloned()
+            .collect();
 
         if lookup_keys.is_empty() {
             return Ok(grouped);
@@ -310,12 +311,35 @@ pub trait EagerLoadModel: Model + InternalModel {
 
             for row in query.get().await? {
                 let key = row.get_field_value(foreign_key)?;
-                grouped.entry(key.to_string()).or_default().push(row);
+                grouped.entry(__relation_key(&key)).or_default().push(row);
             }
         }
 
         Ok(grouped)
     }
+}
+
+/// How an eager load matches a key on one side of a relation with the other:
+/// by its text, so an `i64` key finds the `i32` or the text column holding the
+/// same value, as the database's own comparison does.
+#[doc(hidden)]
+pub fn __relation_key(key: &serde_json::Value) -> String {
+    match key {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// `models` with each primary key once, in order.
+#[doc(hidden)]
+pub fn __distinct_by_primary_key<M: crate::model::Model>(models: Vec<M>) -> Vec<M> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| {
+            seen.insert(serde_json::to_string(&model.primary_key()).unwrap_or_default())
+        })
+        .collect()
 }
 
 /// Resolve the next level of a to-many relation for every parent at once.
@@ -489,10 +513,21 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
+        let database = self.query.named_database();
         let models = self.query.get().await?;
         let mut results: Vec<WithRelations<M>> =
             models.into_iter().map(WithRelations::new).collect();
-        M::__eager_load(&mut results, &self.relation_tree).await?;
+        let load = M::__eager_load(&mut results, &self.relation_tree);
+        match database {
+            // A `query_with(db)` reads the relations from `db` too: the
+            // loaders run their queries on the scope's connection.
+            Some(database) => {
+                let connection = database.__get_connection()?;
+                let origin = crate::database::origin_of(&connection);
+                crate::database::with_connection_override(connection, origin, None, load).await?;
+            }
+            None => load.await?,
+        }
         Ok(results)
     }
 

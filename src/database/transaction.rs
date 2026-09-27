@@ -27,7 +27,9 @@ const LEAKED_TRANSACTION_MESSAGE: &str = "transaction handle leaked outside the 
 ///   transaction's connection, so there is no separate connection to free.
 /// - The driver must resynchronize afterwards. Postgres and MySQL decrement
 ///   their transaction-depth counter unconditionally when the engine later runs
-///   its queued drop-time rollback, so the extra rollback is a harmless no-op.
+///   its queued drop-time rollback. A `BEGIN` follows the `ROLLBACK`, so the
+///   stray handle writes into a transaction of its own, which that drop-time
+///   rollback ends, instead of committing each statement on its own.
 ///   SQLite only decrements when its own rollback succeeds, so a rollback issued
 ///   behind its back would leave the pooled connection permanently off by one
 ///   and turn later `BEGIN`s into savepoints that never close. SQLite (and any
@@ -75,7 +77,17 @@ async fn end_leaked_transaction(
     tide_warn!("{LEAKED_TRANSACTION_MESSAGE}. Rolling it back explicitly.");
 
     match txn.execute_unprepared("ROLLBACK").await {
-        Ok(_) => LeakedRollback::RolledBack,
+        Ok(_) => {
+            // Without a transaction open, a statement through the stray
+            // handle would commit by itself; a leaked transaction never does.
+            if let Err(err) = txn.execute_unprepared("BEGIN").await {
+                tide_warn!(
+                    "Reopening the leaked transaction failed, so statements through the stray handle commit on their own: {}",
+                    transaction_error(err)
+                );
+            }
+            LeakedRollback::RolledBack
+        }
         Err(err) => {
             let err = transaction_error(err);
             tide_warn!("Failed to roll back the leaked transaction: {err}");
@@ -115,6 +127,31 @@ fn leaked_transaction_error(rollback: LeakedRollback, closure_error: Option<Erro
     }
 
     Error::Transaction { message, source }
+}
+
+/// Refuse to commit a PostgreSQL transaction that a failed statement aborted.
+///
+/// PostgreSQL answers the `COMMIT` of such a transaction with a rollback and
+/// no error, so a closure that caught the failure and returned `Ok` would
+/// report a commit that never happened. Any statement fails in an aborted
+/// transaction, so one is sent first; the other backends keep the transaction
+/// going after a failed statement.
+async fn ensure_transaction_can_commit(txn: &crate::internal::OrmTransaction) -> Result<()> {
+    use crate::internal::ConnectionTrait;
+
+    if Backend::from_orm_backend(txn.get_database_backend()) != Some(Backend::Postgres) {
+        return Ok(());
+    }
+    match txn.execute_unprepared("SELECT 1").await {
+        Ok(_) => Ok(()),
+        Err(err) => Err(Error::Transaction {
+            message: format!(
+                "the transaction cannot commit: a statement inside it failed, which aborted it, so it was rolled back ({})",
+                err
+            ),
+            source: transaction_error(err).into_db_failure(),
+        }),
+    }
 }
 
 /// Classify a transaction-control failure.
@@ -184,6 +221,24 @@ impl Database {
 
         match (Arc::try_unwrap(txn), outcome) {
             (Ok(txn), Ok(result)) => {
+                let (statement_failed, deadlocked) = {
+                    let pending = pending.lock();
+                    (pending.statement_failed(), pending.deadlocked())
+                };
+                if deadlocked {
+                    let _ = txn.rollback().await;
+                    return Err(Error::Transaction {
+                        message: "the transaction cannot commit: a statement inside it \
+                                  deadlocked, and the database rolled the whole transaction \
+                                  back; on MySQL and MariaDB the statements after the deadlock \
+                                  ran outside it and are not undone"
+                            .to_string(),
+                        source: None,
+                    });
+                }
+                if statement_failed {
+                    ensure_transaction_can_commit(&txn).await?;
+                }
                 txn.commit().await.map_err(transaction_error)?;
                 std::mem::take(&mut *pending.lock()).replay();
                 Ok(result)

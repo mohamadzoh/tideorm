@@ -39,6 +39,37 @@ pub(crate) fn require_scalar_relation_key<'a>(
     Ok(value)
 }
 
+/// `query` narrowed to the rows whose `column` holds `key`.
+///
+/// A NULL key relates to no row, as SQL's `=` has it, where `where_eq` reads
+/// a null as `IS NULL`: an owner whose nullable `local_key` is unset would
+/// otherwise load every row that points nowhere.
+pub(crate) fn where_key<M: Model>(
+    query: QueryBuilder<M>,
+    column: impl Into<String>,
+    key: &serde_json::Value,
+) -> QueryBuilder<M> {
+    let column = column.into();
+    if key.is_null() {
+        query.eq_any(column, Vec::<serde_json::Value>::new())
+    } else {
+        query.where_eq(column, key.clone())
+    }
+}
+
+/// `key`, which a write links rows by; a NULL one links none.
+pub(crate) fn linkable_key<'a>(
+    key: &'a serde_json::Value,
+    context: &str,
+) -> Result<&'a serde_json::Value> {
+    if key.is_null() {
+        return Err(Error::invalid_query(format!(
+            "{context}: the owner's key is NULL, so no row can be linked to it"
+        )));
+    }
+    Ok(key)
+}
+
 /// Whether a query issued now has a connection to run on — the ambient
 /// transaction or the global database.
 pub(crate) fn has_active_database() -> bool {
@@ -58,6 +89,24 @@ pub(crate) fn required_key<'a>(
         .as_ref()
         .ok_or_else(|| Error::query(format!("{what} not set for relation")))?;
     require_scalar_relation_key(key, context)
+}
+
+/// Whether `key`, the owner key a relation wrapper was built with, names no
+/// stored row yet: absent, or the placeholder a new model holds (`null`, `0`,
+/// `""`, the nil UUID). The rows cached in such a wrapper are the caller's,
+/// so they are kept when saving the owner rebuilds the wrapper under its
+/// stored key: an entity manager then saves them as its children.
+pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
+    match key {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_i64() == Some(0) || number.as_u64() == Some(0)
+        }
+        Some(serde_json::Value::String(text)) => {
+            text.is_empty() || uuid::Uuid::parse_str(text).is_ok_and(|uuid| uuid.is_nil())
+        }
+        Some(_) => false,
+    }
 }
 
 pub(crate) fn preserve_cached_value<C: Clone>(

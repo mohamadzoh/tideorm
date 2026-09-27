@@ -70,7 +70,7 @@ impl<E: Model> HasOne<E> {
     /// The query for the related row.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let pk = self.parent_key(context)?;
-        Ok(self.source.query().where_eq(self.foreign_key, pk.clone()))
+        Ok(where_key(self.source.query(), self.foreign_key, pk))
     }
 
     /// Declare the relation's key pair.
@@ -148,7 +148,7 @@ impl<E: Model> HasOne<E> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             same_relation,
         );
 

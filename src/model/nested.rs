@@ -55,7 +55,7 @@ impl<R: Model> RelationSaveOp for ManyRelationSaveFn<R> {
             related,
             foreign_key,
         } = *self;
-        let saved = create_related(related, &foreign_key, &parent_pk_value).await?;
+        let saved = save_related(related, &foreign_key, &parent_pk_value).await?;
         saved
             .iter()
             .map(related_to_json)
@@ -177,18 +177,23 @@ fn apply_foreign_key<R: Model>(
     }
 }
 
-/// Point every child at the parent and insert it.
-async fn create_related<R: Model>(
+/// Point every child at the parent and save it: a new child is inserted and
+/// one already stored is updated, as `save_with_one` does its child.
+async fn save_related<R: Model>(
     related: Vec<R>,
     foreign_key: &str,
     parent_pk_value: &serde_json::Value,
 ) -> Result<Vec<R>> {
-    let mut created = Vec::with_capacity(related.len());
+    let mut saved = Vec::with_capacity(related.len());
     for item in related {
-        created.push(R::create(apply_foreign_key(item, foreign_key, parent_pk_value)?).await?);
+        saved.push(
+            apply_foreign_key(item, foreign_key, parent_pk_value)?
+                .save()
+                .await?,
+        );
     }
 
-    Ok(created)
+    Ok(saved)
 }
 
 fn related_to_json<R: Model>(related: &R) -> Result<serde_json::Value> {
@@ -240,7 +245,7 @@ pub trait NestedSave: Model {
                 let parent = self.save().await?;
                 let pk_value =
                     require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_many")?;
-                let related = create_related(related, foreign_key, &pk_value).await?;
+                let related = save_related(related, foreign_key, &pk_value).await?;
 
                 Ok((parent, related))
             })

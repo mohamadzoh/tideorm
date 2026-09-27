@@ -169,10 +169,30 @@ fn encrypt_batch_json_value(
     if value.is_null() {
         return Ok(serde_json::Value::Null);
     }
+    // The field is a `String` and decrypts back into one: any other JSON value
+    // would be stored, then fail every load of the row.
+    if !value.is_string() {
+        return Err(Error::invalid_query(format!(
+            "Encrypted field '{}' takes a string or null, not a JSON {}",
+            encrypted_field_label(field_name, column_name),
+            json_kind(&value)
+        )));
+    }
 
     encrypted::encrypt_json_value_for_attribute(&value, table_name, column_name)
         .map(serde_json::Value::String)
         .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn unsupported_batch_operation<T>(

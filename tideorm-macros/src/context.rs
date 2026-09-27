@@ -137,8 +137,6 @@ impl BuildContext {
             !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
         let should_gen_deserialize =
             !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
-        let hidden_attrs =
-            split_csv(input.hidden.as_ref()).unwrap_or_else(|| vec!["deleted_at".to_string()]);
         let translatable_fields = split_csv(input.translatable.as_ref()).unwrap_or_default();
         let encrypted = split_csv(input.encrypted.as_ref()).unwrap_or_default();
         let has_one_files = split_csv(input.has_one_files.as_ref()).unwrap_or_default();
@@ -220,8 +218,18 @@ impl BuildContext {
         let timestamps_enabled = input.timestamps || has_timestamp_pair(&db_fields);
         let internal_entity_mod =
             format_ident!("__tideorm_internal_{}", to_snake_case(&struct_name_str));
-        let index_impls = build_index_impls(&table_name, &indexes, false);
-        let unique_index_impls = build_index_impls(&table_name, &unique_indexes, true);
+        let index_impls = build_index_impls(&table_name, &indexes, false, &db_fields);
+        let unique_index_impls = build_index_impls(&table_name, &unique_indexes, true, &db_fields);
+        let hidden_attrs = resolve_hidden_fields(
+            &input.ident,
+            &fields,
+            &has_one_files
+                .iter()
+                .chain(&has_many_files)
+                .collect::<Vec<_>>(),
+            split_csv(input.hidden.as_ref()),
+            soft_delete.as_ref().map(|(field, _)| field),
+        )?;
 
         let mut ctx = Self {
             columns_struct_name: format_ident!("{}Columns", struct_name),
@@ -239,13 +247,20 @@ impl BuildContext {
                 let derived_serialize = should_gen_serialize || existing_derives.has_serialize;
                 let derived_deserialize =
                     should_gen_deserialize || existing_derives.has_deserialize;
+                let field_attrs = || db_fields.iter().map(|field| field.attrs.as_slice());
+                // TideORM's generated half reads and writes field names, so
+                // against a user derive of the other half any rename loses the
+                // renamed keys; with both derived, only a split one does.
+                let user_derives_both = !should_gen_serialize && !should_gen_deserialize;
                 derived_serialize
                     && derived_deserialize
                     && ((should_gen_serialize && should_gen_deserialize)
-                        || crate::serde_names::round_trips(
-                            &input.attrs,
-                            db_fields.iter().map(|field| field.attrs.as_slice()),
-                        ))
+                        || (crate::serde_names::round_trips(&input.attrs, field_attrs())
+                            && !crate::serde_names::renames(
+                                &input.attrs,
+                                field_attrs(),
+                                user_derives_both,
+                            )))
             },
             hidden_attrs,
             translatable_fields,
@@ -344,6 +359,15 @@ impl BuildContext {
                     format!("relation references unknown field or column '{}'", key),
                 )
             })
+    }
+
+    /// The column a relation's own side keys by when it names no
+    /// `local_key`: the primary key's, which need not be called `id`.
+    pub(crate) fn default_local_key(&self) -> &str {
+        match self.pk_column_names.as_slice() {
+            [column] => column,
+            _ => "id",
+        }
     }
 
     pub(crate) fn resolve_local_key_ident(

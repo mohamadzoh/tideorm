@@ -1,4 +1,4 @@
-error: validation rule 'range' expects `range = "min..max"` or `range(min, max)`
+error: validation rule 'range' expects `range = "min..max"` or `range(min, max)` with finite bounds
  --> tests/ui/invalid_validate_rule_keeps_the_model.rs:7:24
   |
 7 |     #[validate(range = "1,5")]

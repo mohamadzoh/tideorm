@@ -31,7 +31,9 @@ pub use advanced::{Aggregate, AggregateCondition, HavingCondition};
 pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
-pub(crate) use filters::{condition_is_vacuous, condition_methods, filter_value};
+pub(crate) use filters::{
+    checked_filter_value, condition_is_vacuous, condition_methods, filter_value,
+};
 pub use sql::execution::Paginated;
 pub use structure::{
     CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, QueryFragment,
@@ -74,6 +76,11 @@ pub struct QueryBuilder<M: Model> {
     /// Column-type lookups for models whose tables the query joins, consulted
     /// after `M`'s own when a filter value is bound.
     joined_column_types: Vec<fn(&str) -> Option<crate::orm::ColumnType>>,
+    /// How many `where_has` subqueries over this query's own table enclose it.
+    /// Above zero the query reads its table under an alias of its own, so a
+    /// qualified column or a nested correlation names this query's row and
+    /// not an enclosing one's.
+    self_join_depth: usize,
 }
 
 impl<M: Model> QueryBuilder<M> {

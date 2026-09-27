@@ -1,0 +1,5 @@
+error: a relation field is the `HasOne<..>` itself, not an Option, Box, Rc or Arc of one: an unloaded `HasOne` is already empty
+ --> tests/ui/invalid_relation_wrapped.rs:8:14
+  |
+8 |     profile: Option<HasOne<Profile>>,
+  |              ^^^^^^^^^^^^^^^^^^^^^^^

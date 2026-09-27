@@ -3959,3 +3959,1724 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
         ]
     );
 }
+
+#[tideorm::model(table = "coded_tags", soft_delete)]
+pub struct CodedTag {
+    #[tideorm(primary_key)]
+    pub code: String,
+    pub name: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// `save()` over a trashed row of a model keyed by the client updates it: the
+/// probe for the row counts the trash, so it no longer inserts into a conflict.
+#[tokio::test]
+async fn saving_a_trashed_row_of_a_client_keyed_model_updates_it() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("coded_tags", |t| {
+        t.string("code").primary_key();
+        t.string("name").not_null();
+        t.soft_deletes();
+    })
+    .await;
+
+    CodedTag::create(CodedTag {
+        code: "a".into(),
+        name: "first".into(),
+        deleted_at: None,
+    })
+    .await
+    .expect("create failed");
+    CodedTag::find("a".to_string())
+        .await
+        .expect("find failed")
+        .expect("the tag is missing")
+        .delete()
+        .await
+        .expect("delete failed");
+
+    let mut trashed = CodedTag::query()
+        .with_trashed()
+        .find("a".to_string())
+        .await
+        .expect("find failed")
+        .expect("the trashed tag is missing");
+    trashed.name = "edited".into();
+    trashed
+        .save()
+        .await
+        .expect("saving over the trashed row failed");
+
+    let stored = CodedTag::query()
+        .with_trashed()
+        .find("a".to_string())
+        .await
+        .expect("find failed")
+        .expect("the tag is missing");
+    assert_eq!(stored.name, "edited");
+    assert!(stored.deleted_at.is_some(), "save() does not restore");
+    assert_eq!(
+        CodedTag::query()
+            .with_trashed()
+            .count()
+            .await
+            .expect("count failed"),
+        1
+    );
+}
+
+#[tideorm::model(table = "group_members")]
+pub struct GroupMember {
+    #[tideorm(primary_key)]
+    pub user_id: i64,
+    #[tideorm(primary_key)]
+    pub group_id: i64,
+}
+
+/// An upsert whose columns are all conflict columns has nothing to overwrite:
+/// a second one keeps the stored row, where it failed with "None of the
+/// records are inserted" (and, on MySQL, rendered invalid SQL).
+#[tokio::test]
+async fn an_upsert_with_nothing_to_update_keeps_the_stored_row() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("group_members", |t| {
+        t.big_integer("user_id").not_null();
+        t.big_integer("group_id").not_null();
+        t.primary_key(&["user_id", "group_id"]);
+    })
+    .await;
+
+    for _ in 0..2 {
+        let stored = GroupMember::on_conflict(vec!["user_id", "group_id"])
+            .insert(GroupMember {
+                user_id: 1,
+                group_id: 2,
+            })
+            .await
+            .expect("upsert failed");
+        assert_eq!((stored.user_id, stored.group_id), (1, 2));
+    }
+    assert_eq!(GroupMember::query().count().await.expect("count failed"), 1);
+
+    // Naming no column to update is the same upsert.
+    let email = "kept@example.com";
+    for name in ["first", "second"] {
+        TimestampUser::on_conflict(vec!["email"])
+            .update_columns(vec![])
+            .insert(TimestampUser {
+                id: 0,
+                email: email.into(),
+                name: name.into(),
+                login_count: 0,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("upsert with no update columns failed");
+    }
+    let stored = TimestampUser::query()
+        .where_eq("email", email)
+        .get()
+        .await
+        .expect("query failed");
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].name, "first");
+}
+
+#[tideorm::model(table = "eager_owners")]
+pub struct EagerOwner {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    #[tideorm(has_many = "EagerPet", foreign_key = "owner_id")]
+    pub pets: HasMany<EagerPet>,
+}
+
+/// The foreign key is narrower than the key it holds.
+#[tideorm::model(table = "eager_pets")]
+pub struct EagerPet {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub owner_id: i32,
+    pub name: String,
+    #[tideorm(belongs_to = "EagerOwner", foreign_key = "owner_id")]
+    pub owner: BelongsTo<EagerOwner>,
+}
+
+#[tideorm::model(table = "morph_docs")]
+pub struct MorphDoc {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub code: String,
+    #[tideorm(morph_name = "noteable", local_key = "code")]
+    pub notes: MorphMany<MorphNote>,
+}
+
+#[tideorm::model(table = "morph_pages")]
+pub struct MorphPage {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[tideorm(morph_name = "noteable")]
+    pub notes: MorphMany<MorphNote>,
+}
+
+/// The owner key is text, whichever owner it points at.
+#[tideorm::model(table = "morph_notes")]
+pub struct MorphNote {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub noteable_type: String,
+    pub noteable_id: String,
+    pub body: String,
+    #[tideorm(morph_name = "noteable")]
+    pub owner: MorphTo<MorphDoc>,
+}
+
+/// Eager loading matches keys by value, as the database does, so an `i64` key
+/// finds the `i32` or the text column holding it; a `MorphTo` looks its owner
+/// up by the key the owner's `MorphMany` names; and a pair a pivot holds twice
+/// is one related row.
+#[tokio::test]
+async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("eager_owners", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("eager_pets", |t| {
+        t.id();
+        t.integer("owner_id").not_null();
+        t.string("name").not_null();
+    })
+    .await;
+    let mut owners = Vec::new();
+    for name in ["ada", "bob"] {
+        owners.push(
+            EagerOwner::create(EagerOwner {
+                name: name.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("create owner failed"),
+        );
+    }
+    for (owner, name) in [(0, "p1"), (0, "p2"), (1, "p3")] {
+        EagerPet::create(EagerPet {
+            owner_id: owners[owner].id as i32,
+            name: name.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create pet failed");
+    }
+
+    let loaded = EagerOwner::query()
+        .with("pets")
+        .order_by("id", Order::Asc)
+        .get()
+        .await
+        .expect("eager load failed");
+    let counts: Vec<usize> = loaded
+        .iter()
+        .map(|owner| owner.pets.get_cached().map_or(0, <[_]>::len))
+        .collect();
+    assert_eq!(counts, [2, 1]);
+
+    let pets = EagerPet::query()
+        .with("owner")
+        .order_by("id", Order::Asc)
+        .get()
+        .await
+        .expect("eager load failed");
+    let owner_names: Vec<Option<String>> = pets
+        .iter()
+        .map(|pet| pet.owner.get_cached().map(|owner| owner.name.clone()))
+        .collect();
+    assert_eq!(
+        owner_names,
+        [Some("ada".into()), Some("ada".into()), Some("bob".into())]
+    );
+
+    fresh_table("morph_docs", |t| {
+        t.id();
+        t.string("code").not_null();
+    })
+    .await;
+    fresh_table("morph_pages", |t| {
+        t.id();
+    })
+    .await;
+    fresh_table("morph_notes", |t| {
+        t.id();
+        t.string("noteable_type").not_null();
+        t.string("noteable_id").not_null();
+        t.string("body").not_null();
+    })
+    .await;
+    // An id the owners' keys do not hold, so a lookup by id finds nothing.
+    let doc = MorphDoc::create(MorphDoc {
+        code: "doc-a".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create doc failed");
+    let page = MorphPage::create(MorphPage::default())
+        .await
+        .expect("create page failed");
+    for (owner_type, owner_key, body) in [
+        ("morph_docs", doc.code.clone(), "d1"),
+        ("morph_docs", doc.code.clone(), "d2"),
+        ("morph_pages", page.id.to_string(), "p1"),
+    ] {
+        MorphNote::create(MorphNote {
+            noteable_type: owner_type.into(),
+            noteable_id: owner_key,
+            body: body.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create note failed");
+    }
+
+    let docs = MorphDoc::query()
+        .with("notes")
+        .get()
+        .await
+        .expect("eager load failed");
+    assert_eq!(docs[0].notes.get_cached().map_or(0, <[_]>::len), 2);
+    let pages = MorphPage::query()
+        .with("notes")
+        .get()
+        .await
+        .expect("eager load failed");
+    assert_eq!(pages[0].notes.get_cached().map_or(0, <[_]>::len), 1);
+
+    let note = MorphNote::query()
+        .where_eq("body", "d1")
+        .first()
+        .await
+        .expect("query failed")
+        .expect("the note is missing");
+    let owner = note
+        .owner
+        .load_as::<MorphDoc>()
+        .await
+        .expect("load_as failed")
+        .expect("the owner is missing");
+    assert_eq!(owner.code, "doc-a");
+
+    fresh_table("linked_articles", |t| {
+        t.id();
+        t.string("title").not_null();
+    })
+    .await;
+    fresh_table("linked_labels", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("linked_article_labels", |t| {
+        t.id();
+        t.big_integer("article_id").not_null();
+        t.big_integer("label_id").not_null();
+    })
+    .await;
+    let article = LinkedArticle::create(LinkedArticle {
+        title: "a".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create article failed");
+    let label = LinkedLabel::create(LinkedLabel {
+        name: "l".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create label failed");
+    for _ in 0..2 {
+        LinkedArticleLabel::create(LinkedArticleLabel {
+            id: 0,
+            article_id: article.id,
+            label_id: label.id,
+        })
+        .await
+        .expect("create pivot row failed");
+    }
+    let articles = LinkedArticle::query()
+        .with("labels")
+        .get()
+        .await
+        .expect("eager load failed");
+    assert_eq!(articles[0].labels.get_cached().map_or(0, <[_]>::len), 1);
+}
+
+#[tideorm::model(table = "tree_nodes", soft_delete)]
+pub struct TreeNode {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A `where_has` of a model on itself reads the related rows under an alias of
+/// their own, so what the closure names — a nested `where_has`, a typed column
+/// in an OR group, a table-qualified column — is the related row, not the
+/// outer one; `has_related` on the model's own table does the same.
+#[tokio::test]
+async fn where_has_over_the_same_table_keeps_each_level_apart() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("tree_nodes", |t| {
+        t.id();
+        t.big_integer("parent_id");
+        t.string("name").not_null();
+        t.soft_deletes();
+    })
+    .await;
+    let node = |parent_id: Option<i64>, name: &str| TreeNode {
+        parent_id,
+        name: name.into(),
+        ..Default::default()
+    };
+    let root = TreeNode::create(node(None, "root"))
+        .await
+        .expect("create failed");
+    let child = TreeNode::create(node(Some(root.id), "child"))
+        .await
+        .expect("create failed");
+    TreeNode::create(node(Some(child.id), "leaf"))
+        .await
+        .expect("create failed");
+    let lone = TreeNode::create(node(None, "lone"))
+        .await
+        .expect("create failed");
+    TreeNode::create(node(Some(lone.id), "gone"))
+        .await
+        .expect("create failed")
+        .delete()
+        .await
+        .expect("delete failed");
+
+    let ids = |query: QueryBuilder<TreeNode>| async move {
+        query
+            .order_asc("id")
+            .pluck::<i64>("id")
+            .await
+            .expect("query failed")
+    };
+
+    assert_eq!(
+        ids(
+            TreeNode::query().where_has::<TreeNode>("parent_id", "id", |children| {
+                children.where_has::<TreeNode>("parent_id", "id", |grandchildren| grandchildren)
+            })
+        )
+        .await,
+        [root.id],
+        "a node with a grandchild"
+    );
+    assert_eq!(
+        ids(
+            TreeNode::query().where_has::<TreeNode>("parent_id", "id", |children| {
+                children.or_where(|group| group.where_eq(TreeNode::columns.name, "leaf"))
+            })
+        )
+        .await,
+        [child.id],
+        "a typed column in an OR group names the child"
+    );
+    assert_eq!(
+        ids(
+            TreeNode::query().where_has::<TreeNode>("parent_id", "id", |children| {
+                children.where_eq("tree_nodes.name", "child")
+            })
+        )
+        .await,
+        [root.id],
+        "a table-qualified column names the child"
+    );
+    assert_eq!(
+        ids(TreeNode::query().where_has::<TreeNode>("parent_id", "id", |children| children)).await,
+        [root.id, child.id],
+        "a trashed child does not count"
+    );
+    assert_eq!(
+        ids(TreeNode::query().has_related("tree_nodes", "parent_id", "id", "name", "leaf")).await,
+        [child.id],
+        "has_related on the model's own table"
+    );
+}
+
+#[tideorm::model(table = "float_rows")]
+pub struct FloatRow {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub price: Option<f64>,
+}
+
+/// A NaN or infinite filter value is refused: JSON writes it as `null`, which
+/// a filter read as SQL NULL, so `where_eq(price, NaN)` matched the rows with
+/// no price. A `u64` past `i64::MAX` in a raw fragment binds instead of
+/// panicking the driver.
+#[tokio::test]
+async fn values_sql_cannot_compare_are_refused_or_bound_exactly() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("float_rows", |t| {
+        t.id();
+        t.double("price");
+    })
+    .await;
+    for price in [None, Some(1.5)] {
+        FloatRow::create(FloatRow { id: 0, price })
+            .await
+            .expect("create failed");
+    }
+
+    let refused = [
+        FloatRow::query().where_eq("price", f64::NAN).count().await,
+        FloatRow::query()
+            .where_in("price", [1.5, f64::INFINITY])
+            .count()
+            .await,
+        FloatRow::query()
+            .where_col(FloatRow::columns.price.eq(f64::NAN))
+            .count()
+            .await,
+        FloatRow::update_all()
+            .set("price", f64::NEG_INFINITY)
+            .where_gt("id", 0)
+            .execute()
+            .await,
+    ];
+    for result in refused {
+        let error = result.expect_err("a non-finite float must be refused");
+        assert!(error.to_string().contains("NaN or infinite"), "{error}");
+    }
+    assert_eq!(
+        FloatRow::query()
+            .where_null("price")
+            .count()
+            .await
+            .expect("count failed"),
+        1,
+        "the refused update wrote nothing"
+    );
+
+    let matched = TestUser::query()
+        .where_raw_with("id = ?", vec![u64::MAX.into()])
+        .count()
+        .await
+        .expect("a u64 past i64::MAX must bind");
+    assert_eq!(matched, 0);
+}
+
+/// The lookups and writes that cannot keep a query's meaning refuse it: a key
+/// lookup on a union, which would filter one branch only, and a delete whose
+/// one filter is an empty JSON document, which every object contains. A soft
+/// delete leaves the stamp of a row already trashed.
+#[tokio::test]
+async fn unions_empty_documents_and_trashed_rows_keep_their_meaning() {
+    if !setup().await {
+        return;
+    }
+    seed_users(2).await;
+    let union = TestUser::query()
+        .where_eq("id", 999)
+        .union(TestUser::query().where_eq("id", 2))
+        .find(1)
+        .await;
+    assert!(union.is_err(), "{union:?}");
+
+    for name in ["a", "b"] {
+        TestProduct {
+            id: 0,
+            name: name.into(),
+            category: "c".into(),
+            price: 1,
+            metadata: Some(json!({ "name": name })),
+        }
+        .save()
+        .await
+        .expect("save failed");
+    }
+    assert_eq!(
+        TestProduct::query()
+            .where_json_contains("metadata", json!({}))
+            .count()
+            .await
+            .expect("count failed"),
+        2
+    );
+    let deleted = TestProduct::query()
+        .where_json_contains("metadata", json!({}))
+        .delete()
+        .await;
+    assert!(deleted.is_err(), "{deleted:?}");
+    assert_eq!(TestProduct::query().count().await.expect("count failed"), 2);
+
+    let trashed = TestSoftDelete::create(TestSoftDelete {
+        id: 0,
+        name: "trashed".into(),
+        deleted_at: None,
+    })
+    .await
+    .expect("create failed");
+    TestSoftDelete::create(TestSoftDelete {
+        id: 0,
+        name: "live".into(),
+        deleted_at: None,
+    })
+    .await
+    .expect("create failed");
+    let stamp = chrono::DateTime::parse_from_rfc3339("2001-01-01T00:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&chrono::Utc);
+    TestSoftDelete::update_all()
+        .with_trashed()
+        .set("deleted_at", stamp)
+        .where_eq("id", trashed.id)
+        .execute()
+        .await
+        .expect("stamping failed");
+    let marked = TestSoftDelete::query()
+        .with_trashed()
+        .where_gt("id", 0)
+        .delete()
+        .await
+        .expect("soft delete failed");
+    assert_eq!(marked, 1, "only the live row is marked");
+    let kept = TestSoftDelete::query()
+        .with_trashed()
+        .find(trashed.id)
+        .await
+        .expect("find failed")
+        .expect("the trashed row is missing");
+    assert_eq!(kept.deleted_at, Some(stamp));
+}
+
+#[tideorm::model(table = "renamed_accounts")]
+pub struct RenamedAccount {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[tideorm(column = "email_address")]
+    pub email: String,
+    #[tideorm(column = "display")]
+    pub display_name: String,
+    pub s3key: String,
+}
+
+/// An upsert names columns by field or column name everywhere, a field name
+/// whose digits are followed by letters (`s3key`) compiles, and an update
+/// started from a query shares its OR group.
+#[tokio::test]
+async fn upserts_take_field_names_and_query_updates_share_the_or_group() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("renamed_accounts", |t| {
+        t.id();
+        t.string("email_address").not_null().unique();
+        t.string("display").not_null();
+        t.string("s_3_key").not_null();
+    })
+    .await;
+    let account = |display_name: &str, s3key: &str| RenamedAccount {
+        email: "x@example.com".into(),
+        display_name: display_name.into(),
+        s3key: s3key.into(),
+        ..Default::default()
+    };
+    RenamedAccount::create(account("kept", "k1"))
+        .await
+        .expect("create failed");
+    for excluded in ["display_name", "display"] {
+        RenamedAccount::on_conflict(vec!["email"])
+            .update_all_except(vec![excluded])
+            .insert(account("overwritten", "k2"))
+            .await
+            .expect("upsert failed");
+        let stored = RenamedAccount::query()
+            .first()
+            .await
+            .expect("query failed")
+            .expect("the account is missing");
+        assert_eq!(stored.display_name, "kept", "excluded as {excluded}");
+        assert_eq!(stored.s3key, "k2");
+    }
+    let unknown = RenamedAccount::on_conflict(vec!["email"])
+        .update_all_except(vec!["nickname"])
+        .insert(account("x", "k3"))
+        .await;
+    assert!(unknown.is_err(), "{unknown:?}");
+
+    seed_users(4).await;
+    let updated = TestUser::query()
+        .where_gt("age", 0)
+        .or_where_eq("id", 1)
+        .update_all()
+        .or_where_eq("id", 3)
+        .set("name", "picked")
+        .execute()
+        .await
+        .expect("update failed");
+    assert_eq!(updated, 2, "age > 0 AND (id = 1 OR id = 3)");
+}
+
+/// A transaction whose closure swallowed a failed statement: PostgreSQL has
+/// aborted it and would turn the commit into a rollback, so it reports the
+/// failure instead of `Ok`; the other backends keep the transaction going and
+/// commit the rows written before the failure.
+#[tokio::test]
+async fn a_transaction_a_failed_statement_aborted_does_not_report_a_commit() {
+    if !setup().await {
+        return;
+    }
+    let user = |name: &str| TimestampUser {
+        id: 0,
+        email: "same@example.com".into(),
+        name: name.into(),
+        login_count: 0,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let (first, duplicate) = (user("first"), user("duplicate"));
+    let result: tideorm::Result<()> = TimestampUser::transaction(|_tx| {
+        Box::pin(async move {
+            TimestampUser::create(first).await?;
+            let refused = TimestampUser::create(duplicate).await;
+            assert!(refused.is_err(), "the email is unique");
+            Ok(())
+        })
+    })
+    .await;
+    let stored = TimestampUser::query().count().await.expect("count failed");
+
+    if backend::DATABASE_TYPE == DatabaseType::Postgres {
+        let error = result.expect_err("an aborted transaction must not report a commit");
+        assert!(matches!(error, Error::Transaction { .. }), "{error:?}");
+        assert_eq!(stored, 0);
+    } else {
+        result.expect("the transaction commits");
+        assert_eq!(stored, 1);
+    }
+}
+
+struct NamedSeed(&'static str);
+
+#[tideorm::async_trait::async_trait]
+impl tideorm::seeding::Seed for NamedSeed {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    async fn run(&self, _db: &Database) -> tideorm::Result<()> {
+        Ok(())
+    }
+}
+
+/// A rollback whose last recorded seed the seeder no longer registers — one
+/// renamed or removed since it ran — fails naming it, where it rolled nothing
+/// back and reported success, which also left `reset()` and `refresh()`
+/// doing nothing.
+#[tokio::test]
+async fn a_rollback_names_the_recorded_seed_it_cannot_find() {
+    if !setup().await {
+        return;
+    }
+    Schema::new(backend::DATABASE_TYPE)
+        .drop_table_if_exists("_seeds")
+        .await
+        .expect("failed to drop the seed ledger");
+    let registered = || {
+        tideorm::seeding::Seeder::new()
+            .add(NamedSeed("first"))
+            .add(NamedSeed("renamed"))
+    };
+    registered().run().await.expect("seeding failed");
+
+    let current = tideorm::seeding::Seeder::new().add(NamedSeed("first"));
+    let error = current
+        .rollback()
+        .await
+        .expect_err("the last seed is not registered");
+    assert!(error.to_string().contains("'renamed'"), "{error}");
+    assert!(current.reset().await.is_err());
+
+    let reset = registered().reset().await.expect("reset failed");
+    assert_eq!(reset.rolled_back.len(), 2);
+}
+
+/// Connect as `backend::connect` does, with `configure` applied to the
+/// configuration first, on one pooled connection (a new in-memory SQLite
+/// database on that backend).
+async fn connect_configured(
+    configure: impl FnOnce(TideConfig) -> TideConfig,
+) -> tideorm::Result<&'static Database> {
+    configure(
+        TideConfig::init()
+            .database_type(backend::DATABASE_TYPE)
+            .database(backend::database_url())
+            .max_connections(1),
+    )
+    .connect()
+    .await
+}
+
+#[tideorm::model(table = "seeded_notes")]
+pub struct SeededNote {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub body: String,
+}
+
+struct SeededNoteSeed;
+
+#[tideorm::async_trait::async_trait]
+impl tideorm::seeding::Seed for SeededNoteSeed {
+    fn name(&self) -> &str {
+        "seeded_notes"
+    }
+
+    async fn run(&self, _db: &Database) -> tideorm::Result<()> {
+        SeededNote::create(SeededNote {
+            body: "seeded".into(),
+            ..Default::default()
+        })
+        .await?;
+        Ok(())
+    }
+}
+
+/// `connect()` syncs the schema before it seeds, so a seed can fill a table
+/// sync creates; it seeded first, and failed with "no such table".
+#[tokio::test]
+async fn seeds_run_after_schema_sync_creates_their_table() {
+    if !setup().await {
+        return;
+    }
+    let mut schema = Schema::new(backend::DATABASE_TYPE);
+    schema
+        .drop_table_if_exists("seeded_notes")
+        .await
+        .expect("drop failed");
+    schema
+        .drop_table_if_exists("_seeds")
+        .await
+        .expect("dropping the seed ledger failed");
+
+    connect_configured(|config| {
+        config
+            .models::<(SeededNote,)>()
+            .sync(true)
+            .seed(SeededNoteSeed)
+            .run_seeds(true)
+    })
+    .await
+    .expect("connect with sync and seeds failed");
+
+    assert_eq!(SeededNote::query().count().await.expect("count failed"), 1);
+}
+
+#[tideorm::model(table = "stamped_entries")]
+pub struct StampedEntry {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    #[tideorm(default = "CURRENT_TIMESTAMP")]
+    pub stamped_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Sync adds a column with a current-time default to a table that has rows.
+/// SQLite cannot `ADD COLUMN` with such a default, so there it adds the
+/// column without one, and warns, where it failed `connect()`.
+#[tokio::test]
+async fn sync_adds_a_current_time_column_to_a_table_with_rows() {
+    if !setup().await {
+        return;
+    }
+    // The database the syncing connect opens again.
+    connect_configured(|config| config)
+        .await
+        .expect("connect failed");
+    fresh_table("stamped_entries", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    Database::execute("INSERT INTO stamped_entries (name) VALUES ('old')")
+        .await
+        .expect("insert failed");
+
+    connect_configured(|config| config.models::<(StampedEntry,)>().sync(true))
+        .await
+        .expect("sync failed");
+
+    let rows = StampedEntry::query().get().await.expect("read failed");
+    assert_eq!(rows.len(), 1);
+}
+
+/// Re-running `create_table_if_not_exists`, as after a half-applied
+/// migration, keeps the index it made; MySQL, which has no
+/// `CREATE INDEX IF NOT EXISTS`, failed on it with "Duplicate key name".
+#[tokio::test]
+async fn create_table_if_not_exists_runs_twice_with_an_index() {
+    if !setup().await {
+        return;
+    }
+    let mut schema = Schema::new(backend::DATABASE_TYPE);
+    schema
+        .drop_table_if_exists("repeated_tables")
+        .await
+        .expect("drop failed");
+    let build = |t: &mut tideorm::migration::TableBuilder| {
+        t.id();
+        t.string("email").not_null();
+        t.index(&["email"]);
+    };
+    for run in 0..2 {
+        schema
+            .create_table_if_not_exists("repeated_tables", build)
+            .await
+            .unwrap_or_else(|error| panic!("run {run} failed: {error}"));
+    }
+}
+
+/// A string default is escaped the way the backend reads a literal: MySQL
+/// and MariaDB take a backslash as an escape, so `C:\temp\` broke the
+/// statement and `domain\user` stored `domainuser`. `now()`, PostgreSQL's
+/// spelling of the current time, works on every backend.
+#[tokio::test]
+async fn migration_defaults_keep_backslashes_and_accept_now() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("default_values", |t| {
+        t.id();
+        t.string("dir").default(r"C:\temp\");
+        t.string("who").default(r"domain\user");
+        t.string("quote").default("it's");
+        t.timestamptz("at")
+            .default(DefaultValue::Raw("now()".to_string()));
+    })
+    .await;
+    Database::execute("INSERT INTO default_values (id) VALUES (1)")
+        .await
+        .expect("insert failed");
+
+    let rows = Database::raw_json("SELECT dir, who, quote, at FROM default_values")
+        .await
+        .expect("read failed");
+    assert_eq!(rows[0]["dir"], serde_json::json!(r"C:\temp\"));
+    assert_eq!(rows[0]["who"], serde_json::json!(r"domain\user"));
+    assert_eq!(rows[0]["quote"], serde_json::json!("it's"));
+    assert!(!rows[0]["at"].is_null(), "{:?}", rows[0]);
+}
+
+/// The schema file writes a string default quoted on MySQL, whose catalog
+/// reports it bare (`DEFAULT draft` did not parse), and keeps a full-text
+/// index: PostgreSQL's expression index was dropped, MySQL's FULLTEXT one
+/// became a plain index, and SQLite's FTS5 table was exported as ordinary
+/// tables, its shadow tables with it.
+#[tokio::test]
+async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("exported_docs", |t| {
+        t.id();
+        t.string("status").default("draft");
+        t.string("note").default("");
+        t.text("body");
+    })
+    .await;
+    let index = match backend::DATABASE_TYPE {
+        DatabaseType::Postgres => {
+            "CREATE INDEX exported_docs_fts ON exported_docs USING GIN (to_tsvector('english', body))"
+        }
+        DatabaseType::MySQL | DatabaseType::MariaDB => {
+            "CREATE FULLTEXT INDEX exported_docs_fts ON exported_docs (body)"
+        }
+        _ => "CREATE VIRTUAL TABLE exported_docs_fts USING fts5(body, content='exported_docs')",
+    };
+    if backend::DATABASE_TYPE == DatabaseType::SQLite {
+        Database::execute("DROP TABLE IF EXISTS exported_docs_fts")
+            .await
+            .expect("drop failed");
+    }
+    Database::execute(index).await.expect("index failed");
+
+    let path = std::env::temp_dir().join(format!(
+        "tideorm_schema_docs_{:?}_{}.sql",
+        backend::DATABASE_TYPE,
+        std::process::id()
+    ));
+    SchemaWriter::write_schema(&path)
+        .await
+        .expect("write_schema failed");
+    let file = std::fs::read_to_string(&path).expect("schema file missing");
+    let _ = std::fs::remove_file(&path);
+    if backend::DATABASE_TYPE == DatabaseType::SQLite {
+        Database::execute("DROP TABLE exported_docs_fts")
+            .await
+            .expect("drop failed");
+    }
+
+    let quoted = match backend::DATABASE_TYPE {
+        DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_docs`",
+        _ => "\"exported_docs\"",
+    };
+    let create = file
+        .split(";\n")
+        .find(|statement| statement.contains("CREATE TABLE") && statement.contains(quoted))
+        .unwrap_or_else(|| panic!("no CREATE TABLE for exported_docs in:\n{file}"));
+    let column = |name: &str| {
+        create
+            .lines()
+            .find(|line| line.contains(name))
+            .unwrap_or_else(|| panic!("no {name} column in:\n{create}"))
+    };
+    assert!(column("status").contains("'draft'"), "{create}");
+    assert!(column("note").contains("''"), "{create}");
+    match backend::DATABASE_TYPE {
+        DatabaseType::Postgres => assert!(
+            file.contains("CREATE INDEX exported_docs_fts ON public.exported_docs USING gin"),
+            "{file}"
+        ),
+        DatabaseType::MySQL | DatabaseType::MariaDB => {
+            assert!(
+                file.contains("CREATE FULLTEXT INDEX `exported_docs_fts`"),
+                "{file}"
+            )
+        }
+        _ => {
+            assert!(
+                file.contains("CREATE VIRTUAL TABLE exported_docs_fts USING fts5"),
+                "{file}"
+            );
+            assert!(!file.contains("exported_docs_fts_data"), "{file}");
+        }
+    }
+}
+
+#[tideorm::model(table = "coded_buyers")]
+pub struct CodedBuyer {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub code: Option<String>,
+    #[tideorm(
+        has_many = "CodedOrder",
+        foreign_key = "buyer_code",
+        local_key = "code"
+    )]
+    pub orders: HasMany<CodedOrder>,
+}
+
+#[tideorm::model(table = "coded_orders")]
+pub struct CodedOrder {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub buyer_code: Option<String>,
+    pub name: String,
+}
+
+/// An owner whose `local_key` is NULL has no related rows; the lookup read
+/// the NULL as `IS NULL` and loaded every row that points nowhere.
+#[tokio::test]
+async fn a_null_local_key_relates_no_rows() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("coded_buyers", |t| {
+        t.id();
+        t.string("code");
+    })
+    .await;
+    fresh_table("coded_orders", |t| {
+        t.id();
+        t.string("buyer_code");
+        t.string("name").not_null();
+    })
+    .await;
+    for (code, name) in [(None, "orphan"), (Some("x"), "x's")] {
+        CodedOrder::create(CodedOrder {
+            buyer_code: code.map(str::to_string),
+            name: name.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create order failed");
+    }
+    let buyer = CodedBuyer::create(CodedBuyer::default())
+        .await
+        .expect("create buyer failed");
+
+    assert!(buyer.orders.load().await.expect("load failed").is_empty());
+    assert_eq!(buyer.orders.count().await.expect("count failed"), 0);
+    assert!(!buyer.orders.exists().await.expect("exists failed"));
+}
+
+#[tideorm::model(table = "keyed_categories")]
+pub struct KeyedCategory {
+    #[tideorm(primary_key, auto_increment)]
+    pub category_id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    #[tideorm(foreign_key = "parent_id")]
+    pub parent: SelfRef<KeyedCategory>,
+    #[tideorm(foreign_key = "parent_id")]
+    pub children: SelfRefMany<KeyedCategory>,
+}
+
+/// A self-referencing relation keys by the primary key, whatever its column
+/// is called; `parent.load()` ran `WHERE id = ?` and `load_tree` failed.
+#[tokio::test]
+async fn a_self_reference_keys_by_a_primary_key_not_named_id() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("keyed_categories", |t| {
+        t.big_increments("category_id");
+        t.big_integer("parent_id");
+        t.string("name").not_null();
+    })
+    .await;
+    let root = KeyedCategory::create(KeyedCategory {
+        name: "root".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    let child = KeyedCategory::create(KeyedCategory {
+        parent_id: Some(root.category_id),
+        name: "child".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+
+    let parent = child.parent.load().await.expect("parent load failed");
+    assert_eq!(parent.map(|parent| parent.name).as_deref(), Some("root"));
+    let tree = root.children.load_tree(3).await.expect("load_tree failed");
+    assert_eq!(tree.len(), 1);
+}
+
+#[tideorm::model(table = "renamed_link_labels")]
+pub struct RenamedLinkLabel {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+}
+
+#[tideorm::model(table = "renamed_link_articles")]
+pub struct RenamedLinkArticle {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub title: String,
+    #[tideorm(
+        has_many_through = "RenamedLinkLabel",
+        pivot = "renamed_links",
+        foreign_key = "article_id",
+        related_key = "label_id"
+    )]
+    pub labels: HasManyThrough<RenamedLinkLabel, RenamedLink>,
+}
+
+#[tideorm::model(table = "renamed_links")]
+pub struct RenamedLink {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[tideorm(column = "aid")]
+    pub article_id: i64,
+    #[tideorm(column = "lid")]
+    pub label_id: i32,
+}
+
+/// Pivot keys may name fields of renamed columns, and a pivot key of another
+/// integer type than the owner's still links it: `attach` and `load` named
+/// the field as a column, and PostgreSQL's eager load refused an INT4 key
+/// read as INT8. A pair the pivot holds twice is one related row.
+#[tokio::test]
+async fn pivots_resolve_renamed_keys_and_other_key_types() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("renamed_link_labels", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("renamed_link_articles", |t| {
+        t.id();
+        t.string("title").not_null();
+    })
+    .await;
+    fresh_table("renamed_links", |t| {
+        t.id();
+        t.big_integer("aid").not_null();
+        t.integer("lid").not_null();
+    })
+    .await;
+    let article = RenamedLinkArticle::create(RenamedLinkArticle {
+        title: "a".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    let label = RenamedLinkLabel::create(RenamedLinkLabel {
+        name: "l".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+
+    article
+        .labels
+        .attach(label.id)
+        .await
+        .expect("attach failed");
+    RenamedLink::create(RenamedLink {
+        article_id: article.id,
+        label_id: label.id as i32,
+        ..Default::default()
+    })
+    .await
+    .expect("second pivot row failed");
+
+    assert_eq!(article.labels.load().await.expect("load failed").len(), 1);
+    assert_eq!(article.labels.count().await.expect("count failed"), 1);
+    let eager = RenamedLinkArticle::query()
+        .with("labels")
+        .get()
+        .await
+        .expect("eager load failed");
+    assert_eq!(
+        eager[0].labels.get_cached().map(|labels| labels.len()),
+        Some(1)
+    );
+}
+
+#[tideorm::model(table = "natural_accounts")]
+pub struct NaturalAccount {
+    #[tideorm(primary_key)]
+    pub id: uuid::Uuid,
+    pub email: String,
+    pub role: String,
+    pub name: String,
+}
+
+/// `update_all_except` keeps the key of the row it conflicts with, as the
+/// default upsert does; it wrote the new key over it.
+#[tokio::test]
+async fn update_all_except_keeps_the_stored_key() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("natural_accounts", |t| {
+        t.uuid("id").primary_key();
+        t.string("email").not_null();
+        t.string("role").not_null();
+        t.string("name").not_null();
+        t.unique_index(&["email"]);
+    })
+    .await;
+    let first = NaturalAccount::create(NaturalAccount {
+        id: uuid::Uuid::new_v4(),
+        email: "a@example.com".into(),
+        role: "admin".into(),
+        name: "first".into(),
+    })
+    .await
+    .expect("create failed");
+
+    NaturalAccount::on_conflict(vec!["email"])
+        .update_all_except(vec!["role"])
+        .insert(NaturalAccount {
+            id: uuid::Uuid::new_v4(),
+            email: "a@example.com".into(),
+            role: "user".into(),
+            name: "second".into(),
+        })
+        .await
+        .expect("upsert failed");
+
+    let stored = NaturalAccount::query()
+        .first()
+        .await
+        .expect("query failed")
+        .expect("the account is missing");
+    assert_eq!(stored.id, first.id);
+    assert_eq!(
+        (stored.name.as_str(), stored.role.as_str()),
+        ("second", "admin")
+    );
+}
+
+#[tideorm::model(table = "assigned_documents")]
+pub struct AssignedDocument {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub data: serde_json::Value,
+    pub payload: Option<Vec<u8>>,
+}
+
+/// A batch `set()` binds a JSON column's document as JSON and bytes as
+/// bytes: PostgreSQL refused JSON bound as text, and SQLite and MySQL stored
+/// the bytes' JSON text in the BLOB.
+#[tokio::test]
+async fn batch_set_binds_json_and_bytes_as_their_types() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("assigned_documents", |t| {
+        t.id();
+        t.jsonb("data").not_null();
+        t.binary("payload");
+    })
+    .await;
+    let document = AssignedDocument::create(AssignedDocument {
+        data: serde_json::json!({ "a": 0 }),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+
+    AssignedDocument::update_all()
+        .set("data", serde_json::json!({ "a": 1, "tags": ["x"] }))
+        .set("payload", vec![0xDE_u8, 0xAD])
+        .where_eq("id", document.id)
+        .execute()
+        .await
+        .expect("update failed");
+
+    let stored = AssignedDocument::find(document.id)
+        .await
+        .expect("find failed")
+        .expect("the document is missing");
+    assert_eq!(stored.data, serde_json::json!({ "a": 1, "tags": ["x"] }));
+    assert_eq!(stored.payload, Some(vec![0xDE, 0xAD]));
+}
+
+#[tideorm::model(table = "renamed_profiles")]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenamedProfile {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub display_name: Option<String>,
+}
+
+/// A model whose own `Serialize` renames fields is read from the database on
+/// every query rather than from the cache, whose copy TideORM's `Deserialize`
+/// read back without the renamed fields.
+#[tokio::test]
+async fn a_renaming_serialize_derive_does_not_corrupt_cache_hits() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("renamed_profiles", |t| {
+        t.id();
+        t.string("display_name");
+    })
+    .await;
+    RenamedProfile::create(RenamedProfile {
+        display_name: Some("Ada".into()),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+
+    QueryCache::global().enable();
+    let ttl = std::time::Duration::from_secs(60);
+    let first = RenamedProfile::query().cache(ttl).get().await;
+    let second = RenamedProfile::query().cache(ttl).get().await;
+    QueryCache::global().disable();
+    for rows in [first, second] {
+        let rows = rows.expect("read failed");
+        assert_eq!(rows[0].display_name.as_deref(), Some("Ada"));
+    }
+}
+
+/// An upsert keyed by an auto-increment key the database has not numbered
+/// yet is a `create()`; it stored the placeholder `0` (PostgreSQL, SQLite),
+/// or inserted a row and then failed to reload it (MySQL).
+#[tokio::test]
+async fn an_upsert_on_an_unnumbered_key_creates_the_row() {
+    if !setup().await {
+        return;
+    }
+    let created = TestUser::insert_or_update(
+        TestUser {
+            id: 0,
+            email: "zero@example.com".into(),
+            name: "zero".into(),
+            age: 1,
+            active: true,
+        },
+        vec!["id"],
+    )
+    .await
+    .expect("upsert failed");
+    assert_ne!(created.id, 0);
+    let ids: Vec<i64> = TestUser::query().pluck("id").await.expect("pluck failed");
+    assert_eq!(ids, vec![created.id]);
+}
+
+#[tideorm::model(table = "guarded_rows", soft_delete)]
+pub struct GuardedRow {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub name: String,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Callbacks for GuardedRow {
+    fn before_delete(&self) -> tideorm::Result<()> {
+        if self.name == "admin" {
+            return Err(Error::validation("name", "the admin cannot be deleted"));
+        }
+        Ok(())
+    }
+}
+
+/// `soft_delete()` is `delete()` on a soft-delete model: its delete callbacks
+/// run, and a deleted row keeps its stamp. It updated the row directly.
+#[tokio::test]
+async fn soft_delete_runs_the_delete_callbacks_and_keeps_the_stamp() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("guarded_rows", |t| {
+        t.id();
+        t.string("name").not_null();
+        t.timestamptz("deleted_at");
+    })
+    .await;
+    let admin = GuardedRow::create(GuardedRow {
+        name: "admin".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    assert!(admin.clone().soft_delete().await.is_err());
+    assert!(
+        GuardedRow::find(admin.id)
+            .await
+            .expect("find failed")
+            .is_some()
+    );
+
+    let guest = GuardedRow::create(GuardedRow {
+        name: "guest".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    let deleted = guest.soft_delete().await.expect("soft delete failed");
+    let stamp = deleted.deleted_at.expect("the row is stamped");
+    let again = deleted
+        .soft_delete()
+        .await
+        .expect("second soft delete failed");
+    assert_eq!(again.deleted_at, Some(stamp), "the first stamp stays");
+}
+
+/// `save_with_many` saves each child, so one already stored is updated; it
+/// inserted it again.
+#[tokio::test]
+async fn save_with_many_updates_stored_children() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("eager_owners", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("eager_pets", |t| {
+        t.id();
+        t.integer("owner_id").not_null();
+        t.string("name").not_null();
+    })
+    .await;
+    let owner = EagerOwner::create(EagerOwner {
+        name: "o".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    let mut pet = EagerPet::create(EagerPet {
+        owner_id: owner.id as i32,
+        name: "p".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    pet.name = "renamed".into();
+
+    owner
+        .save_with_many(vec![pet], "owner_id")
+        .await
+        .expect("save_with_many failed");
+    let names: Vec<String> = EagerPet::query().pluck("name").await.expect("pluck failed");
+    assert_eq!(names, vec!["renamed".to_string()]);
+}
+
+/// Aggregates read as the columns they summarize: a second MAX of a
+/// timestamp decodes like the first, and a count of a joined boolean column
+/// is a number. A MIN or MAX of a boolean is left to backends that have one.
+#[tokio::test]
+async fn aggregates_decode_each_value_by_its_column() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("timed_events", |t| {
+        t.id();
+        t.timestamptz("at").not_null();
+    })
+    .await;
+    let now = chrono::Utc::now();
+    for at in [now - chrono::Duration::hours(1), now] {
+        TimedEvent::create(TimedEvent {
+            at,
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    let (first, last): (
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = TimedEvent::query()
+        .aggregates(&[Aggregate::min("at"), Aggregate::max("at")])
+        .await
+        .expect("aggregates failed");
+    assert!(first.expect("a first event") < last.expect("a last event"));
+
+    for (email, active) in [("a@example.com", true), ("b@example.com", false)] {
+        TestUser::create(TestUser {
+            email: email.into(),
+            name: "n".into(),
+            age: 1,
+            active,
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    for email in ["a@example.com", "b@example.com"] {
+        CallbackUser::create(CallbackUser {
+            email: email.into(),
+            name: "c".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    let distinct = CallbackUser::query()
+        .inner_join("test_users", "callback_users.email", "test_users.email")
+        .count_distinct("test_users.active")
+        .await
+        .expect("count_distinct failed");
+    assert_eq!(distinct, 2);
+}
+
+#[tideorm::model(table = "timed_events")]
+pub struct TimedEvent {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A union reads a plucked column, and orders by a column, off its result
+/// rows: `pluck` rewrote the first query's projection only, and an
+/// `ORDER BY "table"."column"` is refused on a union.
+#[tokio::test]
+async fn a_union_plucks_and_orders_by_result_columns() {
+    if !setup().await {
+        return;
+    }
+    for (email, name) in [
+        ("a@example.com", "ann"),
+        ("b@example.com", "bob"),
+        ("c@example.com", "cat"),
+    ] {
+        TestUser::create(TestUser {
+            email: email.into(),
+            name: name.into(),
+            age: 1,
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    let union = || {
+        TestUser::query()
+            .where_eq("name", "cat")
+            .union(TestUser::query().where_eq("name", "ann"))
+    };
+
+    let mut names: Vec<String> = union().pluck("name").await.expect("pluck failed");
+    names.sort();
+    assert_eq!(names, vec!["ann".to_string(), "cat".to_string()]);
+
+    let ordered = union()
+        .order_asc("test_users.name")
+        .get()
+        .await
+        .expect("ordered union failed");
+    let ordered: Vec<&str> = ordered.iter().map(|user| user.name.as_str()).collect();
+    assert_eq!(ordered, vec!["ann", "cat"]);
+}
+
+/// `count()` of a grouped join counts its groups when two grouping columns
+/// share a name, which the derived table named twice on MySQL.
+#[tokio::test]
+async fn a_grouped_join_counts_groups_whose_columns_share_a_name() {
+    if !setup().await {
+        return;
+    }
+    for (email, name) in [("a@example.com", "ann"), ("b@example.com", "bob")] {
+        TestUser::create(TestUser {
+            email: email.into(),
+            name: name.into(),
+            age: 1,
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+        CallbackUser::create(CallbackUser {
+            email: email.into(),
+            name: name.into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    let groups = TestUser::query()
+        .inner_join("callback_users", "test_users.email", "callback_users.email")
+        .group_by("test_users.name")
+        .group_by("callback_users.name")
+        .count()
+        .await
+        .expect("count failed");
+    assert_eq!(groups, 2);
+}
+
+/// `chunk()` of a join with a `limit()` hands over the limited rows; its last
+/// batch, cut short by the limit, was taken for a run of one key and failed.
+#[tokio::test]
+async fn chunk_of_a_limited_join_hands_over_the_limited_rows() {
+    if !setup().await {
+        return;
+    }
+    for index in 0..12 {
+        let email = format!("user{index:02}@example.com");
+        TestUser::create(TestUser {
+            email: email.clone(),
+            name: format!("u{index:02}"),
+            age: 1,
+            active: true,
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+        CallbackUser::create(CallbackUser {
+            email,
+            name: "c".into(),
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+
+    for chunk_size in [100, 1] {
+        let mut seen = 0;
+        TestUser::query()
+            .inner_join("callback_users", "test_users.email", "callback_users.email")
+            .limit(10)
+            .chunk(chunk_size, |batch| {
+                seen += batch.len();
+                async { Ok(()) }
+            })
+            .await
+            .unwrap_or_else(|error| panic!("chunk({chunk_size}) failed: {error}"));
+        assert_eq!(seen, 10, "chunk({chunk_size})");
+    }
+}
+
+/// `query_with(db).with(..)` reads the relations from `db` too; they came
+/// from the global database. Two in-memory SQLite databases stand in for two
+/// tenants.
+#[tokio::test]
+async fn query_with_reads_eager_relations_from_its_database() {
+    if !setup().await || backend::DATABASE_TYPE != DatabaseType::SQLite {
+        return;
+    }
+    // One connection, which is the whole in-memory database.
+    let tenant = Database::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .min_connections(1)
+        .build()
+        .await
+        .expect("tenant connect failed");
+    for sql in [
+        "CREATE TABLE eager_owners (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
+        "CREATE TABLE eager_pets (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL, name TEXT NOT NULL)",
+        "INSERT INTO eager_owners (id, name) VALUES (1, 'tenant')",
+        "INSERT INTO eager_pets (owner_id, name) VALUES (1, 'tenant pet')",
+    ] {
+        tenant.exec_raw(sql).await.expect("tenant setup failed");
+    }
+    fresh_table("eager_owners", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("eager_pets", |t| {
+        t.id();
+        t.integer("owner_id").not_null();
+        t.string("name").not_null();
+    })
+    .await;
+    let owner = EagerOwner::create(EagerOwner {
+        name: "global".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+    EagerPet::create(EagerPet {
+        owner_id: owner.id as i32,
+        name: "global pet".into(),
+        ..Default::default()
+    })
+    .await
+    .expect("create failed");
+
+    let owners = EagerOwner::query_with(&tenant)
+        .with("pets")
+        .get()
+        .await
+        .expect("eager load failed");
+    let pets: Vec<String> = owners[0]
+        .pets
+        .get_cached()
+        .unwrap_or_default()
+        .iter()
+        .map(|pet| pet.name.clone())
+        .collect();
+    assert_eq!(pets, vec!["tenant pet".to_string()]);
+}

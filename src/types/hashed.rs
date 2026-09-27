@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Hashed string wrapper (one-way hash, e.g., for passwords).
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+///
+/// `Debug`, `Display` and `Serialize` all leave the hash out: it is what an
+/// offline attack on the password starts from.
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct Hashed {
     /// The hashed value (stored)
     hash: String,
@@ -82,6 +85,14 @@ impl From<&str> for Hashed {
 impl From<String> for Hashed {
     fn from(s: String) -> Self {
         Self::new(&s)
+    }
+}
+
+impl fmt::Debug for Hashed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hashed")
+            .field("hash", &"***HASHED***")
+            .finish()
     }
 }
 

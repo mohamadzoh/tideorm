@@ -453,4 +453,15 @@ fn masking_covers_the_whole_userinfo_and_nothing_else() {
         "postgres://db/app"
     );
     assert_eq!(mask_url_credentials("sqlite::memory:"), "sqlite::memory:");
+
+    // The PostgreSQL driver also reads a password from the query string, and
+    // an `@` there is not the end of the userinfo.
+    assert_eq!(
+        mask_url_credentials("postgres://db/app?user=app&password=s3cret&sslmode=require"),
+        "postgres://db/app?user=app&password=***&sslmode=require"
+    );
+    assert_eq!(
+        mask_url_credentials("mysql://app:pw@db/app?ssl-mode=REQUIRED&tag=a@b"),
+        "mysql://***@db/app?ssl-mode=REQUIRED&tag=a@b"
+    );
 }

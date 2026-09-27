@@ -7,4 +7,7 @@ fn invalid_relation_columns_fail_at_compile_time() {
     t.compile_fail("tests/ui/invalid_validate_custom.rs");
     t.compile_fail("tests/ui/invalid_validate_rule_keeps_the_model.rs");
     t.compile_fail("tests/ui/invalid_field_type.rs");
+    t.compile_fail("tests/ui/invalid_hidden_field.rs");
+    t.compile_fail("tests/ui/invalid_validate_bounds.rs");
+    t.compile_fail("tests/ui/invalid_field_index.rs");
 }

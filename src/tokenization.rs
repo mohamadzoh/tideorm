@@ -133,9 +133,21 @@ impl TokenConfig {
     /// Set the global encryption key used by the default encoder and decoder.
     ///
     /// If this key changes, previously issued default tokens stop decoding.
+    ///
+    /// An empty or blank key, what an unset environment variable read with
+    /// `unwrap_or_default()` gives, leaves no key configured, so encrypting
+    /// fails with a configuration error: under an empty key anyone could open
+    /// every token and encrypted column.
     pub fn set_encryption_key(key: &str) {
-        let configured_key = ConfiguredEncryptionKey::new(key);
-        TOKENIZATION_STATE.write().encryption_key = Some(configured_key);
+        let configured_key = if key.trim().is_empty() {
+            crate::tide_warn!(
+                "Ignoring an empty encryption key: tokens and encrypted fields stay unavailable until a real key is set"
+            );
+            None
+        } else {
+            Some(ConfiguredEncryptionKey::new(key))
+        };
+        TOKENIZATION_STATE.write().encryption_key = configured_key;
     }
 
     /// Return the configured raw encryption key.

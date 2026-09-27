@@ -220,3 +220,128 @@ fn to_json_keeps_a_hidden_attachment_hidden() {
     assert!(payload.get("cover").is_some(), "{payload}");
     assert!(payload.get("files").is_none(), "{payload}");
 }
+
+#[tideorm::model(
+    table = "serialization_test_removed_rows",
+    soft_delete,
+    deleted_at_column = "removed_at"
+)]
+struct RemovedAtModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    removed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[tideorm::model(table = "serialization_test_secrets", hidden = "secret_column")]
+struct HiddenByColumnModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(column = "secret_column")]
+    secret: String,
+}
+
+#[test]
+fn hidden_fields_default_to_the_soft_delete_field_and_resolve_column_names() {
+    use crate::model::ModelMeta;
+
+    assert_eq!(RemovedAtModel::hidden_attributes(), ["removed_at"]);
+    let payload = to_json(
+        &RemovedAtModel {
+            id: 1,
+            removed_at: Some(chrono::Utc::now()),
+        },
+        None,
+    );
+    assert!(payload.get("removed_at").is_none(), "{payload}");
+
+    // `hidden` names the column; the payload key is the field's.
+    assert_eq!(HiddenByColumnModel::hidden_attributes(), ["secret"]);
+    let payload = to_json(
+        &HiddenByColumnModel {
+            id: 1,
+            secret: "s".to_string(),
+        },
+        None,
+    );
+    assert!(payload.get("secret").is_none(), "{payload}");
+}
+
+#[tideorm::model(table = "serialization_test_indexed")]
+#[index("display_name")]
+struct IndexedByFieldModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(column = "display")]
+    display_name: String,
+}
+
+#[test]
+fn an_index_naming_a_field_indexes_its_column() {
+    use crate::model::ModelMeta;
+
+    let indexes = IndexedByFieldModel::indexes();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].columns, ["display"]);
+}
+
+#[tideorm::model(table = "serialization_test_field_indexed")]
+struct FieldIndexedModel {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[index]
+    name: String,
+    #[unique_index]
+    #[tideorm(column = "mail")]
+    email: String,
+}
+
+/// `#[index]` and `#[unique_index]` on a field index its column; they were
+/// accepted there and ignored.
+#[test]
+fn a_field_index_attribute_indexes_the_fields_column() {
+    use crate::model::ModelMeta;
+
+    let indexes = FieldIndexedModel::indexes();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes[0].columns, ["name"]);
+    let unique = FieldIndexedModel::unique_indexes();
+    assert_eq!(unique.len(), 1);
+    assert_eq!(unique[0].columns, ["mail"]);
+    assert!(unique[0].unique);
+}
+
+#[tideorm::model(table = "serialization_test_sequence_owners")]
+struct SequenceOwner {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(has_many = "SequenceChild", foreign_key = "owner_id")]
+    children: crate::relations::HasMany<SequenceChild>,
+    email: String,
+}
+
+#[tideorm::model(table = "serialization_test_sequence_children")]
+struct SequenceChild {
+    #[tideorm(primary_key)]
+    id: i64,
+    owner_id: i64,
+}
+
+/// A sequence holds the columns first, the relations after, as `Serialize`
+/// writes them for a format that reads fields by position; the relation
+/// declared between two columns was read in its place.
+#[test]
+fn a_model_reads_a_sequence_in_the_order_serialize_writes_one() {
+    let owner: SequenceOwner = serde_json::from_value(serde_json::json!([7, "a@example.com"]))
+        .expect("the sequence reads");
+    assert_eq!((owner.id, owner.email.as_str()), (7, "a@example.com"));
+    assert!(owner.children.get_cached().is_none());
+
+    let owner: SequenceOwner = serde_json::from_value(
+        serde_json::json!([7, "a@example.com", [{ "id": 1, "owner_id": 7 }]]),
+    )
+    .expect("the sequence with a relation reads");
+    assert_eq!(
+        owner.children.get_cached().map(|children| children.len()),
+        Some(1)
+    );
+}

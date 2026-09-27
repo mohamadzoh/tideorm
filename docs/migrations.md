@@ -110,6 +110,8 @@ impl Migration for CreateUsersTable {
 }
 ```
 
+A string default is escaped the way the backend reads a literal, so `default(r"C:\temp\")` stores those backslashes on MySQL and MariaDB too, and a current-time default may be spelled `now()`, `CURRENT_TIMESTAMP` or `LOCALTIMESTAMP` on any backend. A generated index name (`idx_<table>_<columns>`) past 63 bytes is shortened with a hash, as PostgreSQL would otherwise cut two names that share a prefix to one and MySQL refuses them; a model's `#[index]` names are shortened the same way. `create_table_if_not_exists` can run again after a half-applied migration: on MySQL, which has no `CREATE INDEX IF NOT EXISTS`, it skips the indexes the table already has.
+
 ### Matching Model Definition
 
 ```rust
@@ -175,7 +177,7 @@ TideConfig::init()
     .await?;
 ```
 
-`SchemaWriter::write_schema("schema.sql").await?` writes the same file at any time: it reads every table of the connected database, with its columns, primary key and indexes.
+`SchemaWriter::write_schema("schema.sql").await?` writes the same file at any time: it reads every table of the connected database, with its columns, primary key and indexes. What those cannot describe comes after the tables as the catalog declares it: a full-text, expression, partial or prefix index, and on SQLite an FTS5 table with the triggers that keep it in step (its shadow tables are left out). An index MySQL builds on an expression is named in a comment instead.
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
 

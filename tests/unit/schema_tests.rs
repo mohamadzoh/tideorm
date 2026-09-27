@@ -579,6 +579,7 @@ fn test_catalog_table_keeps_every_primary_key_column_in_key_order() {
         ],
         vec!["user_id".to_string(), "role_id".to_string()],
         Vec::new(),
+        true,
     );
 
     assert_eq!(table.primary_keys, vec!["user_id", "role_id"]);
@@ -596,25 +597,84 @@ fn test_catalog_table_keeps_every_primary_key_column_in_key_order() {
 }
 
 #[test]
-fn test_catalog_table_only_auto_increments_key_columns() {
-    let mut id = catalog_column("id", "bigint");
-    id.auto_increment = true;
-    let mut counter = catalog_column("counter", "integer");
-    counter.auto_increment = true;
-    counter.default = Some("0".to_string());
+fn test_catalog_table_auto_increments_key_columns_unless_any_column_counts() {
+    let columns = || {
+        let mut id = catalog_column("id", "bigint");
+        id.auto_increment = true;
+        let mut counter = catalog_column("counter", "integer");
+        counter.auto_increment = true;
+        counter.default = Some("0".to_string());
+        vec![id, counter]
+    };
 
     let table = catalog_table(
         "events",
         None,
-        vec![id, counter],
+        columns(),
         vec!["id".to_string()],
         Vec::new(),
+        false,
     );
 
     assert!(table.columns[0].auto_increment);
     assert!(!table.columns[1].auto_increment);
     assert_eq!(table.columns[1].default.as_deref(), Some("0"));
     assert_eq!(table.schema_name, None);
+
+    // PostgreSQL's serial type numbers a column that is not the key, as an
+    // identity column does.
+    let table = catalog_table(
+        "events",
+        Some("public"),
+        columns(),
+        vec!["id".to_string()],
+        Vec::new(),
+        true,
+    );
+    assert!(table.columns[0].auto_increment && table.columns[1].auto_increment);
+}
+
+#[test]
+fn test_mysql_defaults_are_restored_to_a_default_clause() {
+    use super::writer::mysql_default;
+
+    let default = |value: &str, sql_type: &str, extra: &str| {
+        mysql_default(Some(value.to_string()), sql_type, extra, false)
+    };
+    // MySQL 8 reports a literal bare and an expression without parentheses.
+    assert_eq!(
+        default("draft", "varchar(20)", "").as_deref(),
+        Some("'draft'")
+    );
+    assert_eq!(default("", "varchar(20)", "").as_deref(), Some("''"));
+    assert_eq!(default("it's", "text", "").as_deref(), Some("'it''s'"));
+    assert_eq!(
+        default(r"C:\temp", "varchar(20)", "").as_deref(),
+        Some(r"'C:\\temp'")
+    );
+    assert_eq!(default("5", "int", "").as_deref(), Some("5"));
+    assert_eq!(
+        default("1.50", "decimal(10,2)", "").as_deref(),
+        Some("1.50")
+    );
+    assert_eq!(
+        default("CURRENT_TIMESTAMP(6)", "datetime(6)", "DEFAULT_GENERATED").as_deref(),
+        Some("CURRENT_TIMESTAMP(6)")
+    );
+    assert_eq!(
+        default(r"_utf8mb4\'x\'", "longtext", "DEFAULT_GENERATED").as_deref(),
+        Some("(_utf8mb4'x')")
+    );
+    assert_eq!(
+        default("uuid()", "char(36)", "DEFAULT_GENERATED").as_deref(),
+        Some("(uuid())")
+    );
+    assert_eq!(mysql_default(None, "varchar(20)", "", false), None);
+    // MariaDB reports the clause's own spelling.
+    assert_eq!(
+        mysql_default(Some("'draft'".to_string()), "varchar(20)", "", true).as_deref(),
+        Some("'draft'")
+    );
 }
 
 #[test]

@@ -123,6 +123,9 @@ impl Database {
     /// Set an existing database connection as the global connection
     pub fn set_global(db: Self) -> Result<&'static Self> {
         let inner = db.current_inner()?;
+        if inner.is_mariadb() {
+            crate::config::note_detected_mariadb();
+        }
         set_global_connection(Some(inner));
         #[cfg(feature = "dirty-tracking")]
         crate::model::__clear_dirty_snapshots();
@@ -164,8 +167,11 @@ impl Database {
     pub fn backend(&self) -> crate::config::DatabaseType {
         let configured = crate::config::TideConfig::get_database_type();
 
-        match self.__internal_backend() {
-            Ok(backend) => Self::resolve_backend(configured, backend),
+        match self.own_handle() {
+            Ok(handle) => {
+                let mariadb = Self::handle_is_mariadb(&handle);
+                Self::resolve_backend(configured, handle.backend(), mariadb)
+            }
             Err(err) => configured.unwrap_or_else(|| {
                 tide_warn!(
                     "Unable to inspect database backend for disconnected handle: {}. Defaulting to Postgres",
@@ -181,21 +187,35 @@ impl Database {
     /// transaction executes on it.
     pub(crate) fn execution_backend(&self) -> crate::config::DatabaseType {
         match self.__get_connection() {
-            Ok(connection) => Self::resolve_backend(
-                crate::config::TideConfig::get_database_type(),
-                connection.backend(),
-            ),
+            Ok(connection) => {
+                // A transaction cannot say what it runs on; the handle can.
+                let mariadb = Self::handle_is_mariadb(&connection)
+                    || self
+                        .own_handle()
+                        .is_ok_and(|handle| Self::handle_is_mariadb(&handle));
+                Self::resolve_backend(
+                    crate::config::TideConfig::get_database_type(),
+                    connection.backend(),
+                    mariadb,
+                )
+            }
             Err(_) => self.backend(),
         }
+    }
+
+    /// Whether `handle` is a pool its opening found to be MariaDB.
+    fn handle_is_mariadb(handle: &super::ConnectionRef) -> bool {
+        matches!(handle, super::ConnectionRef::Database(inner) if inner.is_mariadb())
     }
 
     /// Reconcile the handle's real backend with the configured database type.
     fn resolve_backend(
         configured: Option<crate::config::DatabaseType>,
         backend: crate::internal::Backend,
+        mariadb: bool,
     ) -> crate::config::DatabaseType {
         if backend == crate::internal::Backend::MySql
-            && configured == Some(crate::config::DatabaseType::MariaDB)
+            && (mariadb || configured == Some(crate::config::DatabaseType::MariaDB))
         {
             return crate::config::DatabaseType::MariaDB;
         }

@@ -51,6 +51,60 @@ pub(crate) fn json_to_column_value(
     typed_value(value, column_type).unwrap_or_else(|| json_to_db_value(value))
 }
 
+/// Bind `value` for an assignment to a column of `column_type`, as a model
+/// write binds the field: a JSON column takes the document itself (a JSON
+/// string stays a JSON string), a binary column the bytes of an array of them,
+/// and a PostgreSQL array column an array. Anything else binds as
+/// [`json_to_column_value`] does.
+pub(crate) fn json_to_assignment_value(
+    value: &serde_json::Value,
+    column_type: Option<&ColumnType>,
+) -> Value {
+    use serde_json::Value as Json;
+
+    let assigned = match (column_type, value) {
+        (_, Json::Null) => None,
+        (Some(ColumnType::Json | ColumnType::JsonBinary), document) => {
+            Some(Value::from(document.clone()))
+        }
+        (
+            Some(ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_)),
+            Json::Array(_),
+        ) => serde_json::from_value::<Vec<u8>>(value.clone())
+            .ok()
+            .map(Value::from),
+        #[cfg(feature = "postgres")]
+        (Some(ColumnType::Array(element)), Json::Array(_)) => array_value(value, element),
+        _ => None,
+    };
+    assigned.unwrap_or_else(|| json_to_column_value(value, column_type))
+}
+
+/// A JSON array as the PostgreSQL array of `element` a model field of that
+/// type binds; `None` when an item is not one.
+#[cfg(feature = "postgres")]
+fn array_value(value: &serde_json::Value, element: &ColumnType) -> Option<Value> {
+    fn read<T>(value: &serde_json::Value) -> Option<Value>
+    where
+        T: serde::de::DeserializeOwned,
+        Vec<T>: Into<Value>,
+    {
+        serde_json::from_value::<Vec<T>>(value.clone())
+            .ok()
+            .map(Into::into)
+    }
+
+    match element {
+        ColumnType::Integer => read::<i32>(value),
+        ColumnType::BigInteger => read::<i64>(value),
+        ColumnType::Boolean => read::<bool>(value),
+        ColumnType::Double => read::<f64>(value),
+        ColumnType::Text | ColumnType::String(_) => read::<String>(value),
+        ColumnType::Json | ColumnType::JsonBinary => read::<serde_json::Value>(value),
+        _ => None,
+    }
+}
+
 fn typed_value(value: &serde_json::Value, column_type: &ColumnType) -> Option<Value> {
     use serde_json::Value as Json;
 

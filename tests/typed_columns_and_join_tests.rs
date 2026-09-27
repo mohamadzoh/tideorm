@@ -2,7 +2,7 @@
 //! consolidation (`JoinResultConsolidator`).
 
 use tideorm::columns::{ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd};
-use tideorm::query::Operator;
+use tideorm::query::{ConditionValue, Operator};
 
 #[path = "typed_columns_and_join_tests/typed_columns.rs"]
 mod typed_columns;

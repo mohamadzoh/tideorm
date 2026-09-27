@@ -36,19 +36,6 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn describe_condition_value(value: &ConditionValue) -> String {
-        match value {
-            ConditionValue::Single(value) => value.to_string(),
-            ConditionValue::List(values) => format!("{:?}", values),
-            ConditionValue::Range(low, high) => format!("{}..{}", low, high),
-            ConditionValue::None => "NULL".to_string(),
-            ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
-            ConditionValue::RawExprWithValues { sql, .. }
-            | ConditionValue::RawTemplate { sql, .. } => sql.clone(),
-            ConditionValue::Column(other) => other.clone(),
-        }
-    }
-
     fn describe_condition(condition: &WhereCondition) -> String {
         match (&condition.operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(sql))
@@ -71,7 +58,7 @@ impl<M: Model> QueryBuilder<M> {
                 "{} {} {}",
                 condition.column,
                 Self::operator_label(&condition.operator),
-                Self::describe_condition_value(&condition.value)
+                condition.value
             ),
         }
     }

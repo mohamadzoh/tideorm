@@ -20,11 +20,23 @@ impl<M: Model> QueryBuilder<M> {
         identifier: &'a str,
     ) -> std::borrow::Cow<'a, str> {
         match M::canonical_column_parts(identifier) {
+            (Some(table), column) if table == M::table_name() => {
+                std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
+            }
             (Some(table), column) => std::borrow::Cow::Owned(format!("{}.{}", table, column)),
             (None, column) if self.qualifies_model_column(column) => {
-                std::borrow::Cow::Owned(format!("{}.{}", M::table_name(), column))
+                std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
             }
             (None, column) => std::borrow::Cow::Borrowed(column),
+        }
+    }
+
+    /// The name the model's table goes by in this query: its own alias inside
+    /// a `where_has` over the same table, else the table's name.
+    pub(in crate::query) fn own_table_ref(&self) -> std::borrow::Cow<'static, str> {
+        match self.self_join_depth {
+            0 => std::borrow::Cow::Borrowed(M::table_name()),
+            depth => std::borrow::Cow::Owned(crate::query::predicates::related_alias(depth)),
         }
     }
 
@@ -368,6 +380,29 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let trimmed = column.trim();
+        // A union's ORDER BY sorts its result rows, which name a column by its
+        // output name alone: `ORDER BY "users"."name"` is refused there.
+        if !self.unions.is_empty() {
+            let (reference, direction_sql) = match trimmed.split_once(char::is_whitespace) {
+                Some((reference, suffix))
+                    if suffix.trim().eq_ignore_ascii_case("asc")
+                        || suffix.trim().eq_ignore_ascii_case("desc") =>
+                {
+                    (reference, suffix.trim().to_ascii_uppercase())
+                }
+                _ => (trimmed, direction.as_str().to_string()),
+            };
+            if reference
+                .split('.')
+                .all(crate::internal::sql_safety::is_safe_identifier_segment)
+            {
+                return format!(
+                    "{} {}",
+                    db_sql::quote_ident(db_type, &self.derived_output_name(reference)),
+                    direction_sql
+                );
+            }
+        }
         if let Some((reference, suffix)) = trimmed.split_once(char::is_whitespace) {
             let suffix = suffix.trim();
             if suffix.eq_ignore_ascii_case("asc") || suffix.eq_ignore_ascii_case("desc") {

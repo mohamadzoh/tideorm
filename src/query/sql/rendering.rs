@@ -11,11 +11,13 @@ impl<M: Model> QueryBuilder<M> {
         count_query.order_by.clear();
         count_query.limit_value = None;
         count_query.offset_value = None;
-        // A grouped query counts its groups. Its grouping columns identify
-        // them, and the model's other columns are not grouped, so the inner
-        // query selects only those unless the caller chose a projection.
+        // A grouped query counts its groups, one row each, so the inner query
+        // selects a constant unless the caller chose a projection: selecting
+        // the grouping columns would name two of one name (`orders.status`,
+        // `customers.status`) alike in the derived table, which MySQL refuses.
         if !count_query.group_by.is_empty() && !count_query.has_explicit_projection() {
-            count_query.select_columns = Some(count_query.group_by.clone());
+            count_query.select_columns = None;
+            count_query.raw_select_expressions = vec!["1".to_string()];
         }
 
         if count_query.unions.is_empty()

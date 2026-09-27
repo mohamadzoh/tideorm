@@ -74,6 +74,11 @@ impl DatabaseBuilder {
     }
 
     /// Set how long to wait while opening a connection.
+    ///
+    /// The driver has one timeout for handing out a connection, opening one
+    /// when the pool has room, so this and
+    /// [`acquire_timeout`](Self::acquire_timeout) set the same limit, and the
+    /// longer of the two applies.
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.connect_timeout = Some(duration);
         self
@@ -93,8 +98,9 @@ impl DatabaseBuilder {
 
     /// Set how long to wait for a free connection when the pool is exhausted.
     ///
-    /// Unlike [`Self::connect_timeout`], which bounds opening a brand-new connection,
-    /// this bounds checking one out of an already-saturated pool.
+    /// The driver bounds checking one out and opening a new one with a single
+    /// timeout, so this and [`connect_timeout`](Self::connect_timeout) set
+    /// the same limit, and the longer of the two applies.
     pub fn acquire_timeout(mut self, duration: Duration) -> Self {
         self.acquire_timeout = Some(duration);
         self
@@ -107,8 +113,10 @@ impl DatabaseBuilder {
         let url = self
             .url
             .ok_or_else(|| Error::configuration("Database URL is required"))?;
+        let url = crate::config::rewrite_driver_url(&url);
 
         let mut opts = crate::internal::ConnectOptions::new(url.clone());
+        crate::internal::quiet_driver_logging(&mut opts);
 
         if let Some(max) = self.max_connections {
             opts.max_connections(max);
@@ -116,8 +124,16 @@ impl DatabaseBuilder {
         if let Some(min) = self.min_connections {
             opts.min_connections(min);
         }
-        if let Some(timeout) = self.connect_timeout {
-            opts.connect_timeout(timeout);
+        // sqlx has one checkout timeout, which also covers opening a
+        // connection when the pool has room, and SeaORM maps both settings
+        // onto it, the later one winning. The longer is passed, so neither
+        // cuts the other short.
+        let checkout_timeout = match (self.connect_timeout, self.acquire_timeout) {
+            (Some(connect), Some(acquire)) => Some(connect.max(acquire)),
+            (connect, acquire) => connect.or(acquire),
+        };
+        if let Some(timeout) = checkout_timeout {
+            opts.acquire_timeout(timeout);
         }
         if let Some(timeout) = self.idle_timeout {
             opts.idle_timeout(timeout);
@@ -125,16 +141,12 @@ impl DatabaseBuilder {
         if let Some(lifetime) = self.max_lifetime {
             opts.max_lifetime(lifetime);
         }
-        if let Some(timeout) = self.acquire_timeout {
-            opts.acquire_timeout(timeout);
-        }
-
         let conn = crate::internal::OrmDatabase::connect(opts)
             .await
             .map_err(|err| crate::internal::translate_connect_error(err, &url))?;
 
-        Ok(Database::from_internal_connection(InternalConnection::new(
-            conn,
-        )))
+        Ok(Database::from_internal_connection(
+            InternalConnection::open(conn).await?,
+        ))
     }
 }

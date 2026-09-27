@@ -1,9 +1,8 @@
-use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::HashSet;
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Ident, Type};
+use syn::Type;
 
 use crate::context::BuildContext;
 use crate::meta_support::has_managed_timestamp_columns;
@@ -78,6 +77,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let searchable_fields = &ctx.searchable_fields;
     let index_impls = &ctx.index_impls;
     let unique_index_impls = &ctx.unique_index_impls;
+    let morph_owner_key_impl = build_morph_owner_key_impl(ctx);
     let soft_delete_impl = ctx.soft_delete.as_ref().map(|(_, deleted_at_column)| {
         quote! {
             fn soft_delete_enabled() -> bool { true }
@@ -254,6 +254,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
                 vec![#(#relation_payload_filters),*]
             }
             fn searchable_fields() -> Vec<&'static str> { vec![#(#searchable_fields),*] }
+            #morph_owner_key_impl
             fn translatable_fields() -> Vec<&'static str> { vec![#(#translatable_fields),*] }
             fn encrypted_fields() -> Vec<&'static str> { vec![#(#encrypted_fields),*] }
             fn encrypted_column_names() -> Vec<&'static str> { vec![#(#encrypted_column_names),*] }
@@ -270,13 +271,51 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     })
 }
 
+/// `ModelMeta::__morph_owner_key`: the column each `MorphOne`/`MorphMany` of
+/// the model keys its children by, found by the child's `{morph}_id` column.
+fn build_morph_owner_key_impl(ctx: &BuildContext) -> Option<TokenStream2> {
+    let arms: Vec<_> = ctx
+        .relation_fields
+        .iter()
+        .filter(|field| {
+            matches!(
+                field.relation_kind(),
+                Some(RelationKind::MorphOne | RelationKind::MorphMany)
+            )
+        })
+        .filter_map(|field| {
+            let id_column = format!("{}_id", field.morph_name.as_deref()?);
+            let local_key = field
+                .local_key
+                .as_deref()
+                .unwrap_or(ctx.default_local_key());
+            let key_column = find_db_field(&ctx.db_fields, local_key)?.column_name();
+            Some(quote!(#id_column => Some(#key_column),))
+        })
+        .collect();
+    if arms.is_empty() {
+        return None;
+    }
+    Some(quote! {
+        fn __morph_owner_key(id_column: &str) -> Option<&'static str> {
+            match id_column {
+                #(#arms)*
+                _ => None,
+            }
+        }
+    })
+}
+
 fn sea_orm_field_def(field: &ModelField) -> TokenStream2 {
     let ident = field.ident();
     let ty = &field.ty;
     let column_name = field.column_name();
     let primary_key = field.primary_key.then(|| quote!(primary_key,));
     let auto_increment = field.auto_increment.then(|| quote!(auto_increment,));
-    quote!(#[sea_orm(#primary_key #auto_increment column_name = #column_name)] pub #ident: #ty)
+    // SeaORM's derives would name the `Column` variant themselves, splitting
+    // digits their own way (`s3key` is `S3key` to them, `S3Key` here).
+    let enum_name = variant_ident(ident).to_string();
+    quote!(#[sea_orm(#primary_key #auto_increment column_name = #column_name, enum_name = #enum_name)] pub #ident: #ty)
 }
 
 fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
@@ -367,7 +406,10 @@ fn build_relation_def(ctx: &BuildContext, field: &ModelField) -> syn::Result<Tok
         .foreign_key
         .as_deref()
         .expect("validated relation foreign_key");
-    let local_key = field.local_key.as_deref().unwrap_or("id");
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
 
     let (target, local_ident, remote_key, relation_type, error) = match field.relation_kind() {
         Some(RelationKind::HasManyThrough) => (
@@ -440,8 +482,15 @@ fn related_entity_value(ty: &Type) -> TokenStream2 {
 /// `DeriveRelated` does — so each relation's columns are resolved and checked in
 /// exactly one place. Only `HasManyThrough::to()` builds a join of its own, from
 /// the pivot to the related model, which no `def` arm describes.
+///
+/// Rust allows one `Related<X>` impl per entity pair, so a second relation to
+/// the same model (an `author` and an `editor`, both `BelongsTo<User>`) gets
+/// none. TideORM reads no relation through `Related`: every `with(..)` and
+/// `load()` goes by the field's own keys, so both relations load their own
+/// rows. Each field keeps its `Relation` variant and `def` arm, and its
+/// column checks.
 fn build_related_impls(relations: &[&ModelField]) -> syn::Result<Vec<TokenStream2>> {
-    let mut seen_related_entities: HashMap<String, &Ident> = HashMap::new();
+    let mut related_entities = HashSet::new();
     let mut impls = Vec::new();
 
     for field in relations {
@@ -450,31 +499,15 @@ fn build_related_impls(relations: &[&ModelField]) -> syn::Result<Vec<TokenStream
         let related_ty = related_types
             .first()
             .ok_or_else(|| missing_related_type(field))?;
-
-        // Rust allows a single `Related<X>` impl per entity pair, and sea-orm's eager
-        // loaders (`load_one`/`load_many`) resolve `<Entity as Related<X>>::to()` by that
-        // pair alone; they never see which field was named. Keeping just the first impl
-        // therefore compiles, but that impl answers for *both* relations: `.with("editor")`
-        // joins on `author_id`, and a mixed `HasMany`/`HasOne` pair fails at runtime with a
-        // cardinality error. Silently wrong rows are worse than a rejected model, so the
-        // second relation to the same target is an error. Each field still keeps its own
-        // `Relation` variant and `RelationTrait::def` arm.
-        match seen_related_entities.entry(type_string(related_ty)) {
-            Entry::Occupied(first) => {
-                return Err(syn::Error::new_spanned(
-                    ident,
-                    duplicate_related_message(first.get(), ident, first.key()),
-                ));
-            }
-            Entry::Vacant(slot) => {
-                slot.insert(ident);
-            }
-        }
+        let first_to_target = related_entities.insert(type_string(related_ty));
 
         let variant = variant_ident(ident);
         let related_entity_ty = quote!(<#related_ty as ::tideorm::internal::InternalModel>::Entity);
 
         if field.relation_kind() != Some(RelationKind::HasManyThrough) {
+            if !first_to_target {
+                continue;
+            }
             impls.push(quote! {
                 impl ::tideorm::orm::Related<#related_entity_ty> for Entity {
                     fn to() -> RelationDef {
@@ -505,6 +538,14 @@ fn build_related_impls(relations: &[&ModelField]) -> syn::Result<Vec<TokenStream
             compile_time_column_assert(related_ty, related_local_key, &related_column_error);
         let related_entity = related_entity_value(related_ty);
 
+        if !first_to_target {
+            impls.push(quote! {
+                #pivot_related_assert
+                #related_column_assert
+            });
+            continue;
+        }
+
         impls.push(quote! {
             impl ::tideorm::orm::Related<#related_entity_ty> for Entity {
                 fn to() -> RelationDef {
@@ -526,16 +567,6 @@ fn build_related_impls(relations: &[&ModelField]) -> syn::Result<Vec<TokenStream
     }
 
     Ok(impls)
-}
-
-fn duplicate_related_message(first: &Ident, second: &Ident, target: &str) -> String {
-    format!(
-        "relations `{first}` and `{second}` both target `{target}`; sea-orm permits one \
-         `Related<{target}>` impl per entity pair, so only one of them can be eager-loaded \
-         and that single impl would answer for either name, joining `{second}` on \
-         `{first}`'s keys. Keep one of them as a relation field and load `{second}` \
-         explicitly with its own query instead of eagerly."
-    )
 }
 
 fn compile_time_column_assert(ty: &Type, column: &str, message: &str) -> TokenStream2 {

@@ -19,7 +19,7 @@ pub(crate) mod sql_builder;
 pub(crate) mod sql_safety;
 
 pub use column_values::__column_type_of;
-pub(crate) use column_values::{column_type_of, json_to_column_value};
+pub(crate) use column_values::{column_type_of, json_to_assignment_value, json_to_column_value};
 pub use executor::Executor;
 
 // Re-export the ORM engine through TideORM's facade, broadly, so other modules
@@ -296,29 +296,75 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
     }
 }
 
+/// Leave statement logging to TideORM: `TIDE_LOG_QUERIES` and the
+/// `QueryLogger` decide what is printed, where the driver would log every
+/// statement at `INFO` to any subscriber listening.
+pub(crate) fn quiet_driver_logging(options: &mut ConnectOptions) {
+    options.sqlx_logging(false);
+}
+
 /// Internal connection wrapper
 #[doc(hidden)]
 pub struct InternalConnection {
     pub(crate) conn: OrmConnection,
+    /// Whether the server behind a MySQL-protocol connection is MariaDB,
+    /// which SeaORM cannot tell apart and some SQL is rendered differently
+    /// for.
+    mariadb: bool,
 }
 
 impl InternalConnection {
     pub async fn connect(url: &str) -> Result<Self> {
-        let conn = OrmDatabase::connect(url)
+        let url = crate::config::rewrite_driver_url(url);
+        let mut options = ConnectOptions::new(url.clone());
+        quiet_driver_logging(&mut options);
+        let conn = OrmDatabase::connect(options)
             .await
-            .map_err(|err| translate_connect_error(err, url))?;
-        Ok(Self::new(conn))
+            .map_err(|err| translate_connect_error(err, &url))?;
+        Self::open(conn).await
+    }
+
+    /// Wrap a freshly opened `conn`, asking a MySQL-protocol server whether
+    /// it is MariaDB. The pool has only just opened, so a failure even of
+    /// `SELECT VERSION()` means it is unusable, and is returned.
+    pub(crate) async fn open(conn: OrmConnection) -> Result<Self> {
+        let mut connection = Self::new(conn);
+        if Backend::from_orm_backend(connection.conn.get_database_backend()) == Some(Backend::MySql)
+        {
+            let statement = OrmStatement::from_string(
+                connection.conn.get_database_backend(),
+                "SELECT VERSION() AS version",
+            );
+            let version: String = connection
+                .conn
+                .query_one_raw(statement)
+                .await
+                .map_err(translate_connection_error)?
+                .ok_or_else(|| Error::query("SELECT VERSION() returned no row"))?
+                .try_get("", "version")
+                .map_err(translate_error)?;
+            connection.mariadb = version.to_ascii_lowercase().contains("mariadb");
+        }
+        Ok(connection)
     }
 
     /// Wrap `conn`, reporting the statements the engine renders itself — the
     /// typed CRUD paths and raw SQL — to the query log.
     pub(crate) fn new(mut conn: OrmConnection) -> Self {
         conn.set_metric_callback(crate::logging::log_engine_statement);
-        Self { conn }
+        Self {
+            conn,
+            mariadb: false,
+        }
     }
 
     pub fn connection(&self) -> &OrmConnection {
         &self.conn
+    }
+
+    /// Whether the server is MariaDB.
+    pub(crate) fn is_mariadb(&self) -> bool {
+        self.mariadb
     }
 }
 
@@ -434,7 +480,13 @@ pub(crate) fn driver_failure(err: &OrmError) -> Option<DbFailure> {
 /// driver.
 pub(crate) fn translate_error(err: OrmError) -> Error {
     let failure = driver_failure(&err);
-    translate_engine_error(err).with_db_failure(failure)
+    let error = translate_engine_error(err).with_db_failure(failure);
+    // A failure inside a transaction can leave it unable to commit; the
+    // transaction asks before it does (see `Database::transaction`).
+    crate::cache::note_failed_statement(
+        error.failure_kind() == crate::error::DbFailureKind::Deadlock,
+    );
+    error
 }
 
 /// Translate an engine error from reaching or probing the server.
@@ -456,15 +508,39 @@ pub(crate) fn translate_connect_error(err: OrmError, url: &str) -> Error {
     }
 }
 
-/// `url` with everything between the scheme and the last `@` masked: its user
-/// and password, delimited the way a URL parser delimits them.
+/// `url` with its credentials masked: everything between the scheme and the
+/// last `@` before the query (its user and password, delimited the way a URL
+/// parser delimits them), and the value of a query parameter that carries a
+/// password, which the PostgreSQL driver reads as `?password=..`.
 pub(crate) fn mask_url_credentials(url: &str) -> String {
-    match (url.find("://"), url.rfind('@')) {
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let base = match (base.find("://"), base.rfind('@')) {
         (Some(scheme_end), Some(at)) if at > scheme_end => {
-            format!("{}://***{}", &url[..scheme_end], &url[at..])
+            format!("{}://***{}", &base[..scheme_end], &base[at..])
         }
-        _ => url.to_string(),
-    }
+        _ => base.to_string(),
+    };
+    let Some(query) = query else {
+        return base;
+    };
+    let query: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((key, _))
+                if matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "password" | "sslpassword" | "passwd" | "pwd"
+                ) =>
+            {
+                format!("{key}=***")
+            }
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{base}?{}", query.join("&"))
 }
 
 pub(crate) fn translate_connection_error(err: OrmError) -> Error {
@@ -652,24 +728,6 @@ where
     }
 
     select
-}
-
-/// [`scoped_find`] for a relation read through `Pivot`, leaving out the rows
-/// only a soft-deleted pivot row links. Generated eager loaders start their
-/// `has_many_through` queries here; the loader joins the pivot table in.
-#[doc(hidden)]
-pub fn scoped_find_through<M, Pivot>() -> Select<M::Entity>
-where
-    M: InternalModel + crate::model::Model,
-    Pivot: InternalModel + crate::model::Model,
-{
-    let select = scoped_find::<M>();
-    match Pivot::column_from_str(Pivot::deleted_at_column()) {
-        Some(deleted_at_column) if Pivot::soft_delete_enabled() => {
-            select.filter(deleted_at_column.is_null())
-        }
-        _ => select,
-    }
 }
 
 /// Internal query executor

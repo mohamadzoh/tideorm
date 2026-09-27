@@ -1,7 +1,6 @@
 use super::{AlterTableBuilder, DatabaseType, TableBuilder, ddl};
 use crate::error::{ErrorContext, Result};
 use crate::internal::sql_safety::quote_ident;
-use crate::tide_debug;
 
 /// Schema manipulation context for migrations
 ///
@@ -40,11 +39,35 @@ impl Schema {
         build(&mut builder);
         self.execute(&builder.build_create(if_not_exists)).await?;
 
-        for index_sql in builder.build_indexes(if_not_exists) {
+        for (index, index_sql) in builder.build_indexes(if_not_exists) {
+            // MySQL has no `CREATE INDEX IF NOT EXISTS`, so a re-run, after a
+            // migration its non-transactional DDL left half applied, asks the
+            // catalog instead of failing on the index it already made.
+            if if_not_exists
+                && self.database_type == DatabaseType::MySQL
+                && self.mysql_index_exists(name, index).await?
+            {
+                continue;
+            }
             self.execute(&index_sql).await?;
         }
 
         Ok(())
+    }
+
+    /// Whether the current MySQL database's `table` has an index named `index`.
+    async fn mysql_index_exists(&self, table: &str, index: &str) -> Result<bool> {
+        let sql = "SELECT COUNT(*) AS found FROM information_schema.statistics \
+                   WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?";
+        let rows = crate::database::__current_db()?
+            .__raw_json_with_params(sql, vec![table.into(), index.into()])
+            .await
+            .map_err(|error| error.with_context(ErrorContext::new().query(sql)))?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get("found"))
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|found| found > 0))
     }
 
     /// Alter an existing table
@@ -54,6 +77,10 @@ impl Schema {
     {
         let mut builder = AlterTableBuilder::new(name, self.database_type);
         build(&mut builder);
+        if builder.changes_mysql_column_types() {
+            let create_table = self.show_create_table(name).await?;
+            builder.keep_column_attributes(&create_table);
+        }
 
         for sql in builder.build()? {
             self.execute(&sql).await?;
@@ -125,16 +152,32 @@ impl Schema {
         self.execute(sql).await
     }
 
+    /// The table's `SHOW CREATE TABLE`, on MySQL or MariaDB.
+    async fn show_create_table(&self, name: &str) -> Result<String> {
+        let sql = format!(
+            "SHOW CREATE TABLE {}",
+            quote_ident(self.database_type, name)
+        );
+        let rows = crate::database::__current_db()?
+            .__raw_json_with_params(&sql, Vec::new())
+            .await
+            .map_err(|error| error.with_context(ErrorContext::new().query(&sql)))?;
+        rows.first()
+            .and_then(|row| row.get("Create Table"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| crate::Error::query(format!("{} returned no table definition", sql)))
+    }
+
     /// Run `sql` on the ambient connection rather than the global pool: on
     /// backends with transactional DDL the migrator wraps each migration in a
     /// transaction, and a pooled connection would run the DDL outside it.
+    ///
+    /// The engine logs the statement once it has run, to `TIDE_LOG_QUERIES`
+    /// and the [`QueryLogger`](crate::logging::QueryLogger), as it logs raw SQL.
     async fn execute(&mut self, sql: &str) -> Result<()> {
-        if crate::logging::query_logging_enabled() {
-            tide_debug!("Migration SQL: {}", sql);
-        }
-
         let db = crate::database::__current_db()?;
-        crate::logging::logged_by_caller(db.exec_raw(sql))
+        db.exec_raw(sql)
             .await
             .map_err(|error| error.with_context(ErrorContext::new().query(sql)))?;
 

@@ -326,9 +326,56 @@ impl<T> ManagedEntry<T> {
         *self.state.write() = EntityState::Managed;
     }
 
+    /// Hand the entry `entity` to write, taking back a pending removal. A row
+    /// already stored is updated; one not inserted yet (a `persist` that has
+    /// not flushed) stays an insert, which flushes in the insert phase, before
+    /// the children that point at it.
     pub(crate) fn overwrite_merged(&self, entity: T) {
+        let state = if self.persisted_key.read().is_some() {
+            EntityState::Managed
+        } else {
+            EntityState::New
+        };
         *self.current.write() = entity;
-        *self.state.write() = EntityState::Managed;
+        *self.state.write() = state;
+    }
+
+    /// Move the entry onto `saved`, the row as another path of this context
+    /// just stored it: a field the holder has not changed since loading takes
+    /// the stored value, one it changed keeps its edit, and the snapshot
+    /// becomes the stored row. A later flush then writes the edits over the
+    /// stored row instead of putting back the values the entry loaded. An
+    /// entry never loaded (a pending insert) has nothing to rebase.
+    ///
+    /// Inside a transaction the entry goes back to what it held if that
+    /// transaction does not commit.
+    pub(crate) fn rebase(self: &Arc<Self>, saved: &T) -> crate::error::Result<()>
+    where
+        T: crate::model::Model + Clone + Send + Sync + 'static,
+    {
+        let mut snapshot = self.snapshot.write();
+        let Some(loaded) = snapshot.clone() else {
+            return Ok(());
+        };
+        let mut current = self.current.write();
+        let previous = current.clone();
+        let mut rebased = previous.clone();
+        for field in <T as crate::model::ModelMeta>::field_names() {
+            if loaded.field_json_value(field)? == previous.field_json_value(field)?
+                && let Some(stored) = saved.field_json_value(field)?
+            {
+                rebased.set_field_json(field, stored)?;
+            }
+        }
+        *current = rebased;
+        *snapshot = Some(saved.clone());
+
+        let entry = Arc::clone(self);
+        crate::cache::undo_on_rollback(move || {
+            *entry.current.write() = previous;
+            *entry.snapshot.write() = Some(loaded);
+        });
+        Ok(())
     }
 
     pub(crate) fn mark_removed(&self) {

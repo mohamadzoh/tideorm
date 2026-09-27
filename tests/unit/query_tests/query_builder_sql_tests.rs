@@ -1121,9 +1121,12 @@ fn test_a_grouped_count_counts_the_groups() {
     let (sql, _) = QueryBuilder::<QueryTestUser>::new()
         .group_by("name")
         .build_count_sql_with_params_for_db(DatabaseType::Postgres);
+    // One constant row per group: two grouping columns of one name
+    // (`orders.status`, `customers.status`) would collide in the derived
+    // table, which MySQL refuses.
     assert_eq!(
         sql,
-        "SELECT COUNT(*) AS count FROM (SELECT \"query_test_users\".\"name\" FROM \"query_test_users\" GROUP BY \"name\") AS \"tideorm_count_subquery\""
+        "SELECT COUNT(*) AS count FROM (SELECT 1 FROM \"query_test_users\" GROUP BY \"name\") AS \"tideorm_count_subquery\""
     );
 }
 

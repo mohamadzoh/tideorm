@@ -27,14 +27,24 @@ pub(crate) struct PendingInvalidations {
     tables: HashSet<String>,
     all: bool,
     undo: Vec<Box<dyn FnOnce() + Send>>,
+    /// Whether a statement failed inside the transaction, which on PostgreSQL
+    /// aborts it.
+    statement_failed: bool,
+    /// Whether a statement deadlocked, which rolls the whole transaction back
+    /// on the server: MySQL and MariaDB then run what follows outside it.
+    deadlocked: bool,
 }
 
 impl Drop for PendingInvalidations {
     /// A record dropped before [`replay`](Self::replay) belongs to a
-    /// transaction that did not commit.
+    /// transaction that did not commit. A deadlock ended every enclosing
+    /// transaction too, so they learn of it.
     fn drop(&mut self) {
         while let Some(undo) = self.undo.pop() {
             undo();
+        }
+        if self.deadlocked {
+            record(|enclosing| enclosing.deadlocked = true);
         }
     }
 }
@@ -53,6 +63,17 @@ impl PendingInvalidations {
 
     pub(super) fn all(&mut self) {
         self.all = true;
+    }
+
+    /// Whether a statement failed inside the transaction.
+    pub(crate) fn statement_failed(&self) -> bool {
+        self.statement_failed
+    }
+
+    /// Whether a statement inside the transaction, or one it enclosed,
+    /// deadlocked.
+    pub(crate) fn deadlocked(&self) -> bool {
+        self.deadlocked
     }
 
     /// Invalidate again what the transaction's writes invalidated, now that it
@@ -97,6 +118,15 @@ pub(crate) fn install(pending: &Arc<Mutex<PendingInvalidations>>) -> PendingGuar
 #[cfg(feature = "entity-manager")]
 pub(crate) fn undo_on_rollback(undo: impl FnOnce() + Send + 'static) {
     record(|pending| pending.undo.push(Box::new(undo)));
+}
+
+/// Note that a statement failed inside the innermost open transaction, if
+/// any, and whether it deadlocked.
+pub(crate) fn note_failed_statement(deadlocked: bool) {
+    record(|pending| {
+        pending.statement_failed = true;
+        pending.deadlocked |= deadlocked;
+    });
 }
 
 /// Note an invalidation against the innermost open transaction, if any.

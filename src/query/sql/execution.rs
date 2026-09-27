@@ -143,7 +143,9 @@ impl<M: Model> QueryBuilder<M> {
             }
         };
         let rows = db.__raw_json_typed(sql, params, &model_type);
-        self.logged(sql, rows, |rows| rows.len() as u64).await
+        let mut rows = self.logged(sql, rows, |rows| rows.len() as u64).await?;
+        crate::model::decrypt_json_rows::<M>(&mut rows, &joined_names)?;
+        Ok(rows)
     }
 
     /// Run a mutation and drop every cached result it may have made stale.
@@ -494,7 +496,9 @@ impl<M: Model> QueryBuilder<M> {
             let fetched = batch.len() as u64;
 
             let mut starts_at_last_key = false;
-            if joins_repeat_keys && fetched == batch_limit {
+            // Rows may follow a full batch unless the limit ends with it.
+            let more_may_follow = remaining.is_none_or(|limit| limit > batch_limit);
+            if joins_repeat_keys && fetched == batch_limit && more_may_follow {
                 let mut tail = 0;
                 for model in batch.iter().rev() {
                     if key_of(model)? != last_key {
@@ -503,13 +507,31 @@ impl<M: Model> QueryBuilder<M> {
                     tail += 1;
                 }
                 if tail == batch.len() {
-                    return Err(Error::invalid_query(format!(
-                        "chunk({}) fetched a batch in which every row has the key {}: the join repeats it more often than a batch holds, so pass a larger chunk size",
-                        chunk_size, last_key
-                    )));
+                    // Every row shares one key: read that key's whole run,
+                    // which fails only when a batch cannot hold it.
+                    let mut run_query = base_query
+                        .clone()
+                        .where_eq(&cursor_column, last_key.clone())
+                        .limit(chunk_size.saturating_add(1));
+                    if let Some(cache_key) = &explicit_cache_key {
+                        run_query.cache_key = Some(format!(
+                            "{}::chunk(run={})",
+                            cache_key,
+                            serde_json::to_string(&last_key).map_err(Error::from)?
+                        ));
+                    }
+                    let run = run_query.get().await?;
+                    if run.len() as u64 > chunk_size {
+                        return Err(Error::invalid_query(format!(
+                            "chunk({}) found more rows with the key {} than a batch holds: the join repeats it, so pass a larger chunk size",
+                            chunk_size, last_key
+                        )));
+                    }
+                    batch = run;
+                } else {
+                    batch.truncate(batch.len() - tail);
+                    starts_at_last_key = true;
                 }
-                batch.truncate(batch.len() - tail);
-                starts_at_last_key = true;
             }
 
             let processed = batch.len() as u64;
@@ -728,6 +750,9 @@ impl<M: Model> QueryBuilder<M> {
         Ok((sql, params))
     }
 
+    /// Mark the live rows this query matches deleted, stamping `deleted_at`;
+    /// a trashed row keeps the stamp it has, even under `with_trashed()`. At
+    /// least one explicit filter is required.
     pub async fn soft_delete(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("soft_delete")?;
@@ -739,9 +764,13 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         self.ensure_mutation_has_explicit_filters("soft_delete")?;
+        self.ensure_not_only_trashed("soft_delete")?;
 
-        let (sql, params) = self.build_soft_delete_sql(self.db_type_for_sql())?;
-        self.run_mutation(&sql, params).await
+        // Marking a trashed row again would change nothing but its stamp,
+        // which a retention purge reads.
+        let query = self.live_rows_only();
+        let (sql, params) = query.build_soft_delete_sql(query.db_type_for_sql())?;
+        query.run_mutation(&sql, params).await
     }
 
     pub async fn restore(self) -> Result<u64> {
@@ -841,8 +870,8 @@ fn normalize_table_name(token: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Pull table names out of rendered SQL by reading the identifier that follows
-/// each `FROM`/`JOIN` keyword.
+/// Pull table names out of rendered SQL: the identifier after each `JOIN`, and
+/// every table of a `FROM` list, `FROM a, b` naming two.
 ///
 /// This is a fallback, not the intended mechanism: joins report their table
 /// directly off `JoinClause`, but union, CTE, and subquery operands only survive
@@ -851,36 +880,122 @@ fn normalize_table_name(token: &str) -> Option<String> {
 /// under-collecting would keep serving stale rows, so every identifier-shaped
 /// token is kept.
 fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
-    const NOT_A_TABLE: [&str; 5] = ["select", "lateral", "only", "unnest", "values"];
+    const NOT_A_TABLE: [&str; 3] = ["select", "unnest", "values"];
+    // Words a table may follow: `FROM ONLY posts` reads `posts`.
+    const BEFORE_A_TABLE: [&str; 2] = ["only", "lateral"];
+    // The keywords that end a `FROM` list.
+    const LIST_END: [&str; 20] = [
+        "where",
+        "group",
+        "order",
+        "limit",
+        "offset",
+        "having",
+        "union",
+        "intersect",
+        "except",
+        "window",
+        "for",
+        "on",
+        "using",
+        "returning",
+        "fetch",
+        "inner",
+        "left",
+        "right",
+        "full",
+        "cross",
+    ];
 
-    let is_separator =
-        |character: char| character.is_whitespace() || matches!(character, ',' | '(' | ')');
-
+    let mut depth = 0usize;
+    // The parenthesis depth of each `FROM` list being read, innermost last.
+    let mut lists: Vec<usize> = Vec::new();
     let mut expect_table = false;
-    for token in sql.split(is_separator) {
-        if token.is_empty() {
-            continue;
+    for token in sql_tokens(sql) {
+        match token {
+            "(" => {
+                depth += 1;
+                expect_table = false;
+            }
+            ")" => {
+                depth = depth.saturating_sub(1);
+                lists.retain(|&list| list <= depth);
+            }
+            "," => expect_table = lists.last() == Some(&depth),
+            word if word.eq_ignore_ascii_case("from") => {
+                lists.push(depth);
+                expect_table = true;
+            }
+            word if word.eq_ignore_ascii_case("join") => {
+                if lists.last() == Some(&depth) {
+                    lists.pop();
+                }
+                expect_table = true;
+            }
+            word => {
+                if lists.last() == Some(&depth)
+                    && LIST_END.iter().any(|end| word.eq_ignore_ascii_case(end))
+                {
+                    lists.pop();
+                }
+                if std::mem::take(&mut expect_table) {
+                    if BEFORE_A_TABLE
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
+                        expect_table = true;
+                    } else if !NOT_A_TABLE
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
+                        push_table_tag(tables, word);
+                    }
+                }
+            }
         }
-
-        if token.eq_ignore_ascii_case("from") || token.eq_ignore_ascii_case("join") {
-            expect_table = true;
-            continue;
-        }
-
-        if !expect_table {
-            continue;
-        }
-        expect_table = false;
-
-        if NOT_A_TABLE
-            .into_iter()
-            .any(|keyword| token.eq_ignore_ascii_case(keyword))
-        {
-            continue;
-        }
-
-        push_table_tag(tables, token);
     }
+}
+
+/// Split SQL into words and the `(`, `)` and `,` between them, leaving out
+/// whitespace and single-quoted literals.
+fn sql_tokens(sql: &str) -> impl Iterator<Item = &str> {
+    let mut rest = sql;
+    std::iter::from_fn(move || {
+        loop {
+            rest = rest.trim_start();
+            let first = rest.chars().next()?;
+            if first == '\'' {
+                // A literal ends at a quote that is not doubled.
+                let mut end = rest.len();
+                let mut chars = rest.char_indices().skip(1).peekable();
+                while let Some((index, character)) = chars.next() {
+                    if character == '\'' {
+                        if chars.peek().is_some_and(|&(_, next)| next == '\'') {
+                            chars.next();
+                        } else {
+                            end = index + 1;
+                            break;
+                        }
+                    }
+                }
+                rest = &rest[end..];
+                continue;
+            }
+            if matches!(first, '(' | ')' | ',') {
+                let (token, tail) = rest.split_at(1);
+                rest = tail;
+                return Some(token);
+            }
+            let end = rest
+                .find(|character: char| {
+                    character.is_whitespace() || matches!(character, '(' | ')' | ',' | '\'')
+                })
+                .unwrap_or(rest.len());
+            let (token, tail) = rest.split_at(end);
+            rest = tail;
+            return Some(token);
+        }
+    })
 }
 
 /// Collect the tables named inside a condition's SQL-carrying operands.

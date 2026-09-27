@@ -176,6 +176,14 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         vec![]
     }
 
+    /// The column this model's `MorphOne`/`MorphMany` keys its children by,
+    /// for the morph whose child column holding that key is `id_column`
+    /// (`commentable_id`); `None` when no relation of this model declares it.
+    #[doc(hidden)]
+    fn __morph_owner_key(_id_column: &str) -> Option<&'static str> {
+        None
+    }
+
     fn translatable_fields() -> Vec<&'static str> {
         vec![]
     }

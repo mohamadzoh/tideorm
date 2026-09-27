@@ -79,7 +79,10 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         .relation_kind()
         .expect("relation fields have a relation wrapper type");
     let foreign_key = field.foreign_key.as_deref();
-    let local_key = field.local_key.as_deref().unwrap_or("id");
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
 
     let relation = match kind {
         RelationKind::HasOne | RelationKind::HasMany | RelationKind::HasManyThrough => {
@@ -159,6 +162,9 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         RelationKind::SelfRef => {
             let foreign_key = foreign_key.unwrap_or("parent_id");
             let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
+            // The parent is looked up by this column, so a typo is caught here
+            // rather than as an unknown column at the first load.
+            ctx.resolve_local_key_ident(local_key, ident)?;
             quote! {
                 let relation = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
                     .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));

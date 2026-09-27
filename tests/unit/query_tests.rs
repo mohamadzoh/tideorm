@@ -40,6 +40,18 @@ impl ScopedQueryTestUser {
     pub fn role(query: QueryBuilder<Self>, role: &str) -> QueryBuilder<Self> {
         query.where_eq(Self::columns.role, role)
     }
+
+    /// A `mut` parameter, which a trait method without a body cannot declare.
+    pub fn at_most(query: QueryBuilder<Self>, mut count: u64) -> QueryBuilder<Self> {
+        count = count.max(1);
+        query.limit(count)
+    }
+
+    /// `Self` in a parameter means the model, which in the generated trait
+    /// is the query builder.
+    pub fn same_role_as(query: QueryBuilder<Self>, other: &Self) -> QueryBuilder<Self> {
+        query.where_eq(Self::columns.role, other.role.clone())
+    }
 }
 
 #[path = "query_tests/db_sql_and_safety_tests.rs"]

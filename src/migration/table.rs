@@ -202,8 +202,10 @@ impl TableBuilder {
     }
 
     pub fn column(&mut self, name: &str, column_type: ColumnType) -> ColumnBuilder<'_> {
+        let database_type = self.database_type;
         ColumnBuilder::new(
             self,
+            database_type,
             ColumnDefinition::new(name, column_type),
             |table, column| table.columns.push(column),
         )
@@ -213,13 +215,18 @@ impl TableBuilder {
         self.column(name, ColumnType::BigInteger)
     }
 
+    /// Index `columns` under a generated name, `idx_<table>_<columns>`,
+    /// shortened with a hash past 63 bytes.
     pub fn index(&mut self, columns: &[&str]) -> &mut Self {
-        let name = format!("idx_{}_{}", self.name, columns.join("_"));
+        let name = ddl::bounded_index_name(format!("idx_{}_{}", self.name, columns.join("_")));
         self.push_index(name, columns, false)
     }
 
+    /// A unique index on `columns`, named `idx_<table>_<columns>_unique`
+    /// (shortened with a hash past 63 bytes).
     pub fn unique_index(&mut self, columns: &[&str]) -> &mut Self {
-        let name = format!("idx_{}_{}_unique", self.name, columns.join("_"));
+        let name =
+            ddl::bounded_index_name(format!("idx_{}_{}_unique", self.name, columns.join("_")));
         self.push_index(name, columns, true)
     }
 
@@ -280,20 +287,22 @@ impl TableBuilder {
         )
     }
 
-    pub(crate) fn build_indexes(&self, if_not_exists: bool) -> Vec<String> {
+    /// Each index as `(name, CREATE INDEX statement)`.
+    pub(crate) fn build_indexes(&self, if_not_exists: bool) -> Vec<(&str, String)> {
         let table = quote_ident(self.database_type, &self.name);
 
         self.indexes
             .iter()
             .map(|index| {
-                ddl::create_index(
+                let sql = ddl::create_index(
                     self.database_type,
                     &index.name,
                     &table,
                     &index.columns,
                     index.unique,
                     if_not_exists,
-                )
+                );
+                (index.name.as_str(), sql)
             })
             .collect()
     }
@@ -305,6 +314,7 @@ impl TableBuilder {
 /// `t.string("email").unique().not_null();` needs no terminating call.
 pub struct ColumnBuilder<'a, T = TableBuilder> {
     target: &'a mut T,
+    database_type: DatabaseType,
     definition: Option<ColumnDefinition>,
     add: fn(&mut T, ColumnDefinition),
 }
@@ -312,11 +322,13 @@ pub struct ColumnBuilder<'a, T = TableBuilder> {
 impl<'a, T> ColumnBuilder<'a, T> {
     pub(super) fn new(
         target: &'a mut T,
+        database_type: DatabaseType,
         definition: ColumnDefinition,
         add: fn(&mut T, ColumnDefinition),
     ) -> Self {
         Self {
             target,
+            database_type,
             definition: Some(definition),
             add,
         }
@@ -342,7 +354,8 @@ impl<'a, T> ColumnBuilder<'a, T> {
 
     /// Set a default value
     pub fn default(mut self, value: impl Into<DefaultValue>) -> Self {
-        self.definition().default = Some(value.into().to_sql());
+        let default = value.into().to_sql(self.database_type);
+        self.definition().default = Some(default);
         self
     }
 

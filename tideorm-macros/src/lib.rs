@@ -25,7 +25,7 @@ use context::BuildContext;
 use entity_gen::generate_entity_support;
 use meta_support::{ExistingDerives, detect_existing_derives};
 use model_trait::generate_model_support;
-use parse::{ModelInput, parse_index_attributes};
+use parse::{ModelInput, parse_field_index_attributes, parse_index_attributes};
 use scope_gen::generate_query_scope_support;
 use serde_gen::generate_trait_impls;
 use tokenization_gen::generate_tokenizable_impl;
@@ -35,7 +35,10 @@ use validation_gen::generate_validation_impl;
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let existing_derives = detect_existing_derives(&input.attrs);
-    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let (mut indexes, mut unique_indexes) = parse_index_attributes(&input.attrs);
+    let (field_indexes, field_unique_indexes) = parse_field_index_attributes(&input.data);
+    indexes.extend(field_indexes);
+    unique_indexes.extend(field_unique_indexes);
 
     let model_input = match ModelInput::from_derive_input(&input) {
         Ok(value) => value,

@@ -57,7 +57,9 @@ pub use prepared_statements::{
 #[cfg(feature = "entity-manager")]
 pub(crate) use query_cache::undo_on_rollback;
 pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
-pub(crate) use query_cache::{PendingInvalidations, install_pending_invalidations};
+pub(crate) use query_cache::{
+    PendingInvalidations, install_pending_invalidations, note_failed_statement,
+};
 
 static GLOBAL_QUERY_CACHE: OnceLock<QueryCache> = OnceLock::new();
 static GLOBAL_STMT_CACHE: OnceLock<PreparedStatementCache> = OnceLock::new();

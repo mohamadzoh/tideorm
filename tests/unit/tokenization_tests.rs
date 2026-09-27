@@ -286,3 +286,18 @@ fn sealed_payloads_open_only_under_the_same_key_and_aad() {
     assert_eq!(super::open(&key, &sealed, b"other"), None);
     assert_eq!(super::open(&key, &sealed[..24], b"aad"), None);
 }
+
+/// An empty key, what an unset environment variable read with
+/// `unwrap_or_default()` gives, configures no key: encrypting then fails
+/// rather than sealing everything under a key anyone can derive.
+#[test]
+fn an_empty_encryption_key_leaves_encryption_unconfigured() {
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key("  ");
+    assert!(!TokenConfig::has_encryption_key());
+    assert!(TokenConfig::get_encryption_key().is_err());
+
+    TokenConfig::set_encryption_key("a-real-key");
+    assert!(TokenConfig::has_encryption_key());
+    TokenConfig::reset();
+}

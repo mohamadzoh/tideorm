@@ -10,6 +10,78 @@ use tideorm::prelude::*;
 
 use super::{backend, parity};
 
+/// `change_column` keeps what MySQL's `MODIFY COLUMN` would drop — NOT NULL,
+/// the default, AUTO_INCREMENT, the comment — as PostgreSQL's `ALTER TYPE`
+/// keeps them.
+#[tokio::test]
+async fn change_column_keeps_the_column_attributes() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS `changed_columns`")
+        .await
+        .expect("failed to drop changed_columns");
+    Database::execute(
+        "CREATE TABLE `changed_columns` (
+            `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            `age` INT NOT NULL DEFAULT 5 COMMENT 'years',
+            `note` VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL
+        ) ENGINE=InnoDB",
+    )
+    .await
+    .expect("failed to create changed_columns");
+
+    tideorm::migration::Schema::new(backend::DATABASE_TYPE)
+        .alter_table("changed_columns", |t| {
+            t.change_column("id", tideorm::migration::ColumnType::BigInteger)
+                .change_column("age", tideorm::migration::ColumnType::BigInteger)
+                .change_column("note", tideorm::migration::ColumnType::Text);
+        })
+        .await
+        .expect("change_column failed");
+
+    let columns = Database::raw_json(
+        "SELECT COLUMN_NAME AS name, DATA_TYPE AS data_type, IS_NULLABLE AS nullable, \
+         COLUMN_DEFAULT AS default_value, EXTRA AS extra, COLUMN_COMMENT AS comment \
+         FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'changed_columns' \
+         ORDER BY ORDINAL_POSITION",
+    )
+    .await
+    .expect("failed to read the columns");
+    let column = |name: &str| {
+        columns
+            .iter()
+            .find(|column| column["name"] == name)
+            .unwrap_or_else(|| panic!("no column {name}: {columns:?}"))
+            .clone()
+    };
+    let (id, age, note) = (column("id"), column("age"), column("note"));
+
+    assert_eq!(id["data_type"], "bigint");
+    assert_eq!(id["nullable"], "NO");
+    assert!(
+        id["extra"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("auto_increment"),
+        "{id}"
+    );
+    assert_eq!(age["data_type"], "bigint");
+    assert_eq!(age["nullable"], "NO");
+    // MariaDB quotes a literal default in `COLUMN_DEFAULT`, MySQL does not.
+    assert!(
+        matches!(age["default_value"].as_str(), Some("5" | "'5'")),
+        "{age}"
+    );
+    assert_eq!(age["comment"], "years");
+    assert_eq!(
+        note["data_type"], "longtext",
+        "`ColumnType::Text` is LONGTEXT here"
+    );
+    assert_eq!(note["nullable"], "YES");
+}
+
 #[tokio::test]
 async fn raw_json_decodes_each_column_by_its_declaration() {
     if !backend::connect().await {
@@ -200,4 +272,19 @@ async fn a_cancelled_migration_run_frees_the_migration_lock() {
     Database::execute(&format!("DROP TABLE IF EXISTS `{ledger}`"))
         .await
         .expect("failed to drop the ledger");
+}
+
+/// A database opened with `Database::connect`, which reads no configuration,
+/// knows whether it reached MariaDB, as `TideConfig::connect` does: it
+/// rendered MySQL's SQL for MariaDB, such as `CAST(? AS JSON)`, which MariaDB
+/// lacks.
+#[tokio::test]
+async fn a_database_opened_directly_knows_its_server() {
+    if !backend::connect().await {
+        return;
+    }
+    let db = Database::connect(backend::database_url())
+        .await
+        .expect("connect failed");
+    assert_eq!(db.backend(), backend::DATABASE_TYPE);
 }

@@ -5,15 +5,15 @@ use crate::internal::Backend;
 #[test]
 fn resolved_backend_prefers_the_live_handle_over_configuration() {
     assert_eq!(
-        Database::resolve_backend(Some(DatabaseType::Postgres), Backend::Sqlite),
+        Database::resolve_backend(Some(DatabaseType::Postgres), Backend::Sqlite, false),
         DatabaseType::SQLite
     );
     assert_eq!(
-        Database::resolve_backend(Some(DatabaseType::SQLite), Backend::Postgres),
+        Database::resolve_backend(Some(DatabaseType::SQLite), Backend::Postgres, false),
         DatabaseType::Postgres
     );
     assert_eq!(
-        Database::resolve_backend(Some(DatabaseType::Postgres), Backend::MySql),
+        Database::resolve_backend(Some(DatabaseType::Postgres), Backend::MySql, false),
         DatabaseType::MySQL
     );
 }
@@ -21,27 +21,41 @@ fn resolved_backend_prefers_the_live_handle_over_configuration() {
 #[test]
 fn resolved_backend_keeps_configured_mariadb_on_a_mysql_handle() {
     assert_eq!(
-        Database::resolve_backend(Some(DatabaseType::MariaDB), Backend::MySql),
+        Database::resolve_backend(Some(DatabaseType::MariaDB), Backend::MySql, false),
         DatabaseType::MariaDB
     );
     assert_eq!(
-        Database::resolve_backend(Some(DatabaseType::MariaDB), Backend::Sqlite),
+        Database::resolve_backend(Some(DatabaseType::MariaDB), Backend::Sqlite, false),
         DatabaseType::SQLite
+    );
+}
+
+/// A MySQL-protocol pool that found MariaDB when it opened is MariaDB
+/// whatever was configured, as `Database::connect` sets up no configuration.
+#[test]
+fn resolved_backend_follows_a_handle_that_detected_mariadb() {
+    assert_eq!(
+        Database::resolve_backend(None, Backend::MySql, true),
+        DatabaseType::MariaDB
+    );
+    assert_eq!(
+        Database::resolve_backend(Some(DatabaseType::MySQL), Backend::MySql, true),
+        DatabaseType::MariaDB
     );
 }
 
 #[test]
 fn resolved_backend_falls_back_to_the_handle_without_configuration() {
     assert_eq!(
-        Database::resolve_backend(None, Backend::MySql),
+        Database::resolve_backend(None, Backend::MySql, false),
         DatabaseType::MySQL
     );
     assert_eq!(
-        Database::resolve_backend(None, Backend::Sqlite),
+        Database::resolve_backend(None, Backend::Sqlite, false),
         DatabaseType::SQLite
     );
     assert_eq!(
-        Database::resolve_backend(None, Backend::Postgres),
+        Database::resolve_backend(None, Backend::Postgres, false),
         DatabaseType::Postgres
     );
 }

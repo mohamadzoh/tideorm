@@ -487,3 +487,15 @@ fn test_tide_config_apply_installs_tokenization_settings() {
     crate::tokenization::TokenConfig::reset();
     TideConfig::reset();
 }
+
+#[test]
+fn test_rewrite_driver_url_reads_the_scheme_in_any_case() {
+    assert_eq!(
+        rewrite_driver_url("MariaDB://localhost/test"),
+        "mysql://localhost/test"
+    );
+    assert_eq!(
+        rewrite_driver_url("postgres://localhost/mariadb://"),
+        "postgres://localhost/mariadb://"
+    );
+}

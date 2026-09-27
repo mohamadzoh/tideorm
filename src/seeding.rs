@@ -169,6 +169,10 @@ impl Seeder {
     }
 
     /// Rollback the last executed seed
+    ///
+    /// A ledger whose last seed this seeder does not hold, one renamed or
+    /// removed since it ran, is an error: it cannot be reverted, and skipping
+    /// it would leave every seed before it recorded as well.
     pub async fn rollback(&self) -> Result<SeedResult> {
         let database = require_db()?;
         let ledger = Ledger::seeds();
@@ -179,11 +183,13 @@ impl Seeder {
             return Ok(result);
         };
 
-        if let Some(seed) = self.seeds.iter().find(|seed| seed.name() == last_name) {
-            result
-                .rolled_back
-                .push(revert(Arc::clone(seed), &database).await?);
-        }
+        let seed = self.find(&last_name).map_err(|_| {
+            Error::not_found(format!(
+                "Seed '{}' is the last one the _seeds table records, but this seeder does not register it; register it again to roll it back, or delete its _seeds row",
+                last_name
+            ))
+        })?;
+        result.rolled_back.push(revert(seed, &database).await?);
 
         Ok(result)
     }

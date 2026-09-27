@@ -250,7 +250,9 @@ fn parse_f64_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<f64
     expr_to_f64(value).ok_or_else(|| {
         syn::Error::new_spanned(
             value,
-            format!("validation rule '{rule_ident}' expects a number, e.g. `{rule_ident} = 18`"),
+            format!(
+                "validation rule '{rule_ident}' expects a finite number, e.g. `{rule_ident} = 18`"
+            ),
         )
     })
 }
@@ -282,8 +284,19 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
 
     let value = single_value(&values, rule_ident)?;
 
-    // `range(min..max)`
+    // `range(min..=max)`. The rule includes its upper bound, which `min..max`
+    // leaves out in Rust, so that spelling is refused rather than read as
+    // including it.
     if let Expr::Range(range) = value {
+        if matches!(range.limits, syn::RangeLimits::HalfOpen(_)) {
+            return Err(syn::Error::new_spanned(
+                value,
+                format!(
+                    "validation rule '{rule_ident}' includes its upper bound; write \
+                     `{rule_ident}(min..=max)` or `{rule_ident}(min, max)`"
+                ),
+            ));
+        }
         let min = range.start.as_deref().and_then(expr_to_f64);
         let max = range.end.as_deref().and_then(expr_to_f64);
         return match (min, max) {
@@ -302,8 +315,17 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
 
 fn parse_range_text(text: &str) -> Option<(f64, f64)> {
     let (min, max) = text.split_once("..")?;
-    let min = min.trim().parse::<f64>().ok()?;
-    let max = max.trim().parse::<f64>().ok()?;
+    let max = max.strip_prefix('=').unwrap_or(max);
+    let min = min
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|min| min.is_finite())?;
+    let max = max
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|max| max.is_finite())?;
     Some((min, max))
 }
 
@@ -311,7 +333,7 @@ fn range_error(value: &Expr, rule_ident: &Ident) -> syn::Error {
     syn::Error::new_spanned(
         value,
         format!(
-            "validation rule '{rule_ident}' expects `{rule_ident} = \"min..max\"` or `{rule_ident}(min, max)`"
+            "validation rule '{rule_ident}' expects `{rule_ident} = \"min..max\"` or `{rule_ident}(min, max)` with finite bounds"
         ),
     )
 }
@@ -350,7 +372,9 @@ fn expr_to_f64(expr: &Expr) -> Option<f64> {
         _ => return None,
     };
 
-    Some(if negated { -value } else { value })
+    // A non-finite bound has no literal to emit, and every value fails
+    // `min = inf` or passes `max = inf`.
+    Some(if negated { -value } else { value }).filter(|value| value.is_finite())
 }
 
 fn expr_to_string(expr: &Expr) -> Option<String> {

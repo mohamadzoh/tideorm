@@ -101,11 +101,22 @@ fn test_column_types_render_what_the_drivers_bind_and_decode() {
 
 #[test]
 fn test_default_value() {
-    assert_eq!(DefaultValue::String("test".to_string()).to_sql(), "'test'");
-    assert_eq!(DefaultValue::Integer(42).to_sql(), "42");
-    assert_eq!(DefaultValue::Boolean(true).to_sql(), "TRUE");
-    assert_eq!(DefaultValue::Boolean(false).to_sql(), "FALSE");
-    assert_eq!(DefaultValue::Null.to_sql(), "NULL");
+    let pg = DatabaseType::Postgres;
+    assert_eq!(
+        DefaultValue::String("test".to_string()).to_sql(pg),
+        "'test'"
+    );
+    assert_eq!(DefaultValue::Integer(42).to_sql(pg), "42");
+    assert_eq!(DefaultValue::Boolean(true).to_sql(pg), "TRUE");
+    assert_eq!(DefaultValue::Boolean(false).to_sql(pg), "FALSE");
+    assert_eq!(DefaultValue::Null.to_sql(pg), "NULL");
+
+    // MySQL reads a backslash as an escape; PostgreSQL and SQLite do not.
+    let path = DefaultValue::String(r"C:\temp\ it's".to_string());
+    assert_eq!(path.to_sql(pg), r"'C:\temp\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::SQLite), r"'C:\temp\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::MySQL), r"'C:\\temp\\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::MariaDB), r"'C:\\temp\\ it''s'");
 }
 
 const BACKENDS: [DatabaseType; 4] = [
@@ -511,6 +522,36 @@ fn test_increments_keep_their_width_on_postgres() {
 }
 
 #[test]
+fn test_change_column_keeps_what_a_mysql_modify_would_drop() {
+    // What `SHOW CREATE TABLE` writes, MySQL's spelling and MariaDB's.
+    let create_table = "CREATE TABLE `users` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `age` int(11) NOT NULL DEFAULT 5 COMMENT 'years',
+  `code` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `kind` enum('a','b c') NOT NULL,
+  `plain` int,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::MySQL);
+    for column in ["id", "age", "code", "kind", "plain", "missing"] {
+        builder.change_column(column, ColumnType::BigInteger);
+    }
+    builder.keep_column_attributes(create_table);
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `users` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT",
+            "ALTER TABLE `users` MODIFY COLUMN `age` BIGINT NOT NULL DEFAULT 5 COMMENT 'years'",
+            "ALTER TABLE `users` MODIFY COLUMN `code` BIGINT DEFAULT NULL",
+            "ALTER TABLE `users` MODIFY COLUMN `kind` BIGINT NOT NULL",
+            "ALTER TABLE `users` MODIFY COLUMN `plain` BIGINT",
+            "ALTER TABLE `users` MODIFY COLUMN `missing` BIGINT",
+        ]
+    );
+}
+
+#[test]
 fn test_change_column_type_is_rejected_on_sqlite() {
     let mut builder = AlterTableBuilder::new("users", DatabaseType::SQLite);
     builder.change_column("age", ColumnType::BigInteger);
@@ -623,12 +664,14 @@ fn test_create_index_if_not_exists_is_omitted_for_mysql() {
 
     let indexes = builder.build_indexes(true);
     assert_eq!(indexes.len(), 1);
+    let (name, sql) = &indexes[0];
+    assert_eq!(*name, "idx_users_email");
     assert!(
-        !indexes[0].contains("IF NOT EXISTS"),
+        !sql.contains("IF NOT EXISTS"),
         "MySQL has no CREATE INDEX IF NOT EXISTS. Got: {}",
-        indexes[0]
+        sql
     );
-    assert!(indexes[0].starts_with("CREATE INDEX `idx_users_email` ON `users`"));
+    assert!(sql.starts_with("CREATE INDEX `idx_users_email` ON `users`"));
 
     for database_type in [
         DatabaseType::Postgres,
@@ -639,10 +682,10 @@ fn test_create_index_if_not_exists_is_omitted_for_mysql() {
         builder.index(&["email"]);
         let indexes = builder.build_indexes(true);
         assert!(
-            indexes[0].contains("IF NOT EXISTS"),
+            indexes[0].1.contains("IF NOT EXISTS"),
             "{:?} supports CREATE INDEX IF NOT EXISTS. Got: {}",
             database_type,
-            indexes[0]
+            indexes[0].1
         );
     }
 }
@@ -862,4 +905,33 @@ fn test_rename_table_uses_each_backends_statement() {
         ddl::rename_table(DatabaseType::Postgres, "we\"ird", "members"),
         "ALTER TABLE \"we\"\"ird\" RENAME TO \"members\""
     );
+}
+
+/// Generated index names fit PostgreSQL's 63 bytes and MySQL's 64
+/// characters: past that PostgreSQL cut two names with a common prefix to
+/// one, skipping the second index, and MySQL refused them.
+#[test]
+fn generated_index_names_fit_every_backend() {
+    let mut builder = TableBuilder::new(
+        "organization_membership_invitations",
+        DatabaseType::Postgres,
+    );
+    builder.index(&["organization_id", "invited_at"]);
+    builder.unique_index(&["organization_id", "invited_email"]);
+    builder.unique_index(&["organization_id", "invited_phone"]);
+    builder.index(&["email"]);
+    let names: Vec<String> = builder
+        .build_indexes(true)
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+
+    assert_eq!(
+        names[0],
+        "idx_organization_membership_invitations_organization_i_75abc36e"
+    );
+    assert_ne!(names[1], names[2]);
+    assert!(names.iter().all(|name| name.len() <= 63), "{names:?}");
+    // A name that fits is left as it was.
+    assert_eq!(names[3], "idx_organization_membership_invitations_email");
 }

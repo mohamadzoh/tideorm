@@ -11,6 +11,7 @@ mod api;
 mod batch;
 mod builders;
 mod crud;
+pub(crate) use crud::find_including_trashed;
 #[cfg(feature = "dirty-tracking")]
 mod dirty_tracking;
 #[cfg(feature = "encrypted-fields")]
@@ -81,6 +82,35 @@ where
         let _ = (value, table_name, field_name, column_name);
         Err(encryption_unavailable())
     }
+}
+
+/// Decrypt, in rows a query of `M` read as JSON, each output named like one
+/// of `M`'s encrypted columns, except those `joined` says another table
+/// supplied: `pluck`, `value`, `get_json` and `get_as` return what `get()`
+/// does, not the stored ciphertext.
+pub(crate) fn decrypt_json_rows<M: ModelMeta>(
+    rows: &mut [serde_json::Value],
+    joined: &[String],
+) -> crate::error::Result<()> {
+    if !M::has_encrypted_fields() {
+        return Ok(());
+    }
+    let encrypted: Vec<(&str, &str)> = M::encrypted_fields()
+        .into_iter()
+        .zip(M::encrypted_column_names())
+        .filter(|(_, column)| !joined.iter().any(|name| name == column))
+        .collect();
+    for row in rows {
+        let Some(members) = row.as_object_mut() else {
+            continue;
+        };
+        for (field, column) in &encrypted {
+            if let Some(value) = members.get_mut(*column) {
+                *value = __decrypt_model_field(value.take(), M::table_name(), field, column)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -162,6 +192,19 @@ pub fn __clear_dirty_snapshots() {
     dirty_tracking::clear_all();
 }
 
+/// Whether a row with this primary key exists, trashed or not: how `save()`
+/// chooses between an update and an insert.
+#[doc(hidden)]
+pub async fn __exists_including_trashed<M: Model>(
+    primary_key: &M::PrimaryKey,
+) -> crate::Result<bool> {
+    M::query()
+        .with_trashed()
+        .where_primary_key(primary_key)?
+        .exists()
+        .await
+}
+
 /// Mark the row with this primary key deleted, as `Model::delete` does for a
 /// soft-delete model; a trashed row is left alone.
 #[doc(hidden)]
@@ -204,6 +247,16 @@ pub(crate) fn __loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -
     return dirty_tracking::loading_from(origin, load);
     #[cfg(not(feature = "dirty-tracking"))]
     load()
+}
+
+/// Run `load` with the models it builds remembered as read through
+/// `connection`'s pool, which for `find_with(id, db)` need not be the scope's.
+#[doc(hidden)]
+pub fn __loading_through<T>(
+    connection: &crate::database::ConnectionRef,
+    load: impl FnOnce() -> T,
+) -> T {
+    __loading_from(crate::database::origin_of(connection), load)
 }
 
 #[doc(hidden)]

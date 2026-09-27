@@ -138,7 +138,7 @@ pub fn __current_connection() -> Result<ConnectionRef> {
 /// The override is a thread-local installed around each `poll` and removed
 /// right after, never held across an await, so it follows the future when a
 /// work-stealing runtime moves it to another thread.
-pub(super) fn with_connection_override<F>(
+pub(crate) fn with_connection_override<F>(
     connection: ConnectionRef,
     origin: Option<u64>,
     pending: Option<Arc<Mutex<PendingInvalidations>>>,

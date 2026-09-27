@@ -63,3 +63,12 @@ fn unix_timestamp_to_millis_saturates_instead_of_overflowing() {
         -2_000
     );
 }
+
+#[test]
+fn hashed_debug_leaves_the_hash_out() {
+    let hashed =
+        crate::types::Hashed::from_hash("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_string());
+    let debug = format!("{hashed:?}");
+    assert!(!debug.contains("argon2"), "{debug}");
+    assert!(debug.contains("***HASHED***"), "{debug}");
+}

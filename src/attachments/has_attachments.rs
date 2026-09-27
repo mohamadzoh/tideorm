@@ -97,15 +97,19 @@ pub trait HasAttachments {
 
     /// Remove attachments from a relation.
     ///
-    /// For `hasOne`, pass `None` to clear the attachment. For `hasMany`, pass
-    /// `Some(key)` to remove one entry or `None` to clear the whole relation.
+    /// For `hasOne`, pass `None` to clear the attachment, or `Some(key)` to
+    /// clear it only while it is that file. For `hasMany`, pass `Some(key)` to
+    /// remove one entry or `None` to clear the whole relation.
     fn detach(&mut self, relation: &str, file_key: Option<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
 
         let mut files = self.get_files_data()?;
 
         if Self::is_has_one_relation(relation) {
-            files.remove_one(relation);
+            let attached = files.get_one(relation);
+            if file_key.is_none_or(|key| attached.is_some_and(|file| file.key == key)) {
+                files.remove_one(relation);
+            }
         } else if let Some(key) = file_key {
             files.remove_from_many(relation, key);
         } else {

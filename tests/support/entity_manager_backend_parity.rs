@@ -1042,6 +1042,56 @@ async fn hasone_insert_update_delete_is_synced() -> tideorm::Result<()> {
     Ok(())
 }
 
+/// Replacing a `has_one` child with a new one deletes the old row before it
+/// inserts the new one, so a unique foreign key (`user_id` here) takes it.
+#[tokio::test]
+async fn replacing_a_has_one_child_deletes_the_old_row_first() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+
+    let created = EntityManagerAggregateUser {
+        id: 0,
+        name: "Aggregate User".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    EntityManagerAggregateProfile {
+        id: 0,
+        user_id: created.id,
+        bio: "Old Bio".to_string(),
+    }
+    .save()
+    .await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let mut user = EntityManagerAggregateUser::find_in_entity_manager(created.id, &entity_manager)
+        .await?
+        .expect("aggregate user should exist");
+    user.profile.load_in_entity_manager(&entity_manager).await?;
+    user.profile.set_cached(Some(EntityManagerAggregateProfile {
+        id: 0,
+        user_id: 0,
+        bio: "New Bio".to_string(),
+    }));
+
+    let user = save_with_entity_manager(&user, &entity_manager).await?;
+    let profiles = EntityManagerAggregateProfile::query_with(db.as_ref())
+        .where_eq("user_id", user.id)
+        .get()
+        .await?;
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].bio, "New Bio");
+    assert_eq!(
+        user.profile.get_cached().map(|profile| profile.id),
+        Some(profiles[0].id)
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideorm::Result<()> {
     let Some(db) = setup_database().await? else {
@@ -1067,6 +1117,27 @@ async fn entity_manager_save_rolls_back_root_when_relation_sync_fails() -> tideo
         id: 0,
         user_id: created.id,
         bio: "Existing Bio".to_string(),
+    }
+    .save()
+    .await?;
+    // The replacement profile below takes a bio another user's profile holds,
+    // so writing it fails after the old profile was deleted.
+    Database::execute(
+        "CREATE UNIQUE INDEX entity_manager_aggregate_profiles_bio ON entity_manager_aggregate_profiles (bio)",
+    )
+    .await?;
+    let other = EntityManagerAggregateUser {
+        id: 0,
+        name: "Other User".to_string(),
+        profile: Default::default(),
+        posts: Default::default(),
+    }
+    .save()
+    .await?;
+    EntityManagerAggregateProfile {
+        id: 0,
+        user_id: other.id,
+        bio: "Conflicting Bio".to_string(),
     }
     .save()
     .await?;
@@ -1924,5 +1995,187 @@ async fn hasmany_without_entity_manager_unchanged() -> tideorm::Result<()> {
     assert_eq!(loaded_posts[0].user_id, saved_user.id);
     assert_eq!(loaded_posts[1].id, posts[1].id);
 
+    Ok(())
+}
+
+/// A new root read from JSON saves the children it carries. Its relation was
+/// built under the placeholder key `0`, and saving the root rebuilt it under
+/// the stored key without them.
+#[tokio::test]
+async fn a_new_root_read_from_json_saves_its_children() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+    let entity_manager = EntityManager::new(db.clone());
+    let user: EntityManagerUser = serde_json::from_value(serde_json::json!({
+        "id": 0,
+        "name": "from json",
+        "posts": [{ "id": 0, "user_id": 0, "title": "first" }]
+    }))
+    .expect("the user deserializes");
+
+    let saved = entity_manager.save(&user).await?;
+
+    let titles: Vec<String> = EntityManagerPost::query_with(db.as_ref())
+        .where_eq("user_id", saved.id)
+        .pluck("title")
+        .await?;
+    assert_eq!(titles, vec!["first".to_string()]);
+    Ok(())
+}
+
+/// Persisting an entity the context was about to remove takes the removal
+/// back and writes it; the removal won, deleting the row.
+#[tokio::test]
+async fn persisting_a_removed_entity_writes_it() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+    let (user, _) = seed_user_with_posts(0).await?;
+    let entity_manager = EntityManager::new(db.clone());
+    let managed = entity_manager
+        .find_managed::<EntityManagerUser>(user.id)
+        .await?
+        .expect("the user is managed");
+
+    entity_manager.remove(&managed);
+    entity_manager.persist(EntityManagerUser {
+        id: user.id,
+        name: "fresh".into(),
+        ..Default::default()
+    });
+    entity_manager.flush().await?;
+
+    let stored = EntityManagerUser::find_with(user.id, db.as_ref()).await?;
+    assert_eq!(stored.map(|user| user.name).as_deref(), Some("fresh"));
+    Ok(())
+}
+
+/// A managed handle to a row that another path of the context saves moves
+/// onto what was stored, so flushing it later writes only its own edits:
+/// it wrote the whole row it had loaded back over the newer save.
+#[tokio::test]
+async fn a_managed_handle_keeps_what_another_save_stored() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+    let user = EntityManagerCodeUser {
+        id: 0,
+        code: "original".into(),
+        name: "original".into(),
+        ..Default::default()
+    }
+    .save()
+    .await?;
+    let entity_manager = EntityManager::new(db.clone());
+    let managed = entity_manager
+        .find_managed::<EntityManagerCodeUser>(user.id)
+        .await?
+        .expect("the user is managed");
+
+    let mut copy = EntityManagerCodeUser::find_with(user.id, db.as_ref())
+        .await?
+        .expect("the user exists");
+    copy.name = "saved elsewhere".into();
+    entity_manager.save(&copy).await?;
+    managed.edit(|user| user.code = "edited".into());
+    entity_manager.flush().await?;
+
+    let stored = EntityManagerCodeUser::find_with(user.id, db.as_ref())
+        .await?
+        .expect("the user exists");
+    assert_eq!(
+        (stored.code.as_str(), stored.name.as_str()),
+        ("edited", "saved elsewhere")
+    );
+    Ok(())
+}
+
+#[tideorm::model(table = "entity_manager_note_owners")]
+struct EntityManagerNoteOwner {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+
+    #[tideorm(has_many = "EntityManagerSecretNote", foreign_key = "owner_id")]
+    notes: HasMany<EntityManagerSecretNote>,
+}
+
+/// A child whose own `Serialize` skips a field; the skipped field is still a
+/// column.
+#[tideorm::model(table = "entity_manager_secret_notes")]
+#[derive(serde::Serialize)]
+struct EntityManagerSecretNote {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    owner_id: i64,
+    label: String,
+    #[serde(skip_serializing)]
+    secret: String,
+}
+
+/// An edit to a field the child's own serde leaves out is saved: the change
+/// check compared the JSON, which does not carry the field.
+#[tokio::test]
+async fn an_edit_to_a_field_serde_skips_is_saved() -> tideorm::Result<()> {
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+    let mut schema = Schema::new(db.backend());
+    schema
+        .drop_table_if_exists("entity_manager_secret_notes")
+        .await?;
+    schema
+        .drop_table_if_exists("entity_manager_note_owners")
+        .await?;
+    schema
+        .create_table("entity_manager_note_owners", |t| {
+            t.id();
+            t.string("name").not_null();
+        })
+        .await?;
+    schema
+        .create_table("entity_manager_secret_notes", |t| {
+            t.id();
+            t.big_integer("owner_id").not_null();
+            t.string("label").not_null();
+            t.string("secret").not_null();
+        })
+        .await?;
+    let owner = EntityManagerNoteOwner {
+        id: 0,
+        name: "owner".into(),
+        ..Default::default()
+    }
+    .save()
+    .await?;
+    EntityManagerSecretNote {
+        id: 0,
+        owner_id: owner.id,
+        label: "note".into(),
+        secret: "old".into(),
+    }
+    .save()
+    .await?;
+
+    let entity_manager = EntityManager::new(db.clone());
+    let mut owner = entity_manager
+        .find::<EntityManagerNoteOwner>(owner.id)
+        .await?
+        .expect("the owner exists");
+    entity_manager.load(&mut owner.notes).await?;
+    let mut notes = owner
+        .notes
+        .get_cached()
+        .map(|notes| notes.to_vec())
+        .unwrap_or_default();
+    notes[0].secret = "new".into();
+    owner.notes.set_cached(notes);
+    entity_manager.save(&owner).await?;
+
+    let secrets: Vec<String> = EntityManagerSecretNote::query_with(db.as_ref())
+        .pluck("secret")
+        .await?;
+    assert_eq!(secrets, vec!["new".to_string()]);
     Ok(())
 }

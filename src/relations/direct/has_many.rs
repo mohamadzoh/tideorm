@@ -57,7 +57,7 @@ impl<E: Model> HasMany<E> {
     pub(crate) fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         self.ensure_configured()?;
         let pk = required_key(&self.parent_pk, "Parent primary key", context)?;
-        Ok(self.source.query().where_eq(self.foreign_key, pk.clone()))
+        Ok(where_key(self.source.query(), self.foreign_key, pk))
     }
 
     /// Whether `other` describes the same relation of the same owner.
@@ -105,7 +105,7 @@ impl<E: Model> HasMany<E> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             same_relation,
         );
 

@@ -82,6 +82,8 @@ Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are
 
 Runtime relation helpers operate on a single local or foreign key value per query. For composite-key models, define `local_key` explicitly when needed and use custom queries when the relation requires matching multiple columns.
 
+An owner whose key is NULL (a nullable `local_key` that is unset) has no related rows: `load()` returns none, `count()` zero, and `attach`, `detach` and `sync` refuse it, rather than matching every row whose foreign key is NULL. A model may hold several relations to one model, such as an `author` and an `editor` that are both `BelongsTo<User>`; each loads by its own keys, eagerly too. `query_with(db).with(..)` reads the relations from `db` as well.
+
 For `has_many_through`, TideORM requires all three relation options to be declared explicitly: `pivot`, `foreign_key`, and `related_key`. Missing any of them is now a compile-time error.
 
 The field's wrapper type decides the relation kind. The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be omitted, but when present it must name the same kind as the wrapper, and `HasOne`, `HasMany` and `BelongsTo` fields must declare `foreign_key`; either mistake is a compile-time error.
@@ -240,6 +242,8 @@ user.roles.sync(vec![
 
 When the pivot model has soft delete, a trashed pivot row no longer links its pair: `load()`, `load_with()`, eager loading and `count()` leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
 
+`load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
+
 ### Polymorphic Relations
 
 ```rust
@@ -269,6 +273,10 @@ pub struct Post {
 // MorphOne/MorphMany fields are wired automatically when morph_name is provided.
 // On the child side, use #[tideorm(morph_name = "imageable")] on MorphTo<T> too.
 ```
+
+An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`; `MorphTo::load_as::<Owner>()` then looks the owner up by that column, and by the primary key otherwise.
+
+Eager loading (`with("images")`, and every other relation) matches keys by value, as the database does, so an `i64` key finds the rows of an `i32` foreign key or a text `*_id` column holding it.
 
 ---
 
@@ -363,6 +371,8 @@ let attachment = FileAttachment::new("uploads/photo.jpg")
     .add_metadata("height", 1080)
     .add_metadata("photographer", "John Doe");
 product.attach_with_metadata("images", attachment)?;
+// Metadata sits beside the attachment's own fields in its JSON. An entry named
+// like one of them (`size`, `key`) is kept only while that field is unset.
 
 // Save to persist changes
 product.update().await?;
@@ -373,6 +383,9 @@ product.update().await?;
 ```rust
 // Remove thumbnail (hasOne)
 product.detach("thumbnail", None)?;
+
+// Remove the thumbnail only while it is this file (hasOne)
+product.detach("thumbnail", Some("uploads/old-thumb.jpg"))?;
 
 // Remove specific file (hasMany)
 product.detach("images", Some("uploads/img1.jpg"))?;
@@ -768,6 +781,12 @@ let json = product.to_translated_json(Some(opts));
 
 // Get JSON including all translations (for admin interfaces)
 let json = product.to_json_with_all_translations();
+
+// A model whose serde derive renames fields (`rename_all = "camelCase"`) says
+// where each field lands, so the translation replaces it there:
+// fn serialized_key(field: &'static str) -> &'static str {
+//     <Self as ModelMeta>::serialized_name(field)
+// }
 // Result includes raw translations field
 ```
 

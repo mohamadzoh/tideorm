@@ -885,6 +885,7 @@ impl<M: Model> QueryBuilder<M> {
             cache_options: None,
             cache_key: None,
             joined_column_types: Vec::new(),
+            self_join_depth: 0,
         }
     }
 

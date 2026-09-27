@@ -126,9 +126,9 @@ pub struct ColumnCondition {
     pub column: String,
     /// The comparison to apply
     pub operator: crate::query::Operator,
-    /// The value (as JSON for flexibility). A list for `In`/`NotIn`, a
-    /// `[low, high]` pair for `Between`, and ignored for the NULL checks.
-    pub value: serde_json::Value,
+    /// The value compared with: one value, a list for `In`/`NotIn`, a range
+    /// for `Between`, and none for the NULL checks.
+    pub value: crate::query::ConditionValue,
 }
 
 /// The escape character used by every generated `LIKE ... ESCAPE` clause.

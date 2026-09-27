@@ -24,6 +24,8 @@ pub use tracked::{TrackedHasMany, TrackedHasManyEntityManagerExt};
 
 pub(crate) use meta::model_entity_manager_key;
 #[doc(hidden)]
+pub use meta::model_entity_manager_key as __model_entity_manager_key;
+#[doc(hidden)]
 pub use meta::pk_to_entity_manager_key as __pk_to_entity_manager_key;
 pub(crate) use save::with_entity_manager_db;
 #[doc(hidden)]
@@ -166,11 +168,13 @@ impl EntityManager {
         // every other path files the map under.
         let key = (!entity.tide_pk_is_new()).then(|| entity.tide_pk_key());
 
+        // Persisting an entity this context was about to remove takes the
+        // removal back: the row is written as given instead of deleted.
         if let Some(existing) = key
             .as_deref()
             .and_then(|key| self.get_managed_by_key::<T>(key))
         {
-            existing.entry.replace(entity);
+            existing.entry.overwrite_merged(entity);
             return existing;
         }
 

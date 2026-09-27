@@ -4,11 +4,6 @@ use syn::Ident;
 
 use crate::parse::{ModelField, RelationKind};
 
-/// Parents resolved per eager-load query. One `IN` list for every parent would
-/// exceed the bind-parameter limit (32,766 on SQLite, 65,535 elsewhere) on a
-/// large result, so the parents are loaded in chunks of this size.
-const EAGER_LOAD_CHUNK: usize = 5_000;
-
 pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let relation_arms = ctx
@@ -23,18 +18,9 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                 models: &mut [::tideorm::relations::WithRelations<Self>],
                 relation_tree: &::tideorm::relations::RelationTree,
             ) -> ::tideorm::Result<()> {
-                use ::tideorm::internal::InternalModel;
-                use ::tideorm::orm::LoaderTrait;
-
                 if models.is_empty() || relation_tree.is_empty() {
                     return Ok(());
                 }
-
-                let entity_models: Vec<_> = models
-                    .iter()
-                    .map(|entry| entry.model.try_to_entity_model())
-                    .collect::<::tideorm::Result<Vec<_>>>()?;
-                let connection = ::tideorm::database::__current_connection()?;
 
                 for relation_name in relation_tree.roots() {
                     match relation_name.as_str() {
@@ -68,73 +54,24 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     let Some(related_ty) = related_types.first() else {
         return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind);
     };
-    // The loader joins a `has_many_through` pivot in, so its soft-delete scope
-    // can filter the same query.
-    let find = match (kind, related_types.get(1)) {
-        (RelationKind::HasManyThrough, Some(pivot_ty)) => {
-            quote! { ::tideorm::internal::scoped_find_through::<#related_ty, #pivot_ty>() }
-        }
-        _ => quote! { ::tideorm::internal::scoped_find::<#related_ty>() },
-    };
-
     // Resolve the related rows of every parent in one query, as `Vec<Vec<R>>` for a
     // to-many relation or `Vec<Option<R>>` for a to-one one.
     let (related, is_many) = match kind {
-        RelationKind::HasMany | RelationKind::HasManyThrough => (
-            quote! {
-                {
-                    let mut related = Vec::with_capacity(entity_models.len());
-                    for parents in entity_models.chunks(#EAGER_LOAD_CHUNK) {
-                        related.extend(
-                            parents
-                                .load_many(#find, &connection.executor())
-                                .await
-                                .map_err(::tideorm::Error::from)?,
-                        );
-                    }
-                    related
-                }
-                    .into_iter()
-                    .map(|related_models| {
-                        related_models
-                            .into_iter()
-                            .map(<#related_ty as InternalModel>::try_from_entity_model)
-                            .collect::<::tideorm::Result<Vec<_>>>()
-                    })
-                    .collect::<::tideorm::Result<Vec<_>>>()?
-            },
-            true,
-        ),
-        RelationKind::HasOne | RelationKind::BelongsTo => (
-            quote! {
-                {
-                    let mut related = Vec::with_capacity(entity_models.len());
-                    for parents in entity_models.chunks(#EAGER_LOAD_CHUNK) {
-                        related.extend(
-                            parents
-                                .load_one(::tideorm::internal::scoped_find::<#related_ty>(), &connection.executor())
-                                .await
-                                .map_err(::tideorm::Error::from)?,
-                        );
-                    }
-                    related
-                }
-                    .into_iter()
-                    .map(|related_model| {
-                        related_model
-                            .map(<#related_ty as InternalModel>::try_from_entity_model)
-                            .transpose()
-                    })
-                    .collect::<::tideorm::Result<Vec<_>>>()?
-            },
-            false,
-        ),
-        RelationKind::MorphOne | RelationKind::MorphMany => {
-            match morph_lookup(ctx, field, related_ty, kind == RelationKind::MorphMany) {
-                Some(lookup) => (lookup, kind == RelationKind::MorphMany),
-                None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
-            }
-        }
+        RelationKind::HasManyThrough => match through_lookup(ctx, field, related_ty) {
+            Some(lookup) => (lookup, true),
+            None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
+        },
+        RelationKind::HasMany
+        | RelationKind::HasOne
+        | RelationKind::BelongsTo
+        | RelationKind::MorphOne
+        | RelationKind::MorphMany => match keyed_lookup(ctx, field, related_ty, kind) {
+            Some(lookup) => (
+                lookup,
+                matches!(kind, RelationKind::HasMany | RelationKind::MorphMany),
+            ),
+            None => return unsupported_relation_arm(&ctx.struct_name, &relation_name, kind),
+        },
         // `MorphTo` resolves a different target type per row, and a self-referencing
         // relation nests to any depth, which no fixed set of batched queries covers.
         RelationKind::MorphTo | RelationKind::SelfRef | RelationKind::SelfRefMany => {
@@ -160,20 +97,43 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     }
 }
 
-/// The related rows of a `MorphOne`/`MorphMany`, which SeaORM's `LoaderTrait`
-/// cannot express because the join carries a type discriminator alongside the key.
-fn morph_lookup(
+/// The related rows of a relation keyed by one column on each side: the
+/// related rows whose key is one of the parents', matched by value, so an `i64`
+/// id finds an `i32` or a text foreign key holding it. A `MorphOne`/`MorphMany`
+/// adds its type discriminator.
+fn keyed_lookup(
     ctx: &BuildContext,
     field: &ModelField,
     related_ty: &syn::Type,
-    is_many: bool,
+    kind: RelationKind,
 ) -> Option<TokenStream2> {
-    let morph_name = field.morph_name.as_deref()?;
-    let type_column = format!("{}_type", morph_name);
-    let id_column = format!("{}_id", morph_name);
-    let local_key = field.local_key.as_deref().unwrap_or("id");
-    let local_key_ident = ctx.resolve_local_key_ident(local_key, field.ident()).ok()?;
-    let pick = if is_many {
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
+    let (parent_key_ident, related_key, morph_type) = match kind {
+        RelationKind::MorphOne | RelationKind::MorphMany => {
+            let morph_name = field.morph_name.as_deref()?;
+            let type_column = format!("{}_type", morph_name);
+            (
+                ctx.resolve_local_key_ident(local_key, field.ident()).ok()?,
+                format!("{}_id", morph_name),
+                quote!(Some((#type_column, <Self as ::tideorm::model::ModelMeta>::table_name()))),
+            )
+        }
+        RelationKind::BelongsTo => (
+            ctx.resolve_required_db_field_ident(field.foreign_key.as_deref()?, field.ident())
+                .ok()?,
+            field.owner_key.as_deref().unwrap_or("id").to_string(),
+            quote!(None),
+        ),
+        _ => (
+            ctx.resolve_local_key_ident(local_key, field.ident()).ok()?,
+            field.foreign_key.clone()?,
+            quote!(None),
+        ),
+    };
+    let pick = if matches!(kind, RelationKind::HasMany | RelationKind::MorphMany) {
         quote!(.cloned().unwrap_or_default())
     } else {
         quote!(.and_then(|group| group.first().cloned()))
@@ -183,18 +143,80 @@ fn morph_lookup(
         {
             let parent_keys: Vec<_> = models
                 .iter()
-                .map(|entry| ::tideorm::prelude::json!(entry.model.#local_key_ident.clone()))
+                .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
                 .collect();
             let by_key = <#related_ty as ::tideorm::relations::EagerLoadModel>::__load_grouped_by_key(
                 &parent_keys,
-                #id_column,
-                Some((#type_column, <Self as ::tideorm::model::ModelMeta>::table_name())),
+                #related_key,
+                #morph_type,
             )
             .await?;
             parent_keys
                 .iter()
-                .map(|key| by_key.get(&key.to_string()) #pick)
+                .map(|key| by_key.get(&::tideorm::relations::__relation_key(key)) #pick)
                 .collect::<Vec<_>>()
+        }
+    })
+}
+
+/// The related rows of a `HasManyThrough`: the live pivot rows of every
+/// parent, then the live related rows they link, each step matched by value
+/// as the other relations are, so a pivot key of another integer type than
+/// the owner's or the related model's key still links them. Each step reads
+/// through its model's query, whose soft-delete scope leaves out trashed
+/// pivot and related rows.
+fn through_lookup(
+    ctx: &BuildContext,
+    field: &ModelField,
+    related_ty: &syn::Type,
+) -> Option<TokenStream2> {
+    let pivot_ty = field.related_types().get(1)?.clone();
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
+    let parent_key_ident = ctx.resolve_local_key_ident(local_key, field.ident()).ok()?;
+    let foreign_key = field.foreign_key.as_deref()?;
+    let related_key = field.related_key.as_deref()?;
+    let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+
+    Some(quote! {
+        {
+            use ::tideorm::relations::{EagerLoadModel, RelationExt, __relation_key};
+
+            let parent_keys: Vec<_> = models
+                .iter()
+                .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
+                .collect();
+            let links = <#pivot_ty as EagerLoadModel>::__load_grouped_by_key(
+                &parent_keys,
+                #foreign_key,
+                None,
+            )
+            .await?;
+            let mut related_keys = Vec::new();
+            for link in links.values().flatten() {
+                related_keys.push(link.get_field_value(#related_key)?);
+            }
+            let related_by_key = <#related_ty as EagerLoadModel>::__load_grouped_by_key(
+                &related_keys,
+                #related_local_key,
+                None,
+            )
+            .await?;
+            let mut related = Vec::with_capacity(parent_keys.len());
+            for key in &parent_keys {
+                let mut rows = Vec::new();
+                for link in links.get(&__relation_key(key)).into_iter().flatten() {
+                    let related_key = link.get_field_value(#related_key)?;
+                    if let Some(found) = related_by_key.get(&__relation_key(&related_key)) {
+                        rows.extend(found.iter().cloned());
+                    }
+                }
+                // A pair the pivot holds twice is one related row.
+                related.push(::tideorm::relations::__distinct_by_primary_key(rows));
+            }
+            related
         }
     })
 }

@@ -81,20 +81,30 @@ impl ColumnDefinition {
         sql
     }
 
-    /// `default` as MySQL accepts it for this column: `CURRENT_TIMESTAMP` is
-    /// raised to the six fractional digits of a `DATETIME(6)`, because MySQL
-    /// rejects a default less precise than its column, and a `TEXT`, `BLOB` or
-    /// `JSON` default (an array column is `JSON` there) is written as an
-    /// expression, the only form MySQL allows on those types.
+    /// `default` as `db_type` accepts it for this column. A current-time
+    /// default in any common spelling (`now()`, `CURRENT_TIMESTAMP()`, ..) is
+    /// written `CURRENT_TIMESTAMP` on SQLite, the only one it reads, and on
+    /// MySQL raised to the six fractional digits of a `DATETIME(6)`, because
+    /// MySQL rejects a default less precise than its column. On MySQL a
+    /// `TEXT`, `BLOB` or `JSON` default (an array column is `JSON` there) is
+    /// written as an expression, the only form MySQL allows on those types.
     fn default_sql(&self, db_type: DatabaseType, default: &str) -> String {
-        if !matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) {
-            return default.to_string();
+        match db_type {
+            DatabaseType::Postgres => return default.to_string(),
+            DatabaseType::SQLite => {
+                return if is_current_timestamp(default) {
+                    "CURRENT_TIMESTAMP".to_string()
+                } else {
+                    default.to_string()
+                };
+            }
+            DatabaseType::MySQL | DatabaseType::MariaDB => {}
         }
         let accepted_as_is = default.eq_ignore_ascii_case("NULL")
             || (default.starts_with('(') && default.ends_with(')'));
         match self.column_type {
             ColumnType::DateTime | ColumnType::Timestamp | ColumnType::TimestampTz
-                if default.eq_ignore_ascii_case("CURRENT_TIMESTAMP") =>
+                if is_current_timestamp(default) =>
             {
                 "CURRENT_TIMESTAMP(6)".to_string()
             }
@@ -130,6 +140,55 @@ impl ColumnDefinition {
 
         sql
     }
+}
+
+/// The longest identifier every backend keeps whole: PostgreSQL cuts names at
+/// 63 bytes, MySQL rejects them past 64 characters.
+const MAX_IDENTIFIER_BYTES: usize = 63;
+
+/// A generated index name that fits [`MAX_IDENTIFIER_BYTES`].
+///
+/// A longer one keeps its first 54 bytes and ends in `_` and eight hex digits
+/// of its FNV-1a hash, so two long names that share a prefix stay distinct
+/// (PostgreSQL would cut both to the same 63 bytes and skip the second index)
+/// and MySQL accepts it. The model derive shortens `#[index]` names the same
+/// way, so both spell an index alike.
+pub(crate) fn bounded_index_name(name: String) -> String {
+    if name.len() <= MAX_IDENTIFIER_BYTES {
+        return name;
+    }
+    let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    let mut cut = MAX_IDENTIFIER_BYTES - 9;
+    while !name.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}_{:08x}", &name[..cut], hash)
+}
+
+/// Whether `default` is the current timestamp in one of the spellings the
+/// backends share between them.
+fn is_current_timestamp(default: &str) -> bool {
+    matches!(
+        default.trim().to_ascii_uppercase().as_str(),
+        "CURRENT_TIMESTAMP"
+            | "CURRENT_TIMESTAMP()"
+            | "NOW()"
+            | "LOCALTIMESTAMP"
+            | "LOCALTIMESTAMP()"
+    )
+}
+
+/// Whether SQLite can add a column with `default` to a table that has rows:
+/// `ALTER TABLE .. ADD COLUMN` takes no current-time default and no
+/// parenthesized expression.
+pub(crate) fn sqlite_can_add_with_default(default: &str) -> bool {
+    let default = default.trim();
+    !(default.starts_with('(')
+        || is_current_timestamp(default)
+        || default.eq_ignore_ascii_case("CURRENT_DATE")
+        || default.eq_ignore_ascii_case("CURRENT_TIME"))
 }
 
 /// Map a PostgreSQL integer type to the serial pseudo-type of the same width.

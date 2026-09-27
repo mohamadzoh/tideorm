@@ -58,10 +58,14 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 .await
                 .map_err(::tideorm::Error::from)
                 .map_err(|err| err.with_context(error_context()))?;
-            rows.into_iter()
-                .next()
-                .map(<Self as ::tideorm::internal::InternalModel>::try_from_entity_model)
-                .transpose()
+            // The baseline dirty tracking keeps is the one of the database
+            // the row came from, `db` for `find_with`.
+            ::tideorm::model::__loading_through(&connection, || {
+                rows.into_iter()
+                    .next()
+                    .map(<Self as ::tideorm::internal::InternalModel>::try_from_entity_model)
+                    .transpose()
+            })
         }
     };
     let ensure_fields_storable = ctx.ensure_fields_storable();
@@ -175,14 +179,14 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     Self::create(self).await
                 } else {
                     let primary_key = self.primary_key();
-                    // The row-presence probe below is deliberately `find`, not the
-                    // soft-delete scoped `exists`: saving over a trashed natural-key row
-                    // must still UPDATE instead of INSERTing into a conflict.
+                    // The row-presence probe counts trashed rows: saving over a
+                    // trashed natural-key row must UPDATE it, not INSERT into a
+                    // conflict with it.
                     if <Self as ::tideorm::model::ModelMeta>::primary_key_auto_increment()
                         && <Self as ::tideorm::model::ModelMeta>::primary_key_names().len() == 1
                     {
                         self.update().await
-                    } else if <Self as ::tideorm::model::Model>::find(primary_key).await?.is_some() {
+                    } else if ::tideorm::model::__exists_including_trashed::<Self>(&primary_key).await? {
                         self.update().await
                     } else {
                         Self::create(self).await
@@ -241,7 +245,26 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let model_for_lookup = model.clone();
                 let conflict_cols = builder.conflict_columns;
                 #encrypted_conflict_column_check
-                let include_pk = conflict_cols.iter().any(|column| #is_pk_column) || !#pk_auto_increment;
+                // The column lists take field or column names; they are
+                // compared as column names.
+                let conflict_cols: Vec<String> = conflict_cols
+                    .into_iter()
+                    .map(|column| {
+                        <Self as ::tideorm::model::ModelMeta>::canonical_column_name(&column)
+                            .map_or(column, str::to_string)
+                    })
+                    .collect();
+                // A key the database has not numbered yet conflicts with no
+                // row: keyed by it alone the upsert is a `create()`, and
+                // otherwise the database numbers it as `create()` would,
+                // rather than storing its placeholder `0`.
+                let key_is_new = #pk_auto_increment
+                    && <Self as ::tideorm::model::Model>::is_new(&model_for_lookup);
+                if key_is_new && conflict_cols.iter().all(|column| #is_pk_column) {
+                    return <Self as ::tideorm::model::Model>::create(model).await;
+                }
+                let include_pk = !key_is_new
+                    && (conflict_cols.iter().any(|column| #is_pk_column) || !#pk_auto_increment);
                 let insertable_columns: Vec<&str> = vec![#(#column_names),*]
                     .into_iter()
                     .filter(|column| !(*column == <Self as ::tideorm::model::ModelMeta>::primary_key_name() && #pk_auto_increment && !include_pk))
@@ -264,10 +287,28 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let update_cols: Vec<String> = if let Some(cols) = builder.update_columns {
                     cols
                 } else if let Some(exclude) = builder.exclude_columns {
+                    let exclude = exclude
+                        .iter()
+                        .map(|name| {
+                            <Self as ::tideorm::model::ModelMeta>::canonical_column_name(name).ok_or_else(|| {
+                                ::tideorm::Error::invalid_query(format!(
+                                    "unknown column '{}' in update_all_except() for {}",
+                                    name,
+                                    #table_name
+                                ))
+                            })
+                        })
+                        .collect::<::tideorm::Result<Vec<&str>>>()?;
+                    // The key and the conflict columns are what matched the
+                    // stored row, so they stay as they are, as without
+                    // `update_all_except`.
                     insertable_columns
                         .iter()
                         .filter(|column| {
-                            !exclude.contains(&column.to_string()) && !managed_created_at.contains(column)
+                            !exclude.contains(*column) && !managed_created_at.contains(column) && {
+                                let column = column.to_string();
+                                !conflict_cols.contains(&column) && !#is_pk_column
+                            }
                         })
                         .map(|column| column.to_string())
                         .collect()
@@ -292,9 +333,12 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                     })
                     .collect::<::tideorm::Result<Vec<_>>>()?;
 
+                // Nothing to overwrite: a conflict keeps the stored row. MySQL
+                // has no `DO NOTHING` and takes `ON DUPLICATE KEY UPDATE c = c`
+                // over the conflict columns instead.
                 let on_conflict = if update_columns.is_empty() {
                     OnConflict::columns(conflict_columns.iter().cloned())
-                        .do_nothing()
+                        .do_nothing_on(conflict_columns.iter().cloned())
                         .to_owned()
                 } else {
                     OnConflict::columns(conflict_columns.iter().cloned())
@@ -317,9 +361,14 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
 
                 let connection = ::tideorm::database::__current_connection()?;
                 #ensure_fields_storable
+                // A plain insert reports a conflict that wrote nothing as an
+                // error: a kept row, and on MySQL an update that changed no
+                // value, which reports no affected row. The row is read back
+                // below either way.
                 ::tideorm::profiling::__profile_future(
                     #internal_entity_mod::Entity::insert(active_model)
                         .on_conflict(on_conflict)
+                        .do_nothing()
                         .exec(&connection.executor()),
                 )
                     .await

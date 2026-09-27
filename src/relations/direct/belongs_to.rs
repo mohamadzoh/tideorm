@@ -64,7 +64,7 @@ impl<E: Model> BelongsTo<E> {
     /// The query for the owning row.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let fk = self.foreign_key_value(context)?;
-        Ok(self.source.query().where_eq(self.owner_key, fk.clone()))
+        Ok(where_key(self.source.query(), self.owner_key, fk))
     }
 
     /// Declare the relation's key pair.

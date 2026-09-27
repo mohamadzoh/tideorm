@@ -20,7 +20,8 @@ use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    QuerySource, ensure_relation_configured, preserve_cached_value, required_key,
+    QuerySource, ensure_relation_configured, owner_is_unsaved, preserve_cached_value, required_key,
+    where_key,
 };
 #[cfg(feature = "entity-manager")]
 use super::helpers::{SnapshotOwner, register_loaded};

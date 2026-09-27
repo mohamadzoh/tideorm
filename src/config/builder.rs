@@ -102,9 +102,10 @@ impl TideConfig {
 
     /// Choose whether [`connect`](TideConfig::connect) runs the registered seeds.
     ///
-    /// Off by default. Seeds run after migrations; if seeding fails, the
-    /// migrations that already ran are **not** rolled back and `connect` returns
-    /// the error with the database partially initialized.
+    /// Off by default. Seeds run after migrations and schema sync, so they can
+    /// fill the tables either creates; if seeding fails, what already ran is
+    /// **not** rolled back and `connect` returns the error with the database
+    /// partially initialized.
     #[must_use]
     pub fn run_seeds(mut self, enabled: bool) -> Self {
         self.run_seeds = enabled;
@@ -217,6 +218,11 @@ impl TideConfig {
     }
 
     /// How long to wait when opening a new connection. Defaults to 8 seconds.
+    ///
+    /// The driver has one timeout for handing out a connection, opening one
+    /// when the pool has room, so this and
+    /// [`acquire_timeout`](TideConfig::acquire_timeout) set the same limit,
+    /// and the longer of the two applies.
     #[must_use]
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.pool.connect_timeout = duration;
@@ -245,7 +251,9 @@ impl TideConfig {
     /// How long a query may wait for a free pooled connection. Defaults to 8 seconds.
     ///
     /// This is the one that fires under load: exceeding it means the pool is
-    /// saturated, not that the database is unreachable.
+    /// saturated, not that the database is unreachable. It shares the
+    /// driver's one timeout with [`connect_timeout`](TideConfig::connect_timeout),
+    /// and the longer of the two applies.
     #[must_use]
     pub fn acquire_timeout(mut self, duration: Duration) -> Self {
         self.pool.acquire_timeout = duration;
@@ -372,12 +380,14 @@ impl TideConfig {
     /// In order: the configuration and tokenization settings are installed
     /// globally, the pool is opened (auto-detecting MariaDB behind a `mysql://`
     /// URL), the connection becomes the global handle every model uses, then —
-    /// only when they were enabled — migrations run, seeds run, schema sync
-    /// runs, and the schema file is written.
+    /// only when they were enabled — migrations run, schema sync runs, seeds
+    /// run, and the schema file is written. Seeds come after sync so that they
+    /// can fill the tables sync creates, and a `force_sync` does not drop what
+    /// they wrote.
     ///
     /// The steps are **not** one atomic unit: a failure part-way through leaves
     /// the earlier steps applied, so a seed error can return `Err` with the
-    /// migrations already committed.
+    /// migrations and sync already applied.
     ///
     /// Errors when no database URL was set, when the backend cannot be inferred
     /// from the URL, when a MySQL server cannot report its version, or when any
@@ -434,6 +444,10 @@ impl TideConfig {
             }
         }
 
+        if self.sync_enabled {
+            crate::sync::sync_database_with_options(db_ref, self.force_sync).await?;
+        }
+
         if self.run_seeds && !self.seeds.is_empty() {
             let mut seeder = crate::seeding::Seeder::new();
             for seed in self.seeds {
@@ -443,7 +457,7 @@ impl TideConfig {
                 Ok(result) => result,
                 Err(error) => {
                     tide_warn!(
-                        "Database seeding failed after initialization steps were already applied. The database may be partially initialized: migrations may have run, but seed data is missing."
+                        "Database seeding failed after initialization steps were already applied. The database may be partially initialized: migrations and schema sync may have run, but seed data is missing."
                     );
                     return Err(error);
                 }
@@ -451,10 +465,6 @@ impl TideConfig {
             if result.has_executed() {
                 tide_info!("{}", result);
             }
-        }
-
-        if self.sync_enabled {
-            crate::sync::sync_database_with_options(db_ref, self.force_sync).await?;
         }
 
         set_global_schema_file_path(self.schema_file.clone());
@@ -545,13 +555,9 @@ impl TideConfig {
             return Ok(declared);
         }
 
-        let version = db
-            .__query_scalar::<String>("SELECT VERSION() AS version", "version")
-            .await?
-            .ok_or_else(|| Error::query("SELECT VERSION() returned no row"))?;
-
-        if version.to_lowercase().contains("mariadb") {
-            tide_info!("Auto-detected MariaDB server: {}", version);
+        // The pool asked the server when it opened.
+        if db.current_inner()?.is_mariadb() {
+            tide_info!("Auto-detected a MariaDB server");
             Ok(DatabaseType::MariaDB)
         } else {
             Ok(DatabaseType::MySQL)

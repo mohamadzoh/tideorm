@@ -228,3 +228,61 @@ fn test_apply_translations_stores_nothing_when_part_of_the_batch_is_invalid() {
 
     assert_eq!(model.translations, serde_json::Value::Null);
 }
+
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenamedTranslatableProbe {
+    meta_title: String,
+    translations: serde_json::Value,
+}
+
+impl HasTranslations for RenamedTranslatableProbe {
+    fn translatable_fields() -> Vec<&'static str> {
+        vec!["meta_title"]
+    }
+
+    fn allowed_languages() -> Vec<String> {
+        vec!["en".to_string()]
+    }
+
+    fn fallback_language() -> String {
+        "en".to_string()
+    }
+
+    fn get_translations_data(&self) -> Result<TranslationsData, TranslationError> {
+        Ok(TranslationsData::from_json(&self.translations))
+    }
+
+    fn set_translations_data(&mut self, data: TranslationsData) -> Result<(), TranslationError> {
+        self.translations = data.to_json();
+        Ok(())
+    }
+
+    fn get_default_value(&self, _field: &str) -> Result<serde_json::Value, TranslationError> {
+        Ok(serde_json::json!(self.meta_title))
+    }
+
+    fn serialized_key(field: &'static str) -> &'static str {
+        match field {
+            "meta_title" => "metaTitle",
+            other => other,
+        }
+    }
+}
+
+#[test]
+fn translated_json_writes_the_translation_under_the_serialized_key() {
+    let mut model = RenamedTranslatableProbe {
+        meta_title: "Default".to_string(),
+        ..Default::default()
+    };
+    model
+        .set_translation("meta_title", "en", "Translated")
+        .unwrap();
+
+    let json = model.to_translated_json(None);
+
+    assert_eq!(json["metaTitle"], "Translated");
+    assert!(json.get("meta_title").is_none(), "{json}");
+    assert!(json.get("translations").is_none(), "{json}");
+}

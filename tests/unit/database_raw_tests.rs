@@ -14,6 +14,42 @@ fn read_only_statements_do_not_flush_the_cache() {
 }
 
 #[test]
+fn a_batch_is_read_only_only_when_every_statement_is() {
+    assert!(Database::raw_sql_may_write("SELECT 1; DELETE FROM users"));
+    assert!(Database::raw_sql_may_write(
+        "SELECT 1; -- then\n UPDATE users SET a = 1"
+    ));
+    assert!(!Database::raw_sql_may_write("SELECT 1;"));
+    assert!(!Database::raw_sql_may_write(
+        "SELECT 1; -- trailing comment"
+    ));
+    assert!(!Database::raw_sql_may_write("SELECT ';' AS separator"));
+
+    // MySQL reads `\'` as an escaped quote, so the `;` ends the first
+    // statement there; PostgreSQL ends the literal at `\'` instead.
+    assert!(Database::raw_sql_may_write(
+        r"SELECT 'O\'Brien'; DELETE FROM users WHERE id = 1"
+    ));
+    assert!(Database::raw_sql_may_write(
+        r"SELECT 'C:\'; DELETE FROM users WHERE id = 1"
+    ));
+}
+
+#[test]
+fn explain_analyze_runs_the_statement_it_explains() {
+    assert!(Database::raw_sql_may_write(
+        "EXPLAIN ANALYZE DELETE FROM users"
+    ));
+    assert!(Database::raw_sql_may_write(
+        "EXPLAIN (ANALYZE, BUFFERS) UPDATE users SET a = 1"
+    ));
+    assert!(!Database::raw_sql_may_write(
+        "EXPLAIN ANALYZE SELECT * FROM users"
+    ));
+    assert!(!Database::raw_sql_may_write("EXPLAIN DELETE FROM users"));
+}
+
+#[test]
 fn soft_delete_columns_are_not_write_keywords() {
     // `deleted_at` and `updated_at` contain `DELETE` and `UPDATE`, and the
     // soft-delete scope renders them into the `WHERE` clause of every read.

@@ -14,7 +14,9 @@ mod store;
 pub use config::{CacheConfig, CacheStrategy};
 #[cfg(feature = "entity-manager")]
 pub(crate) use pending::undo_on_rollback;
-pub(crate) use pending::{PendingInvalidations, install as install_pending_invalidations};
+pub(crate) use pending::{
+    PendingInvalidations, install as install_pending_invalidations, note_failed_statement,
+};
 pub use store::CacheStats;
 use store::{CacheEntry, CacheStore};
 

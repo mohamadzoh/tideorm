@@ -436,7 +436,8 @@ impl WindowFunction {
 
     /// Append a `PARTITION BY` column. Repeated calls accumulate left to right.
     pub fn partition_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.partition_by.push(column.column_name().to_string());
+        self.partition_by
+            .push(crate::columns::column_reference(&column, None));
         self
     }
 
@@ -449,7 +450,7 @@ impl WindowFunction {
         direction: Order,
     ) -> Self {
         self.order_by
-            .push((column.column_name().to_string(), direction));
+            .push((crate::columns::column_reference(&column, None), direction));
         self
     }
 

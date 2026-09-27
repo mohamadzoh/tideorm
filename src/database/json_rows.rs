@@ -291,7 +291,66 @@ impl Database {
             .or_else(|| Self::try_get_json::<chrono::NaiveTime>(row, index))
             .or_else(|| Self::try_get_json::<String>(row, index))
             .or_else(|| Self::try_get_json::<Vec<u8>>(row, index))
+            .or_else(|| Self::undecoded_as_text(row, index))
             .unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A value no typed decoder accepts, as the text the server sent for it,
+    /// so a non-NULL value (a PostgreSQL enum label, a MySQL `DECIMAL` past
+    /// `Decimal`'s 28 digits) does not come back as `null`, which reads as
+    /// SQL `NULL`. `None` for a NULL, and for a binary value that is not
+    /// printable text.
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
+    fn undecoded_as_text(row: &QueryResult, index: usize) -> Option<serde_json::Value> {
+        #[cfg(feature = "postgres")]
+        if let Some(pg_row) = row.try_as_pg_row() {
+            use crate::internal::sqlx::postgres::PgValueFormat;
+            use crate::internal::sqlx::{Row, ValueRef};
+
+            let raw = pg_row.try_get_raw(index).ok()?;
+            if raw.is_null() {
+                return None;
+            }
+            let text = match raw.format() {
+                PgValueFormat::Text => raw.as_str().ok()?,
+                PgValueFormat::Binary => std::str::from_utf8(raw.as_bytes().ok()?).ok()?,
+            };
+            let printable = text
+                .chars()
+                .all(|character| !character.is_control() || character.is_whitespace());
+            return printable.then(|| serde_json::Value::String(text.to_string()));
+        }
+
+        #[cfg(feature = "mysql")]
+        if let Some(mysql_row) = row.try_as_mysql_row() {
+            use crate::internal::sqlx::Row;
+
+            // MySQL sends a DECIMAL as its digits, in either protocol.
+            return mysql_row
+                .try_get_unchecked::<Option<String>, _>(index)
+                .ok()
+                .flatten()
+                .map(serde_json::Value::String);
+        }
+
+        None
+    }
+
+    /// A PostgreSQL `NUMERIC` in its binary form as exact decimal text:
+    /// `Decimal` holds 28 digits, and a `NUMERIC` holds far more, or `NaN`.
+    #[cfg(feature = "postgres")]
+    fn postgres_numeric_as_text(row: &QueryResult, index: usize) -> Option<serde_json::Value> {
+        use crate::internal::sqlx::postgres::PgValueFormat;
+        use crate::internal::sqlx::{Row, ValueRef};
+
+        let raw = row.try_as_pg_row()?.try_get_raw(index).ok()?;
+        if raw.is_null() || raw.format() != PgValueFormat::Binary {
+            return None;
+        }
+        numeric_text(raw.as_bytes().ok()?).map(serde_json::Value::String)
     }
 
     #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
@@ -378,6 +437,11 @@ impl Database {
             );
         }
 
+        #[cfg(feature = "postgres")]
+        if let Some(value) = Self::postgres_numeric_as_text(row, index) {
+            return Some(value);
+        }
+
         None
     }
 
@@ -428,3 +492,63 @@ impl Database {
             .collect()
     }
 }
+
+/// The decimal text of a PostgreSQL `NUMERIC` in its binary wire form: a
+/// digit count, the weight of the first base-10000 digit, the sign, the
+/// display scale, then the digits.
+#[cfg(feature = "postgres")]
+fn numeric_text(bytes: &[u8]) -> Option<String> {
+    let word = |at: usize| -> Option<u16> {
+        Some(u16::from_be_bytes([*bytes.get(at)?, *bytes.get(at + 1)?]))
+    };
+    let ndigits = usize::from(word(0)?);
+    let weight = i32::from(word(2)? as i16);
+    let sign = word(4)?;
+    let scale = usize::from(word(6)?);
+    match sign {
+        0xC000 => return Some("NaN".to_string()),
+        0xD000 => return Some("Infinity".to_string()),
+        0xF000 => return Some("-Infinity".to_string()),
+        0x0000 | 0x4000 => {}
+        _ => return None,
+    }
+    let digits = (0..ndigits)
+        .map(|position| word(8 + 2 * position))
+        .collect::<Option<Vec<_>>>()?;
+    // The digit of base-10000 place `weight - group`; zero past the stored ones.
+    let digit = |group: i32| {
+        usize::try_from(group)
+            .ok()
+            .and_then(|group| digits.get(group).copied())
+            .unwrap_or(0)
+    };
+
+    let mut text = String::new();
+    if sign == 0x4000 {
+        text.push('-');
+    }
+    if weight < 0 {
+        text.push('0');
+    } else {
+        text.push_str(&digit(0).to_string());
+        for group in 1..=weight {
+            text.push_str(&format!("{:04}", digit(group)));
+        }
+    }
+    if scale > 0 {
+        let mut fraction = String::with_capacity(scale + 4);
+        let mut group = weight + 1;
+        while fraction.len() < scale {
+            fraction.push_str(&format!("{:04}", digit(group)));
+            group += 1;
+        }
+        fraction.truncate(scale);
+        text.push('.');
+        text.push_str(&fraction);
+    }
+    Some(text)
+}
+
+#[cfg(all(test, feature = "postgres"))]
+#[path = "../../tests/unit/database_json_rows_tests.rs"]
+mod numeric_text_tests;

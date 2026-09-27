@@ -105,11 +105,13 @@ Managed entities expose:
 - `managed.replace(...)` to replace the current managed value wholesale.
 - `managed.state()` to inspect whether the entity is `New`, `Managed`, `Removed`, or `Detached`.
 
-`merge(...)` attaches a detached instance into the current context. `detach(...)` keeps the in-memory value but removes it from future flushes. `clear()` detaches the whole context.
+`merge(...)` attaches a detached instance into the current context. `detach(...)` keeps the in-memory value but removes it from future flushes. `clear()` detaches the whole context. Persisting or merging an entity the context was about to remove takes the removal back and writes it; merging one a `persist()` has not flushed keeps it an insert.
+
+When the context saves a row it also holds as a managed entity, through `entity_manager.save(..)` or a relation sync, the managed entity moves onto what was stored: the fields it has not changed take the stored values, the ones it changed keep its edits, so a later flush does not write the values it loaded back over the newer save. A relation copy of the row, loaded before, is not moved; reload it.
 
 A managed entity keeps the primary key it was loaded or saved with: a flush refuses one whose key was changed, rather than write it over the row holding the new key. Detach it and persist a new entity instead.
 
-A flush that fails, is cancelled part way, or runs inside a transaction that later rolls back leaves the context as it was before the flush, since none of what it wrote was committed.
+A flush that fails, is cancelled part way, or runs inside a transaction that later rolls back leaves the context as it was before the flush, since none of what it wrote was committed. The one outcome no client can know is a flush cancelled while its `COMMIT` is on the wire: the database may have committed it. The context is restored then too, so reload what the flush wrote before flushing it again.
 
 ## Compatibility Helpers
 

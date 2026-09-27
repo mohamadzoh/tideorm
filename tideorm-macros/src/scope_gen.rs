@@ -1,5 +1,5 @@
-use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use proc_macro2::{Group, TokenStream as TokenStream2, TokenTree};
+use quote::{ToTokens, format_ident, quote};
 use syn::{
     FnArg, GenericArgument, ImplItem, ImplItemFn, ItemImpl, Pat, PatIdent, PathArguments,
     ReturnType, Type, TypePath,
@@ -155,7 +155,11 @@ fn generate_scope_method(
             }
         };
 
-        forwarded_inputs.push(pat_type.clone());
+        // The trait method has no body, where a `mut` binding is an error, and
+        // in the trait `Self` is the query builder, not the model.
+        let attrs = &pat_type.attrs;
+        let ty = replace_self(pat_type.ty.to_token_stream(), model_ty);
+        forwarded_inputs.push(quote! { #(#attrs)* #arg_ident: #ty });
         forwarded_args.push(quote! { #arg_ident });
     }
 
@@ -173,6 +177,23 @@ fn generate_scope_method(
             }
         },
     })
+}
+
+/// `tokens` with every `Self` spelled as `model_ty`.
+fn replace_self(tokens: TokenStream2, model_ty: &Type) -> TokenStream2 {
+    tokens
+        .into_iter()
+        .map(|tree| match tree {
+            TokenTree::Ident(ident) if ident == "Self" => quote!(#model_ty),
+            TokenTree::Group(group) => {
+                let mut replaced =
+                    Group::new(group.delimiter(), replace_self(group.stream(), model_ty));
+                replaced.set_span(group.span());
+                TokenStream2::from(TokenTree::Group(replaced))
+            }
+            other => TokenStream2::from(other),
+        })
+        .collect()
 }
 
 fn model_ident(model_ty: &Type) -> syn::Result<&syn::Ident> {

@@ -90,7 +90,7 @@ Use these inline in `#[tideorm::model(...)]`, or in a `#[tideorm(...)]` attribut
 | `#[tideorm(soft_delete)]` | Soft deletes through a `deleted_at` column (see [Soft Deletes](#soft-deletes)) |
 | `#[tideorm(deleted_at_column = "name")]` | The soft-delete column, when it is not `deleted_at` |
 | `#[tideorm(timestamps)]` | Mark the model as timestamped; `created_at`/`updated_at` fields are managed either way |
-| `#[tideorm(hidden = "field_a,field_b")]` | Leave these fields out of `to_json()`. Plain `serde` serialization and `query().get_json()` still include them |
+| `#[tideorm(hidden = "field_a,field_b")]` | Leave these fields out of `to_json()`: fields, columns (which hide their field) or attachment relations; any other name is a compile error. Without it the soft-delete field is hidden. Plain `serde` serialization and `query().get_json()` still include them |
 | `#[tideorm(tokenize)]` | Enable [record tokenization](#record-tokenization) |
 | `#[tideorm(translatable = "..", languages = "..", fallback_language = "..")]` | Translated fields; requires the `translations` feature and a manual `HasTranslations` impl (see [Relations](relations.md)) |
 | `#[tideorm(has_one_files = "..", has_many_files = "..")]` | File attachment slots; requires the `attachments` feature and a manual `HasAttachments` impl |
@@ -105,6 +105,7 @@ Use these inline in `#[tideorm::model(...)]`, or in a `#[tideorm(...)]` attribut
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
+| `#[index]` / `#[unique_index]` on a field | Index that field's column |
 
 #### Field-Level Attributes
 
@@ -156,7 +157,9 @@ Encrypted field behavior:
 - Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
 - Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
-- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`.
+- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`. A batch `set()` of an encrypted field takes a string or `None`.
+- `pluck`, `value`, `get_json` and `get_as` return an encrypted column decrypted when they read it under its own name.
+- A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
 
 ---
 
@@ -376,7 +379,8 @@ Deleting marks: `delete()`, `destroy(id)`, `query().delete()` and `delete_all()`
 ```rust
 use tideorm::SoftDelete;
 
-// Soft delete (sets deleted_at to now)
+// Soft delete (sets deleted_at to now). This is `delete()`: the delete
+// callbacks run, and a row already deleted keeps its stamp.
 let post = post.soft_delete().await?;
 
 // Restore a soft-deleted record
@@ -415,6 +419,8 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+A model takes one `#[tideorm::scopes]` block, which generates its `UserQueryScopes` trait; put every scope in it. A scope's parameters after the query can be `mut` and can name the model as `Self`.
 
 If you call a model's named scopes from a different module than the `#[tideorm::scopes]` block, bring the generated extension trait into scope first:
 
@@ -675,7 +681,7 @@ if let Err(errors) = user.validate() {
 }
 ```
 
-Supported rules: `required`, `email`, `url`, `alpha`, `alphanumeric`, `numeric`, `uuid`, `min_length = n`, `max_length = n`, `length = n`, `min = n`, `max = n`, `range(min, max)` (or `range = "min..max"`), and `regex = "pattern"`. Lengths count characters, not bytes. `min`, `max` and `range` reject `NaN`. A `regex` pattern that does not compile fails validation for every value, with an error naming the pattern.
+Supported rules: `required`, `email`, `url`, `alpha`, `alphanumeric`, `numeric`, `uuid`, `min_length = n`, `max_length = n`, `length = n`, `min = n`, `max = n`, `range(min, max)` (or `range(min..=max)`, or `range = "min..max"`, all including `max`), and `regex = "pattern"`. The string rules apply to `String` and `Text` fields, `min`, `max` and `range` to numbers, `Decimal` and numeric strings, and `required` to an `Option` of any common type (a `Uuid`, a date, a `bool`, JSON, a `Vec`). Lengths count characters, not bytes. `min`, `max` and `range` reject `NaN`, compare an `f32` at its own precision (so `min = 0.7` takes `0.7_f32`), and take finite bounds only; `numeric` refuses `NaN`, `inf` and a value past `f64`. Errors come out in the order the struct declares its fields. A `regex` pattern that does not compile fails validation for every value, with an error naming the pattern.
 
 Rules on a `#[tideorm(skip)]` field run too, for a value that is checked but never stored, such as a password confirmation. A skip field holds its `Default` on every model a query returns, so make it an `Option`: `None` passes every rule except `required`. `#[validate]` on a relation field is a compile error; the rules belong on the related model's fields.
 
@@ -901,7 +907,7 @@ Calling `TokenConfig::set_encryption_key`, `TokenConfig::set_encoder`, or `Token
 
 **Features:**
 - **Authenticated encryption**: Default tokens use XChaCha20-Poly1305
-- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse
+- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse. The name is the struct's, so two tokenized models of one struct name in different modules accept each other's tokens; name them apart
 - **Tamper detection**: Modified tokens fail authentication and are rejected
 - **Randomized output**: The default encoder uses a fresh nonce, so the same record can produce different valid tokens
 - **URL-safe**: Base64-URL encoding (A-Za-z0-9-_), no escaping needed
@@ -1080,7 +1086,7 @@ let count = reports_rel.count().await?;
 let tree = reports_rel.load_tree(3).await?;  // 3 levels deep
 ```
 
-`SelfRef` and `SelfRefMany` fields are wired automatically when you provide the self-referencing `foreign_key`. `local_key` defaults to `id` and can be overridden explicitly when needed.
+`SelfRef` and `SelfRefMany` fields are wired automatically when you provide the self-referencing `foreign_key`. `local_key` defaults to the primary key, whatever its column is called, and can be overridden explicitly when needed.
 
 `SelfRefMany::load_tree()` respects the configured `local_key` and fetches the
 tree in one query, which avoids one SELECT per node on large hierarchies.
@@ -1097,7 +1103,8 @@ let (user, profile) = user.save_with_one(profile, "user_id").await?;
 // Save parent with multiple related models
 let posts = vec![post1, post2, post3];
 let (user, posts) = user.save_with_many(posts, "user_id").await?;
-// All posts have user_id set to user.id
+// All posts have user_id set to user.id; a new one is inserted and a
+// stored one updated, as `save()` does
 
 // Cascade updates
 let (user, profile) = user.update_with_one(profile).await?;

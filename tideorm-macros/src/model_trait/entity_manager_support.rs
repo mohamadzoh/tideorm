@@ -174,7 +174,10 @@ fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<T
     let ident = field.ident();
     let relation_name = field.name();
     let related_ty = field.related_types().into_iter().next()?;
-    let local_key = field.local_key.as_deref().unwrap_or("id");
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
     let struct_name = &ctx.struct_name;
 
     let sync = match field.relation_kind()? {
@@ -219,6 +222,19 @@ fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<T
                 .resolve_local_key_ident(local_key, ident)
                 .expect("relation local keys resolve when the context is built");
             quote! {
+                // The row the relation no longer holds goes first, as for a
+                // `has_many`: a unique foreign key refuses the new row beside it.
+                let current_keys: Vec<String> = match self.#ident.as_mut() {
+                    Some(item) => ::tideorm::entity_manager::__model_entity_manager_key(&*item)?
+                        .into_iter()
+                        .collect(),
+                    None => Vec::new(),
+                };
+                ::tideorm::entity_manager::__delete_detached_entities::<#related_ty>(
+                    entity_manager, owner_table, &owner_key, #relation_name, &current_keys,
+                )
+                .await?;
+
                 let child_fk_value = ::tideorm::serde_json::to_value(self.#local_key_ident.clone())?;
                 let mut updated_keys = Vec::new();
                 if let Some(item) = self.#ident.as_mut() {
@@ -231,11 +247,6 @@ fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<T
                         ::tideorm::entity_manager::__sync_related_entity(item, entity_manager).await?,
                     );
                 }
-
-                ::tideorm::entity_manager::__delete_detached_entities::<#related_ty>(
-                    entity_manager, owner_table, &owner_key, #relation_name, &updated_keys,
-                )
-                .await?;
             }
         }
         RelationKind::HasManyThrough => {

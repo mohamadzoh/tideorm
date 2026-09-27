@@ -205,7 +205,8 @@ async fn sync_indexes(
                 model.table_name
             ),
             Err(error) if !new_table => tide_warn!(
-                "Could not create index '{}' on TideORM table '{}': {}.                  Resolve the conflicting rows or create it with a migration.",
+                "Could not create index '{}' on TideORM table '{}': {}. \
+                 Resolve the conflicting rows or create it with a migration.",
                 index.name,
                 model.table_name,
                 error
@@ -224,7 +225,8 @@ async fn mysql_index_exists(
 ) -> Result<bool> {
     let statement = build_statement_with_values(
         Backend::MySql,
-        "SELECT COUNT(*) > 0 FROM information_schema.statistics          WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
+        "SELECT COUNT(*) > 0 FROM information_schema.statistics \
+         WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
         vec![
             mysql_database(&model.schema_name).into(),
             model.table_name.as_str().into(),
@@ -415,7 +417,22 @@ async fn add_missing_column(
     let mut column = ColumnDefinition::new(&col.name, keyed_column_type(model, col, backend));
     column.default = col.default.clone();
 
-    if !col.nullable && !col.auto_increment {
+    if backend == Backend::Sqlite
+        && col
+            .default
+            .as_deref()
+            .is_some_and(|default| !ddl::sqlite_can_add_with_default(default))
+    {
+        tide_warn!(
+            "SQLite cannot add column '{}' to table '{}' with its default {}; \
+             adding it as nullable without one. Use a migration that rebuilds \
+             the table to keep the default.",
+            col.name,
+            model.table_name,
+            col.default.as_deref().unwrap_or_default()
+        );
+        column.default = None;
+    } else if !col.nullable && !col.auto_increment {
         if col.default.is_some() {
             column.nullable = false;
         } else {

@@ -6,6 +6,15 @@ use crate::internal::Value;
 use crate::model::Model;
 use crate::query::db_sql;
 
+/// The alias a query `depth` (at least 1) levels deep in `where_has`
+/// subqueries over its own table reads that table under.
+pub(in crate::query) fn related_alias(depth: usize) -> String {
+    match depth {
+        1 => "tideorm_related".to_string(),
+        depth => format!("tideorm_related_{}", depth),
+    }
+}
+
 impl<M: Model> QueryBuilder<M> {
     fn push_condition(mut self, condition: WhereCondition) -> Self {
         self.conditions.push(condition);
@@ -107,9 +116,17 @@ impl<M: Model> QueryBuilder<M> {
         related_table: &str,
         foreign_key: &str,
         local_key: &str,
-        condition: Option<(&str, serde_json::Value)>,
+        condition: Option<(&str, std::result::Result<serde_json::Value, String>)>,
     ) -> Self {
         let db_type = self.db_type_for_sql();
+        let condition = match condition {
+            Some((column, Ok(value))) => Some((column, value)),
+            Some((_, Err(reason))) => {
+                self.invalidate_query(format!("{}(): {}", method, reason));
+                return self;
+            }
+            None => None,
+        };
 
         let mut identifiers = vec![
             ("related table", related_table),
@@ -128,14 +145,22 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
-        let related = db_sql::quote_ident(db_type, related_table);
+        // The model's own table is read under an alias, so the key on the
+        // outer row stays reachable.
+        let table = db_sql::quote_ident(db_type, related_table);
+        let (from, related) = if related_table == M::table_name() {
+            let alias = db_sql::quote_ident(db_type, &related_alias(self.self_join_depth + 1));
+            (format!("{} AS {}", table, alias), alias)
+        } else {
+            (table.clone(), table)
+        };
         let mut sql = format!(
             "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
             if negated { "NOT " } else { "" },
-            related,
+            from,
             related,
             db_sql::quote_ident(db_type, foreign_key),
-            db_sql::quote_ident(db_type, M::table_name()),
+            db_sql::quote_ident(db_type, &self.own_table_ref()),
             db_sql::quote_ident(db_type, local_key),
         );
         let mut values = Vec::new();
@@ -204,7 +229,7 @@ impl<M: Model> QueryBuilder<M> {
             local_key,
             Some((
                 condition_column,
-                crate::query::filter_value(condition_value),
+                crate::query::checked_filter_value(condition_value),
             )),
         )
     }
@@ -236,7 +261,7 @@ impl<M: Model> QueryBuilder<M> {
             local_key,
             Some((
                 condition_column,
-                crate::query::filter_value(condition_value),
+                crate::query::checked_filter_value(condition_value),
             )),
         )
     }
@@ -271,7 +296,7 @@ impl<M: Model> QueryBuilder<M> {
         local_key: impl IntoColumnName,
         constrain: impl FnOnce(QueryBuilder<R>) -> QueryBuilder<R>,
     ) -> Self {
-        let related = constrain(QueryBuilder::<R>::new());
+        let related = constrain(self.related_query::<R>());
         self.push_has_condition(
             "where_has",
             false,
@@ -291,7 +316,7 @@ impl<M: Model> QueryBuilder<M> {
         local_key: impl IntoColumnName,
         constrain: impl FnOnce(QueryBuilder<R>) -> QueryBuilder<R>,
     ) -> Self {
-        let related = constrain(QueryBuilder::<R>::new());
+        let related = constrain(self.related_query::<R>());
         self.push_has_condition(
             "where_doesnt_have",
             true,
@@ -338,19 +363,14 @@ impl<M: Model> QueryBuilder<M> {
 
         let db_type = self.db_type_for_sql();
         let (where_sql, values) = related.build_where_clause_with_condition_for_db(db_type);
-        // A model related to itself reads the related rows under an alias, so
-        // the key on the outer row stays reachable.
-        let (from, related_ref) = if R::table_name() == M::table_name() {
-            let alias = db_sql::quote_ident(db_type, "tideorm_related");
-            (
-                format!("{} AS {}", db_sql::quote_table::<R>(db_type), alias),
-                alias,
-            )
+        // A model related to itself reads the related rows under an alias of
+        // their own (see `related_query`), so the key on the outer row stays
+        // reachable.
+        let related_ref = db_sql::quote_ident(db_type, &related.own_table_ref());
+        let from = if related.self_join_depth > 0 {
+            format!("{} AS {}", db_sql::quote_table::<R>(db_type), related_ref)
         } else {
-            (
-                db_sql::quote_table::<R>(db_type),
-                db_sql::quote_ident(db_type, R::table_name()),
-            )
+            db_sql::quote_table::<R>(db_type)
         };
         let mut sql = format!(
             "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
@@ -358,7 +378,7 @@ impl<M: Model> QueryBuilder<M> {
             from,
             related_ref,
             db_sql::quote_ident(db_type, foreign_key),
-            db_sql::quote_ident(db_type, M::table_name()),
+            db_sql::quote_ident(db_type, &self.own_table_ref()),
             db_sql::quote_ident(db_type, local_key),
         );
         if !where_sql.is_empty() {
@@ -372,6 +392,18 @@ impl<M: Model> QueryBuilder<M> {
             value: ConditionValue::RawExprWithValues { sql, values },
         });
         self
+    }
+
+    /// The query `where_has` hands its closure. Over this query's own table
+    /// it reads its rows under an alias one level deeper than this query's, so
+    /// a qualified column or a nested correlation inside the closure names the
+    /// related row, and the correlation names this one.
+    fn related_query<R: Model>(&self) -> QueryBuilder<R> {
+        let mut related = QueryBuilder::<R>::new();
+        if R::table_name() == M::table_name() {
+            related.self_join_depth = self.self_join_depth + 1;
+        }
+        related
     }
 
     /// `name` as a column of `N`, a field name or column name, bare or
@@ -491,7 +523,10 @@ impl<M: Model> QueryBuilder<M> {
             Operator::Raw,
             ConditionValue::RawTemplate {
                 sql: raw_sql.to_string(),
-                values: params,
+                values: params
+                    .into_iter()
+                    .map(crate::internal::bindable_value)
+                    .collect(),
             },
         ))
     }
@@ -543,7 +578,7 @@ impl<M: Model> QueryBuilder<M> {
         self.push_condition(WhereCondition::of::<M>(
             column,
             Operator::EqAny,
-            ConditionValue::List(values.into_iter().map(crate::query::filter_value).collect()),
+            ConditionValue::list(values),
         ))
     }
 
@@ -557,7 +592,7 @@ impl<M: Model> QueryBuilder<M> {
         self.push_condition(WhereCondition::of::<M>(
             column,
             Operator::NeAll,
-            ConditionValue::List(values.into_iter().map(crate::query::filter_value).collect()),
+            ConditionValue::list(values),
         ))
     }
 
@@ -573,25 +608,6 @@ impl<M: Model> QueryBuilder<M> {
         let column = match column.split_once('.') {
             Some((table, name)) if table == M::table_name() => name.to_string(),
             _ => column,
-        };
-
-        let value = match (operator, value) {
-            (Operator::IsNull | Operator::IsNotNull, _) => ConditionValue::None,
-            (Operator::In | Operator::NotIn, serde_json::Value::Array(values)) => {
-                ConditionValue::List(values)
-            }
-            (Operator::In | Operator::NotIn, value) => ConditionValue::List(vec![value]),
-            (Operator::Between, serde_json::Value::Array(values)) if values.len() >= 2 => {
-                let mut bounds = values.into_iter();
-                ConditionValue::Range(
-                    bounds.next().unwrap_or(serde_json::Value::Null),
-                    bounds.next().unwrap_or(serde_json::Value::Null),
-                )
-            }
-            (Operator::Between, serde_json::Value::Array(_)) => {
-                ConditionValue::Single(serde_json::Value::Null)
-            }
-            (_, value) => ConditionValue::Single(value),
         };
 
         self.conditions.push(WhereCondition {

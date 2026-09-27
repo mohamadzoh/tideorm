@@ -42,6 +42,18 @@ fn failures_and_slow_queries_reach_the_quieter_levels() {
             "{level}"
         );
     }
+
+    // A failure keeps its error at the verbose level, and when it was slow.
+    for (level, is_slow) in [
+        (LogLevel::Debug, false),
+        (LogLevel::Error, true),
+        (LogLevel::Info, true),
+    ] {
+        assert!(
+            render(level, &failed, is_slow, 1).is_some_and(|output| output.contains("boom")),
+            "{level} slow={is_slow}"
+        );
+    }
 }
 
 #[test]

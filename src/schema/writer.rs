@@ -22,14 +22,22 @@ impl SchemaWriter {
     /// Every base table is read back from the catalog - its columns, primary
     /// key and secondary indexes - and rendered by [`SchemaGenerator`] for the
     /// backend the global connection actually talks to.
+    ///
+    /// What a table's columns and indexes cannot describe comes after the
+    /// tables as the catalog reports it: a full-text, expression, partial or
+    /// prefix index, and on SQLite a virtual table (an FTS5 index) with the
+    /// triggers that keep it in step. SQLite's FTS5 shadow tables are left out;
+    /// the virtual table recreates them.
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
         let db = crate::require_db()?;
         let db_type = db.backend();
         let conn = db.__internal_connection()?;
 
-        let tables = match db_type {
+        let Catalog { tables, verbatim } = match db_type {
             DatabaseType::Postgres => introspect_postgres(&conn).await?,
-            DatabaseType::MySQL | DatabaseType::MariaDB => introspect_mysql(&conn).await?,
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                introspect_mysql(&conn, db_type == DatabaseType::MariaDB).await?
+            }
             DatabaseType::SQLite => introspect_sqlite(&conn).await?,
         };
 
@@ -38,11 +46,31 @@ impl SchemaWriter {
             generator.add_table(table);
         }
 
-        fs::write(path.as_ref(), generator.generate())
+        let mut text = generator.generate();
+        for statement in verbatim {
+            if statement.starts_with("--") {
+                text.push_str(&statement);
+                text.push('\n');
+            } else {
+                text.push_str(statement.trim_end().trim_end_matches(';'));
+                text.push_str(";\n");
+            }
+        }
+
+        fs::write(path.as_ref(), text)
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
 
         Ok(())
     }
+}
+
+/// What a catalog read found: the tables the generator renders, and the
+/// statements written as the catalog reports them, or a comment naming what
+/// could not be exported.
+#[derive(Default)]
+struct Catalog {
+    tables: Vec<TableSchema>,
+    verbatim: Vec<String>,
 }
 
 /// One column as the catalog reports it.
@@ -66,13 +94,16 @@ pub(super) struct CatalogIndexColumn {
 ///
 /// `primary_key` is in key order, which can differ from column order, so it
 /// is set on the table as given rather than collected from the columns. Only
-/// key columns keep their auto-increment flag.
+/// key columns keep their auto-increment flag unless `counters_anywhere`:
+/// MySQL requires the counter to be a key, where PostgreSQL's serial type
+/// numbers any column.
 pub(super) fn catalog_table(
     name: &str,
     schema_name: Option<&str>,
     columns: Vec<CatalogColumn>,
     primary_key: Vec<String>,
     indexes: Vec<IndexDefinition>,
+    counters_anywhere: bool,
 ) -> TableSchema {
     let mut builder = TableSchemaBuilder::new(name);
     if let Some(schema_name) = schema_name {
@@ -82,11 +113,12 @@ pub(super) fn catalog_table(
     for column in columns {
         let mut schema = ColumnSchema::new(column.name, column.sql_type);
 
-        if primary_key.contains(&schema.name) {
+        let is_key = primary_key.contains(&schema.name);
+        if is_key {
             schema = schema.primary_key();
-            if column.auto_increment {
-                schema = schema.auto_increment();
-            }
+        }
+        if column.auto_increment && (is_key || counters_anywhere) {
+            schema = schema.auto_increment();
         }
 
         if !column.nullable {
@@ -150,7 +182,7 @@ async fn query(
         .map_err(translate_error)
 }
 
-async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
+async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
     let pg = Backend::Postgres;
     let table_rows = query(
         conn,
@@ -166,7 +198,7 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
     )
     .await?;
 
-    let mut tables = Vec::with_capacity(table_rows.len());
+    let mut catalog = Catalog::default();
 
     for row in table_rows {
         let table_schema: String = get(&row, "table_schema")?;
@@ -189,7 +221,8 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
             "SELECT a.attname AS column_name,
                     pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                     NOT a.attnotnull AS is_nullable,
-                    pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default
+                    pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default,
+                    a.attidentity::text AS identity
              FROM pg_catalog.pg_attribute a
              JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
              JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
@@ -205,10 +238,12 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
         .map(|row| {
             let default: Option<String> = get(row, "column_default")?;
             // A serial column's default is its sequence, which the serial
-            // type recreates.
-            let auto_increment = default
-                .as_deref()
-                .is_some_and(|default| default.contains("nextval"));
+            // type recreates, as it does an identity column's.
+            let identity: String = get(row, "identity")?;
+            let auto_increment = !identity.is_empty()
+                || default
+                    .as_deref()
+                    .is_some_and(|default| default.contains("nextval"));
 
             Ok(CatalogColumn {
                 name: get(row, "column_name")?,
@@ -221,22 +256,29 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
         .collect::<Result<Vec<_>>>()?;
 
         // One row per key column, in key order: `indkey` lists the columns
-        // the way the index was declared, which `attnum` does not.
+        // the way the index was declared, which `attnum` does not. An index
+        // on an expression, a partial one or one not a B-tree cannot be told
+        // by its columns, and is exported as `pg_get_indexdef` renders it.
+        const PLAIN_INDEX: &str =
+            "ix.indexprs IS NULL AND ix.indpred IS NULL AND am.amname = 'btree'";
         let mut primary_key = Vec::new();
         let mut index_columns = Vec::new();
         for row in query(
             conn,
             pg,
-            "SELECT i.relname AS index_name, ix.indisprimary AS is_primary,
-                    ix.indisunique AS is_unique, a.attname AS column_name
-             FROM pg_catalog.pg_index ix
-             JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
-             JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
-             JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
-             CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, position)
-             JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-             WHERE ns.nspname = $1 AND t.relname = $2
-             ORDER BY i.relname, k.position",
+            &format!(
+                "SELECT i.relname AS index_name, ix.indisprimary AS is_primary,
+                        ix.indisunique AS is_unique, a.attname AS column_name
+                 FROM pg_catalog.pg_index ix
+                 JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+                 JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
+                 JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_catalog.pg_am am ON am.oid = i.relam
+                 CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, position)
+                 JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                 WHERE ns.nspname = $1 AND t.relname = $2 AND {PLAIN_INDEX}
+                 ORDER BY i.relname, k.position"
+            ),
             params(),
         )
         .await?
@@ -253,19 +295,41 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
             }
         }
 
-        tables.push(catalog_table(
+        for row in query(
+            conn,
+            pg,
+            &format!(
+                "SELECT pg_catalog.pg_get_indexdef(ix.indexrelid) AS definition
+                 FROM pg_catalog.pg_index ix
+                 JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+                 JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
+                 JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_catalog.pg_am am ON am.oid = i.relam
+                 WHERE ns.nspname = $1 AND t.relname = $2
+                 AND NOT ix.indisprimary AND NOT ({PLAIN_INDEX})
+                 ORDER BY i.relname"
+            ),
+            params(),
+        )
+        .await?
+        {
+            catalog.verbatim.push(get(&row, "definition")?);
+        }
+
+        catalog.tables.push(catalog_table(
             &table_name,
             Some(&table_schema),
             columns,
             primary_key,
             group_indexes(index_columns),
+            true,
         ));
     }
 
-    Ok(tables)
+    Ok(catalog)
 }
 
-async fn introspect_mysql(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
+async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog> {
     let mysql = Backend::MySql;
     let database_row = query(conn, mysql, "SELECT DATABASE() AS db_name", Vec::new()).await?;
     let Some(db_name) = database_row
@@ -275,7 +339,7 @@ async fn introspect_mysql(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
         .flatten()
         .filter(|name| !name.is_empty())
     else {
-        return Ok(Vec::new());
+        return Ok(Catalog::default());
     };
 
     // Every catalog column is aliased: MySQL 8 labels information_schema
@@ -291,7 +355,7 @@ async fn introspect_mysql(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
     )
     .await?;
 
-    let mut tables = Vec::with_capacity(table_rows.len());
+    let mut catalog = Catalog::default();
 
     for row in table_rows {
         let table_name: String = get(&row, "table_name")?;
@@ -315,27 +379,29 @@ async fn introspect_mysql(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
         .map(|row| {
             let is_nullable: String = get(row, "is_nullable")?;
             let extra: String = get(row, "extra")?;
+            let sql_type: String = get(row, "column_type")?;
+            let default = mysql_default(get(row, "column_default")?, &sql_type, &extra, mariadb);
 
             Ok(CatalogColumn {
                 name: get(row, "column_name")?,
-                sql_type: get(row, "column_type")?,
+                sql_type,
                 nullable: is_nullable == "YES",
-                default: get(row, "column_default")?,
+                default,
                 auto_increment: extra.contains("auto_increment"),
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
         // `non_unique` is an INT on MySQL and a BIGINT on MariaDB, so it is
-        // cast to one width. A functional key part has no column name and
-        // cannot be exported.
+        // cast to one width, as is the prefix length `sub_part`.
         let mut primary_key = Vec::new();
-        let mut index_columns = Vec::new();
+        let mut keys: BTreeMap<String, MysqlKey> = BTreeMap::new();
         for row in query(
             conn,
             mysql,
             "SELECT index_name AS index_name, CAST(non_unique AS SIGNED) AS non_unique,
-                    column_name AS column_name
+                    column_name AS column_name, index_type AS index_type,
+                    CAST(sub_part AS SIGNED) AS sub_part
              FROM information_schema.statistics
              WHERE table_schema = ? AND table_name = ?
              ORDER BY index_name, seq_in_index",
@@ -343,47 +409,176 @@ async fn introspect_mysql(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
         )
         .await?
         {
-            let Some(column) = get::<Option<String>>(&row, "column_name")? else {
-                continue;
-            };
             let index: String = get(&row, "index_name")?;
-
+            let column: Option<String> = get(&row, "column_name")?;
             if index == "PRIMARY" {
-                primary_key.push(column);
-            } else {
-                index_columns.push(CatalogIndexColumn {
-                    index,
-                    unique: get::<i64>(&row, "non_unique")? == 0,
-                    column,
-                });
+                primary_key.extend(column);
+                continue;
             }
+            let key = keys.entry(index).or_insert_with(|| MysqlKey {
+                unique: false,
+                kind: String::new(),
+                parts: Vec::new(),
+            });
+            key.unique = get::<i64>(&row, "non_unique")? == 0;
+            key.kind = get(&row, "index_type")?;
+            let prefix: Option<i64> = get(&row, "sub_part")?;
+            key.parts.push(column.map(|column| (column, prefix)));
         }
 
-        tables.push(catalog_table(
+        // A plain key is described by its columns; a full-text, spatial or
+        // prefix one is written out, and one with an expression part, which
+        // the catalog does not spell, is named in a comment.
+        let table = quote_ident(DatabaseType::MySQL, &table_name);
+        let mut index_columns = Vec::new();
+        for (index, key) in keys {
+            let Some(parts) = key
+                .parts
+                .into_iter()
+                .collect::<Option<Vec<(String, Option<i64>)>>>()
+            else {
+                catalog.verbatim.push(format!(
+                    "-- index {} on {} has an expression key part and is not exported",
+                    quote_ident(DatabaseType::MySQL, &index),
+                    table
+                ));
+                continue;
+            };
+            let plain = matches!(key.kind.as_str(), "BTREE" | "HASH")
+                && parts.iter().all(|(_, prefix)| prefix.is_none());
+            if plain {
+                index_columns.extend(parts.into_iter().map(|(column, _)| CatalogIndexColumn {
+                    index: index.clone(),
+                    unique: key.unique,
+                    column,
+                }));
+                continue;
+            }
+            let kind = match key.kind.as_str() {
+                "FULLTEXT" => "FULLTEXT ",
+                "SPATIAL" => "SPATIAL ",
+                _ if key.unique => "UNIQUE ",
+                _ => "",
+            };
+            let columns: Vec<String> = parts
+                .iter()
+                .map(|(column, prefix)| {
+                    let column = quote_ident(DatabaseType::MySQL, column);
+                    match prefix {
+                        Some(length) => format!("{column}({length})"),
+                        None => column,
+                    }
+                })
+                .collect();
+            catalog.verbatim.push(format!(
+                "CREATE {kind}INDEX {} ON {table} ({})",
+                quote_ident(DatabaseType::MySQL, &index),
+                columns.join(", ")
+            ));
+        }
+
+        catalog.tables.push(catalog_table(
             &table_name,
             None,
             columns,
             primary_key,
             group_indexes(index_columns),
+            false,
         ));
     }
 
-    Ok(tables)
+    Ok(catalog)
 }
 
-async fn introspect_sqlite(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
+/// One MySQL index as `information_schema.statistics` lists it: each key
+/// part is a column and its prefix length, or `None` for an expression.
+struct MysqlKey {
+    unique: bool,
+    kind: String,
+    parts: Vec<Option<(String, Option<i64>)>>,
+}
+
+/// A MySQL or MariaDB `column_default` as a `DEFAULT` clause writes it.
+///
+/// MariaDB reports the clause's own spelling. MySQL 8 reports a literal bare
+/// (`draft` for `DEFAULT 'draft'`), and an expression, which `extra` marks
+/// `DEFAULT_GENERATED`, without its parentheses and with its quotes escaped;
+/// both are restored here. A current-timestamp default stays bare, as MySQL
+/// takes it.
+pub(super) fn mysql_default(
+    default: Option<String>,
+    sql_type: &str,
+    extra: &str,
+    mariadb: bool,
+) -> Option<String> {
+    let default = default?;
+    if mariadb {
+        return Some(default);
+    }
+    if default
+        .to_ascii_uppercase()
+        .starts_with("CURRENT_TIMESTAMP")
+    {
+        return Some(default);
+    }
+    if extra.to_ascii_uppercase().contains("DEFAULT_GENERATED") {
+        return Some(format!("({})", default.replace("\\'", "'")));
+    }
+    let lowered = sql_type.to_ascii_lowercase();
+    let numeric = [
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "int",
+        "bigint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "bit",
+        "year",
+    ]
+    .iter()
+    .any(|prefix| lowered.starts_with(prefix));
+    Some(if numeric {
+        default
+    } else {
+        format!(
+            "'{}'",
+            crate::internal::sql_safety::escape_sql_literal_for_db(DatabaseType::MySQL, &default)
+        )
+    })
+}
+
+async fn introspect_sqlite(conn: &OrmConnection) -> Result<Catalog> {
     let sqlite = Backend::Sqlite;
+    // `pragma_table_list` tells a virtual table (an FTS5 index) and the shadow
+    // tables it keeps its data in from an ordinary table; the virtual table is
+    // exported as declared, and it recreates its shadow tables.
     let table_rows = query(
         conn,
         sqlite,
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+        "SELECT name FROM pragma_table_list
+         WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%'
          ORDER BY name",
         Vec::new(),
     )
     .await?;
 
-    let mut tables = Vec::with_capacity(table_rows.len());
+    let mut catalog = Catalog::default();
+    for row in query(
+        conn,
+        sqlite,
+        "SELECT m.sql AS sql FROM pragma_table_list l
+         JOIN sqlite_master m ON m.name = l.name AND m.type = 'table'
+         WHERE l.schema = 'main' AND l.type = 'virtual' AND m.sql IS NOT NULL
+         ORDER BY l.name",
+        Vec::new(),
+    )
+    .await?
+    {
+        catalog.verbatim.push(get(&row, "sql")?);
+    }
 
     for row in table_rows {
         let table_name: String = get(&row, "name")?;
@@ -433,10 +628,13 @@ async fn introspect_sqlite(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
 
             let index: String = get(&index_row, "name")?;
             let unique = get::<i64>(&index_row, "unique")? == 1;
+            let partial = get::<i64>(&index_row, "partial")? == 1;
 
             // `index_info` is already in key order. An expression key part
-            // has no column name and cannot be exported.
+            // has no column name, so an index with one, like a partial index,
+            // is exported as it was declared.
             let mut key_columns = Vec::new();
+            let mut expression = false;
             for info_row in query(
                 conn,
                 sqlite,
@@ -448,9 +646,24 @@ async fn introspect_sqlite(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
             )
             .await?
             {
-                if let Some(column) = get::<Option<String>>(&info_row, "name")? {
-                    key_columns.push(column);
+                match get::<Option<String>>(&info_row, "name")? {
+                    Some(column) => key_columns.push(column),
+                    None => expression = true,
                 }
+            }
+
+            if partial || expression {
+                for row in query(
+                    conn,
+                    sqlite,
+                    "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ? AND sql IS NOT NULL",
+                    vec![index.clone().into()],
+                )
+                .await?
+                {
+                    catalog.verbatim.push(get(&row, "sql")?);
+                }
+                continue;
             }
 
             let index = sqlite_index_export_name(&table_name, index, &key_columns);
@@ -461,16 +674,29 @@ async fn introspect_sqlite(conn: &OrmConnection) -> Result<Vec<TableSchema>> {
             }));
         }
 
-        tables.push(catalog_table(
+        catalog.tables.push(catalog_table(
             &table_name,
             None,
             columns,
             primary_key.into_iter().map(|(_, name)| name).collect(),
             group_indexes(index_columns),
+            false,
         ));
     }
 
-    Ok(tables)
+    // The triggers, which keep an FTS5 index in step with its table.
+    for row in query(
+        conn,
+        sqlite,
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL ORDER BY name",
+        Vec::new(),
+    )
+    .await?
+    {
+        catalog.verbatim.push(get(&row, "sql")?);
+    }
+
+    Ok(catalog)
 }
 
 /// The name a SQLite index is exported under.

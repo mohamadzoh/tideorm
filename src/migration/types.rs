@@ -321,10 +321,16 @@ pub enum DefaultValue {
 }
 
 impl DefaultValue {
-    /// Convert to SQL representation
-    pub fn to_sql(&self) -> String {
+    /// The value as a `DEFAULT` clause writes it on `db_type`. A string is
+    /// escaped the way that backend reads a literal: MySQL and MariaDB also
+    /// take a backslash as an escape, so there `C:\temp\` has its backslashes
+    /// doubled.
+    pub fn to_sql(&self, db_type: DatabaseType) -> String {
         match self {
-            DefaultValue::String(value) => format!("'{}'", value.replace('\'', "''")),
+            DefaultValue::String(value) => format!(
+                "'{}'",
+                crate::internal::sql_safety::escape_sql_literal_for_db(db_type, value)
+            ),
             DefaultValue::Integer(value) => value.to_string(),
             DefaultValue::Float(value) => value.to_string(),
             DefaultValue::Boolean(value) => {

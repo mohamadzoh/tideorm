@@ -193,9 +193,10 @@ fn render(level: LogLevel, entry: &QueryLogEntry, is_slow: bool, threshold: u64)
         LogLevel::Error if entry.success => return None,
         LogLevel::Warn if entry.success && !is_slow => return None,
         LogLevel::Trace => entry.format_console(),
+        // A failure reads as one at every level, slow or not.
+        _ if !entry.success => format_error(entry),
         LogLevel::Debug => format_debug(entry),
         _ if is_slow => format_slow(entry, threshold),
-        _ if !entry.success => format_error(entry),
         _ => format_summary(entry),
     };
     Some(output)

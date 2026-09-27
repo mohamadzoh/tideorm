@@ -19,25 +19,30 @@ pub use values::ValidatableValue;
 use values::compiled_validation_regex;
 
 /// Collection of validation errors organized by field name
+///
+/// Fields come out in the order their first error was added, which for a
+/// derived model is the order the struct declares them, so [`first`](Self::first),
+/// [`messages`](Self::messages) and the error `create()` returns are the same
+/// on every run.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationErrors {
     errors: HashMap<String, Vec<String>>,
+    order: Vec<String>,
 }
 
 impl ValidationErrors {
     /// Start an empty validation-error collection.
     pub fn new() -> Self {
-        Self {
-            errors: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Append one error message to a field.
     pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
-        self.errors
-            .entry(field.into())
-            .or_default()
-            .push(message.into());
+        let field = field.into();
+        if !self.errors.contains_key(&field) {
+            self.order.push(field.clone());
+        }
+        self.errors.entry(field).or_default().push(message.into());
     }
 
     /// True when no field errors have been collected.
@@ -70,23 +75,23 @@ impl ValidationErrors {
         &self.errors
     }
 
-    /// Iterate through all field-error pairs.
+    /// Iterate through all field-error pairs, in the order the fields failed.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
-        self.errors.iter()
+        self.order
+            .iter()
+            .filter_map(|field| self.errors.get_key_value(field))
     }
 
     /// Return the first field/message pair, if any.
     pub fn first(&self) -> Option<(&String, &String)> {
-        self.errors
-            .iter()
+        self.iter()
             .next()
             .and_then(|(field, messages)| messages.first().map(|msg| (field, msg)))
     }
 
     /// Flatten all field errors into display strings.
     pub fn messages(&self) -> Vec<String> {
-        self.errors
-            .iter()
+        self.iter()
             .flat_map(|(field, messages)| {
                 messages
                     .iter()
@@ -96,9 +101,9 @@ impl ValidationErrors {
     }
 
     /// Append all errors from another collection.
-    pub fn merge(&mut self, other: ValidationErrors) {
-        for (field, messages) in other.errors {
-            for message in messages {
+    pub fn merge(&mut self, mut other: ValidationErrors) {
+        for field in other.order {
+            for message in other.errors.remove(&field).unwrap_or_default() {
                 self.add(field.clone(), message);
             }
         }
@@ -111,8 +116,7 @@ impl ValidationErrors {
 
     /// Flatten all errors into `(field, message)` pairs.
     pub fn errors(&self) -> Vec<(String, String)> {
-        self.errors
-            .iter()
+        self.iter()
             .flat_map(|(field, messages)| {
                 messages.iter().map(move |msg| (field.clone(), msg.clone()))
             })
@@ -328,8 +332,9 @@ impl Validator {
                 }
             }
             ValidationRule::Numeric => {
+                // `parse` also reads "NaN", "inf" and an overflowing "1e999".
                 if let Some(s) = value.as_str_value()
-                    && s.parse::<f64>().is_err()
+                    && !s.parse::<f64>().is_ok_and(f64::is_finite)
                 {
                     return Some(rule.message(field));
                 }
@@ -411,7 +416,9 @@ fn below_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bo
             integer < bound.ceil() as i128
         });
     }
-    value.as_f64_value().map(|n| n.is_nan() || n < bound)
+    value
+        .as_f64_value()
+        .map(|n| n.is_nan() || n < value.numeric_bound(bound))
 }
 
 /// Whether a numeric `value` lies above `bound`, as [`below_bound`] compares.
@@ -425,7 +432,9 @@ fn above_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bo
             integer > bound.floor() as i128
         });
     }
-    value.as_f64_value().map(|n| n.is_nan() || n > bound)
+    value
+        .as_f64_value()
+        .map(|n| n.is_nan() || n > value.numeric_bound(bound))
 }
 
 #[cfg(test)]

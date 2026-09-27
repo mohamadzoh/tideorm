@@ -1003,3 +1003,17 @@ async fn test_sqlite_search_skips_soft_deleted_rows() {
     .await
     .expect("searching a soft-delete model should succeed");
 }
+
+#[test]
+fn the_sqlite_rebuild_statement_reindexes_the_table_by_its_current_rowids() {
+    let index = FullTextIndex::new("idx_notes", "notes", vec!["body".to_string()]);
+
+    assert_eq!(
+        index.sqlite_rebuild_sql(),
+        r#"INSERT INTO "notes_fts"("notes_fts") VALUES('rebuild')"#
+    );
+    assert_eq!(
+        index.to_sqlite_sql().last(),
+        Some(&index.sqlite_rebuild_sql())
+    );
+}

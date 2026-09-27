@@ -10,7 +10,7 @@ fn json_text(value: &serde_json::Value) -> crate::internal::Value {
 impl<M: Model> BatchUpdateBuilder<M> {
     /// Bind `value` with the type of the column it is assigned to.
     fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
-        crate::internal::json_to_column_value(
+        crate::internal::json_to_assignment_value(
             value,
             crate::internal::column_type_of::<M>(column).as_ref(),
         )
@@ -260,11 +260,25 @@ impl<M: Model> BatchUpdateBuilder<M> {
         }
 
         query.conditions.extend(self.conditions.iter().cloned());
-        if !self.or_group.is_empty() {
-            query.or_groups.push(self.or_group.clone());
+        // The update's `or_where_*` calls join the query's own OR group.
+        for condition in &self.or_group.conditions {
+            query = query.push_or_condition(condition.clone());
         }
 
         query
+    }
+
+    /// Report a value a setter refused, such as a NaN float; its assignment
+    /// was never staged, so the update would otherwise run without it.
+    fn ensure_values_are_bindable(&self) -> Result<()> {
+        match &self.invalid_reason {
+            Some(reason) => Err(Error::invalid_query(format!(
+                "update of {}: {}",
+                M::table_name(),
+                reason
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Refuse the parts of a query an `UPDATE` cannot keep: it takes the
@@ -388,6 +402,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///
     /// On success the query cache for this table is invalidated.
     pub async fn execute(self) -> Result<u64> {
+        self.ensure_values_are_bindable()?;
         if self.updates.is_empty() {
             return Ok(0);
         }
@@ -425,6 +440,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// are already written, and retrying repeats a non-idempotent change such
     /// as `increment`. Run it inside `Database::transaction` when that matters.
     pub async fn execute_returning(self) -> Result<Vec<M>> {
+        self.ensure_values_are_bindable()?;
         if self.updates.is_empty() {
             return Ok(vec![]);
         }

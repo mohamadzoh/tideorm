@@ -20,6 +20,10 @@ mod backend {
 
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::Postgres;
 
+    pub fn database_url() -> &'static str {
+        super::test_config::test_database_url()
+    }
+
     pub async fn connect() -> bool {
         if !super::test_config::should_run_postgres_tests() {
             println!("{}", super::test_config::SKIPPED);

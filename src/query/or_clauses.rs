@@ -22,7 +22,7 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Add `condition` to the one OR group the `or_where_*` calls share,
     /// creating it among the query's groups on first use.
-    fn push_or_condition(mut self, condition: WhereCondition) -> Self {
+    pub(crate) fn push_or_condition(mut self, condition: WhereCondition) -> Self {
         match self
             .simple_or_group
             .and_then(|index| self.or_groups.get_mut(index))

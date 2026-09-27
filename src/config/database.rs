@@ -136,11 +136,14 @@ impl DatabaseType {
     }
 }
 
+/// `url` with a `mariadb://` scheme, in any case, spelled `mysql://`, the
+/// one the driver takes.
 pub(crate) fn rewrite_driver_url(url: &str) -> String {
-    if let Some(remainder) = url.strip_prefix("mariadb://") {
-        format!("mysql://{}", remainder)
-    } else {
-        url.to_string()
+    match url.split_once("://") {
+        Some((scheme, remainder)) if scheme.eq_ignore_ascii_case("mariadb") => {
+            format!("mysql://{}", remainder)
+        }
+        _ => url.to_string(),
     }
 }
 

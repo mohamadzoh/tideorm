@@ -105,6 +105,12 @@ impl FullTextIndex {
     /// Generate CREATE VIRTUAL TABLE statement for SQLite FTS5, the statement
     /// that indexes the rows the table already holds, and the triggers that
     /// keep it in sync with the table
+    ///
+    /// The index follows the table's rowid. SQLite keeps rowids through a
+    /// `VACUUM` only for a table with an `INTEGER PRIMARY KEY`; after
+    /// vacuuming any other table, a UUID- or text-keyed one, run
+    /// [`sqlite_rebuild_sql`](Self::sqlite_rebuild_sql) before anything reads
+    /// or writes it, or searches return other rows.
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let mut params = Vec::new();
         let fts_table = format!("{}_fts", self.table);
@@ -148,14 +154,22 @@ impl FullTextIndex {
             self.sqlite_trigger("au", "UPDATE", &format!("{delete_old} {insert_new}")),
             // An external-content table starts empty: without a rebuild, rows
             // written before the index was created are never found.
-            SqlBuilder::new(DatabaseType::SQLite, &mut params)
-                .raw("INSERT INTO ")
-                .ident(&fts_table)
-                .raw("(")
-                .ident(&fts_table)
-                .raw(") VALUES('rebuild')")
-                .into_sql(),
+            self.sqlite_rebuild_sql(),
         ]
+    }
+
+    /// The SQLite statement that indexes the table's rows afresh, by their
+    /// rowids as they are now: what a `VACUUM` of a table without an
+    /// `INTEGER PRIMARY KEY` calls for (see [`to_sqlite_sql`](Self::to_sqlite_sql)).
+    pub fn sqlite_rebuild_sql(&self) -> String {
+        let fts_table = format!("{}_fts", self.table);
+        SqlBuilder::new(DatabaseType::SQLite, &mut Vec::new())
+            .raw("INSERT INTO ")
+            .ident(&fts_table)
+            .raw("(")
+            .ident(&fts_table)
+            .raw(") VALUES('rebuild')")
+            .into_sql()
     }
 
     /// Render the `AFTER <event>` trigger named `<table>_<suffix>`.

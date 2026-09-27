@@ -35,6 +35,17 @@ This release is breaking: read the upgrade notes and the removal list before upg
   Read an eager-loaded value with `get_cached()`.
 - **`connect()` fails when the MySQL/MariaDB version probe fails** instead of silently assuming
   MySQL.
+- **`#[tideorm(hidden = "..")]` names are checked.** Each must be a field, a column or an
+  attachment relation, so a typo is a compile error instead of a field `to_json` shows; a column
+  name hides its field. Without `hidden`, a model hides its soft-delete field, which is
+  `deleted_at` unless `deleted_at_column` names another.
+- **A NaN or infinite float in a filter, a `set()` or a `having()` fails the query.** JSON writes
+  one as `null`, so `where_eq("price", f64::NAN)` became `price IS NULL` and matched the rows with
+  no price — `"NaN".parse::<f64>()` succeeds, so a request could send one. A `None` still means
+  NULL.
+- **`Seeder::rollback()` fails when the last seed the `_seeds` table records is not registered**
+  (renamed or removed since it ran), naming it; it rolled nothing back and reported success, which
+  left `reset()` and `refresh()` doing nothing. Register it again, or delete its `_seeds` row.
 - **`BatchUpdateBuilder::execute_returning()` on MySQL and MariaDB returns
   `Error::BackendNotSupported`** (501) before anything runs, instead of a generic query error on
   MySQL and a syntax error on MariaDB, which has `UPDATE .. RETURNING` only from 13.0.
@@ -128,6 +139,45 @@ This release is breaking: read the upgrade notes and the removal list before upg
 - **The entity manager refuses to flush a managed entity whose primary key was changed.** The
   flush saved it under the new key, overwriting whichever row held that key. Detach the entity
   and persist a new one.
+- **Model declarations the derive now refuses**, each of which compiled and then failed or went
+  wrong at run time: `#[tideorm(encrypted = "..")]` on a primary key (every write stored a new
+  ciphertext, so `find`, `update` and `delete` never matched and `save()` inserted duplicates);
+  `auto_increment` on a key that is not an integer (the insert left the key out); a relation
+  field inside an `Option`, `Box`, `Rc` or `Arc`; `#[validate(range(a..b))]`, which leaves `b`
+  out in Rust while the rule includes it (write `range(a..=b)` or `range(a, b)`); a `min`, `max`
+  or `range` bound that is not finite, which made the derive panic; and `#[index(..)]` with
+  arguments on a field, where the bare attribute now indexes that field.
+- **`connect()` syncs the schema before it seeds**, so a seed fills the tables sync creates, and
+  a `force_sync` no longer drops what the seeds wrote.
+- **Generated index names past 63 bytes are shortened with a hash** (`idx_<table>_<columns>`,
+  and a model's `uidx_` and `idx_` names alike). PostgreSQL cut such names to 63 bytes, so two
+  indexes whose names shared that prefix were one, and MySQL refused them. On PostgreSQL a sync
+  creates such an index again under its new name; drop the one under the cut name.
+- **`soft_delete()` is `delete()` on a soft-delete model**: the delete callbacks run, so a
+  `before_delete` that refuses stops it, and a row already deleted keeps its stamp. It returns the
+  row as stored.
+- **`update_all_except` keeps the key and the conflict columns**, as the default upsert does; it
+  wrote them, so a UUID-keyed row was re-keyed.
+- **An upsert keyed only by an auto-increment key the database has not numbered is `create()`**,
+  with its callbacks; it stored the placeholder `0`.
+- **`save_with_many` and `NestedSaveBuilder::with_many` save each child**, updating one already
+  stored, as `save_with_one` does; they inserted it again.
+- **A model whose own `Serialize` or `Deserialize` derive renames a field is not query-cached**:
+  TideORM's generated half reads and writes field names, so a cache hit lost the renamed fields.
+- **An empty or blank encryption key configures no key**, so encrypting fails with the missing-key
+  error; tokens and encrypted fields were sealed under a key anyone could derive.
+- **A batch `set()` of an encrypted field takes a string or `None`**; any other value is refused
+  rather than stored where no load could read it back.
+- **A transaction in which a statement deadlocked refuses to commit** (`Error::Transaction`): the
+  database rolled the whole transaction back, and on MySQL and MariaDB the statements after the
+  deadlock ran outside it and were committed while the transaction reported success.
+- **`Database::connect`, `Database::init` and `Database::builder().build()` ask a MySQL-protocol
+  server whether it is MariaDB** (`SELECT VERSION()`), as `TideConfig::connect` does, and fail
+  when that fails; they also take a `mariadb://` URL, in any case.
+- **The driver's own statement logging is off**: `TIDE_LOG_QUERIES` and the `QueryLogger` decide
+  what is printed, where sqlx logged every statement at `INFO` to any subscriber listening.
+- **Validation errors come out in the order the fields failed**, which for a model is the order
+  it declares them, so `create()` reports the same field every time.
 
 ### Removed — Breaking
 
@@ -236,14 +286,17 @@ This release is breaking: read the upgrade notes and the removal list before upg
   builder, renders `NOT BETWEEN`; like `where_between`, a NULL bound is refused.
 - **`QueryBuilder::update_all()`** starts a bulk update of the rows a query selects — scopes,
   filters, OR groups, its soft-delete scope and the database `query_with` names carry over — so a
-  chain of scopes can be updated without restating its filters. A query that joins, groups, pages
-  or unions is refused when the update runs. Batch updates also render for the backend of the
-  connection that runs them.
+  chain of scopes can be updated without restating its filters, and the update's `or_where_*`
+  calls join the query's OR group. A query that joins, groups, pages or unions is refused when the
+  update runs. Batch updates also render for the backend of the connection that runs them.
 - **`where_has::<R>(fk, lk, |q| ..)` and `where_doesnt_have::<R>(..)`** filter by a related
   model's own query: its soft-delete scope applies, its values bind as its columns' types, and
-  any filter works inside the closure — the typed form of the table-level `has_related`.
+  any filter works inside the closure — the typed form of the table-level `has_related`. Over the
+  model's own table (a tree's children) the related rows are read under an alias, so a nested
+  `where_has` or a qualified column in the closure names the related row.
 - **`QueryBuilder::find(id)` and `find_or_fail(id)`** look a key up among the rows a query
-  matches, its filters and scope applied.
+  matches, its filters and scope applied; a union is refused, since the key would filter its first
+  query only.
 - **`sort("-created_at,name")`** orders by a request's sort string — terms separated by commas,
   `-` or `desc` for descending — checking every column as `order_by` does.
 - **Column comparisons**: `where_column_eq`, `_ne`, `_gt`, `_gte`, `_lt` and `_lte`, with
@@ -268,6 +321,21 @@ This release is breaking: read the upgrade notes and the removal list before upg
   leaving quoted phrases as written. All of these existed and did nothing.
 - **`Seeder::names()`** lists the seeds a seeder holds without a database, so a seed name can be
   checked before anything runs; the CLI checks `--seeder` against it before dropping tables.
+- **`FullTextIndex::sqlite_rebuild_sql()`** re-indexes a table's SQLite FTS5 index by its current
+  rowids, which a `VACUUM` renumbers for a table without an `INTEGER PRIMARY KEY`.
+- **`HasTranslations::serialized_key(field)`** names the key a field is serialized under, so
+  `to_translated_json` writes each translation where a `rename_all` model's JSON has the field;
+  the default is the field's name.
+- **`#[index]` and `#[unique_index]` on a field** index that field's column; they were accepted
+  there and ignored.
+- **Two relations to one model**, such as an `author` and an `editor` that are both
+  `BelongsTo<User>`, compile, and each loads eagerly by its own keys.
+- **Validation:** the string rules apply to `Text` fields, `min`, `max` and `range` to `Decimal`,
+  `required` to an `Option` of a `Uuid`, a date, a `bool`, JSON or a `Vec`, and
+  `range(min..=max)` is accepted. `ValidatableValue::numeric_bound` rounds a bound to a value's
+  precision (a defaulted method).
+- **`MorphTo::with_values` takes an `Option<String>` type value**, so a `MorphTo` may have a
+  nullable type column; a row holding NULL in both loads no owner.
 
 ### Fixed
 
@@ -524,9 +592,9 @@ This release is breaking: read the upgrade notes and the removal list before upg
   as bytes, matched nothing on; it is bound as the column's type whenever a model maps that table.
   A typed column of another model named the query's own column of that name:
   `Post::query().where_eq(User::columns.id, 5)` filtered `posts.id`. A typed column carries its
-  model's table now, and a filter, `order_by`, `group_by`, aggregate, `pluck` or IN subquery on
-  another model's column is written `users.id`, which fails loudly unless the query joins that
-  table. `has_related`/`has_no_related` bound their value as text and refused a `Uuid` or a
+  model's table now, and a filter, `order_by`, `group_by`, aggregate, window, `pluck` or IN
+  subquery on another model's column is written `users.id`, which fails loudly unless the query
+  joins that table. `has_related`/`has_no_related` bound their value as text and refused a `Uuid` or a
   timestamp; they take any `Serialize` value and bind it as the related column's type.
   `where_eq`, `where_not`, `where_in` and `where_not_in` on a JSON column failed on PostgreSQL, whose
   `json` type has no `=`, and never matched on MySQL, which compared the document with a string;
@@ -561,12 +629,119 @@ This release is breaking: read the upgrade notes and the removal list before upg
   lock lives on a connection of its own now, which closes with the run. Seeding inside a
   transaction read and created its ledger outside it: a second run in the same transaction ran
   every seed again, and a one-connection SQLite pool waited forever for a second connection.
+  `change_column` on MySQL and MariaDB made the column nullable and dropped its default,
+  `AUTO_INCREMENT` and comment, since `MODIFY COLUMN` restates the whole column; it reads them
+  from `SHOW CREATE TABLE` and keeps them, as PostgreSQL's `ALTER COLUMN .. TYPE` does.
+- **Field names with a digit before a letter** (`s3key`, `md5sum`) failed to compile: SeaORM's
+  derives named the generated column variant `S3key` while TideORM named it `S3Key`. A field named
+  `self_` no longer produces the variant `Self`.
+- **Upserts.** One with nothing to update — every column a conflict column, or
+  `update_columns(vec![])` — failed with "None of the records are inserted" on a conflict, and on
+  MySQL and MariaDB rendered `ON DUPLICATE KEY IGNORE`, which is not SQL, so even the first insert
+  failed; it keeps the stored row now. On MySQL and MariaDB an upsert whose update changed no value
+  failed the same way, since the server reports no affected row. `update_all_except` compared
+  column names only, so a field name of a renamed column left it overwritten; an unknown name is
+  an error.
+- **Transactions.** On PostgreSQL a closure that caught a failed statement and returned `Ok`
+  reported a commit, while the server, which aborts the transaction at the failure, rolled it
+  back; `transaction()` now returns `Error::Transaction` and rolls back, and the entity manager's
+  state is restored with it. The other backends keep the transaction going after a failed
+  statement, as before. After the explicit rollback of a leaked transaction, statements through
+  the stray handle committed one by one; a transaction is reopened for them, which the handle's
+  drop rolls back.
+- **Eager loading.** `with(..)` matched a parent's key with its children's by exact type, so an
+  `i64` id and an `i32` foreign key (or an integer owner id and a text `*_id` column of a
+  `MorphMany`) loaded no children while `load()` found them. Keys match by value now. A pair the
+  pivot table held twice loaded its related row twice through `with(..)` of a `HasManyThrough`.
+- **Relations and attachments.** `MorphTo::load_as` looked the owner up by its primary key even
+  when the owner's `MorphOne`/`MorphMany` keyed its children by a `local_key`, and by the first
+  column of a composite key. Replacing a `has_one` child through the entity manager inserted the
+  new row before deleting the old one, which a unique foreign key refused. `detach(relation,
+  Some(key))` on a has-one attachment cleared it whatever file it held. Attachment metadata named
+  like a field (`size`, `key`) could not be read back, so `get_file()` returned `None`, or
+  overwrote the field; an entry named like an unset optional field round-trips, and one named
+  like a set field is not stored.
+- **Queries.** `soft_delete()` under `with_trashed()` re-stamped rows already trashed, pushing
+  back a retention purge that reads the stamp; it marks live rows only, and refuses
+  `only_trashed()`. A delete or update whose one filter is `where_json_contains(col, json!({}))`
+  (or `[]`), which every object (or array) document contains, passed the filter guard and wrote
+  the whole table. An index naming a field of a renamed column (`#[index("display_name")]`) was
+  created on a column of that name, which does not exist.
+- **Caching.** A raw batch that begins with `SELECT` and goes on to write (`SELECT 1; DELETE ..`)
+  left the cache in place, and a cached read's tags missed the second table of `FROM a, b`, so a
+  write to it left the entry stale.
+- **Schema sync, migrations and the schema file.** On SQLite, sync failed adding a column with a
+  current-time default to a table that has rows ("Cannot add a column with non-constant
+  default"); it adds the column without the default and warns. A migration string default kept
+  its backslashes unescaped on MySQL and MariaDB, where `C:\temp\` broke the statement and
+  `domain\user` stored `domainuser`. A current-time default spelled `now()` failed on MySQL
+  (`DATETIME(6)` rejects a less precise default) and on SQLite; `now()`, `CURRENT_TIMESTAMP()`
+  and `LOCALTIMESTAMP` now render as each backend accepts them. On MySQL a re-run of
+  `create_table_if_not_exists` failed on the index it had already made. The schema file wrote a
+  MySQL string default bare (`DEFAULT draft`), an expression default without its parentheses,
+  a FULLTEXT or prefix index as a plain index, an index with an expression key part with a
+  column missing, PostgreSQL's expression, partial and GIN indexes not at all, an identity column
+  as a plain one, and SQLite's FTS5 table and its shadow tables as ordinary tables; each is
+  written as the catalog declares it now. A sync warning carried a run of spaces from a lost
+  line continuation.
+- **Validation.** `#[validate(min = 0.7)]` refused `0.7_f32`, which is `0.699999988` as an `f64`;
+  `numeric` accepted `NaN`, `inf` and `1e999`.
+- **Encrypted fields.** `pluck`, `value`, `get_json` and `get_as` returned the ciphertext of an
+  encrypted column. `Hashed`'s `Debug` printed the Argon2 hash its `Display` and `Serialize`
+  hide, and `from_token`'s not-found error named the decoded key a token exists to hide.
+- **Relations.** `query_with(db).with(..)` loaded the relations from the global database. An
+  owner whose nullable `local_key` was NULL loaded every related row whose foreign key is NULL,
+  counted them, and had `attach()` insert `(NULL, id)` pivot rows and `sync()` delete them. A
+  `SelfRef` and `SelfRefMany::load_tree` of a model whose key is not named `id` queried an `id`
+  column. `HasManyThrough` read a pivot key naming a renamed column's field as a column of that
+  name, and its eager load failed on PostgreSQL when the pivot key's integer type differed from
+  the owner's; it loads like the other relations now, matching keys by value. Its `load()` and
+  `count()` grouped by the key beside `SELECT related.*`, which MariaDB refuses under
+  `ONLY_FULL_GROUP_BY`; they read the rows through a semi-join. Eager loading compared each key
+  with every other to drop duplicates, quadratic in the parents.
+- **Models.** A batch `set()` bound a JSON document, bytes and a PostgreSQL array as JSON text:
+  PostgreSQL refused a `jsonb` column set so, and SQLite and MySQL stored the bytes' JSON text in
+  the BLOB. `find_with(id, db)` recorded its dirty-tracking baseline under the global database's
+  pool. `insert_all` discarded every dirty-tracking baseline of the model, the new rows' among
+  them. The generated `Deserialize` read a sequence (bincode, postcard) in another order than
+  `Serialize` writes one, relations among the columns; relations now follow the columns in both,
+  and a non-self-describing format gets every relation, as `None` when none is cached.
+- **Entity manager.** A new root read from JSON, whose relations were built under its
+  placeholder key `0`, was saved without its children. `persist()` onto an entity the context
+  was removing kept the removal: the row was deleted and the new values never written. A
+  managed entity whose row another path of the context saved flushed the whole row it had
+  loaded back over the newer values; it moves onto what was stored, keeping its own edits. An
+  edit to a field the model's own serde derive skips was not saved through a relation, whose
+  change check compared JSON.
+- **Queries.** `chunk()` of a join with a `limit()` failed on its last batch, and `chunk(1)` of any
+  join on its first, taking a batch the limit cut short for a key repeated past the chunk size.
+  `aggregates()` decoded a second `MIN`/`MAX` of one column by the driver's type (a MySQL
+  timestamp without its zone, a SQLite boolean as `1`), and `sum`, `avg` and `count_distinct`
+  of a joined column by that column's type (a count read as `true`). `pluck` and `value` on a
+  union rewrote only its first query's projection; a union's `order_by` wrote a joined query's
+  column as `table.column`, which PostgreSQL and MySQL refuse there; `count()` of a join grouped
+  by two columns of one name failed on MySQL. A raw read of `FROM ONLY posts` was not tagged
+  with `posts`, so a write to it left the cached read in place.
+- **Connections, caching and logging.** `connect_timeout` did nothing: SeaORM maps it and
+  `acquire_timeout` onto sqlx's one checkout timeout, and `acquire_timeout` won; the longer of the
+  two applies now. URL masking left a `?password=` query parameter visible. A cache TTL too long
+  for an `Instant`, such as `Duration::MAX`, expired the entry at once. The `QueryLogger`
+  dropped a failure's error at `Debug` level and when the failed statement was also slow.
+  Migration statements never reached the `QueryLogger`. A raw JSON row gave `null` for a
+  non-NULL value no decoder took, such as a PostgreSQL `NUMERIC` past 28 digits or an enum; it
+  gives the value's text, a `NUMERIC` exactly. Raw SQL write detection missed
+  `EXPLAIN ANALYZE DELETE ..`, which runs the delete, and a MySQL literal written with `\'`,
+  which hid a second statement from the scan, so neither flushed the cache.
 
 ### Changed — Breaking
 
-- `ConditionValue` has a `RawTemplate` variant, which `where_raw_with` builds, so an exhaustive
-  `match` on it needs an arm; `ColumnIn::is_in`/`not_in` take `impl IntoIterator<Item = T>`, so an
+- `ConditionValue` has `RawTemplate`, `Column` and `Invalid` variants — the last holds a value no
+  SQL comparison takes, such as a NaN — so an exhaustive `match` on it needs arms, and it
+  implements `PartialEq`. `ColumnCondition::value` is a `ConditionValue` rather than JSON, so
+  a typed condition carries its list, range or refusal as the builders do; `ColumnIn::is_in`/`not_in` take `impl IntoIterator<Item = T>`, so an
   implementation outside TideORM changes its signature. Calls are unaffected.
+- `DefaultValue::to_sql` takes the `DatabaseType` to render for, since a string default is
+  escaped differently on MySQL and MariaDB.
 - The crate root re-exports the whole prelude, plus `Result`, `chrono`, `async_trait` and
   `inventory`, so `tideorm::X` and `tideorm::prelude::X` can no longer drift apart.
 - `profiling::GlobalStats` is a type alias of `QueryStats`, so `GlobalProfiler::stats()` prints in

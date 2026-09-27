@@ -12,7 +12,6 @@ pub(crate) use fulltext::{
 };
 
 /// Escape `value` for use inside a single-quoted SQL literal on `db_type`.
-#[cfg(feature = "fulltext")]
 pub(crate) fn escape_sql_literal_for_db(db_type: DatabaseType, value: &str) -> String {
     let escaped = value.replace('\'', "''");
     match db_type {

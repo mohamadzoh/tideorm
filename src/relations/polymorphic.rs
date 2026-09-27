@@ -17,8 +17,8 @@ use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    ensure_relation_configured, has_active_database, preserve_cached_value,
-    require_scalar_relation_key, required_key,
+    ensure_relation_configured, has_active_database, owner_is_unsaved, preserve_cached_value,
+    require_scalar_relation_key, required_key, where_key,
 };
 
 /// The inverse side of a polymorphic relation: this model carries the
@@ -79,8 +79,15 @@ impl<Morphable> MorphTo<Morphable> {
     /// `type_value` is the owner's table name — the same string
     /// `Model::table_name()` returns — and `id_value` its key. Without both, the
     /// load methods have nothing to resolve.
-    pub fn with_values(mut self, type_value: String, id_value: serde_json::Value) -> Self {
-        self.type_value = Some(type_value);
+    ///
+    /// The type column may be nullable (`Option<String>`): a row with no owner
+    /// holds `NULL` in both columns, and `load()` then returns `None`.
+    pub fn with_values(
+        mut self,
+        type_value: impl Into<Option<String>>,
+        id_value: serde_json::Value,
+    ) -> Self {
+        self.type_value = type_value.into();
         self.id_value = Some(id_value);
         self
     }
@@ -118,8 +125,23 @@ impl<Morphable> MorphTo<Morphable> {
             _ => return Ok(None),
         };
 
+        // The owner's `MorphOne`/`MorphMany` names the key its children hold.
+        let key_column = match Related::__morph_owner_key(self.id_column) {
+            Some(column) => column,
+            None => match Related::primary_key_names() {
+                [column] => column,
+                _ => {
+                    return Err(Error::invalid_query(format!(
+                        "MorphTo::load_as: {} has a composite primary key, and no MorphOne or MorphMany of it names the key '{}' holds",
+                        Related::table_name(),
+                        self.id_column
+                    )));
+                }
+            },
+        };
+
         Related::query()
-            .where_eq(Related::primary_key_name(), id.clone())
+            .where_eq(key_column, id.clone())
             .first()
             .await
     }
@@ -143,6 +165,11 @@ impl<Morphable: Model> MorphTo<Morphable> {
         self.ensure_configured()?;
 
         let Some(type_value) = self.type_value.as_deref() else {
+            // A NULL type column is a row with no owner; only a wrapper that
+            // never received the columns has no id either.
+            if self.id_value.is_some() {
+                return Ok(None);
+            }
             return Err(Error::query(format!(
                 "MorphTo column '{}' holds no type value; rebuild the model through TideORM",
                 self.type_column
@@ -236,9 +263,11 @@ impl<Related: Model> MorphOne<Related> {
             .as_deref()
             .ok_or_else(|| Error::query("Parent table not set for relation"))?;
 
-        Ok(Related::query()
-            .where_eq(format!("{}_type", self.morph_name), table)
-            .where_eq(format!("{}_id", self.morph_name), pk.clone()))
+        Ok(where_key(
+            Related::query().where_eq(format!("{}_type", self.morph_name), table),
+            format!("{}_id", self.morph_name),
+            pk,
+        ))
     }
 
     /// Declare the morph prefix and the local key column.
@@ -271,7 +300,7 @@ impl<Related: Model> MorphOne<Related> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk
@@ -377,9 +406,11 @@ impl<Related: Model> MorphMany<Related> {
             .as_deref()
             .ok_or_else(|| Error::query("Parent table not set for relation"))?;
 
-        Ok(Related::query()
-            .where_eq(format!("{}_type", self.morph_name), table)
-            .where_eq(format!("{}_id", self.morph_name), pk.clone()))
+        Ok(where_key(
+            Related::query().where_eq(format!("{}_type", self.morph_name), table),
+            format!("{}_id", self.morph_name),
+            pk,
+        ))
     }
 
     /// Declare the morph prefix and the local key column.
@@ -412,7 +443,7 @@ impl<Related: Model> MorphMany<Related> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk

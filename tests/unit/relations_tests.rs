@@ -152,3 +152,30 @@ mod cached_payloads;
 
 #[path = "relations_tests/sqlite_runtime.rs"]
 mod sqlite_runtime;
+
+/// A comment whose owner may be absent: both morph columns are nullable.
+#[tideorm::model(table = "relation_optional_comments")]
+struct RelationOptionalComment {
+    #[tideorm(primary_key)]
+    id: i64,
+    commentable_type: Option<String>,
+    commentable_id: Option<i64>,
+    #[tideorm(morph_name = "commentable")]
+    commentable: MorphTo<RelationTestNode>,
+}
+
+/// A `MorphTo` over a nullable type column compiles, and a row holding NULL
+/// in both columns has no owner.
+#[tokio::test]
+async fn a_morph_to_with_null_columns_has_no_owner() {
+    let comment = RelationOptionalComment::default();
+    assert_eq!(comment.commentable.type_value(), None);
+    assert!(
+        comment
+            .commentable
+            .load()
+            .await
+            .expect("load failed")
+            .is_none()
+    );
+}

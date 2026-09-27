@@ -59,7 +59,11 @@ pub trait SoftDelete: Model {
         self.deleted_at().is_some()
     }
 
-    /// Mark the record as deleted by setting the soft-delete timestamp.
+    /// Mark the record as deleted, and return it as stored.
+    ///
+    /// On a `#[tideorm(soft_delete)]` model this is `delete()`: the delete
+    /// callbacks run, so a `before_delete` that refuses stops it, and a record
+    /// already deleted keeps its stamp, which a retention purge reads.
     ///
     /// The stamp is `Utc::now()` and never the database's `CURRENT_TIMESTAMP`.
     /// `deleted_at` is a `DateTime<Utc>`, so a session-local database clock —
@@ -68,8 +72,24 @@ pub trait SoftDelete: Model {
     /// query-level `QueryBuilder::soft_delete` renders the same UTC instant for
     /// exactly this reason; keep the two in agreement.
     async fn soft_delete(mut self) -> Result<Self> {
-        self.set_deleted_at(Some(Utc::now()));
-        self.update().await
+        // `delete()` removes the row of a model without the flag, so a hand
+        // written implementation on one only sets the stamp.
+        if !Self::soft_delete_enabled() {
+            self.set_deleted_at(Some(Utc::now()));
+            return self.update().await;
+        }
+        let primary_key = self.primary_key();
+        let display = Self::primary_key_display(&primary_key);
+        <Self as Model>::delete(self).await?;
+        crate::model::find_including_trashed::<Self>(primary_key)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::not_found(format!(
+                    "{} with {} no longer exists",
+                    Self::table_name(),
+                    display
+                ))
+            })
     }
 
     /// Clear the soft-delete timestamp and persist the restored record.

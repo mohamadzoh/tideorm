@@ -56,7 +56,12 @@ where
     let connection = crate::database::__current_connection()?;
     let inserted =
         crate::internal::QueryExecutor::insert_many::<M>(&connection.executor(), models).await?;
-    crate::query::QueryBuilder::<M>::invalidate_model_state(inserted.len() as u64);
+    // New rows leave every loaded model as it was, so only cached reads go:
+    // the dirty-tracking baselines stay, the inserted models' among them, as
+    // `create()` leaves its own.
+    if !inserted.is_empty() {
+        crate::QueryCache::global().invalidate_model(M::table_name());
+    }
     Ok(inserted)
 }
 
@@ -103,8 +108,8 @@ where
 }
 
 /// Read the row with this primary key whether or not it is soft-deleted, for
-/// `reload`, whose record is the one in hand.
-async fn find_including_trashed<M>(id: M::PrimaryKey) -> Result<Option<M>>
+/// `reload` and `soft_delete`, whose record is the one in hand.
+pub(crate) async fn find_including_trashed<M>(id: M::PrimaryKey) -> Result<Option<M>>
 where
     M: Model,
 {

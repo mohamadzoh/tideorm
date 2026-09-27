@@ -11,8 +11,8 @@ use crate::query::QueryBuilder;
 mod entity_manager_support;
 
 use super::helpers::{
-    QuerySource, ensure_relation_configured, preserve_cached_value, quote_ident,
-    require_scalar_relation_key, required_key,
+    QuerySource, ensure_relation_configured, linkable_key, owner_is_unsaved, preserve_cached_value,
+    quote_ident, require_scalar_relation_key, required_key, where_key,
 };
 
 /// A many-to-many relation: rows of `Related` reached by joining `Pivot`'s
@@ -167,7 +167,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             same_relation,
         );
 
@@ -180,50 +180,45 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         }
     }
 
-    /// Apply the pivot join and the owner filter that both load paths read the
+    /// Apply the pivot join and the owner filter `load_with` reads the
     /// relation through.
     ///
     /// The join fans a related row out once per matching pivot row, so a pivot
-    /// table holding the same pair twice repeats the related model.
-    /// `deduplicate` collapses that in the database — see
-    /// [`deduplicate_by_identity`] for why it groups rather than `DISTINCT`s —
-    /// which keeps the duplicates off the wire and makes `count()` over the same
-    /// shape agree with what `load` returns. `load_with` passes `false`: its
-    /// closure owns the projection and the ordering, both of which
-    /// deduplication constrains.
+    /// table holding the same pair twice repeats the related model; the
+    /// closure owns the projection, so it may read the pivot's columns.
     fn scope_to_pivot(
         &self,
         query: QueryBuilder<Related>,
         pk: &serde_json::Value,
-        deduplicate: bool,
     ) -> QueryBuilder<Related> {
-        let pivot_related_column = format!("{}.{}", self.pivot_table, self.related_key);
+        let pivot_related_column = format!(
+            "{}.{}",
+            self.pivot_table,
+            pivot_column::<Pivot>(self.related_key)
+        );
         let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
-        let query = query
-            .bind_columns_of::<Pivot>()
-            .inner_join(
-                &self.pivot_table_reference(),
-                &pivot_related_column,
-                &related_local_column,
-            )
-            .where_eq(
-                format!("{}.{}", self.pivot_table, self.foreign_key),
-                pk.clone(),
-            );
+        let query = query.bind_columns_of::<Pivot>().inner_join(
+            &self.pivot_table_reference(),
+            &pivot_related_column,
+            &related_local_column,
+        );
+        let query = where_key(
+            query,
+            format!(
+                "{}.{}",
+                self.pivot_table,
+                pivot_column::<Pivot>(self.foreign_key)
+            ),
+            pk,
+        );
         // A soft-deleted pivot row no longer links the pair.
-        let query = if Pivot::soft_delete_enabled() {
+        if Pivot::soft_delete_enabled() {
             query.where_null(format!(
                 "{}.{}",
                 self.pivot_table,
                 Pivot::deleted_at_column()
             ))
-        } else {
-            query
-        };
-
-        if deduplicate {
-            deduplicate_by_identity(query)
         } else {
             query
         }
@@ -240,18 +235,29 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         }
     }
 
-    /// The query `load` reads the related rows through, one row per related
-    /// model.
+    /// The query `load` and `count` read the related rows through: the rows
+    /// whose key one of the owner's live pivot rows holds.
+    ///
+    /// A semi-join lists each related row once however many pivot rows link
+    /// it, where a join would repeat it and collapsing that takes a `GROUP BY`
+    /// on the key beside `SELECT related.*`, which MariaDB refuses under
+    /// `ONLY_FULL_GROUP_BY`, or a `DISTINCT`, which PostgreSQL refuses for a
+    /// `json` column. The pivot's own query leaves its trashed rows out.
     fn load_query(&self, context: &str) -> Result<QueryBuilder<Related>> {
         let pk = self.parent_key(context)?;
-        Ok(self.scope_to_pivot(self.source.query(), pk, true))
+        let links = where_key(self.source.query::<Pivot>(), self.foreign_key, pk)
+            .select(vec![pivot_column::<Pivot>(self.related_key)]);
+        Ok(self
+            .source
+            .query()
+            .where_in_subquery(self.related_local_key, links))
     }
 
-    /// Fetch every related row joined through the pivot table.
+    /// Fetch every related row linked through the pivot table.
     ///
-    /// Groups on `Related`'s primary key, so a pivot table holding the same pair
-    /// twice still yields one row — which is what makes this agree with
-    /// [`count`](Self::count). Queries whenever a connection is reachable and
+    /// Each related row comes back once, however many pivot rows link it,
+    /// which is what makes this agree with [`count`](Self::count). Queries
+    /// whenever a connection is reachable and
     /// falls back to the cache otherwise; the result is not stored back, so each
     /// call is a fresh read. Under the `entity-manager` feature an attached
     /// manager owns the cached instances, so its cache wins. Use
@@ -272,25 +278,22 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
     /// Load the relation through a caller-supplied constraint on the join query.
     ///
-    /// Unlike [`load`](Self::load) this does **not** deduplicate. The closure
-    /// owns the projection and the ordering, and both are things deduplication
-    /// constrains: it cannot order by a pivot column outside the grouping, and a
-    /// caller reading pivot columns through `select_raw()` wants exactly the one
-    /// row per pivot row that deduplication would remove. Callers who want the
-    /// deduplicated shape can add `.group_by()` on `Related`'s primary key
-    /// inside the closure.
+    /// Unlike [`load`](Self::load) this joins the pivot table, so the closure
+    /// can order by or read a pivot column (`select_raw()`), and a related row
+    /// comes back once per pivot row that links it. Add `.group_by()` on
+    /// `Related`'s primary key inside the closure for one row each.
     pub async fn load_with<F>(&self, constraint_fn: F) -> Result<Vec<Related>>
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
         let pk = self.parent_key("HasManyThrough::load_with")?;
-        constraint_fn(self.scope_to_pivot(self.source.query(), pk, false))
+        constraint_fn(self.scope_to_pivot(self.source.query(), pk))
             .get()
             .await
     }
 
     /// Count the related rows [`load`](Self::load) would return, without
-    /// reading them: the same join, deduplication and soft-delete scopes, so a
+    /// reading them: the same query and soft-delete scopes, so a
     /// pivot row pointing at a deleted or soft-deleted `Related` row is not
     /// counted. Always queries; the cache is not consulted.
     pub async fn count(&self) -> Result<u64> {
@@ -314,7 +317,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// instead. On a soft-delete pivot, a trashed row for the pair is restored
     /// rather than left to block the insert.
     pub async fn attach(&self, related_id: impl serde::Serialize) -> Result<()> {
-        let pk = self.parent_key("HasManyThrough::attach")?;
+        let pk = linkable_key(
+            self.parent_key("HasManyThrough::attach")?,
+            "HasManyThrough::attach",
+        )?;
         let related_id = crate::query::filter_value(related_id);
         let related_id = require_scalar_relation_key(&related_id, "HasManyThrough::attach")?;
         let db = self.source.database()?;
@@ -372,7 +378,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// Deletes pivot rows only — neither the owner nor the related row is
     /// touched.
     pub async fn detach(&self, related_id: impl serde::Serialize) -> Result<u64> {
-        let pk = self.parent_key("HasManyThrough::detach")?;
+        let pk = linkable_key(
+            self.parent_key("HasManyThrough::detach")?,
+            "HasManyThrough::detach",
+        )?;
 
         self.source
             .query::<Pivot>()
@@ -396,7 +405,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// joins an ambient transaction as a SAVEPOINT rather than opening a second
     /// top-level one.
     pub async fn sync<V: serde::Serialize>(&self, related_ids: Vec<V>) -> Result<()> {
-        let pk = self.parent_key("HasManyThrough::sync")?.clone();
+        let pk = linkable_key(
+            self.parent_key("HasManyThrough::sync")?,
+            "HasManyThrough::sync",
+        )?
+        .clone();
 
         let mut seen = std::collections::HashSet::new();
         let mut wanted = Vec::with_capacity(related_ids.len());
@@ -479,32 +492,11 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     }
 }
 
-/// Collapse the duplicate rows a pivot join fans out, without comparing whole
-/// rows.
-///
-/// `SELECT DISTINCT` is the obvious spelling and the wrong one: it compares
-/// every projected column, and PostgreSQL has no equality operator for the
-/// `json` type, so `SELECT DISTINCT "related".*` over a table carrying one
-/// aborts with `could not identify an equality operator for type json` — and
-/// tideorm's own schema builder emits exactly that column type. Grouping on the
-/// primary key deduplicates by identity instead, never comparing the other
-/// columns; they are functionally dependent on it, which is the one shape
-/// PostgreSQL and MySQL's `ONLY_FULL_GROUP_BY` both accept alongside
-/// `SELECT "related".*`. `build_self_ref_tree_sql` in the sibling `helpers`
-/// module groups for the same reason.
-///
-/// A model that declares no primary key has no identity cheaper than the whole
-/// row, so it falls back to `SELECT DISTINCT` and keeps the JSON hazard.
-fn deduplicate_by_identity<E: Model>(query: QueryBuilder<E>) -> QueryBuilder<E> {
-    let primary_key_columns = E::primary_key_names();
-    if primary_key_columns.is_empty() {
-        return query.distinct();
-    }
-
-    let table = E::table_name();
-    primary_key_columns.iter().fold(query, |query, column| {
-        query.group_by(format!("{}.{}", table, column))
-    })
+/// The pivot column `name` stands for: a key may name the field of a
+/// renamed column, which SQL naming the pivot by hand has to spell as the
+/// column.
+fn pivot_column<Pivot: Model>(name: &str) -> &str {
+    Pivot::canonical_column_name(name).unwrap_or(name)
 }
 
 /// Build the parameterized pivot-row INSERT shared by `attach` and `sync`, with
@@ -542,8 +534,8 @@ fn build_pivot_insert<Pivot: Model>(
         crate::internal::sql_safety::format_identifier_reference(db_type, pivot_table)
             .unwrap_or_else(|| quote_ident(db_type, pivot_table))
     };
-    let foreign_key = quote_ident(db_type, foreign_key);
-    let related_key = quote_ident(db_type, related_key);
+    let foreign_key = quote_ident(db_type, pivot_column::<Pivot>(foreign_key));
+    let related_key = quote_ident(db_type, pivot_column::<Pivot>(related_key));
     let sql = match db_type {
         // The conflict clause makes losing a race on a unique key a no-op
         // instead of an error.

@@ -76,6 +76,15 @@ pub(super) fn validate_primary_key_fields(
                 "#[tideorm(auto_increment)] requires #[tideorm(primary_key)] on the same field",
             ));
         }
+        // A key the database does not number is left out of the INSERT, which
+        // then fails; a `Uuid` key without `auto_increment` gets a random one.
+        if field.auto_increment && !field.is_integer() {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "#[tideorm(auto_increment)] requires an integer primary key; a Uuid key \
+                 gets a random value on create without it",
+            ));
+        }
     }
 
     Ok(())
@@ -106,6 +115,15 @@ pub(super) fn validate_relation_fields(fields: &[ModelField]) -> syn::Result<()>
         let Some(kind) = kind else {
             continue;
         };
+        if field.wraps_relation() {
+            let message = format!(
+                "a relation field is the `{wrapper}<..>` itself, not an Option, Box, Rc or Arc \
+                 of one: an unloaded `{wrapper}` is already empty",
+                wrapper = kind.wrapper()
+            );
+            combine_error(&mut errors, syn::Error::new_spanned(&field.ty, message));
+            continue;
+        }
 
         let required: &[(&str, &Option<String>)] = match kind {
             RelationKind::HasOne | RelationKind::HasMany | RelationKind::BelongsTo => {
@@ -166,6 +184,16 @@ pub(super) fn resolve_encrypted_fields<'a>(
             return Err(syn::Error::new_spanned(
                 &field.ty,
                 "#[tideorm(encrypted = ...)] only supports String/Text fields and Option<String>/Option<Text> fields",
+            ));
+        }
+
+        // Every write stores a fresh ciphertext, so an encrypted key would
+        // never match the plaintext `find`, `update` and `delete` look it up by.
+        if field.primary_key {
+            return Err(syn::Error::new_spanned(
+                field.ident(),
+                "#[tideorm(encrypted = ...)] cannot name a primary key field: its stored \
+                 ciphertext changes on every write, so no lookup by the key could match it",
             ));
         }
 
@@ -236,13 +264,55 @@ pub(super) fn build_index_impls(
     table_name: &str,
     indexes: &[IndexDef],
     unique: bool,
+    db_fields: &[ModelField],
 ) -> Vec<TokenStream2> {
     indexes
         .iter()
         .map(|index| {
             let name = index.get_name(table_name);
-            let columns = &index.columns;
+            // An index may name a field; the table knows its column.
+            let columns = index.columns.iter().map(|column| {
+                find_db_field(db_fields, column).map_or_else(|| column.clone(), ModelField::column_name)
+            });
             quote!(::tideorm::model::IndexDefinition::new(#name, vec![#(#columns.to_string()),*], #unique))
+        })
+        .collect()
+}
+
+/// The keys `to_json` leaves out: the fields `hidden` names by field or
+/// column name, as field names, and the attachment relations it names; else
+/// the soft-delete field, or `deleted_at` on a model without one.
+pub(super) fn resolve_hidden_fields(
+    struct_ident: &Ident,
+    fields: &[ModelField],
+    attachments: &[&String],
+    requested: Option<Vec<String>>,
+    soft_delete_field: Option<&Ident>,
+) -> syn::Result<Vec<String>> {
+    let Some(requested) = requested else {
+        return Ok(vec![soft_delete_field.map_or_else(
+            || "deleted_at".to_string(),
+            crate::parse::unraw_ident,
+        )]);
+    };
+
+    requested
+        .iter()
+        .map(|name| {
+            fields
+                .iter()
+                .find(|field| field.is_named(name))
+                .map(ModelField::name)
+                .or_else(|| attachments.contains(&name).then(|| name.clone()))
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(
+                        struct_ident,
+                        format!(
+                            "#[tideorm(hidden = ...)] references unknown field, column or attachment '{}'",
+                            name
+                        ),
+                    )
+                })
         })
         .collect()
 }

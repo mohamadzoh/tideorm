@@ -18,8 +18,8 @@ use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    build_self_ref_tree_sql, has_active_database, preserve_cached_value,
-    require_scalar_relation_key, required_key,
+    build_self_ref_tree_sql, has_active_database, owner_is_unsaved, preserve_cached_value,
+    require_scalar_relation_key, required_key, where_key,
 };
 
 /// The upward half of a self-referencing relation: the single row of the same
@@ -237,7 +237,7 @@ impl<E: Model> SelfRefMany<E> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk,
@@ -251,7 +251,7 @@ impl<E: Model> SelfRefMany<E> {
     /// The query for the direct children.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let pk = self.parent_key(context)?;
-        Ok(E::query().where_eq(self.foreign_key, pk.clone()))
+        Ok(where_key(E::query(), self.foreign_key, pk))
     }
 
     /// Fetch the direct children — one level only, in no particular order.

@@ -335,6 +335,11 @@ where
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;
     entity_manager.put(aggregate.clone());
+    // A managed handle to the same row now loaded older values; one flushed
+    // later would write them back over what was just stored.
+    if let Some(managed) = entity_manager.get_managed_by_key::<T>(&aggregate.tide_pk_key()) {
+        managed.entry.rebase(&aggregate)?;
+    }
     Ok(aggregate)
 }
 
@@ -357,6 +362,10 @@ where
 /// Persists one entity held by a loaded relation during a relation sync — or,
 /// when the identity map already holds an identical copy, only syncs that
 /// entity's own relations — and returns its identity key afterwards.
+///
+/// The copies are compared column by column, as a managed flush compares an
+/// entity with its snapshot: their JSON leaves out a field the model's own
+/// serde derive skips, so an edit to one would never be written.
 #[doc(hidden)]
 pub async fn __sync_related_entity<T>(
     entity: &mut T,
@@ -364,11 +373,13 @@ pub async fn __sync_related_entity<T>(
 ) -> Result<Option<String>>
 where
     T: TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
 {
     let existing_key = super::meta::model_entity_manager_key(entity)?;
     let unchanged = match existing_key.as_deref() {
         Some(key) => match entity_manager.get_by_entity_manager_key::<T>(key) {
-            Some(cached) => serde_json::to_value(&*entity)? == serde_json::to_value(&cached)?,
+            Some(cached) => entity.to_entity_model() == cached.to_entity_model(),
             None => false,
         },
         None => false,

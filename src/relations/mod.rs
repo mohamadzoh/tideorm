@@ -89,7 +89,9 @@ pub use polymorphic::{MorphMany, MorphOne, MorphTo};
 pub use self_referencing::{SelfRef, SelfRefMany};
 
 #[doc(hidden)]
-pub use eager::{__eager_load_nested_many, __eager_load_nested_one};
+pub use eager::{
+    __distinct_by_primary_key, __eager_load_nested_many, __eager_load_nested_one, __relation_key,
+};
 
 #[cfg(test)]
 #[path = "../../tests/unit/relations_tests.rs"]

@@ -237,3 +237,107 @@ fn integer_bounds_are_compared_exactly_past_two_to_the_53() {
     assert!(Validator::validate_rule(&4_i32, &ValidationRule::Range(2.5, 3.5), "n").is_some());
     assert!(Validator::validate_rule(&f64::NAN, &ValidationRule::Min(0.0), "n").is_some());
 }
+
+#[test]
+fn f32_bounds_compare_at_the_precision_the_field_holds() {
+    // `0.7_f32` is `0.699999988` as an `f64`, below a bound of `0.7`.
+    assert!(Validator::validate_rule(&0.7_f32, &ValidationRule::Min(0.7), "score").is_none());
+    assert!(Validator::validate_rule(&0.1_f32, &ValidationRule::Max(0.1), "score").is_none());
+    assert!(
+        Validator::validate_rule(&Some(0.7_f32), &ValidationRule::Range(0.7, 0.9), "score")
+            .is_none()
+    );
+    assert!(Validator::validate_rule(&0.69_f32, &ValidationRule::Min(0.7), "score").is_some());
+}
+
+#[test]
+fn numeric_refuses_text_that_parses_as_no_finite_number() {
+    for text in ["NaN", "inf", "-Infinity", "1e999"] {
+        assert!(
+            Validator::validate_rule(&text.to_string(), &ValidationRule::Numeric, "amount")
+                .is_some(),
+            "{text}"
+        );
+    }
+    assert!(
+        Validator::validate_rule(&"1e3".to_string(), &ValidationRule::Numeric, "amount").is_none()
+    );
+}
+
+#[test]
+fn errors_come_out_in_the_order_the_fields_failed() {
+    let mut errors = ValidationErrors::new();
+    for field in ["zeta", "alpha", "mid", "alpha"] {
+        errors.add(field, format!("{field} is wrong"));
+    }
+    let fields: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
+    assert_eq!(fields, ["zeta", "alpha", "mid"]);
+    assert_eq!(
+        errors.first().map(|(field, _)| field.as_str()),
+        Some("zeta")
+    );
+    assert_eq!(errors.messages()[0], "zeta: zeta is wrong");
+
+    let mut merged = ValidationErrors::new();
+    merged.add("beta", "b");
+    merged.merge(errors);
+    let fields: Vec<&str> = merged.iter().map(|(field, _)| field.as_str()).collect();
+    assert_eq!(fields, ["beta", "zeta", "alpha", "mid"]);
+}
+
+#[test]
+fn required_applies_to_the_common_field_types() {
+    let rule = ValidationRule::Required;
+    assert!(Validator::validate_rule(&None::<uuid::Uuid>, &rule, "owner").is_some());
+    assert!(Validator::validate_rule(&Some(uuid::Uuid::nil()), &rule, "owner").is_none());
+    assert!(Validator::validate_rule(&Vec::<i32>::new(), &rule, "tags").is_some());
+    assert!(Validator::validate_rule(&serde_json::json!({}), &rule, "meta").is_some());
+    assert!(Validator::validate_rule(&serde_json::json!({ "a": 1 }), &rule, "meta").is_none());
+    assert!(
+        Validator::validate_rule(&None::<chrono::DateTime<chrono::Utc>>, &rule, "at").is_some()
+    );
+    assert!(Validator::validate_rule(&Some(true), &rule, "flag").is_none());
+
+    let price = rust_decimal::Decimal::new(150, 2);
+    assert!(Validator::validate_rule(&price, &ValidationRule::Min(1.5), "price").is_none());
+    assert!(Validator::validate_rule(&price, &ValidationRule::Min(2.0), "price").is_some());
+}
+
+/// Rules on `Text` and `Decimal` fields and a required `Option<Uuid>` compile,
+/// and `min..=max` includes its upper bound.
+#[tideorm::model(table = "validated_documents")]
+struct ValidatedDocument {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    #[validate(max_length = 5)]
+    body: crate::types::Text,
+    #[validate(min = 0)]
+    price: rust_decimal::Decimal,
+    #[validate(required)]
+    owner: Option<uuid::Uuid>,
+    #[validate(range(1..=5))]
+    stars: i32,
+}
+
+#[test]
+fn rules_on_text_decimal_and_uuid_fields_check_them() {
+    let document = ValidatedDocument {
+        id: 0,
+        body: "short".into(),
+        price: rust_decimal::Decimal::ZERO,
+        owner: Some(uuid::Uuid::new_v4()),
+        stars: 5,
+    };
+    assert!(document.validate().is_ok());
+
+    let document = ValidatedDocument {
+        body: "too long".into(),
+        price: rust_decimal::Decimal::new(-1, 0),
+        owner: None,
+        stars: 6,
+        ..document
+    };
+    let errors = document.validate().expect_err("every rule fails");
+    let fields: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
+    assert_eq!(fields, ["body", "price", "owner", "stars"]);
+}

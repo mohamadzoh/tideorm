@@ -555,3 +555,38 @@ fn test_cache_strategy_display() {
     assert_eq!(format!("{}", CacheStrategy::FIFO), "FIFO");
     assert_eq!(format!("{}", CacheStrategy::TTL), "TTL");
 }
+
+/// A TTL past what an `Instant` can reach, such as `Duration::MAX` for "keep
+/// it", keeps the entry; it expired at once, and still evicted a live one.
+#[test]
+fn test_a_ttl_too_long_for_an_instant_keeps_the_entry() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache
+        .set("forever", &1_i32, Some(Duration::MAX), "test_model")
+        .unwrap();
+    assert_eq!(cache.get::<i32>("forever"), Some(1));
+}
+
+/// A deadlock ends the whole transaction on the server, so the enclosing
+/// transactions of the one it failed in learn of it when that one ends.
+#[test]
+fn test_a_deadlock_marks_every_enclosing_transaction() {
+    let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+    let _outer_scope = install_pending_invalidations(&outer);
+    {
+        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+        let scope = install_pending_invalidations(&inner);
+        note_failed_statement(true);
+        drop(scope);
+        assert!(inner.lock().deadlocked());
+        assert!(!outer.lock().deadlocked());
+    }
+    assert!(outer.lock().deadlocked());
+
+    let other = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+    let _other_scope = install_pending_invalidations(&other);
+    note_failed_statement(false);
+    assert!(other.lock().statement_failed());
+    assert!(!other.lock().deadlocked());
+}

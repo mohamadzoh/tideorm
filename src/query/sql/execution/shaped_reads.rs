@@ -79,6 +79,12 @@ impl<M: Model> QueryBuilder<M> {
     /// Filter by primary key, one condition per key column; a key whose shape
     /// does not match the declared columns is refused.
     pub(crate) fn where_primary_key(mut self, primary_key: &M::PrimaryKey) -> Result<Self> {
+        if !self.unions.is_empty() {
+            return Err(Error::invalid_query(format!(
+                "a primary-key lookup on a union of {} would filter its first query only; filter each query of the union instead",
+                M::table_name()
+            )));
+        }
         let values = match serde_json::to_value(primary_key)
             .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?
         {
@@ -142,7 +148,9 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     ///
     /// It replaces the query's `select()`; `distinct()` still applies, so
-    /// `.distinct().pluck("country")` lists each country once.
+    /// `.distinct().pluck("country")` lists each country once. On a
+    /// `union()`, whose other queries keep the projection they were given,
+    /// the column is read off the union's rows.
     pub async fn pluck<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -151,10 +159,17 @@ impl<M: Model> QueryBuilder<M> {
         // The row names the column by its output name; other projections the
         // query carries, such as `select_raw()`, come back beside it.
         let output = self.derived_output_name(&column);
-        self.select(vec![column.as_str()])
-            .get_json()
-            .await?
-            .into_iter()
+        let union_distinct = (!self.unions.is_empty()).then(|| self.is_distinct());
+        let rows = match union_distinct {
+            None => self.select(vec![column.as_str()]).get_json().await?,
+            Some(_) => self.get_json().await?,
+        };
+        let mut seen = std::collections::HashSet::new();
+        rows.into_iter()
+            .filter(|row| {
+                union_distinct != Some(true)
+                    || seen.insert(row.get(output.as_str()).map(ToString::to_string))
+            })
             .map(|mut row| {
                 let value = row
                     .get_mut(output.as_str())

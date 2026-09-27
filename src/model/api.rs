@@ -77,10 +77,12 @@ pub trait Model:
 
     /// Delete **every** row of this model's table.
     ///
-    /// This is a hard `DELETE` with no `WHERE` clause: it does not honour soft
-    /// delete, does not run per-row callbacks, and cannot be undone. It exists
-    /// as a deliberate escape hatch precisely because the ordinary bulk paths
-    /// refuse to run without a filter. Returns the number of rows removed.
+    /// A `DELETE` with no `WHERE` clause, run without per-row callbacks; on a
+    /// soft-delete model it marks every live row deleted instead, and
+    /// `Model::query().only_trashed().force_delete()` empties the trash. It
+    /// exists as a deliberate escape hatch precisely because the ordinary bulk
+    /// paths refuse to run without a filter. Returns the number of rows it
+    /// deleted or marked.
     async fn delete_all() -> Result<u64> {
         Self::query().delete_all().await
     }

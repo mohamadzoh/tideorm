@@ -353,14 +353,58 @@ impl Database {
     ///
     /// Deliberately conservative otherwise: a statement whose leading keyword is
     /// not unambiguously read-only counts as a write.
+    ///
+    /// MySQL reads a backslash inside quotes as an escape and PostgreSQL does
+    /// not, so `'O\'Brien'` ends at a different quote on each. The SQL is read
+    /// both ways, and counts as a write when either reading finds one.
     fn raw_sql_may_write(sql: &str) -> bool {
+        Self::may_write(sql, false) || Self::may_write(sql, true)
+    }
+
+    /// [`raw_sql_may_write`](Self::raw_sql_may_write) for one reading of
+    /// backslashes inside quotes.
+    fn may_write(sql: &str, backslash_escapes: bool) -> bool {
         let statement = Self::strip_leading_sql_noise(sql);
+        // A batch is read-only only if every statement is; its first keyword
+        // speaks for the first one.
+        if Self::holds_more_statements(statement, backslash_escapes) {
+            return true;
+        }
 
         match Self::leading_keyword(statement).as_str() {
-            "SELECT" | "SHOW" | "EXPLAIN" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => false,
-            "WITH" => Self::with_statement_may_write(statement),
+            "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => false,
+            "EXPLAIN" => Self::explain_may_write(statement, backslash_escapes),
+            "WITH" => Self::with_statement_may_write(statement, backslash_escapes),
             _ => true,
         }
+    }
+
+    /// Classify an `EXPLAIN`: a plain one only plans its statement, while
+    /// `EXPLAIN ANALYZE` (PostgreSQL, MySQL) runs it, so a `DELETE` it
+    /// explains is deleted.
+    fn explain_may_write(statement: &str, backslash_escapes: bool) -> bool {
+        let (_, mut rest) = Self::split_word(statement);
+        let mut analyzes = false;
+        loop {
+            rest = Self::skip_sql_noise(rest);
+            if rest.starts_with('(') {
+                // PostgreSQL's option list: `EXPLAIN (ANALYZE, BUFFERS) ..`.
+                let (options, after) = Self::split_parenthesized_group(rest, backslash_escapes);
+                analyzes |= options
+                    .split(|character: char| !character.is_ascii_alphabetic())
+                    .any(|word| word.eq_ignore_ascii_case("ANALYZE"));
+                rest = after;
+                continue;
+            }
+            let (word, after) = Self::split_word(rest);
+            match word.to_ascii_uppercase().as_str() {
+                "ANALYZE" | "ANALYSE" => analyzes = true,
+                "VERBOSE" | "EXTENDED" | "PARTITIONS" | "FORMAT" => {}
+                _ => break,
+            }
+            rest = after;
+        }
+        analyzes && Self::may_write(rest, backslash_escapes)
     }
 
     /// Classify a `WITH` statement, the one shape whose leading keyword does
@@ -372,7 +416,7 @@ impl Database {
     /// reached at the top level decides the rest. Quoted text is skipped, so
     /// neither a `"deleted_at"` identifier nor a `'delete me'` literal can be
     /// mistaken for a statement keyword.
-    fn with_statement_may_write(statement: &str) -> bool {
+    fn with_statement_may_write(statement: &str, backslash_escapes: bool) -> bool {
         let (_, mut rest) = Self::split_word(statement);
 
         loop {
@@ -386,13 +430,13 @@ impl Database {
 
             match next {
                 '(' => {
-                    let (group, after) = Self::split_parenthesized_group(rest);
-                    if Self::cte_body_may_write(group) {
+                    let (group, after) = Self::split_parenthesized_group(rest, backslash_escapes);
+                    if Self::cte_body_may_write(group, backslash_escapes) {
                         return true;
                     }
                     rest = after;
                 }
-                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next),
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
                 _ if next.is_ascii_alphabetic() || next == '_' => {
                     let (word, after) = Self::split_word(rest);
                     match word.to_ascii_uppercase().as_str() {
@@ -412,12 +456,12 @@ impl Database {
     /// Such a group is either a CTE body or the optional column list in front of
     /// `AS`. Only a body opens with a statement keyword, so a group that does
     /// not is no statement at all and cannot write.
-    fn cte_body_may_write(group: &str) -> bool {
+    fn cte_body_may_write(group: &str, backslash_escapes: bool) -> bool {
         let body = Self::strip_leading_sql_noise(group);
 
         match Self::leading_keyword(body).as_str() {
             "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => true,
-            "WITH" => Self::with_statement_may_write(body),
+            "WITH" => Self::with_statement_may_write(body, backslash_escapes),
             _ => false,
         }
     }
@@ -429,6 +473,29 @@ impl Database {
             .take_while(char::is_ascii_alphabetic)
             .collect::<String>()
             .to_ascii_uppercase()
+    }
+
+    /// Whether a statement separator outside quoted text and comments is
+    /// followed by another statement.
+    fn holds_more_statements(sql: &str, backslash_escapes: bool) -> bool {
+        let mut rest = sql;
+
+        while let Some(next) = rest.chars().next() {
+            match next {
+                ';' => {
+                    rest = Self::skip_sql_noise(&rest[1..]);
+                    if !rest.is_empty() && !rest.starts_with(';') {
+                        return true;
+                    }
+                }
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
+                '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest),
+                '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest),
+                _ => rest = &rest[next.len_utf8()..],
+            }
+        }
+
+        false
     }
 
     /// Split the keyword or identifier at the start of `sql` from the rest.
@@ -447,7 +514,7 @@ impl Database {
     /// Nested groups, quoted text, and comments inside the group are skipped, so
     /// the split lands on the matching close parenthesis. An unterminated group
     /// yields everything that was left.
-    fn split_parenthesized_group(sql: &str) -> (&str, &str) {
+    fn split_parenthesized_group(sql: &str, backslash_escapes: bool) -> (&str, &str) {
         let Some(body) = sql.strip_prefix('(') else {
             return ("", sql);
         };
@@ -468,7 +535,7 @@ impl Database {
                         return (&body[..body.len() - rest.len() - 1], rest);
                     }
                 }
-                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next),
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
                 '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest),
                 '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest),
                 _ => rest = &rest[next.len_utf8()..],
@@ -481,12 +548,30 @@ impl Database {
     /// Skip the quoted string or identifier at the start of `sql`.
     ///
     /// A doubled delimiter is SQL's escape for the delimiter itself, so it
-    /// continues the quoted run rather than ending it.
-    fn skip_quoted(sql: &str, delimiter: char) -> &str {
+    /// continues the quoted run rather than ending it; with
+    /// `backslash_escapes`, as MySQL reads a string, so does one after a
+    /// backslash.
+    fn skip_quoted(sql: &str, delimiter: char, backslash_escapes: bool) -> &str {
         let mut rest = &sql[delimiter.len_utf8()..];
 
         loop {
-            let Some(end) = rest.find(delimiter) else {
+            let end = if backslash_escapes && delimiter != '`' {
+                let mut escaped = false;
+                rest.char_indices().find_map(|(at, character)| {
+                    if escaped {
+                        escaped = false;
+                        None
+                    } else if character == '\\' {
+                        escaped = true;
+                        None
+                    } else {
+                        (character == delimiter).then_some(at)
+                    }
+                })
+            } else {
+                rest.find(delimiter)
+            };
+            let Some(end) = end else {
                 return "";
             };
 
