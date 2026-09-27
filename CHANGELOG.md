@@ -5,7 +5,7 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.0] - 2026-09-24
+## [0.12.0] - 2026-09-27
 
 A second repository-wide cleanup. Dead, duplicated and misleading code was removed, unused public
 API was deleted outright rather than deprecated, and the defects the audit turned up are fixed.
