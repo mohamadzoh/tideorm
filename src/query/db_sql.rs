@@ -114,10 +114,11 @@ pub(crate) fn postgres_jsonb(column_sql: &str) -> String {
 }
 
 /// Render "`column` holds the JSON document `value`" (or does not, when
-/// `negated`), compared as JSON rather than as text: PostgreSQL, MySQL and
-/// MariaDB ignore key order and spacing, and SQLite compares the minified
-/// text. PostgreSQL's `json` type has no `=` at all, and MySQL compared the
-/// document with a string, which never matched.
+/// `negated`), compared as JSON rather than as text, so key order and
+/// spacing do not count and `1` equals `1.0`. PostgreSQL's `json` type has
+/// no `=` at all, MySQL compared the document with a string, which never
+/// matched, and SQLite, which compares JSON only as text, compares the
+/// document's structure.
 pub(crate) fn json_equals_bound(
     db_type: DatabaseType,
     column_sql: &str,
@@ -144,10 +145,24 @@ pub(crate) fn json_equals_bound(
             ),
             text(),
         ),
+        // A NULL column matches neither the test nor its negation.
         DatabaseType::SQLite => {
-            BoundSql::new(format!("json({}) {} json(?)", column_sql, operator), text())
+            let (equal, values) = sqlite_json::sqlite_json_equals(column_sql, value);
+            let sql = if negated {
+                format!("({column_sql} IS NOT NULL AND NOT {equal})")
+            } else {
+                equal
+            };
+            BoundSql::new(sql, values)
         }
     }
+}
+
+/// Render "the `json_each` row `alias` holds the JSON value `value`" on
+/// SQLite, compared as [`json_equals_bound`] compares documents.
+pub(crate) fn sqlite_json_element_equals(alias: &str, value: &serde_json::Value) -> BoundSql {
+    let (sql, values) = sqlite_json::sqlite_json_element_equals(alias, value);
+    BoundSql::new(sql, values)
 }
 
 pub(crate) fn json_contains_bound(

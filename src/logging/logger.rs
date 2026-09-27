@@ -30,13 +30,16 @@ struct LoggerState {
 impl LoggerState {
     /// Read `TIDE_LOG_QUERIES`, `TIDE_LOG_LEVEL`, and `TIDE_SLOW_QUERY_MS`.
     fn from_env() -> Self {
-        let level = std::env::var("TIDE_LOG_LEVEL")
-            .ok()
-            .map(|value| LogLevel::parse_str(&value));
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// Build the state from `TIDE_LOG_LEVEL` and `TIDE_SLOW_QUERY_MS` as
+    /// `var` reads them, and `TIDE_LOG_QUERIES` from the environment.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+        let level = var("TIDE_LOG_LEVEL").map(|value| LogLevel::parse_str(&value));
         let enabled =
             super::query_logging_enabled() || level.is_some_and(|level| level != LogLevel::Off);
-        let slow_threshold_ms = std::env::var("TIDE_SLOW_QUERY_MS")
-            .ok()
+        let slow_threshold_ms = var("TIDE_SLOW_QUERY_MS")
             .and_then(|value| value.parse().ok())
             .unwrap_or(DEFAULT_SLOW_QUERY_THRESHOLD_MS);
 

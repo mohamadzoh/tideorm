@@ -105,3 +105,45 @@ fn contained_by_a_top_level_array_also_takes_one_of_its_scalars() {
     let (nested, _) = sqlite_json_contained_by("\"doc\"", &json!({"a": [5]}));
     assert!(!nested.contains("json_extract"), "{nested}");
 }
+
+#[test]
+fn equality_needs_as_many_members_each_equal_under_its_key() {
+    let (sql, values) = sqlite_json_equals("\"doc\"", &json!({"a": [1], "b": null}));
+    assert_eq!(
+        sql,
+        "(json_type(\"doc\") = 'object' \
+         AND (SELECT COUNT(*) FROM json_each(\"doc\")) = 2 \
+         AND EXISTS (SELECT 1 FROM json_each(\"doc\") AS tide_json_1 WHERE tide_json_1.key = ? \
+         AND (tide_json_1.type = 'array' AND json_array_length(tide_json_1.value) = 1 \
+         AND EXISTS (SELECT 1 FROM json_each(tide_json_1.value) AS tide_json_2 WHERE tide_json_2.key = 0 \
+         AND (tide_json_2.type IN ('integer', 'real') AND tide_json_2.atom = ?)))) \
+         AND EXISTS (SELECT 1 FROM json_each(\"doc\") AS tide_json_3 WHERE tide_json_3.key = ? \
+         AND tide_json_3.type = 'null'))"
+    );
+    assert_eq!(
+        values,
+        vec![
+            Value::from("a".to_string()),
+            Value::from(1i64),
+            Value::from("b".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_element_equals_a_scalar_by_type_and_value() {
+    assert_eq!(
+        sqlite_json_element_equals("item", &json!("a")),
+        (
+            "(item.type = 'text' AND item.atom = ?)".to_string(),
+            vec![Value::from("a".to_string())]
+        )
+    );
+    assert_eq!(
+        sqlite_json_element_equals("item", &json!([])),
+        (
+            "(item.type = 'array' AND json_array_length(item.value) = 0)".to_string(),
+            vec![]
+        )
+    );
+}

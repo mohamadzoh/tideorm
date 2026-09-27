@@ -57,25 +57,18 @@ fn failures_and_slow_queries_reach_the_quieter_levels() {
 }
 
 #[test]
-#[allow(unsafe_code)]
 fn state_starts_from_the_documented_environment_variables() {
-    // SAFETY: `.cargo/config.toml` runs tests on a single thread, and both
-    // variables are removed again right after the state has read them.
-    unsafe {
-        std::env::set_var("TIDE_LOG_LEVEL", "debug");
-        std::env::set_var("TIDE_SLOW_QUERY_MS", "250");
-    }
-    let configured = LoggerState::from_env();
-    unsafe {
-        std::env::remove_var("TIDE_LOG_LEVEL");
-        std::env::remove_var("TIDE_SLOW_QUERY_MS");
-    }
+    let configured = LoggerState::from_vars(|name| match name {
+        "TIDE_LOG_LEVEL" => Some("debug".to_string()),
+        "TIDE_SLOW_QUERY_MS" => Some("250".to_string()),
+        _ => None,
+    });
 
     assert!(configured.enabled.load(Ordering::SeqCst));
     assert_eq!(*configured.level.read(), Some(LogLevel::Debug));
     assert_eq!(configured.slow_threshold_ms.load(Ordering::SeqCst), 250);
 
-    let unset = LoggerState::from_env();
+    let unset = LoggerState::from_vars(|_| None);
     assert_eq!(*unset.level.read(), None);
     assert_eq!(
         unset.slow_threshold_ms.load(Ordering::SeqCst),

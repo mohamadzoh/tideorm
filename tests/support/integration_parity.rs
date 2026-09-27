@@ -2554,6 +2554,20 @@ async fn equality_filters_compare_json_documents() {
         .await,
         2
     );
+
+    // A document stored with its keys in another order, and a number
+    // written as `1.0`, is the same document; SQLite compared the text.
+    Database::execute(r#"INSERT INTO plain_json_docs (body) VALUES ('{"b": [1, 2], "a": 1.0}')"#)
+        .await
+        .expect("insert failed");
+    assert_eq!(
+        count(PlainJsonDoc::query().where_eq("body", json!({"a": 1, "b": [1, 2]}))).await,
+        2
+    );
+    assert_eq!(
+        count(PlainJsonDoc::query().where_not("body", json!({"a": 1, "b": [1, 2]}))).await,
+        2
+    );
 }
 
 /// A `json` column (`t.json(..)`), which PostgreSQL gives none of the `jsonb`
@@ -3960,6 +3974,51 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
     );
 }
 
+/// `array_remove` compares elements as JSON values: an object with its keys
+/// in another order is equal, `1.0` is `1`, and an array with its elements
+/// in another order, or one repeated, is not equal. SQLite compared the
+/// elements' text, so the object stayed, and MySQL and MariaDB tested
+/// containment both ways, so `[2, 1]` and `[1, 2, 2]` went with `[1, 2]`.
+#[tokio::test]
+async fn array_remove_compares_elements_as_json_values() {
+    use serde_json::json;
+
+    if !setup().await || backend::DATABASE_TYPE == DatabaseType::Postgres {
+        return;
+    }
+
+    fresh_table("tagged_rows", |t| {
+        t.id();
+        t.json("tags").not_null();
+    })
+    .await;
+    // Written as text, so the stored object keeps its keys in this order.
+    Database::execute(
+        r#"INSERT INTO tagged_rows (tags) VALUES ('[{"b": 2, "a": 1}, {"a": 1}, [1, 2], [2, 1], [1, 2, 2], [[1, 2]], 1.0, 1, "1"]')"#,
+    )
+    .await
+    .expect("insert failed");
+
+    for value in [json!({"a": 1, "b": 2}), json!([1, 2]), json!(1)] {
+        TaggedRow::update_all()
+            .where_gt("id", 0)
+            .array_remove("tags", value)
+            .execute()
+            .await
+            .expect("array_remove failed");
+    }
+
+    let row = TaggedRow::query()
+        .first()
+        .await
+        .expect("query failed")
+        .expect("the row is there");
+    assert_eq!(
+        row.tags,
+        json!([{"a": 1}, [2, 1], [1, 2, 2], [[1, 2]], "1"])
+    );
+}
+
 #[tideorm::model(table = "coded_tags", soft_delete)]
 pub struct CodedTag {
     #[tideorm(primary_key)]
@@ -4717,9 +4776,8 @@ async fn a_rollback_names_the_recorded_seed_it_cannot_find() {
     assert_eq!(reset.rolled_back.len(), 2);
 }
 
-/// Connect as `backend::connect` does, with `configure` applied to the
-/// configuration first, on one pooled connection (a new in-memory SQLite
-/// database on that backend).
+/// Connect to `backend::database_url()` as `backend::connect` does, with
+/// `configure` applied to the configuration first, on one pooled connection.
 async fn connect_configured(
     configure: impl FnOnce(TideConfig) -> TideConfig,
 ) -> tideorm::Result<&'static Database> {

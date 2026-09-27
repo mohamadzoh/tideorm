@@ -178,6 +178,9 @@ This release is breaking: read the upgrade notes and the removal list before upg
   what is printed, where sqlx logged every statement at `INFO` to any subscriber listening.
 - **Validation errors come out in the order the fields failed**, which for a model is the order
   it declares them, so `create()` reports the same field every time.
+- **Dirty tracking reports no baseline for a key two databases gave different rows**:
+  `changed_fields()` and `original_value()` return `None` there, where they compared the model
+  with whichever row was read last.
 
 ### Removed — Breaking
 
@@ -598,7 +601,8 @@ This release is breaking: read the upgrade notes and the removal list before upg
   timestamp; they take any `Serialize` value and bind it as the related column's type.
   `where_eq`, `where_not`, `where_in` and `where_not_in` on a JSON column failed on PostgreSQL, whose
   `json` type has no `=`, and never matched on MySQL, which compared the document with a string;
-  they compare documents now, ignoring key order and spacing (SQLite compares the minified text).
+  they compare documents now, as JSON on every backend: key order and spacing do not count, and
+  `1.0` equals `1`.
 - **Query builder, results.** `get_json()` decoded a joined column that shares a name with a model
   column as the model's type. `chunk()` over a union repeated rows and never ended, and over a join
   that repeats a key skipped rows (8 of 10); a union is refused, and a join reads every row. The query
@@ -611,15 +615,19 @@ This release is breaking: read the upgrade notes and the removal list before upg
   decoded.
 - **JSON arrays.** `array_remove()` turned the whole array NULL on MySQL and MariaDB when the value
   was absent, never found a number or boolean, and read `%` and `_` as wildcards; on SQLite it
-  turned booleans into `1`/`0`, dropped nulls and turned a NULL column into `[]`. `array_append()`
-  on SQLite stored an object or array as a string.
+  turned booleans into `1`/`0`, dropped nulls and turned a NULL column into `[]`. It removes each
+  element equal to the value as JSON now, as `where_eq` compares a document: an object's key order
+  does not count, an array's element order and repeats do, and `1.0` is `1`. `array_append()` on
+  SQLite stored an object or array as a string.
 - **Validation.** `min`, `max` and `range` compared integers through `f64`, so past 2^53 a value
   one past the bound passed. Integers are compared exactly.
 - **Serialization.** `to_json` put an attachment back when it was hidden, and
   `to_translated_json` read a `translations` key instead of the model's translations. A
   highlighted snippet with `fragment_words: Some(0)` left the match out.
 - **Dirty tracking** kept one snapshot for rows of two databases that share a key, so a model
-  loaded from one could save against the other's baseline.
+  loaded from one was compared with the other's row. Each database keeps its own baseline, and a
+  model, which does not record where it was read from, is compared with a baseline only when every
+  database that gave its key gave the same row.
 - **Entity manager.** A flush cancelled part way, or rolled back with a transaction around it
   after it had succeeded, left the context holding ids and clean snapshots for rows never
   committed, so the next flush skipped them. The context is restored to its state before the
@@ -701,8 +709,7 @@ This release is breaking: read the upgrade notes and the removal list before upg
   with every other to drop duplicates, quadratic in the parents.
 - **Models.** A batch `set()` bound a JSON document, bytes and a PostgreSQL array as JSON text:
   PostgreSQL refused a `jsonb` column set so, and SQLite and MySQL stored the bytes' JSON text in
-  the BLOB. `find_with(id, db)` recorded its dirty-tracking baseline under the global database's
-  pool. `insert_all` discarded every dirty-tracking baseline of the model, the new rows' among
+  the BLOB. `insert_all` discarded every dirty-tracking baseline of the model, the new rows' among
   them. The generated `Deserialize` read a sequence (bincode, postcard) in another order than
   `Serialize` writes one, relations among the columns; relations now follow the columns in both,
   and a non-self-describing format gets every relation, as `None` when none is cached.

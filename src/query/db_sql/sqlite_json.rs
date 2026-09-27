@@ -1,10 +1,13 @@
-//! JSON containment for SQLite, which has no `@>` or `<@` operator.
+//! JSON containment and equality for SQLite, which has no `@>` or `<@`
+//! operator and compares JSON only as text.
 //!
 //! PostgreSQL's reading is rebuilt from `json_each` rows: an object candidate
 //! needs every member contained under the same key, an array candidate needs
 //! every element contained by some element, and a scalar has to equal the
-//! value — or, at the top level only, be an element of an array. Keys and
-//! scalars are bound as parameters in the order their `?` appear.
+//! value — or, at the top level only, be an element of an array. Equality
+//! needs as many members or elements as the value, each equal to the value's
+//! own. Keys and scalars are bound as parameters in the order their `?`
+//! appear.
 
 use crate::internal::Value;
 
@@ -19,6 +22,14 @@ struct Node {
 }
 
 impl Node {
+    fn document(column_sql: &str) -> Self {
+        Self {
+            json: column_sql.to_string(),
+            kind: format!("json_type({column_sql})"),
+            atom: format!("json_extract({column_sql}, '$')"),
+        }
+    }
+
     fn row(alias: &str) -> Self {
         Self {
             json: format!("{alias}.value"),
@@ -33,13 +44,8 @@ pub(crate) fn sqlite_json_contains(
     column_sql: &str,
     candidate: &serde_json::Value,
 ) -> (String, Vec<Value>) {
-    let root = Node {
-        json: column_sql.to_string(),
-        kind: format!("json_type({column_sql})"),
-        atom: format!("json_extract({column_sql}, '$')"),
-    };
-    let mut builder = Containment::default();
-    let sql = builder.contains(&root, candidate, true);
+    let mut builder = JsonTests::default();
+    let sql = builder.contains(&Node::document(column_sql), candidate, true);
     (sql, builder.values)
 }
 
@@ -49,23 +55,38 @@ pub(crate) fn sqlite_json_contained_by(
     column_sql: &str,
     container: &serde_json::Value,
 ) -> (String, Vec<Value>) {
-    let root = Node {
-        json: column_sql.to_string(),
-        kind: format!("json_type({column_sql})"),
-        atom: format!("json_extract({column_sql}, '$')"),
-    };
-    let mut builder = Containment::default();
-    let sql = builder.contained_by(&root, container, true);
+    let mut builder = JsonTests::default();
+    let sql = builder.contained_by(&Node::document(column_sql), container, true);
+    (sql, builder.values)
+}
+
+/// SQL testing that the JSON document in `column_sql` equals `value`.
+pub(crate) fn sqlite_json_equals(
+    column_sql: &str,
+    value: &serde_json::Value,
+) -> (String, Vec<Value>) {
+    let mut builder = JsonTests::default();
+    let sql = builder.equals(&Node::document(column_sql), value);
+    (sql, builder.values)
+}
+
+/// SQL testing that the `json_each` row `alias` holds `value`.
+pub(crate) fn sqlite_json_element_equals(
+    alias: &str,
+    value: &serde_json::Value,
+) -> (String, Vec<Value>) {
+    let mut builder = JsonTests::default();
+    let sql = builder.equals(&Node::row(alias), value);
     (sql, builder.values)
 }
 
 #[derive(Default)]
-struct Containment {
+struct JsonTests {
     values: Vec<Value>,
     aliases: usize,
 }
 
-impl Containment {
+impl JsonTests {
     fn alias(&mut self) -> String {
         self.aliases += 1;
         format!("tide_json_{}", self.aliases)
@@ -156,6 +177,53 @@ impl Containment {
                     .map(|element| self.scalar_equals(node, element))
                     .collect();
                 format!("({array} OR {})", any_of(scalars))
+            }
+            scalar => self.scalar_equals(node, scalar),
+        }
+    }
+
+    /// `node` holds exactly `value`, compared as JSON: an object has the
+    /// same keys, in any order, holding equal values, an array the same
+    /// elements in the same order, and a number the same value however it
+    /// is written (`1` and `1.0`).
+    fn equals(&mut self, node: &Node, value: &serde_json::Value) -> String {
+        use serde_json::Value as Json;
+
+        match value {
+            Json::Object(members) => {
+                let mut checks = vec![
+                    format!("{} = 'object'", node.kind),
+                    format!(
+                        "(SELECT COUNT(*) FROM json_each({})) = {}",
+                        node.json,
+                        members.len()
+                    ),
+                ];
+                for (key, member) in members {
+                    let alias = self.alias();
+                    self.values.push(Value::from(key.clone()));
+                    let equal = self.equals(&Node::row(&alias), member);
+                    checks.push(format!(
+                        "EXISTS (SELECT 1 FROM json_each({}) AS {alias} WHERE {alias}.key = ? AND {equal})",
+                        node.json
+                    ));
+                }
+                format!("({})", checks.join(" AND "))
+            }
+            Json::Array(elements) => {
+                let mut checks = vec![
+                    format!("{} = 'array'", node.kind),
+                    format!("json_array_length({}) = {}", node.json, elements.len()),
+                ];
+                for (index, element) in elements.iter().enumerate() {
+                    let alias = self.alias();
+                    let equal = self.equals(&Node::row(&alias), element);
+                    checks.push(format!(
+                        "EXISTS (SELECT 1 FROM json_each({}) AS {alias} WHERE {alias}.key = {index} AND {equal})",
+                        node.json
+                    ));
+                }
+                format!("({})", checks.join(" AND "))
             }
             scalar => self.scalar_equals(node, scalar),
         }

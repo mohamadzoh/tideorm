@@ -123,32 +123,40 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         push_param(db_type, params, crate::internal::json_to_db_value(value));
                     format!("{} = array_remove({}, {})", col, col, placeholder)
                 }
-                // Every element equal to the value goes, by JSON value (`1`,
-                // `"1"` and `true` differ), and the rest keep their order and
-                // types; a NULL column stays NULL. Equality is containment both
-                // ways, which MySQL and MariaDB share: MariaDB crashes comparing
-                // a JSON_TABLE value with `<=>`, and MySQL has no JSON_EQUALS.
-                // JSON_TABLE reads a JSON null as SQL NULL on MySQL, hence the
-                // extra test when null is what is removed.
+                // Every element equal to the value goes, compared as JSON as
+                // `where_eq` compares a document (`1`, `"1"` and `true` differ,
+                // an object's key order does not, an array's order does), and
+                // the rest keep their order and types; a NULL column stays
+                // NULL. JSON_TABLE reads a JSON null as SQL NULL on MySQL,
+                // hence the extra test when null is what is removed.
                 crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                    let first = push_param(db_type, params, json_text(value));
-                    let second = push_param(db_type, params, json_text(value));
+                    let equal = crate::query::db_sql::json_equals_bound(
+                        db_type,
+                        "tideorm_element.v",
+                        value,
+                        false,
+                    );
+                    params.extend(equal.values);
                     let null_guard = if value.is_null() {
                         "tideorm_element.v IS NOT NULL AND "
                     } else {
                         ""
                     };
                     format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE(JSON_CONTAINS(tideorm_element.v, {first}) AND JSON_CONTAINS({second}, tideorm_element.v), FALSE)) END"
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
+                        equal.sql
                     )
                 }
                 // Each kept element is rebuilt as the JSON it was: `json_each`
                 // reports true and false as 1 and 0 and null as NULL.
                 crate::config::DatabaseType::SQLite => {
-                    let placeholder = push_param(db_type, params, json_text(value));
-                    let element = "CASE type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') WHEN 'null' THEN json('null') WHEN 'object' THEN json(value) WHEN 'array' THEN json(value) ELSE json_quote(value) END";
+                    let equal =
+                        crate::query::db_sql::sqlite_json_element_equals("tideorm_element", value);
+                    params.extend(equal.values);
+                    let element = "CASE tideorm_element.type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') WHEN 'null' THEN json('null') WHEN 'object' THEN json(tideorm_element.value) WHEN 'array' THEN json(tideorm_element.value) ELSE json_quote(tideorm_element.value) END";
                     format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY key) FROM json_each({col}) WHERE {element} <> json({placeholder})) END"
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({col}) AS tideorm_element WHERE NOT {}) END",
+                        equal.sql
                     )
                 }
             }),

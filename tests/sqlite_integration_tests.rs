@@ -25,12 +25,14 @@ mod backend {
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::SQLite;
 
     /// A file database for a scenario that connects more than once and needs
-    /// the same database each time, which an in-memory one is not.
+    /// the same database each time, which an in-memory one is not (it closes
+    /// with the pool `connect()` replaces). It lives in the directory Cargo
+    /// sets aside for integration tests, inside `target/`, and each run
+    /// starts it empty.
     pub fn database_url() -> &'static str {
         static URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
         URL.get_or_init(|| {
-            let path =
-                std::env::temp_dir().join(format!("tideorm_parity_{}.db", std::process::id()));
+            let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("tideorm_parity.db");
             let _ = std::fs::remove_file(&path);
             format!(
                 "sqlite://{}?mode=rwc",

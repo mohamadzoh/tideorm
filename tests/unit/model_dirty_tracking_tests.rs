@@ -69,3 +69,68 @@ fn an_unsaved_model_reports_no_baseline() {
         None
     );
 }
+
+#[tideorm::model(table = "dirty_tracking_two_database_users")]
+struct TwoDatabaseUser {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+}
+
+/// A model does not record the database it was read from, so its baseline is
+/// the one every database that gave its key agrees on, and there is none
+/// where they differ. The scope's own was used, which for a model read
+/// through `query_with(db)` is another database's row.
+#[test]
+fn a_key_read_from_two_databases_has_a_baseline_only_where_they_agree() {
+    let bob = TwoDatabaseUser {
+        id: 3,
+        name: "Bob".to_string(),
+    };
+    let carol = TwoDatabaseUser {
+        id: 3,
+        name: "Carol".to_string(),
+    };
+    let remember_from = |origin, model: &TwoDatabaseUser| {
+        loading_from(origin, || remember_model(model)).expect("remembering should succeed");
+    };
+
+    // Read through a database other than the scope's (none here).
+    remember_from(Some(2), &bob);
+    assert_eq!(
+        changed_fields(&bob).expect("dirty check should succeed"),
+        Some(Vec::new())
+    );
+
+    // A second database gave the key the same row.
+    remember_from(Some(1), &bob);
+    assert_eq!(
+        original_value(&bob, "name").expect("original value lookup should succeed"),
+        Some(Some(serde_json::json!("Bob")))
+    );
+
+    // It gave the key another row: either could be the model's.
+    remember_from(Some(1), &carol);
+    for model in [&bob, &carol] {
+        assert_eq!(
+            changed_fields(model).expect("dirty check should succeed"),
+            None
+        );
+        assert_eq!(
+            original_value(model, "name").expect("original value lookup should succeed"),
+            None
+        );
+    }
+
+    loading_from(Some(1), || forget_model(&carol)).expect("forgetting should succeed");
+    assert_eq!(
+        changed_fields(&carol).expect("dirty check should succeed"),
+        Some(vec!["name"])
+    );
+
+    invalidate_model::<TwoDatabaseUser>();
+    assert_eq!(
+        changed_fields(&bob).expect("dirty check should succeed"),
+        None
+    );
+}

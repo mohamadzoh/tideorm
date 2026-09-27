@@ -267,6 +267,8 @@ match user.changed_fields()? {
 
 Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
 
+Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row.
+
 ### Delete
 
 ```rust
