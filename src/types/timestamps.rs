@@ -3,13 +3,15 @@ use std::fmt;
 
 use super::{DateTime, Utc};
 
-/// Unix timestamp stored as seconds since epoch (i64)
+/// Unix timestamp as whole seconds since the epoch.
 ///
-/// This provides a portable integer-based timestamp format that works across
-/// all databases. Convert to/from `chrono::DateTime` as needed.
+/// A value type for converting between `i64` epoch seconds and
+/// `chrono::DateTime`. It has no database column mapping, so a model stores
+/// the `i64` (see [`UnixTimestamp::as_seconds`]) and converts at the edges.
+/// Serializes as the bare integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UnixTimestamp(pub i64);
+pub struct UnixTimestamp(i64);
 
 impl UnixTimestamp {
     /// Create a new Unix timestamp from seconds since epoch
@@ -36,27 +38,11 @@ impl UnixTimestamp {
     pub fn as_seconds(&self) -> i64 {
         self.0
     }
-
-    /// Check if this timestamp is in the past
-    pub fn is_past(&self) -> bool {
-        self.0 < chrono::Utc::now().timestamp()
-    }
-
-    /// Check if this timestamp is in the future
-    pub fn is_future(&self) -> bool {
-        self.0 > chrono::Utc::now().timestamp()
-    }
 }
 
 impl Default for UnixTimestamp {
     fn default() -> Self {
         Self::now()
-    }
-}
-
-impl From<i64> for UnixTimestamp {
-    fn from(seconds: i64) -> Self {
-        Self(seconds)
     }
 }
 
@@ -82,12 +68,13 @@ impl fmt::Display for UnixTimestamp {
     }
 }
 
-/// Unix timestamp stored as milliseconds since epoch (i64)
+/// Unix timestamp as milliseconds since the epoch.
 ///
-/// Higher precision version of `UnixTimestamp` for sub-second accuracy.
+/// The sub-second counterpart of [`UnixTimestamp`], with the same caveat: it
+/// has no database column mapping of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct UnixTimestampMillis(pub i64);
+pub struct UnixTimestampMillis(i64);
 
 impl UnixTimestampMillis {
     /// Create a new Unix timestamp from milliseconds since epoch
@@ -129,27 +116,11 @@ impl UnixTimestampMillis {
     pub fn to_unix_timestamp(self) -> UnixTimestamp {
         UnixTimestamp(self.as_seconds())
     }
-
-    /// Check if this timestamp is in the past
-    pub fn is_past(&self) -> bool {
-        self.0 < chrono::Utc::now().timestamp_millis()
-    }
-
-    /// Check if this timestamp is in the future
-    pub fn is_future(&self) -> bool {
-        self.0 > chrono::Utc::now().timestamp_millis()
-    }
 }
 
 impl Default for UnixTimestampMillis {
     fn default() -> Self {
         Self::now()
-    }
-}
-
-impl From<i64> for UnixTimestampMillis {
-    fn from(millis: i64) -> Self {
-        Self(millis)
     }
 }
 

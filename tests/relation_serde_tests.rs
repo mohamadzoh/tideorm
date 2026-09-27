@@ -188,7 +188,8 @@ fn with_relations_initializes_supported_relation_wrappers() {
     assert_eq!(team.members.foreign_key, "team_uuid");
     assert_eq!(team.members.local_key, "team_uuid");
     assert_eq!(team.labels.morph_name, "labelable");
-    assert_eq!(team.labels.local_key, "id");
+    // No `local_key`: the primary key's column, which is not named `id` here.
+    assert_eq!(team.labels.local_key, "team_uuid");
 
     let member = TeamMember {
         id: 9,

@@ -3,11 +3,13 @@ use crate::config::DatabaseType;
 /// Supported column types for migrations.
 ///
 /// This enum is TideORM's single logical column vocabulary: migrations name a
-/// variant directly, and every Rust type TideORM knows how to store is mapped
-/// onto one of these by
+/// variant directly, and schema sync maps every Rust type TideORM knows how to
+/// store onto one through
 /// [`rust_type_to_column_type`](crate::schema::rust_type_to_column_type). The
 /// three backend renderers below are the only place a logical type becomes SQL
-/// text, so schema export, `DB_SYNC` and migrations cannot drift apart.
+/// text, and migrations and sync render whole column definitions through the
+/// same DDL builder, so a table one of them creates matches the table the other
+/// would have created.
 #[derive(Debug, Clone)]
 pub enum ColumnType {
     /// Small integer (2 bytes)
@@ -42,6 +44,9 @@ pub enum ColumnType {
     Numeric,
     /// Variable length string
     String,
+    /// Variable length string of at most this many characters: `VARCHAR(n)`,
+    /// and `TEXT` on SQLite, which ignores a declared length.
+    Varchar(u32),
     /// Text (unlimited length)
     Text,
     /// Boolean
@@ -96,6 +101,24 @@ impl ColumnType {
         }
     }
 
+    /// Whether a column of this type can carry an auto-increment clause.
+    ///
+    /// A [`ColumnType::Custom`] type is taken at its word, since its SQL is
+    /// whatever the caller declared.
+    pub(crate) fn can_auto_increment(&self) -> bool {
+        matches!(
+            self,
+            ColumnType::SmallInteger
+                | ColumnType::Integer
+                | ColumnType::BigInteger
+                | ColumnType::TinyUnsigned
+                | ColumnType::SmallUnsigned
+                | ColumnType::Unsigned
+                | ColumnType::BigUnsigned
+                | ColumnType::Custom(_)
+        )
+    }
+
     /// Convert to PostgreSQL SQL type.
     ///
     /// PostgreSQL has no unsigned integer types, so the unsigned variants land
@@ -111,8 +134,10 @@ impl ColumnType {
     ///   to `i64` before it ever reaches the server, so an exact `NUMERIC`
     ///   column would only be writable through the same `i64`.
     /// * `u8` and `u16` do widen (`SMALLINT`, `INTEGER`), because nothing
-    ///   downstream constrains them: `sea-orm` refuses both on PostgreSQL, and
-    ///   the binder sends them as `i16`/`i32`.
+    ///   downstream constrains them: neither type works on PostgreSQL at all -
+    ///   `sea-orm` will not decode them and the value binder will not bind them
+    ///   (`u8 unsupported by sqlx-postgres`) - so only hand-written SQL ever
+    ///   reads these columns.
     ///
     /// Known limitation: a `u32` above `i32::MAX` or a `u64` above `i64::MAX`
     /// does not round-trip through PostgreSQL - the value is rejected rather
@@ -135,6 +160,7 @@ impl ColumnType {
             }
             ColumnType::Numeric => "DECIMAL".to_string(),
             ColumnType::String => "VARCHAR(255)".to_string(),
+            ColumnType::Varchar(length) => format!("VARCHAR({})", length),
             ColumnType::Text => "TEXT".to_string(),
             ColumnType::Boolean => "BOOLEAN".to_string(),
             ColumnType::Date => "DATE".to_string(),
@@ -162,6 +188,18 @@ impl ColumnType {
     /// widens here. It has no array type either, so the array variants are
     /// stored as `JSON`.
     ///
+    /// Three renderings avoid MySQL defaults that silently lose data:
+    ///
+    /// * Text and binary are `LONGTEXT`/`LONGBLOB`. Plain `TEXT` and `BLOB`
+    ///   stop at 64 KB, which is not the unlimited column the other backends
+    ///   give a `String` or `Vec<u8>`.
+    /// * Times carry six fractional digits. A bare `TIME`/`DATETIME` rounds a
+    ///   `NaiveTime` or `Utc::now()` to the whole second on the way in.
+    /// * Both timestamp flavors are `DATETIME(6)`. MySQL's `TIMESTAMP` only
+    ///   spans 1970 to 2038, so a birth date or a far expiry was rejected.
+    ///   `DATETIME` has no session-zone shifting, and sqlx pins every
+    ///   session to `+00:00`, so a `DateTime<Utc>` is stored and read as UTC.
+    ///
     /// [`ColumnType::Uuid`] renders `BINARY(16)`, matching `sea-query`'s own
     /// MySQL renderer. `sqlx-mysql` encodes a `Uuid` as the 16 raw bytes and
     /// refuses to decode anything else, so a `CHAR(36)` column rejects every
@@ -184,15 +222,17 @@ impl ColumnType {
             }
             ColumnType::Numeric => "DECIMAL(65,30)".to_string(),
             ColumnType::String => "VARCHAR(255)".to_string(),
-            ColumnType::Text => "TEXT".to_string(),
+            ColumnType::Varchar(length) => format!("VARCHAR({})", length),
+            ColumnType::Text => "LONGTEXT".to_string(),
             ColumnType::Boolean => "TINYINT(1)".to_string(),
             ColumnType::Date => "DATE".to_string(),
-            ColumnType::Time => "TIME".to_string(),
-            ColumnType::DateTime => "DATETIME".to_string(),
-            ColumnType::Timestamp | ColumnType::TimestampTz => "TIMESTAMP".to_string(),
+            ColumnType::Time => "TIME(6)".to_string(),
+            ColumnType::DateTime | ColumnType::Timestamp | ColumnType::TimestampTz => {
+                "DATETIME(6)".to_string()
+            }
             ColumnType::Uuid => "BINARY(16)".to_string(),
             ColumnType::Json | ColumnType::Jsonb => "JSON".to_string(),
-            ColumnType::Binary => "BLOB".to_string(),
+            ColumnType::Binary => "LONGBLOB".to_string(),
             ColumnType::IntegerArray
             | ColumnType::BigIntegerArray
             | ColumnType::TextArray
@@ -241,6 +281,7 @@ impl ColumnType {
             | ColumnType::Decimal { .. }
             | ColumnType::Numeric => "REAL".to_string(),
             ColumnType::String
+            | ColumnType::Varchar(_)
             | ColumnType::Text
             | ColumnType::Uuid
             | ColumnType::Date
@@ -280,10 +321,16 @@ pub enum DefaultValue {
 }
 
 impl DefaultValue {
-    /// Convert to SQL representation
-    pub fn to_sql(&self) -> String {
+    /// The value as a `DEFAULT` clause writes it on `db_type`. A string is
+    /// escaped the way that backend reads a literal: MySQL and MariaDB also
+    /// take a backslash as an escape, so there `C:\temp\` has its backslashes
+    /// doubled.
+    pub fn to_sql(&self, db_type: DatabaseType) -> String {
         match self {
-            DefaultValue::String(value) => format!("'{}'", value.replace('\'', "''")),
+            DefaultValue::String(value) => format!(
+                "'{}'",
+                crate::internal::sql_safety::escape_sql_literal_for_db(db_type, value)
+            ),
             DefaultValue::Integer(value) => value.to_string(),
             DefaultValue::Float(value) => value.to_string(),
             DefaultValue::Boolean(value) => {

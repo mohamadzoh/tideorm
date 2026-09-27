@@ -75,10 +75,6 @@ pub(super) fn bench_subquery(c: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// RAW EXPRESSION BENCHMARKS
-// =============================================================================
-
 pub(super) fn bench_raw_expressions(c: &mut Criterion) {
     let rt = runtime();
 
@@ -144,10 +140,6 @@ pub(super) fn bench_raw_expressions(c: &mut Criterion) {
 
     group.finish();
 }
-
-// =============================================================================
-// BULK DELETE BENCHMARKS
-// =============================================================================
 
 pub(super) fn bench_bulk_delete(c: &mut Criterion) {
     let rt = runtime();
@@ -217,31 +209,8 @@ pub(super) fn bench_bulk_delete(c: &mut Criterion) {
         );
     });
 
-    // Benchmark force_delete
-    group.bench_function("force_delete", |b| {
-        b.iter_batched(
-            || {
-                setup_benchmark_with_data(1000);
-            },
-            |_| {
-                rt.block_on(async {
-                    BenchProduct::query()
-                        .where_eq("active", false)
-                        .force_delete()
-                        .await
-                        .expect("Force delete failed")
-                })
-            },
-            criterion::BatchSize::PerIteration,
-        );
-    });
-
     group.finish();
 }
-
-// =============================================================================
-// COMBINED FEATURE BENCHMARKS
-// =============================================================================
 
 pub(super) fn bench_combined_features(c: &mut Criterion) {
     let rt = runtime();

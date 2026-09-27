@@ -14,10 +14,6 @@ use std::marker::PhantomData;
 
 mod impls;
 
-// =============================================================================
-// TYPED COLUMN
-// =============================================================================
-
 /// Trait for types that can be used as column names in queries.
 ///
 /// This allows both string literals and typed `Column<T>` to be used
@@ -25,6 +21,31 @@ mod impls;
 pub trait IntoColumnName {
     /// Get the column name as a string
     fn column_name(&self) -> &str;
+
+    /// The table the column belongs to, when it names one: a model's typed
+    /// column does, a string does not.
+    fn column_table(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// How a query of the model whose table is `own_table` refers to `column`:
+/// by name, qualified with the column's own table when that is another
+/// model's, so `User::columns.id` in a `Post` query means `users.id` rather
+/// than `posts.id`. With no `own_table`, a typed column is always qualified.
+pub(crate) fn column_reference(column: &impl IntoColumnName, own_table: Option<&str>) -> String {
+    match column.column_table() {
+        Some(table) if Some(table) != own_table => {
+            format!("{}.{}", table, column.column_name())
+        }
+        _ => column.column_name().to_string(),
+    }
+}
+
+/// The builders whose `where_*` methods [`column_reference`] qualifies for.
+pub(crate) trait ConditionOwner {
+    /// The table of the builder's model, if it has one.
+    fn own_table() -> Option<&'static str>;
 }
 
 impl IntoColumnName for &str {
@@ -49,6 +70,10 @@ impl<T> IntoColumnName for Column<T> {
     fn column_name(&self) -> &str {
         self.name
     }
+
+    fn column_table(&self) -> Option<&str> {
+        self.table
+    }
 }
 
 /// A strongly-typed column reference
@@ -57,6 +82,7 @@ impl<T> IntoColumnName for Column<T> {
 /// The type parameter `T` represents the Rust type of the column.
 #[derive(Debug, Clone, Copy)]
 pub struct Column<T> {
+    table: Option<&'static str>,
     name: &'static str,
     _phantom: PhantomData<T>,
 }
@@ -65,6 +91,17 @@ impl<T> Column<T> {
     /// Create a new typed column reference
     pub const fn new(name: &'static str) -> Self {
         Self {
+            table: None,
+            name,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// A column of `table`, as a model's generated `columns` name theirs: a
+    /// query of another model refers to it as `table.name`.
+    pub const fn of(table: &'static str, name: &'static str) -> Self {
+        Self {
+            table: Some(table),
             name,
             _phantom: PhantomData,
         }
@@ -74,76 +111,24 @@ impl<T> Column<T> {
     pub const fn name(&self) -> &'static str {
         self.name
     }
+
+    /// The table the column belongs to, for a model's column.
+    pub const fn table(&self) -> Option<&'static str> {
+        self.table
+    }
 }
 
-// =============================================================================
-// COLUMN CONDITIONS
-// =============================================================================
-
-/// A type-safe column condition for WHERE clauses
+/// A type-safe column condition for WHERE clauses, applied with
+/// [`QueryBuilder::where_col`](crate::query::QueryBuilder::where_col).
 #[derive(Debug, Clone)]
 pub struct ColumnCondition {
     /// The column name
     pub column: String,
-    /// The operator
-    pub operator: ColumnOperator,
-    /// The value (as JSON for flexibility)
-    pub value: serde_json::Value,
-}
-
-/// Operators for column conditions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColumnOperator {
-    /// Equal to (=)
-    Eq,
-    /// Not equal to (<>)
-    NotEq,
-    /// Greater than (>)
-    Gt,
-    /// Greater than or equal (>=)
-    Gte,
-    /// Less than (<)
-    Lt,
-    /// Less than or equal (<=)
-    Lte,
-    /// LIKE pattern match
-    Like,
-    /// LIKE pattern match using an escaped literal pattern
-    LikeEscaped,
-    /// NOT LIKE pattern match
-    NotLike,
-    /// IN list
-    In,
-    /// NOT IN list
-    NotIn,
-    /// IS NULL
-    IsNull,
-    /// IS NOT NULL
-    IsNotNull,
-    /// BETWEEN range
-    Between,
-}
-
-impl ColumnOperator {
-    /// Convert to SQL operator string
-    pub fn to_sql(&self) -> &'static str {
-        match self {
-            Self::Eq => "=",
-            Self::NotEq => "<>",
-            Self::Gt => ">",
-            Self::Gte => ">=",
-            Self::Lt => "<",
-            Self::Lte => "<=",
-            Self::Like => "LIKE",
-            Self::LikeEscaped => "LIKE",
-            Self::NotLike => "NOT LIKE",
-            Self::In => "IN",
-            Self::NotIn => "NOT IN",
-            Self::IsNull => "IS NULL",
-            Self::IsNotNull => "IS NOT NULL",
-            Self::Between => "BETWEEN",
-        }
-    }
+    /// The comparison to apply
+    pub operator: crate::query::Operator,
+    /// The value compared with: one value, a list for `In`/`NotIn`, a range
+    /// for `Between`, and none for the NULL checks.
+    pub value: crate::query::ConditionValue,
 }
 
 /// The escape character used by every generated `LIKE ... ESCAPE` clause.
@@ -171,10 +156,6 @@ pub(crate) fn escape_like_literal(value: &str) -> String {
     }
     escaped
 }
-
-// =============================================================================
-// COLUMN EXPRESSION TRAITS
-// =============================================================================
 
 /// Trait for types that can be compared for equality
 pub trait ColumnEq<T> {
@@ -224,10 +205,10 @@ pub trait ColumnNullable {
 /// Trait for types that support IN clauses
 #[allow(clippy::wrong_self_convention)]
 pub trait ColumnIn<T> {
-    /// Create an IN list condition
-    fn is_in(self, values: Vec<T>) -> ColumnCondition;
+    /// Create an IN list condition from any list: a `Vec`, an array, a set
+    fn is_in(self, values: impl IntoIterator<Item = T>) -> ColumnCondition;
     /// Create a NOT IN list condition
-    fn not_in(self, values: Vec<T>) -> ColumnCondition;
+    fn not_in(self, values: impl IntoIterator<Item = T>) -> ColumnCondition;
 }
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+error: validation rule 'range' includes its upper bound; write `range(min..=max)` or `range(min, max)`
+ --> tests/ui/invalid_validate_bounds.rs:6:22
+  |
+6 |     #[validate(range(0..100))]
+  |                      ^^^^^^
+
+error: validation rule 'max' expects a finite number, e.g. `max = 18`
+  --> tests/ui/invalid_validate_bounds.rs:15:22
+   |
+15 |     #[validate(max = "inf")]
+   |                      ^^^^^

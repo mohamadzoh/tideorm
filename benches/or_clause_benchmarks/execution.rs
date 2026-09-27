@@ -7,19 +7,6 @@ pub(super) fn bench_or_clause_query_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("or_clause_execution");
     group.measurement_time(Duration::from_secs(10));
 
-    // Simple OR query
-    group.bench_function("simple_or_query", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                let _results = OrBenchUser::query()
-                    .or_where(|q| q.where_eq("role", "admin").where_eq("role", "moderator"))
-                    .get()
-                    .await
-                    .unwrap();
-            });
-        });
-    });
-
     // Complex OR query with AND conditions
     group.bench_function("complex_or_and_query", |b| {
         b.iter(|| {

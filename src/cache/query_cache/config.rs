@@ -7,6 +7,9 @@ pub struct CacheConfig {
     pub enabled: bool,
     /// Maximum number of entries in the cache
     pub max_entries: usize,
+    /// Upper bound on the total serialized size of cached data, or `0` for no
+    /// byte budget
+    pub max_size_bytes: usize,
     /// Default TTL for cache entries
     pub default_ttl: Duration,
     /// Cache eviction strategy
@@ -22,6 +25,7 @@ impl Default for CacheConfig {
         Self {
             enabled: false,
             max_entries: 1000,
+            max_size_bytes: 0,
             default_ttl: Duration::from_secs(60),
             strategy: CacheStrategy::LRU,
             cache_empty_results: true,

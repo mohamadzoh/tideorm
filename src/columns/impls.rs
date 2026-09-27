@@ -1,418 +1,182 @@
 use super::{
-    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOperator,
-    ColumnOrd, escape_like_literal,
+    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd,
+    escape_like_literal,
 };
+use crate::query::{ConditionValue, Operator};
 
-// =============================================================================
-// IMPLEMENTATIONS FOR COMMON TYPES
-// =============================================================================
+impl<T> Column<T> {
+    fn cond(self, operator: Operator, value: ConditionValue) -> ColumnCondition {
+        ColumnCondition {
+            column: super::column_reference(&self, None),
+            operator,
+            value,
+        }
+    }
+}
 
-macro_rules! impl_column_numeric {
-    ($($t:ty),*) => {
-        $(
-            impl ColumnEq<$t> for Column<$t> {
-                fn eq(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Eq,
-                        value: serde_json::json!(value),
-                    }
-                }
+fn like_pattern(pattern: String) -> ConditionValue {
+    ConditionValue::Single(serde_json::Value::String(pattern))
+}
 
-                fn ne(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::NotEq,
-                        value: serde_json::json!(value),
-                    }
-                }
+// Each macro implements one trait for every listed column type, so a nullable
+// column (`Column<Option<T>>`) shares the comparisons of its plain twin.
+
+macro_rules! impl_eq {
+    ($value:ty => $($column:ty),+) => {$(
+        impl ColumnEq<$value> for Column<$column> {
+            fn eq(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::Eq, ConditionValue::single(value))
             }
 
-            impl ColumnOrd<$t> for Column<$t> {
-                fn gt(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Gt,
-                        value: serde_json::json!(value),
-                    }
-                }
+            fn ne(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::NotEq, ConditionValue::single(value))
+            }
+        }
+    )+};
+}
 
-                fn gte(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Gte,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn lt(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Lt,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn lte(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Lte,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn between(self, low: $t, high: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Between,
-                        value: serde_json::json!([low, high]),
-                    }
-                }
+macro_rules! impl_ord {
+    ($value:ty => $($column:ty),+) => {$(
+        impl ColumnOrd<$value> for Column<$column> {
+            fn gt(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::Gt, ConditionValue::single(value))
             }
 
-            impl ColumnIn<$t> for Column<$t> {
-                fn is_in(self, values: Vec<$t>) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::In,
-                        value: serde_json::json!(values),
-                    }
-                }
-
-                fn not_in(self, values: Vec<$t>) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::NotIn,
-                        value: serde_json::json!(values),
-                    }
-                }
+            fn gte(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::Gte, ConditionValue::single(value))
             }
 
-            impl ColumnEq<$t> for Column<Option<$t>> {
-                fn eq(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Eq,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn ne(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::NotEq,
-                        value: serde_json::json!(value),
-                    }
-                }
+            fn lt(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::Lt, ConditionValue::single(value))
             }
 
-            impl ColumnOrd<$t> for Column<Option<$t>> {
-                fn gt(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Gt,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn gte(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Gte,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn lt(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Lt,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn lte(self, value: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Lte,
-                        value: serde_json::json!(value),
-                    }
-                }
-
-                fn between(self, low: $t, high: $t) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::Between,
-                        value: serde_json::json!([low, high]),
-                    }
-                }
+            fn lte(self, value: $value) -> ColumnCondition {
+                self.cond(Operator::Lte, ConditionValue::single(value))
             }
 
-            impl ColumnNullable for Column<Option<$t>> {
-                fn is_null(self) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::IsNull,
-                        value: serde_json::Value::Null,
-                    }
-                }
-
-                fn is_not_null(self) -> ColumnCondition {
-                    ColumnCondition {
-                        column: self.name.to_string(),
-                        operator: ColumnOperator::IsNotNull,
-                        value: serde_json::Value::Null,
-                    }
-                }
+            fn between(self, low: $value, high: $value) -> ColumnCondition {
+                self.cond(Operator::Between, ConditionValue::range(low, high))
             }
-        )*
+        }
+    )+};
+}
+
+macro_rules! impl_in {
+    (@methods $value:ty) => {
+        fn is_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
+            self.cond(Operator::In, ConditionValue::list(values))
+        }
+
+        fn not_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
+            self.cond(Operator::NotIn, ConditionValue::list(values))
+        }
     };
+    (<$lifetime:lifetime> $value:ty => $($column:ty),+) => {$(
+        impl<$lifetime> ColumnIn<$value> for Column<$column> {
+            impl_in!(@methods $value);
+        }
+    )+};
 }
 
-impl_column_numeric!(i8, i16, i32, i64, u8, u16, u32, u64, f32, f64);
+macro_rules! impl_like {
+    ($($column:ty),+) => {$(
+        impl ColumnLike for Column<$column> {
+            fn like(self, pattern: &str) -> ColumnCondition {
+                self.cond(Operator::Like, like_pattern(pattern.to_string()))
+            }
 
-impl ColumnEq<&str> for Column<String> {
-    fn eq(self, value: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Eq,
-            value: serde_json::json!(value),
-        }
-    }
+            fn not_like(self, pattern: &str) -> ColumnCondition {
+                self.cond(Operator::NotLike, like_pattern(pattern.to_string()))
+            }
 
-    fn ne(self, value: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotEq,
-            value: serde_json::json!(value),
+            fn contains(self, substr: &str) -> ColumnCondition {
+                self.cond(
+                    Operator::LikeEscaped,
+                    like_pattern(format!("%{}%", escape_like_literal(substr))),
+                )
+            }
+
+            fn starts_with(self, prefix: &str) -> ColumnCondition {
+                self.cond(
+                    Operator::LikeEscaped,
+                    like_pattern(format!("{}%", escape_like_literal(prefix))),
+                )
+            }
+
+            fn ends_with(self, suffix: &str) -> ColumnCondition {
+                self.cond(
+                    Operator::LikeEscaped,
+                    like_pattern(format!("%{}", escape_like_literal(suffix))),
+                )
+            }
         }
-    }
+    )+};
 }
 
-impl ColumnEq<String> for Column<String> {
-    fn eq(self, value: String) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Eq,
-            value: serde_json::json!(value),
-        }
-    }
+macro_rules! impl_nullable {
+    ($($column:ty),+) => {$(
+        impl ColumnNullable for Column<$column> {
+            fn is_null(self) -> ColumnCondition {
+                self.cond(Operator::IsNull, ConditionValue::None)
+            }
 
-    fn ne(self, value: String) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotEq,
-            value: serde_json::json!(value),
+            fn is_not_null(self) -> ColumnCondition {
+                self.cond(Operator::IsNotNull, ConditionValue::None)
+            }
         }
-    }
+    )+};
 }
 
-impl ColumnLike for Column<String> {
-    fn like(self, pattern: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(pattern),
-        }
-    }
-
-    fn not_like(self, pattern: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotLike,
-            value: serde_json::json!(pattern),
-        }
-    }
-
-    fn contains(self, substr: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("%{}%", escape_like_literal(substr))),
-        }
-    }
-
-    fn starts_with(self, prefix: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("{}%", escape_like_literal(prefix))),
-        }
-    }
-
-    fn ends_with(self, suffix: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("%{}", escape_like_literal(suffix))),
-        }
-    }
+macro_rules! impl_ordered {
+    ($($t:ty),*) => {$(
+        impl_ord!($t => $t, Option<$t>);
+        impl_nullable!(Option<$t>);
+    )*};
 }
 
-impl ColumnIn<&str> for Column<String> {
-    fn is_in(self, values: Vec<&str>) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::In,
-            value: serde_json::json!(values),
-        }
+impl_ordered!(i8, i16, i32, i64, u8, u16, u32, u64, f32, f64);
+impl_ordered!(
+    uuid::Uuid,
+    chrono::DateTime<chrono::Utc>,
+    chrono::NaiveDateTime,
+    chrono::NaiveDate,
+    chrono::NaiveTime,
+    rust_decimal::Decimal
+);
+
+impl_eq!(&str => String, Option<String>);
+impl_like!(String, Option<String>);
+impl_in!(<'a> &'a str => String, Option<String>);
+impl_nullable!(Option<String>);
+
+impl_nullable!(Option<bool>);
+// Equality and IN lists work for a column of any type that serializes — an
+// enum, a newtype, a JSON value — and a nullable column (`Column<Option<T>>`)
+// compares with a plain `T` too.
+impl<T: serde::Serialize> ColumnEq<T> for Column<T> {
+    fn eq(self, value: T) -> ColumnCondition {
+        self.cond(Operator::Eq, ConditionValue::single(value))
     }
 
-    fn not_in(self, values: Vec<&str>) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotIn,
-            value: serde_json::json!(values),
-        }
+    fn ne(self, value: T) -> ColumnCondition {
+        self.cond(Operator::NotEq, ConditionValue::single(value))
     }
 }
 
-impl ColumnIn<String> for Column<String> {
-    fn is_in(self, values: Vec<String>) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::In,
-            value: serde_json::json!(values),
-        }
+impl<T: serde::Serialize> ColumnEq<T> for Column<Option<T>> {
+    fn eq(self, value: T) -> ColumnCondition {
+        self.cond(Operator::Eq, ConditionValue::single(value))
     }
 
-    fn not_in(self, values: Vec<String>) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotIn,
-            value: serde_json::json!(values),
-        }
+    fn ne(self, value: T) -> ColumnCondition {
+        self.cond(Operator::NotEq, ConditionValue::single(value))
     }
 }
 
-impl ColumnEq<&str> for Column<Option<String>> {
-    fn eq(self, value: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Eq,
-            value: serde_json::json!(value),
-        }
-    }
-
-    fn ne(self, value: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotEq,
-            value: serde_json::json!(value),
-        }
-    }
+impl<T: serde::Serialize> ColumnIn<T> for Column<T> {
+    impl_in!(@methods T);
 }
 
-impl ColumnLike for Column<Option<String>> {
-    fn like(self, pattern: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Like,
-            value: serde_json::json!(pattern),
-        }
-    }
-
-    fn not_like(self, pattern: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotLike,
-            value: serde_json::json!(pattern),
-        }
-    }
-
-    fn contains(self, substr: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("%{}%", escape_like_literal(substr))),
-        }
-    }
-
-    fn starts_with(self, prefix: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("{}%", escape_like_literal(prefix))),
-        }
-    }
-
-    fn ends_with(self, suffix: &str) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::LikeEscaped,
-            value: serde_json::json!(format!("%{}", escape_like_literal(suffix))),
-        }
-    }
-}
-
-impl ColumnNullable for Column<Option<String>> {
-    fn is_null(self) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::IsNull,
-            value: serde_json::Value::Null,
-        }
-    }
-
-    fn is_not_null(self) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::IsNotNull,
-            value: serde_json::Value::Null,
-        }
-    }
-}
-
-impl ColumnEq<bool> for Column<bool> {
-    fn eq(self, value: bool) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Eq,
-            value: serde_json::json!(value),
-        }
-    }
-
-    fn ne(self, value: bool) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotEq,
-            value: serde_json::json!(value),
-        }
-    }
-}
-
-impl ColumnEq<bool> for Column<Option<bool>> {
-    fn eq(self, value: bool) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::Eq,
-            value: serde_json::json!(value),
-        }
-    }
-
-    fn ne(self, value: bool) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::NotEq,
-            value: serde_json::json!(value),
-        }
-    }
-}
-
-impl ColumnNullable for Column<Option<bool>> {
-    fn is_null(self) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::IsNull,
-            value: serde_json::Value::Null,
-        }
-    }
-
-    fn is_not_null(self) -> ColumnCondition {
-        ColumnCondition {
-            column: self.name.to_string(),
-            operator: ColumnOperator::IsNotNull,
-            value: serde_json::Value::Null,
-        }
-    }
+impl<T: serde::Serialize> ColumnIn<T> for Column<Option<T>> {
+    impl_in!(@methods T);
 }

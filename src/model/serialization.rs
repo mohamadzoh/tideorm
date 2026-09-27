@@ -6,26 +6,10 @@ use super::{Model, ModelMeta};
 
 pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -> serde_json::Value
 where
-    M: Model + serde::Serialize,
+    M: Model,
 {
-    #[cfg(feature = "translations")]
-    let fallback = M::fallback_language();
-    #[cfg(feature = "translations")]
-    let current_language = options
-        .and_then(|opts| opts.get("language"))
-        .map(|s| s.as_str())
-        .unwrap_or(&fallback);
-    let _current_presenter = options
-        .and_then(|opts| opts.get("presenter"))
-        .map(|s| s.as_str())
-        .unwrap_or(M::default_presenter());
-
     let hidden = M::hidden_attributes();
     let global_hidden = crate::config::Config::get_hidden_attributes();
-    #[cfg(feature = "translations")]
-    let translatable = M::translatable_fields();
-    #[cfg(feature = "attachments")]
-    let file_relations = M::files_relations();
 
     let mut json = match model_to_object(model) {
         Ok(map) => map,
@@ -35,45 +19,44 @@ where
         }
     };
 
+    if M::has_translations()
+        && let Some(translations) = json.remove(M::serialized_name("translations"))
+        && let Some(translations) = translations.as_object()
+    {
+        let language = options
+            .and_then(|opts| opts.get("language"))
+            .map(String::as_str);
+        for (field, value) in translated_values::<M>(translations, language) {
+            json.insert(M::serialized_name(field).to_string(), value);
+        }
+    }
+
+    // After translation resolution, which writes translatable fields back in:
+    // a field that is both hidden and translatable must stay hidden.
     for attr in &hidden {
-        json.remove(*attr);
+        json.remove(M::serialized_name(attr));
     }
 
     for attr in &global_hidden {
-        json.remove(attr.as_str());
-    }
-
-    #[cfg(feature = "translations")]
-    if M::has_translations()
-        && let Some(translations) = json.get("translations").cloned()
-    {
-        if let Some(trans_obj) = translations.as_object() {
-            for field in &translatable {
-                if let Some(field_trans) = trans_obj.get(*field)
-                    && let Some(field_obj) = field_trans.as_object()
-                    && let Some(value) = field_obj
-                        .get(current_language)
-                        .or_else(|| field_obj.get(&fallback))
-                {
-                    json.insert(field.to_string(), value.clone());
-                }
-            }
-        }
-        json.remove("translations");
+        json.remove(M::serialized_name(attr));
     }
 
     #[cfg(feature = "attachments")]
-    if M::has_file_attachments() {
+    if M::has_file_attachments()
+        && let Some(files) = json.remove(M::serialized_name("files"))
+        && let Some(files_obj) = files.as_object()
+    {
         let url_generator = M::file_url_generator();
-        if let Some(files) = json.remove("files")
-            && let Some(files_obj) = files.as_object()
-        {
-            for relation in &file_relations {
-                if let Some(file_data) = files_obj.get(*relation) {
-                    let processed =
-                        process_file_for_json(relation, file_data, &hidden, url_generator);
-                    json.insert(relation.to_string(), processed);
-                }
+        for relation in M::files_relations() {
+            // An attachment named among the hidden attributes stays hidden.
+            if hidden.contains(&relation)
+                || global_hidden.iter().any(|attr| attr.as_str() == relation)
+            {
+                continue;
+            }
+            if let Some(file_data) = files_obj.get(relation) {
+                let processed = process_file_for_json(relation, file_data, &hidden, url_generator);
+                json.insert(relation.to_string(), processed);
             }
         }
     }
@@ -81,6 +64,31 @@ where
     strip_hidden_from_non_column_payloads::<M>(&mut json, &global_hidden);
 
     serde_json::Value::Object(json)
+}
+
+/// Each translatable field's value for `language` (default: the model's
+/// fallback language), falling back to the fallback language for a field the
+/// requested one does not define.
+fn translated_values<M>(
+    translations: &serde_json::Map<String, serde_json::Value>,
+    language: Option<&str>,
+) -> Vec<(&'static str, serde_json::Value)>
+where
+    M: ModelMeta,
+{
+    let fallback = M::fallback_language();
+    let language = language.unwrap_or(&fallback);
+
+    M::translatable_fields()
+        .into_iter()
+        .filter_map(|field| {
+            let by_language = translations.get(field)?.as_object()?;
+            let value = by_language
+                .get(language)
+                .or_else(|| by_language.get(fallback.as_str()))?;
+            Some((field, value.clone()))
+        })
+        .collect()
 }
 
 /// Return whether `name` is one of the model's own persisted attributes.
@@ -91,7 +99,10 @@ fn is_persisted_attribute<M>(name: &str) -> bool
 where
     M: ModelMeta,
 {
-    M::field_names().contains(&name) || M::column_names().contains(&name)
+    M::field_names()
+        .iter()
+        .any(|field| *field == name || M::serialized_name(field) == name)
+        || M::column_names().contains(&name)
 }
 
 /// Apply hidden-attribute filtering to eager-loaded relation and attachment
@@ -105,7 +116,7 @@ where
 /// any depth, so `post.to_json(None)` after `.with("author")` hides what `User`
 /// declares hidden rather than what `Post` does. Payloads with no declared
 /// target (attachment blobs, and `MorphTo` fields whose model is only known at
-/// runtime) keep the older behaviour of reusing the owning model's list.
+/// runtime) are filtered with the owning model's list instead.
 fn strip_hidden_from_non_column_payloads<M>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     global_hidden: &[String],
@@ -146,11 +157,11 @@ where
     match value {
         serde_json::Value::Object(map) => {
             for attr in M::hidden_attributes() {
-                map.remove(attr);
+                map.remove(M::serialized_name(attr));
             }
 
             for attr in global_hidden {
-                map.remove(attr.as_str());
+                map.remove(M::serialized_name(attr));
             }
 
             strip_hidden_from_non_column_payloads::<M>(map, global_hidden);
@@ -193,7 +204,7 @@ fn strip_hidden_attributes(
 }
 
 #[cfg(feature = "attachments")]
-pub(crate) fn process_file_for_json(
+fn process_file_for_json(
     field_name: &str,
     file_data: &serde_json::Value,
     hidden_attrs: &[&str],
@@ -231,7 +242,7 @@ pub(crate) fn collection_to_json<M>(
     options: Option<HashMap<String, String>>,
 ) -> serde_json::Value
 where
-    M: Model + serde::Serialize,
+    M: Model,
 {
     serde_json::Value::Array(
         models
@@ -243,7 +254,7 @@ where
 
 pub(crate) fn to_hash_map<M>(model: &M) -> HashMap<String, String>
 where
-    M: Model + serde::Serialize,
+    M: Model,
 {
     let json = to_json(model, None);
     let mut map = HashMap::new();
@@ -289,93 +300,6 @@ where
     }
 }
 
-fn overwrite_model_from_object<M>(
-    model: &mut M,
-    object: serde_json::Map<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    let mut updated: M = serde_json::from_value(serde_json::Value::Object(object))
-        .map_err(|error| format!("Failed to deserialize model: {}", error))?;
-    updated.refresh_runtime_relations_from(model);
-    *model = updated;
-    Ok(())
-}
-
-/// Resolve a field or database column name to the model's serde field name,
-/// which is the key used by the JSON representation of the model.
-fn canonical_field_name<M>(name: &str) -> Option<&'static str>
-where
-    M: Model,
-{
-    if let Some(field_name) = M::field_names()
-        .iter()
-        .copied()
-        .find(|field| *field == name)
-    {
-        return Some(field_name);
-    }
-
-    M::field_names()
-        .iter()
-        .copied()
-        .zip(M::column_names().iter().copied())
-        .find_map(|(field_name, column_name)| (column_name == name).then_some(field_name))
-}
-
-fn changes_to_object<M>(
-    changes: HashMap<String, serde_json::Value>,
-    object: &mut serde_json::Map<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    for (name, value) in changes {
-        let field_name = canonical_field_name::<M>(&name)
-            .ok_or_else(|| format!("Unknown field '{}' for '{}'", name, M::table_name()))?;
-        object.insert(field_name.to_string(), value);
-    }
-
-    Ok(())
-}
-
-/// Apply accumulated attribute changes to `model` in place.
-///
-/// Keys accept either the Rust field name or the database column name.
-pub(crate) fn apply_changes<M>(
-    model: &mut M,
-    changes: HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    if changes.is_empty() {
-        return Ok(());
-    }
-
-    let mut object = model_to_object(model)?;
-    changes_to_object::<M>(changes, &mut object)?;
-
-    overwrite_model_from_object(model, object)
-}
-
-/// Build a brand new model from accumulated attribute values.
-///
-/// Keys accept either the Rust field name or the database column name.
-pub(crate) fn model_from_values<M>(
-    values: HashMap<String, serde_json::Value>,
-) -> std::result::Result<M, String>
-where
-    M: Model,
-{
-    let mut object = serde_json::Map::new();
-    changes_to_object::<M>(values, &mut object)?;
-
-    serde_json::from_value(serde_json::Value::Object(object))
-        .map_err(|error| format!("Failed to build model from values: {}", error))
-}
-
 pub(crate) fn load_language_translations<M>(
     model: &mut M,
     language: &str,
@@ -387,69 +311,18 @@ where
         return Err("Model does not support translations".to_string());
     }
 
-    let mut object = model_to_object(model)?;
-    let fallback = M::fallback_language();
-
-    let translations = object
-        .get("translations")
-        .and_then(serde_json::Value::as_object)
-        .cloned();
-
-    if let Some(translations) = translations {
-        for field in M::translatable_fields() {
-            if let Some(value) = translations
-                .get(field)
-                .and_then(serde_json::Value::as_object)
-                .and_then(|by_language| {
-                    by_language
-                        .get(language)
-                        .or_else(|| by_language.get(fallback.as_str()))
-                })
-            {
-                object.insert(field.to_string(), value.clone());
-            }
-        }
+    let translations = model
+        .field_json_value("translations")
+        .map_err(|error| error.to_string())?;
+    let Some(translations) = translations.as_ref().and_then(serde_json::Value::as_object) else {
+        return Ok(());
+    };
+    for (field, value) in translated_values::<M>(translations, Some(language)) {
+        model
+            .set_field_json(field, value)
+            .map_err(|error| error.to_string())?;
     }
-
-    overwrite_model_from_object(model, object)
-}
-
-#[cfg(feature = "translations")]
-pub(crate) fn extract_translations<M>(
-    data: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<serde_json::Value, String>
-where
-    M: Model,
-{
-    if !M::has_translations() {
-        return Ok(serde_json::json!({}));
-    }
-
-    let mut translations = serde_json::Map::new();
-    let translatable = M::translatable_fields();
-
-    for field in translatable {
-        if let Some(value) = data.get(field)
-            && value.is_object()
-        {
-            translations.insert(field.to_string(), value.clone());
-            data.remove(field);
-        }
-    }
-
-    Ok(serde_json::Value::Object(translations))
-}
-
-#[cfg(not(feature = "translations"))]
-pub(crate) fn extract_translations<M>(
-    data: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<serde_json::Value, String>
-where
-    M: Model,
-{
-    let _ = std::marker::PhantomData::<M>;
-    let _ = data;
-    Ok(serde_json::json!({}))
+    Ok(())
 }
 
 pub(crate) fn get_files_attribute<M>(
@@ -462,8 +335,10 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    let mut object = model_to_object(model)?;
-    match object.remove("files") {
+    match model
+        .field_json_value("files")
+        .map_err(|error| error.to_string())?
+    {
         None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
         Some(serde_json::Value::Object(map)) => Ok(map.into_iter().collect()),
         Some(_) => Err("Model files attribute is not a JSON object".to_string()),
@@ -481,48 +356,16 @@ where
         return Err("Model does not support file attachments".to_string());
     }
 
-    let mut object = model_to_object(model)?;
-    object.insert(
-        "files".to_string(),
-        serde_json::Value::Object(files.into_iter().collect()),
-    );
-
-    overwrite_model_from_object(model, object)
+    let files = serde_json::Value::Object(files.into_iter().collect());
+    match model.set_field_json("files", files) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("Model has no files field".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
-pub(crate) fn attach_file<M>(
-    relation_type: &str,
-    file_key: &str,
-    files: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
-    let file_metadata = serde_json::json!({
-        "key": file_key,
-        "filename": file_key.split('/').next_back().unwrap_or(file_key),
-        "created_at": chrono::Utc::now().to_rfc3339(),
-    });
-
-    if M::has_one_attached_file().contains(&relation_type) {
-        files.insert(relation_type.to_string(), file_metadata);
-    } else if M::has_many_attached_files().contains(&relation_type) {
-        let mut array = files
-            .get(relation_type)
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default();
-        array.push(file_metadata);
-        files.insert(relation_type.to_string(), serde_json::Value::Array(array));
-    } else {
-        return Err(format!("Unknown file relation: {}", relation_type));
-    }
-
-    Ok(())
-}
+// The attachment editors below receive `files` from `get_files_attribute`,
+// which has already rejected a model without attachments.
 
 enum FileRelationKind {
     HasOne,
@@ -542,6 +385,43 @@ where
     }
 }
 
+/// Metadata recorded for one attached file: its storage key, the key's last
+/// path segment as the file name, and the time it was attached.
+fn file_metadata(file_key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "key": file_key,
+        "filename": file_key.split('/').next_back().unwrap_or(file_key),
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+pub(crate) fn attach_file<M>(
+    relation_type: &str,
+    file_key: &str,
+    files: &mut HashMap<String, serde_json::Value>,
+) -> std::result::Result<(), String>
+where
+    M: Model,
+{
+    let metadata = file_metadata(file_key);
+
+    match file_relation_kind::<M>(relation_type)? {
+        FileRelationKind::HasOne => {
+            files.insert(relation_type.to_string(), metadata);
+        }
+        FileRelationKind::HasMany => {
+            let mut array = files
+                .get(relation_type)
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default();
+            array.push(metadata);
+            files.insert(relation_type.to_string(), serde_json::Value::Array(array));
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn attach_files<M>(
     relation_type: &str,
     file_keys: Vec<&str>,
@@ -550,10 +430,6 @@ pub(crate) fn attach_files<M>(
 where
     M: Model,
 {
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
     if !matches!(
         file_relation_kind::<M>(relation_type)?,
         FileRelationKind::HasMany
@@ -579,10 +455,6 @@ pub(crate) fn detach_file<M>(
 where
     M: Model,
 {
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
     match file_relation_kind::<M>(relation_type)? {
         FileRelationKind::HasOne => {
             if let Some(key) = file_key {
@@ -625,83 +497,17 @@ pub(crate) fn sync_files<M>(
 where
     M: Model,
 {
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
-    match file_relation_kind::<M>(relation_type)? {
-        FileRelationKind::HasOne => {
-            if file_keys.is_empty() {
-                files.insert(relation_type.to_string(), serde_json::Value::Null);
-                return Ok(());
-            }
-
-            let file_metadata = serde_json::json!({
-                "key": file_keys[0],
-                "filename": file_keys[0].split('/').next_back().unwrap_or(file_keys[0]),
-                "created_at": chrono::Utc::now().to_rfc3339(),
-            });
-            files.insert(relation_type.to_string(), file_metadata);
-        }
+    let synced = match file_relation_kind::<M>(relation_type)? {
+        FileRelationKind::HasOne => file_keys
+            .first()
+            .map_or(serde_json::Value::Null, |key| file_metadata(key)),
         FileRelationKind::HasMany => {
-            if file_keys.is_empty() {
-                files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
-                return Ok(());
-            }
-
-            let file_array: Vec<serde_json::Value> = file_keys
-                .iter()
-                .map(|key| {
-                    serde_json::json!({
-                        "key": key,
-                        "filename": key.split('/').next_back().unwrap_or(key),
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                    })
-                })
-                .collect();
-            files.insert(
-                relation_type.to_string(),
-                serde_json::Value::Array(file_array),
-            );
+            serde_json::Value::Array(file_keys.into_iter().map(file_metadata).collect())
         }
-    }
+    };
+    files.insert(relation_type.to_string(), synced);
 
     Ok(())
-}
-
-#[cfg(feature = "attachments")]
-pub(crate) fn extract_files<M>(
-    data: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<serde_json::Value, String>
-where
-    M: Model,
-{
-    if !M::has_file_attachments() {
-        return Ok(serde_json::json!({}));
-    }
-
-    let mut files = serde_json::Map::new();
-    let file_relations = M::files_relations();
-
-    for relation in file_relations {
-        if let Some(value) = data.remove(relation) {
-            files.insert(relation.to_string(), value);
-        }
-    }
-
-    Ok(serde_json::Value::Object(files))
-}
-
-#[cfg(not(feature = "attachments"))]
-pub(crate) fn extract_files<M>(
-    data: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<serde_json::Value, String>
-where
-    M: Model,
-{
-    let _ = std::marker::PhantomData::<M>;
-    let _ = data;
-    Ok(serde_json::json!({}))
 }
 
 #[cfg(test)]

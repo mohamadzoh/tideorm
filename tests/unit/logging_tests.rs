@@ -3,39 +3,6 @@ use std::time::Duration;
 use super::*;
 
 #[test]
-fn test_log_level_parsing() {
-    assert_eq!(LogLevel::parse_str("debug"), LogLevel::Debug);
-    assert_eq!(LogLevel::parse_str("DEBUG"), LogLevel::Debug);
-    assert_eq!(LogLevel::parse_str("warn"), LogLevel::Warn);
-    assert_eq!(LogLevel::parse_str("4"), LogLevel::Debug);
-    assert_eq!(LogLevel::parse_str("invalid"), LogLevel::Off);
-}
-
-#[test]
-fn test_query_operation_detection() {
-    assert_eq!(
-        QueryOperation::from_sql("SELECT * FROM users"),
-        QueryOperation::Select
-    );
-    assert_eq!(
-        QueryOperation::from_sql("INSERT INTO users"),
-        QueryOperation::Insert
-    );
-    assert_eq!(
-        QueryOperation::from_sql("UPDATE users SET"),
-        QueryOperation::Update
-    );
-    assert_eq!(
-        QueryOperation::from_sql("DELETE FROM users"),
-        QueryOperation::Delete
-    );
-    assert_eq!(
-        QueryOperation::from_sql("BEGIN"),
-        QueryOperation::Transaction
-    );
-}
-
-#[test]
 fn test_query_log_entry() {
     let entry = QueryLogEntry::new("SELECT * FROM users")
         .with_table("users")
@@ -49,37 +16,17 @@ fn test_query_log_entry() {
 }
 
 #[test]
-fn test_slow_query_detection() {
-    let fast_entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(10));
-
-    let slow_entry = QueryLogEntry::new("SELECT 1").with_duration(Duration::from_millis(200));
-
-    assert!(!fast_entry.is_slow(100));
-    assert!(slow_entry.is_slow(100));
-}
-
-#[test]
 fn test_query_stats() {
     let stats = QueryStats {
         total_queries: 100,
         slow_queries: 5,
-        total_time_ms: 500,
-        threshold_ms: 100,
+        total_time_ns: 500_000_000,
+        slow_threshold_ms: 100,
     };
 
-    assert_eq!(stats.avg_query_time_ms(), 5.0);
-    assert_eq!(stats.slow_query_percentage(), 5.0);
-}
-
-#[test]
-fn test_query_timer() {
-    let timer = QueryTimer::start("SELECT * FROM users").with_table("users");
-
-    std::thread::sleep(Duration::from_millis(10));
-    let entry = timer.finish_with_rows(5);
-
-    assert!(entry.duration.unwrap() >= Duration::from_millis(10));
-    assert_eq!(entry.rows, Some(5));
+    assert_eq!(stats.total_time(), Duration::from_millis(500));
+    assert_eq!(stats.avg_query_time(), Duration::from_millis(5));
+    assert_eq!(stats.slow_percentage(), 5.0);
 }
 
 #[test]
@@ -110,18 +57,59 @@ fn test_logger_records_duration_and_failure_from_a_finished_timer() {
     );
 
     let stats = QueryLogger::stats();
-    assert!(stats.total_time_ms >= 5);
+    assert!(stats.total_time() >= Duration::from_millis(5));
     assert_eq!(stats.slow_queries, 1);
     assert_eq!(QueryLogger::slow_queries().len(), 1);
 
     QueryLogger::clear_history();
     QueryLogger::reset_stats();
-    // `QueryLoggerBuilder::disable` applies none of the builder settings, so the
-    // threshold has to be restored through `enable()` before switching off.
     QueryLogger::global()
         .set_slow_query_threshold_ms(100)
         .set_history_limit(100)
+        .disable();
+}
+
+#[test]
+fn test_builder_disable_still_applies_its_settings() {
+    QueryLogger::clear_history();
+    QueryLogger::global()
+        .set_level(LogLevel::Debug)
+        .set_history_limit(1)
         .enable();
+
+    QueryLogger::global().set_history_limit(3).disable();
+    assert!(!QueryLogger::is_enabled());
+
+    QueryLogger::enable();
+    for sql in ["SELECT 1", "SELECT 2", "SELECT 3"] {
+        QueryLogger::log(QueryLogEntry::new(sql));
+    }
+    assert_eq!(
+        QueryLogger::history().len(),
+        3,
+        "the history limit set on a disabling builder must be kept"
+    );
+
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    QueryLogger::global().set_history_limit(100).disable();
+}
+
+#[test]
+fn test_stats_keep_sub_millisecond_query_time() {
+    QueryLogger::reset_stats();
+    QueryLogger::global().set_level(LogLevel::Error).enable();
+
+    QueryLogger::log(QueryLogEntry::new("SELECT 1").with_duration(Duration::from_micros(400)));
+    QueryLogger::log(QueryLogEntry::new("SELECT 2").with_duration(Duration::from_micros(600)));
+
+    let stats = QueryLogger::stats();
+    assert_eq!(stats.total_queries, 2);
+    assert_eq!(stats.total_time(), Duration::from_millis(1));
+    assert_eq!(stats.avg_query_time(), Duration::from_micros(500));
+
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
     QueryLogger::disable();
 }
 

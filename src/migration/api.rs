@@ -3,6 +3,7 @@ use std::fmt;
 use crate::error::Result;
 
 use super::Schema;
+use super::ledger::write_report_section;
 
 /// Trait for defining database migrations
 ///
@@ -53,37 +54,22 @@ impl MigrationResult {
     pub fn has_applied(&self) -> bool {
         !self.applied.is_empty()
     }
-
-    /// Check if any migrations were rolled back
-    pub fn has_rolled_back(&self) -> bool {
-        !self.rolled_back.is_empty()
-    }
 }
 
 impl fmt::Display for MigrationResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.applied.is_empty() {
-            writeln!(f, "Applied migrations:")?;
-            for migration in &self.applied {
-                writeln!(f, "  ✓ {} - {}", migration.version, migration.name)?;
-            }
-        }
+        let label =
+            |migration: &MigrationInfo| format!("{} - {}", migration.version, migration.name);
 
-        if !self.skipped.is_empty() {
-            writeln!(f, "Skipped migrations (already applied):")?;
-            for migration in &self.skipped {
-                writeln!(f, "  - {} - {}", migration.version, migration.name)?;
-            }
-        }
-
-        if !self.rolled_back.is_empty() {
-            writeln!(f, "Rolled back migrations:")?;
-            for migration in &self.rolled_back {
-                writeln!(f, "  ↩ {} - {}", migration.version, migration.name)?;
-            }
-        }
-
-        Ok(())
+        write_report_section(f, "Applied migrations", "✓", &self.applied, label)?;
+        write_report_section(
+            f,
+            "Skipped migrations (already applied)",
+            "-",
+            &self.skipped,
+            label,
+        )?;
+        write_report_section(f, "Rolled back migrations", "↩", &self.rolled_back, label)
     }
 }
 

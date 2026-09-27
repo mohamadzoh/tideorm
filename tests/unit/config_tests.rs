@@ -1,5 +1,7 @@
+use super::database::rewrite_driver_url;
 use super::*;
 use crate::sync::SyncRegistry;
+use std::time::Duration;
 
 #[path = "config_tests/model_pattern_fixture.rs"]
 mod model_pattern_fixture;
@@ -172,7 +174,7 @@ fn test_database_type_supports_arrays() {
 fn test_database_type_supports_returning() {
     assert!(DatabaseType::Postgres.supports_returning());
     assert!(!DatabaseType::MySQL.supports_returning());
-    assert!(DatabaseType::MariaDB.supports_returning());
+    assert!(!DatabaseType::MariaDB.supports_returning());
     assert!(DatabaseType::SQLite.supports_returning());
 }
 
@@ -182,14 +184,6 @@ fn test_database_type_supports_upsert() {
     assert!(DatabaseType::MySQL.supports_upsert());
     assert!(DatabaseType::MariaDB.supports_upsert());
     assert!(DatabaseType::SQLite.supports_upsert());
-}
-
-#[test]
-fn test_database_type_supports_fulltext_search() {
-    assert!(DatabaseType::Postgres.supports_fulltext_search());
-    assert!(DatabaseType::MySQL.supports_fulltext_search());
-    assert!(DatabaseType::MariaDB.supports_fulltext_search());
-    assert!(DatabaseType::SQLite.supports_fulltext_search());
 }
 
 #[test]
@@ -206,14 +200,6 @@ fn test_database_type_supports_cte() {
     assert!(DatabaseType::MySQL.supports_cte());
     assert!(DatabaseType::MariaDB.supports_cte());
     assert!(DatabaseType::SQLite.supports_cte());
-}
-
-#[test]
-fn test_database_type_supports_schemas() {
-    assert!(DatabaseType::Postgres.supports_schemas());
-    assert!(!DatabaseType::MySQL.supports_schemas());
-    assert!(!DatabaseType::MariaDB.supports_schemas());
-    assert!(!DatabaseType::SQLite.supports_schemas());
 }
 
 #[test]
@@ -241,35 +227,11 @@ fn test_database_type_quote_char() {
 }
 
 #[test]
-fn test_database_type_default_port() {
-    assert_eq!(DatabaseType::Postgres.default_port(), 5432);
-    assert_eq!(DatabaseType::MySQL.default_port(), 3306);
-    assert_eq!(DatabaseType::MariaDB.default_port(), 3306);
-    assert_eq!(DatabaseType::SQLite.default_port(), 0);
-}
-
-#[test]
-fn test_database_type_url_scheme() {
-    assert_eq!(DatabaseType::Postgres.url_scheme(), "postgres");
-    assert_eq!(DatabaseType::MySQL.url_scheme(), "mysql");
-    assert_eq!(DatabaseType::MariaDB.url_scheme(), "mariadb");
-    assert_eq!(DatabaseType::SQLite.url_scheme(), "sqlite");
-}
-
-#[test]
 fn test_database_type_display() {
     assert_eq!(format!("{}", DatabaseType::Postgres), "PostgreSQL");
     assert_eq!(format!("{}", DatabaseType::MySQL), "MySQL");
     assert_eq!(format!("{}", DatabaseType::MariaDB), "MariaDB");
     assert_eq!(format!("{}", DatabaseType::SQLite), "SQLite");
-}
-
-#[test]
-fn test_database_type_is_mysql_compatible() {
-    assert!(!DatabaseType::Postgres.is_mysql_compatible());
-    assert!(DatabaseType::MySQL.is_mysql_compatible());
-    assert!(DatabaseType::MariaDB.is_mysql_compatible());
-    assert!(!DatabaseType::SQLite.is_mysql_compatible());
 }
 
 #[test]
@@ -351,18 +313,15 @@ fn test_tide_config_apply_overwrites_existing_global_state() {
 
     TideConfig::init()
         .database_type(DatabaseType::Postgres)
-        .max_connections(3)
         .fallback_language("fr")
         .apply();
 
     TideConfig::init()
         .database_type(DatabaseType::SQLite)
-        .max_connections(9)
         .fallback_language("ar")
         .apply();
 
     assert_eq!(TideConfig::get_database_type(), Some(DatabaseType::SQLite));
-    assert_eq!(TideConfig::pool_config().max_connections, 9);
     assert_eq!(Config::global().fallback_language, "ar");
 }
 
@@ -372,17 +331,14 @@ fn test_tide_config_reset_restores_defaults() {
 
     TideConfig::init()
         .database_type(DatabaseType::MariaDB)
-        .max_connections(17)
+        .schema_file("reset_schema.sql")
         .fallback_language("fr")
         .apply();
 
     TideConfig::reset();
 
     assert_eq!(TideConfig::get_database_type(), None);
-    assert_eq!(
-        TideConfig::pool_config().max_connections,
-        PoolConfig::default().max_connections
-    );
+    assert_eq!(TideConfig::schema_file_path(), None);
     assert_eq!(Config::global().fallback_language, "en");
 }
 
@@ -418,6 +374,29 @@ fn test_tide_config_schema_file_path_replaced_without_leak_prone_static_refs() {
 
     TideConfig::reset();
     assert_eq!(TideConfig::schema_file_path(), None);
+}
+
+#[tokio::test]
+async fn test_mariadb_detection_failure_fails_instead_of_assuming_mysql() {
+    let disconnected = crate::database::Database::disconnected();
+
+    // Detection that cannot run must fail `connect()`, not quietly settle on
+    // MySQL and turn MariaDB's RETURNING support off.
+    let err = TideConfig::resolve_database_type(DatabaseType::MySQL, &disconnected)
+        .await
+        .expect_err("a failed MariaDB probe must not be read as MySQL");
+    assert!(
+        matches!(err, crate::error::Error::Connection { .. }),
+        "{err:?}"
+    );
+
+    // Only a MySQL declaration is probed; other backends are taken as declared.
+    assert_eq!(
+        TideConfig::resolve_database_type(DatabaseType::Postgres, &disconnected)
+            .await
+            .expect("a Postgres declaration needs no probe"),
+        DatabaseType::Postgres
+    );
 }
 
 #[test]
@@ -510,17 +489,13 @@ fn test_tide_config_apply_installs_tokenization_settings() {
 }
 
 #[test]
-fn test_tide_config_stores_the_acquire_timeout_in_the_pool_config() {
-    TideConfig::reset();
-
-    TideConfig::init()
-        .acquire_timeout(std::time::Duration::from_secs(23))
-        .apply();
-
+fn test_rewrite_driver_url_reads_the_scheme_in_any_case() {
     assert_eq!(
-        TideConfig::pool_config().acquire_timeout,
-        std::time::Duration::from_secs(23)
+        rewrite_driver_url("MariaDB://localhost/test"),
+        "mysql://localhost/test"
     );
-
-    TideConfig::reset();
+    assert_eq!(
+        rewrite_driver_url("postgres://localhost/mariadb://"),
+        "postgres://localhost/mariadb://"
+    );
 }

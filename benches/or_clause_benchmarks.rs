@@ -1,7 +1,8 @@
 //! OR Clause Benchmarks for TideORM
 //!
-//! These benchmarks measure the performance of OR clause query building
-//! and execution against a PostgreSQL database.
+//! These benchmarks measure OR-clause query execution against a PostgreSQL
+//! database. Building the queries without executing them is benchmarked in
+//! `stability_benchmarks`.
 //!
 //! Requirements:
 //! - PostgreSQL running on localhost:5432
@@ -10,7 +11,7 @@
 //!
 //! Run with: cargo bench --bench or_clause_benchmarks
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group};
 use std::sync::OnceLock;
 use std::time::Duration;
 use tideorm::prelude::*;
@@ -20,8 +21,6 @@ use support::{init_postgres_database, runtime, truncate_table};
 
 #[path = "or_clause_benchmarks/comparison.rs"]
 mod comparison;
-#[path = "or_clause_benchmarks/construction.rs"]
-mod construction;
 #[path = "or_clause_benchmarks/execution.rs"]
 mod execution;
 #[path = "or_clause_benchmarks/fluent.rs"]
@@ -32,26 +31,26 @@ mod models;
 mod setup;
 
 use comparison::*;
-use construction::*;
 use execution::*;
 use fluent::*;
 use models::*;
 use setup::*;
 
-// Database initialization flag
 static DB_INITIALIZED: OnceLock<()> = OnceLock::new();
 
 criterion_group!(
     benches,
-    bench_or_group_construction,
-    bench_query_builder_with_or,
     bench_or_clause_query_execution,
     bench_or_vs_in_comparison,
     bench_or_clause_scaling,
     bench_or_conditions_count,
-    bench_fluent_or_branch_construction,
-    bench_fluent_or_builder_api,
     bench_fluent_or_execution,
 );
 
-criterion_main!(benches);
+// `criterion_main!`, run only when a PostgreSQL server is configured.
+fn main() {
+    if support::postgres_benchmarks_enabled() {
+        benches();
+        Criterion::default().configure_from_args().final_summary();
+    }
+}

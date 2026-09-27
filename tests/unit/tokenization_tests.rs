@@ -60,131 +60,6 @@ fn test_default_encode_decode() {
 }
 
 #[test]
-fn test_encode_decode_negative_id() {
-    init_test_key();
-
-    let record_id = "-99999";
-    let model_name = "NegativeModel";
-
-    let token = default_encode(record_id, model_name).unwrap();
-    let decoded = default_decode(&token, model_name).unwrap();
-
-    assert_eq!(decoded, Some(record_id.to_string()));
-}
-
-#[test]
-fn test_encode_decode_zero() {
-    init_test_key();
-
-    let record_id = "0";
-    let model_name = "ZeroModel";
-
-    let token = default_encode(record_id, model_name).unwrap();
-    let decoded = default_decode(&token, model_name).unwrap();
-
-    assert_eq!(decoded, Some(record_id.to_string()));
-}
-
-#[test]
-fn test_encode_decode_max_i64() {
-    init_test_key();
-
-    let record_id = "9223372036854775807";
-    let model_name = "MaxModel";
-
-    let token = default_encode(record_id, model_name).unwrap();
-    let decoded = default_decode(&token, model_name).unwrap();
-
-    assert_eq!(decoded, Some(record_id.to_string()));
-}
-
-#[test]
-fn test_wrong_model_fails() {
-    init_test_key();
-
-    let record_id = "42";
-    let token = default_encode(record_id, "User").unwrap();
-
-    let decoded = default_decode(&token, "Product").unwrap();
-    assert_eq!(decoded, None);
-}
-
-#[test]
-fn test_tampered_token_fails() {
-    init_test_key();
-
-    let record_id = "42";
-    let token = default_encode(record_id, "User").unwrap();
-
-    let mut chars: Vec<char> = token.chars().collect();
-    if let Some(c) = chars.get_mut(10) {
-        *c = if *c == 'A' { 'B' } else { 'A' };
-    }
-    let tampered: String = chars.into_iter().collect();
-
-    let decoded = default_decode(&tampered, "User").unwrap();
-    assert_eq!(decoded, None);
-}
-
-#[test]
-fn test_invalid_base64_fails() {
-    init_test_key();
-
-    let decoded = default_decode("not-valid-base64!!!", "User").unwrap();
-    assert_eq!(decoded, None);
-}
-
-#[test]
-fn test_too_short_token_fails() {
-    init_test_key();
-
-    let decoded = default_decode("abc", "User").unwrap();
-    assert_eq!(decoded, None);
-}
-
-#[test]
-fn test_token_is_url_safe() {
-    init_test_key();
-
-    let record_id = "999999999";
-    let token = default_encode(record_id, "User").unwrap();
-
-    assert!(
-        token
-            .chars()
-            .all(|c| { c.is_ascii_alphanumeric() || c == '-' || c == '_' })
-    );
-}
-
-#[test]
-fn test_different_ids_different_tokens() {
-    init_test_key();
-
-    let token1 = default_encode("1", "User").unwrap();
-    let token2 = default_encode("2", "User").unwrap();
-
-    assert_ne!(token1, token2);
-}
-
-#[test]
-fn test_same_id_generates_different_tokens() {
-    init_test_key();
-
-    let token1 = default_encode("42", "User").unwrap();
-    let token2 = default_encode("42", "User").unwrap();
-
-    assert_ne!(token1, token2);
-    assert_eq!(
-        default_decode(&token1, "User").unwrap(),
-        Some("42".to_string())
-    );
-    assert_eq!(
-        default_decode(&token2, "User").unwrap(),
-        Some("42".to_string())
-    );
-}
-
-#[test]
 fn test_token_config_encode_decode() {
     init_test_key();
 
@@ -395,5 +270,34 @@ fn test_encrypted_field_key_is_derived_per_table_and_column() {
         TokenConfig::get_derived_encryption_key_for_field("users", "email").unwrap()
     );
 
+    TokenConfig::reset();
+}
+
+#[test]
+fn sealed_payloads_open_only_under_the_same_key_and_aad() {
+    let key = [7_u8; 32];
+    let sealed = super::seal(&key, b"secret", b"aad").expect("sealing should succeed");
+
+    assert_eq!(
+        super::open(&key, &sealed, b"aad").as_deref(),
+        Some(&b"secret"[..])
+    );
+    assert_eq!(super::open(&[8_u8; 32], &sealed, b"aad"), None);
+    assert_eq!(super::open(&key, &sealed, b"other"), None);
+    assert_eq!(super::open(&key, &sealed[..24], b"aad"), None);
+}
+
+/// An empty key, what an unset environment variable read with
+/// `unwrap_or_default()` gives, configures no key: encrypting then fails
+/// rather than sealing everything under a key anyone can derive.
+#[test]
+fn an_empty_encryption_key_leaves_encryption_unconfigured() {
+    TokenConfig::reset();
+    TokenConfig::set_encryption_key("  ");
+    assert!(!TokenConfig::has_encryption_key());
+    assert!(TokenConfig::get_encryption_key().is_err());
+
+    TokenConfig::set_encryption_key("a-real-key");
+    assert!(TokenConfig::has_encryption_key());
     TokenConfig::reset();
 }

@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::hash::Hash;
+
 /// Regroups the flat rows a JOIN returns into the nested shape they describe.
 ///
 /// A join between one parent and N children returns the parent repeated once per
@@ -11,15 +15,31 @@
 ///   equality, not by run.
 /// - Parents come out in order of first appearance, and each parent's children
 ///   keep their relative input order, so an `ORDER BY` on either side survives.
+/// - Each key function is called once per row.
 /// - The **first** parent value seen for a key is the one kept; later copies are
 ///   dropped rather than merged, which is correct for a join that repeats an
 ///   identical parent row and lossy if it does not.
-/// - The key function is called more than once per row, so keep it cheap and
-///   free of side effects.
 ///
 /// This is a namespace, not a value — every method is associated, and the unit
 /// struct is never instantiated.
 pub struct JoinResultConsolidator;
+
+/// The slot of `key` in `groups`, pushing `make()` as a new group for a key not
+/// seen before.
+fn group_slot<K: Eq + Hash, G>(
+    index: &mut HashMap<K, usize>,
+    groups: &mut Vec<G>,
+    key: K,
+    make: impl FnOnce() -> G,
+) -> usize {
+    match index.entry(key) {
+        Entry::Occupied(entry) => *entry.get(),
+        Entry::Vacant(entry) => {
+            groups.push(make());
+            *entry.insert(groups.len() - 1)
+        }
+    }
+}
 
 impl JoinResultConsolidator {
     /// Group `(parent, child)` pairs by the parent's key.
@@ -30,29 +50,13 @@ impl JoinResultConsolidator {
     /// [`consolidate_two_optional`](Self::consolidate_two_optional).
     pub fn consolidate_two<A, B, K, F>(items: Vec<(A, B)>, key_fn: F) -> Vec<(A, Vec<B>)>
     where
-        A: Clone,
-        K: Eq + std::hash::Hash,
+        K: Eq + Hash,
         F: Fn(&A) -> K,
     {
-        use std::collections::HashMap;
-
-        let mut groups: HashMap<K, (A, Vec<B>)> = HashMap::new();
-        let mut order: Vec<K> = Vec::new();
-
-        for (a, b) in items {
-            let key = key_fn(&a);
-            if let Some((_, bs)) = groups.get_mut(&key) {
-                bs.push(b);
-            } else {
-                order.push(key_fn(&a));
-                groups.insert(key, (a, vec![b]));
-            }
-        }
-
-        order
-            .into_iter()
-            .filter_map(|key| groups.remove(&key))
-            .collect()
+        Self::consolidate_two_optional(
+            items.into_iter().map(|(a, b)| (a, Some(b))).collect(),
+            key_fn,
+        )
     }
 
     /// Group LEFT JOIN rows, where an unmatched parent arrives with `None`.
@@ -65,32 +69,18 @@ impl JoinResultConsolidator {
         key_fn: F,
     ) -> Vec<(A, Vec<B>)>
     where
-        A: Clone,
-        K: Eq + std::hash::Hash,
+        K: Eq + Hash,
         F: Fn(&A) -> K,
     {
-        use std::collections::HashMap;
-
-        let mut groups: HashMap<K, (A, Vec<B>)> = HashMap::new();
-        let mut order: Vec<K> = Vec::new();
+        let mut index = HashMap::new();
+        let mut groups: Vec<(A, Vec<B>)> = Vec::new();
 
         for (a, maybe_b) in items {
-            let key = key_fn(&a);
-            if let Some((_, bs)) = groups.get_mut(&key) {
-                if let Some(b) = maybe_b {
-                    bs.push(b);
-                }
-            } else {
-                order.push(key_fn(&a));
-                let values = maybe_b.into_iter().collect();
-                groups.insert(key, (a, values));
-            }
+            let slot = group_slot(&mut index, &mut groups, key_fn(&a), || (a, Vec::new()));
+            groups[slot].1.extend(maybe_b);
         }
 
-        order
-            .into_iter()
-            .filter_map(|key| groups.remove(&key))
-            .collect()
+        groups
     }
 
     /// Nest a three-way join two levels deep: `(A, B, C)` rows become
@@ -111,50 +101,16 @@ impl JoinResultConsolidator {
         key_b: FB,
     ) -> Vec<(A, Vec<(B, Vec<C>)>)>
     where
-        A: Clone,
-        B: Clone,
-        KA: Eq + std::hash::Hash + Clone,
-        KB: Eq + std::hash::Hash + Clone,
+        KA: Eq + Hash,
+        KB: Eq + Hash,
         FA: Fn(&A) -> KA,
         FB: Fn(&B) -> KB,
     {
-        use std::collections::HashMap;
-
-        let mut a_groups: HashMap<KA, (A, HashMap<KB, (B, Vec<C>)>, Vec<KB>)> = HashMap::new();
-        let mut a_order: Vec<KA> = Vec::new();
-
-        for (a, b, c) in items {
-            let key_a_value = key_a(&a);
-            let key_b_value = key_b(&b);
-
-            if let Some((_, b_groups, b_order)) = a_groups.get_mut(&key_a_value) {
-                if let Some((_, values)) = b_groups.get_mut(&key_b_value) {
-                    values.push(c);
-                } else {
-                    b_order.push(key_b_value.clone());
-                    b_groups.insert(key_b_value, (b, vec![c]));
-                }
-            } else {
-                a_order.push(key_a_value.clone());
-                let mut b_groups = HashMap::new();
-                let b_order = vec![key_b_value.clone()];
-                b_groups.insert(key_b_value, (b, vec![c]));
-                a_groups.insert(key_a_value, (a, b_groups, b_order));
-            }
-        }
-
-        a_order
-            .into_iter()
-            .filter_map(|key| {
-                a_groups.remove(&key).map(|(a, mut b_groups, b_order)| {
-                    let values = b_order
-                        .into_iter()
-                        .filter_map(|inner_key| b_groups.remove(&inner_key))
-                        .collect();
-                    (a, values)
-                })
-            })
-            .collect()
+        Self::consolidate_three_optional(
+            items.into_iter().map(|(a, b, c)| (a, b, Some(c))).collect(),
+            key_a,
+            key_b,
+        )
     }
 
     /// [`consolidate_three`](Self::consolidate_three) for an innermost LEFT
@@ -169,53 +125,42 @@ impl JoinResultConsolidator {
         key_b: FB,
     ) -> Vec<(A, Vec<(B, Vec<C>)>)>
     where
-        A: Clone,
-        B: Clone,
-        KA: Eq + std::hash::Hash + Clone,
-        KB: Eq + std::hash::Hash + Clone,
+        KA: Eq + Hash,
+        KB: Eq + Hash,
         FA: Fn(&A) -> KA,
         FB: Fn(&B) -> KB,
     {
-        use std::collections::HashMap;
-
-        let mut a_groups: HashMap<KA, (A, HashMap<KB, (B, Vec<C>)>, Vec<KB>)> = HashMap::new();
-        let mut a_order: Vec<KA> = Vec::new();
+        let mut a_index = HashMap::new();
+        let mut groups: Vec<ParentGroup<A, B, C, KB>> = Vec::new();
 
         for (a, b, maybe_c) in items {
-            let key_a_value = key_a(&a);
-            let key_b_value = key_b(&b);
+            let a_slot = group_slot(&mut a_index, &mut groups, key_a(&a), || ParentGroup {
+                parent: a,
+                children: Vec::new(),
+                child_index: HashMap::new(),
+            });
 
-            if let Some((_, b_groups, b_order)) = a_groups.get_mut(&key_a_value) {
-                if let Some((_, values)) = b_groups.get_mut(&key_b_value) {
-                    if let Some(c) = maybe_c {
-                        values.push(c);
-                    }
-                } else {
-                    b_order.push(key_b_value.clone());
-                    let values = maybe_c.into_iter().collect();
-                    b_groups.insert(key_b_value, (b, values));
-                }
-            } else {
-                a_order.push(key_a_value.clone());
-                let mut b_groups = HashMap::new();
-                let b_order = vec![key_b_value.clone()];
-                let values = maybe_c.into_iter().collect();
-                b_groups.insert(key_b_value, (b, values));
-                a_groups.insert(key_a_value, (a, b_groups, b_order));
-            }
+            let group = &mut groups[a_slot];
+            let b_slot = group_slot(
+                &mut group.child_index,
+                &mut group.children,
+                key_b(&b),
+                || (b, Vec::new()),
+            );
+            group.children[b_slot].1.extend(maybe_c);
         }
 
-        a_order
+        groups
             .into_iter()
-            .filter_map(|key| {
-                a_groups.remove(&key).map(|(a, mut b_groups, b_order)| {
-                    let values = b_order
-                        .into_iter()
-                        .filter_map(|inner_key| b_groups.remove(&inner_key))
-                        .collect();
-                    (a, values)
-                })
-            })
+            .map(|group| (group.parent, group.children))
             .collect()
     }
+}
+
+/// One outer parent of a three-way consolidation, with its middle rows in
+/// order of first appearance and the index that finds them by key.
+struct ParentGroup<A, B, C, KB> {
+    parent: A,
+    children: Vec<(B, Vec<C>)>,
+    child_index: HashMap<KB, usize>,
 }

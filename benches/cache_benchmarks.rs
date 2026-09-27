@@ -7,12 +7,12 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
 use tideorm::Database;
 use tideorm::cache::{CacheKeyBuilder, CacheStrategy, PreparedStatementCache, QueryCache};
 use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
 use tideorm::prelude::*;
+use tokio::runtime::Runtime;
 
 #[path = "cache_benchmarks/complex.rs"]
 mod complex;
@@ -30,10 +30,6 @@ use key_builder::*;
 use models::*;
 use prepared_statement::*;
 use query_cache::*;
-
-// =============================================================================
-// CRITERION GROUPS
-// =============================================================================
 
 criterion_group!(
     query_cache_benches,

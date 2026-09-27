@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{HasTranslations, TranslationError};
+use super::{HasTranslations, TranslationError, TranslationsData};
 
 /// Helper to create translations from input data
 ///
@@ -27,24 +27,18 @@ impl TranslationInput {
     /// here because the allowlists live on the model. `ApplyTranslations::apply_translations`
     /// performs that validation before anything is stored.
     pub fn from_json(value: &serde_json::Value) -> Result<Self, TranslationError> {
-        match value {
-            serde_json::Value::Object(map) => {
-                let mut fields = HashMap::new();
-                for (field, trans) in map {
-                    if let serde_json::Value::Object(lang_map) = trans {
-                        let mut translations = HashMap::new();
-                        for (lang, val) in lang_map {
-                            translations.insert(lang.clone(), val.clone());
-                        }
-                        fields.insert(field.clone(), translations);
-                    }
-                }
-                Ok(Self { fields })
-            }
-            _ => Err(TranslationError::ParseError(
+        if !value.is_object() {
+            return Err(TranslationError::ParseError(
                 "Expected JSON object".to_string(),
-            )),
+            ));
         }
+
+        let fields = TranslationsData::from_json(value)
+            .fields
+            .into_iter()
+            .map(|(field, translations)| (field, translations.translations))
+            .collect();
+        Ok(Self { fields })
     }
 
     /// Add a translation

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
-use crate::model::{Model, ModelMeta};
+use crate::model::Model;
 
 use super::EntityManager;
 
@@ -97,7 +97,7 @@ where
 #[doc(hidden)]
 pub fn model_entity_manager_key<T>(model: &T) -> Result<Option<String>>
 where
-    T: Model + ModelMeta,
+    T: Model,
 {
     let primary_key = model.primary_key();
     if T::primary_key_is_new(&primary_key) {

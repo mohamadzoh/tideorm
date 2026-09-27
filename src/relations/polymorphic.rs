@@ -5,12 +5,9 @@
 //! inverse, on the table that carries the two columns. The discriminator holds
 //! the owner's **table name**, so `"users"`, not `"User"`.
 //!
-//! Two behaviours differ from the direct wrappers and are worth reading before
-//! use. First, `load()` here is **cache-first**: a cached value is returned
-//! without consulting the database, including one that arrived by deserializing
-//! JSON. Second, [`MorphTo`] has no eager-loading path — its target type varies
-//! per row — so `.with("..")` on a `MorphTo` field is a hard error pointing you
-//! at the lazy load.
+//! One behaviour differs from the direct wrappers: [`MorphTo`] has no
+//! eager-loading path — its target type varies per row — so `.with("..")` on a
+//! `MorphTo` field is a hard error pointing you at the lazy load.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
@@ -19,8 +16,10 @@ use crate::error::{Error, Result};
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::{cached_ref, ensure_relation_configured, preserve_cached_value};
-use super::require_scalar_relation_key;
+use super::helpers::{
+    ensure_relation_configured, has_active_database, owner_is_unsaved, preserve_cached_value,
+    require_scalar_relation_key, required_key, where_key,
+};
 
 /// The inverse side of a polymorphic relation: this model carries the
 /// `(type, id)` pair and its owner could be any table.
@@ -38,27 +37,24 @@ use super::require_scalar_relation_key;
 /// `Morphable` is only the *default* target — the one [`load`](Self::load)
 /// resolves without being told. Rows pointing elsewhere are handled by reading
 /// [`type_value`](Self::type_value) and calling
-/// [`load_as::<T>()`](Self::load_as) for each candidate, optionally collecting
-/// the answer into a [`MorphResult`]. Because that target varies per row there
-/// is no eager path: `.with(..)` on a `MorphTo` field errors rather than
-/// silently returning nothing.
+/// [`load_as::<T>()`](Self::load_as) for each candidate. Because that target
+/// varies per row there is no eager path: `.with(..)` on a `MorphTo` field
+/// errors rather than silently returning nothing.
 ///
-/// Serialization is asymmetric here, unlike the other wrappers: the cached owner
-/// is written out, but deserializing discards it entirely (the payload is
-/// consumed and ignored, since `Morphable` need not be `Deserialize`). A
-/// `MorphTo` restored from JSON always starts empty and needs
-/// [`refresh_runtime_relations_from`](crate::internal::InternalModel::refresh_runtime_relations_from)
-/// to become loadable again.
+/// Unlike the other wrappers it keeps no cache: every load queries, and
+/// deserializing discards whatever payload it meets.
 #[derive(Debug, Clone)]
 pub struct MorphTo<Morphable> {
     /// Column on this model holding the owner's table name.
     pub type_column: &'static str,
     /// Column on this model holding the owner's key.
     pub id_column: &'static str,
+    /// The table of the model this relation sits on, which picks the owner's
+    /// `MorphOne`/`MorphMany` naming the key its children hold.
+    child_table: &'static str,
     type_value: Option<String>,
     id_value: Option<serde_json::Value>,
-    cached: Option<Box<Morphable>>,
-    _marker: PhantomData<Morphable>,
+    _morphable: PhantomData<Morphable>,
 }
 
 impl<Morphable> MorphTo<Morphable> {
@@ -77,11 +73,17 @@ impl<Morphable> MorphTo<Morphable> {
         Self {
             type_column,
             id_column,
-            type_value: None,
-            id_value: None,
-            cached: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
+    }
+
+    /// Record the model this relation sits on. The derive does; without it,
+    /// the owner is looked up by the key its first `MorphOne`/`MorphMany`
+    /// with this relation's morph name names, else by its primary key.
+    #[doc(hidden)]
+    pub fn __on<Child: crate::model::ModelMeta>(mut self) -> Self {
+        self.child_table = Child::table_name();
+        self
     }
 
     /// Supply the values read off this model's two columns.
@@ -89,8 +91,15 @@ impl<Morphable> MorphTo<Morphable> {
     /// `type_value` is the owner's table name — the same string
     /// `Model::table_name()` returns — and `id_value` its key. Without both, the
     /// load methods have nothing to resolve.
-    pub fn with_values(mut self, type_value: String, id_value: serde_json::Value) -> Self {
-        self.type_value = Some(type_value);
+    ///
+    /// The type column may be nullable (`Option<String>`): a row with no owner
+    /// holds `NULL` in both columns, and `load()` then returns `None`.
+    pub fn with_values(
+        mut self,
+        type_value: impl Into<Option<String>>,
+        id_value: serde_json::Value,
+    ) -> Self {
+        self.type_value = type_value.into();
         self.id_value = Some(id_value);
         self
     }
@@ -115,10 +124,7 @@ impl<Morphable> MorphTo<Morphable> {
     ///
     /// Returns `Ok(None)` when the stored discriminator names a different table,
     /// so a caller can try each type its `morph_type` column may hold. Also
-    /// `Ok(None)` for a null or absent id.
-    ///
-    /// Always queries — the cache is never consulted, since a cached owner has
-    /// no type the caller can check against `Related`.
+    /// `Ok(None)` for a null or absent id. Always queries.
     pub async fn load_as<Related: Model>(&self) -> Result<Option<Related>> {
         self.ensure_configured()?;
 
@@ -131,44 +137,33 @@ impl<Morphable> MorphTo<Morphable> {
             _ => return Ok(None),
         };
 
+        // The owner's `MorphOne`/`MorphMany` names the key its children hold.
+        let key_column = match Related::__morph_owner_key(self.id_column, self.child_table) {
+            Some(column) => column,
+            None => match Related::primary_key_names() {
+                [column] => column,
+                _ => {
+                    return Err(Error::invalid_query(format!(
+                        "MorphTo::load_as: {} has a composite primary key, and no MorphOne or MorphMany of it names the key '{}' holds",
+                        Related::table_name(),
+                        self.id_column
+                    )));
+                }
+            },
+        };
+
         Related::query()
-            .where_eq(Related::primary_key_name(), id.clone())
+            .where_eq(key_column, id.clone())
             .first()
             .await
     }
 
-    /// The cached owner, if one was set. Never queries and never awaits.
-    ///
-    /// Always `None` on a wrapper restored from JSON, since deserialization
-    /// discards the payload.
-    pub fn get_cached(&self) -> Option<&Morphable> {
-        cached_ref(&self.cached)
-    }
-
+    /// `MorphTo` carries no runtime state beyond the two column values, which
+    /// the derive re-reads from the model's own columns, so there is nothing to
+    /// carry over — keeping the previous values would resurrect a discriminator
+    /// the columns no longer hold.
     #[doc(hidden)]
-    pub fn set_cached(&mut self, model: Option<Morphable>) {
-        self.cached = model.map(Box::new);
-    }
-
-    #[doc(hidden)]
-    pub fn preserve_runtime_state_from(&mut self, previous: &Self)
-    where
-        Morphable: Clone,
-    {
-        let same_relation =
-            self.type_column == previous.type_column && self.id_column == previous.id_column;
-        if same_relation {
-            self.type_value = previous.type_value.clone();
-            self.id_value = previous.id_value.clone();
-        }
-
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            previous.type_value.is_none() && previous.id_value.is_none(),
-            same_relation,
-        );
-    }
+    pub fn preserve_runtime_state_from(&mut self, _previous: &Self) {}
 }
 
 impl<Morphable: Model> MorphTo<Morphable> {
@@ -178,17 +173,15 @@ impl<Morphable: Model> MorphTo<Morphable> {
     /// whose discriminator names another table is an error rather than a silent
     /// `None`; resolve heterogeneous owners with [`MorphTo::type_value`] and
     /// [`MorphTo::load_as`].
-    ///
-    /// Cache-first: a cached owner is returned without touching the database,
-    /// and only an empty cache triggers a query.
     pub async fn load(&self) -> Result<Option<Morphable>> {
-        if let Some(cached) = &self.cached {
-            return Ok(Some((**cached).clone()));
-        }
-
         self.ensure_configured()?;
 
         let Some(type_value) = self.type_value.as_deref() else {
+            // A NULL type column is a row with no owner; only a wrapper that
+            // never received the columns has no id either.
+            if self.id_value.is_some() {
+                return Ok(None);
+            }
             return Err(Error::query(format!(
                 "MorphTo column '{}' holds no type value; rebuild the model through TideORM",
                 self.type_column
@@ -212,20 +205,20 @@ impl<Morphable> Default for MorphTo<Morphable> {
         Self {
             type_column: "",
             id_column: "",
+            child_table: "",
             type_value: None,
             id_value: None,
-            cached: None,
-            _marker: PhantomData,
+            _morphable: PhantomData,
         }
     }
 }
 
-impl<Morphable: Serialize> Serialize for MorphTo<Morphable> {
+impl<Morphable> Serialize for MorphTo<Morphable> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        self.cached.serialize(serializer)
+        serializer.serialize_none()
     }
 }
 
@@ -234,9 +227,8 @@ impl<'de, Morphable> Deserialize<'de> for MorphTo<Morphable> {
     where
         D: Deserializer<'de>,
     {
-        // The cached owner is runtime-only state — `Morphable` is not required to
-        // be deserializable — but the payload must still be consumed or a
-        // streaming deserializer desyncs part way through the surrounding struct.
+        // The payload must still be consumed, or a streaming deserializer
+        // desyncs part way through the surrounding struct.
         serde::de::IgnoredAny::deserialize(deserializer)?;
         Ok(Self::default())
     }
@@ -257,10 +249,9 @@ impl<'de, Morphable> Deserialize<'de> for MorphTo<Morphable> {
 /// stored: `{morph_name}_type` and `{morph_name}_id` on `Related`'s table. The
 /// type column is matched against this model's table name.
 ///
-/// Unlike [`HasOne`](crate::relations::HasOne), [`load`](Self::load) is
-/// **cache-first** — a cached row wins over the database, including one that
-/// arrived by deserializing JSON. Eager loading is supported and issues one
-/// `WHERE .. IN (..)` per level.
+/// Like [`HasOne`](crate::relations::HasOne), [`load`](Self::load) prefers the
+/// database over a cached row. Eager loading issues one `WHERE .. IN (..)` per
+/// level.
 #[derive(Debug, Clone)]
 pub struct MorphOne<Related: Model> {
     /// Prefix the two polymorphic columns on `Related` are named after:
@@ -272,12 +263,24 @@ pub struct MorphOne<Related: Model> {
     cached: Option<Box<Related>>,
     parent_pk: Option<serde_json::Value>,
     parent_table: Option<String>,
-    _marker: PhantomData<Related>,
 }
 
 impl<Related: Model> MorphOne<Related> {
-    fn ensure_configured(&self) -> Result<()> {
-        ensure_relation_configured("MorphOne", &[self.morph_name, self.local_key])
+    /// The query for the related row: `_type` names this model's table, `_id`
+    /// holds its key.
+    fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
+        ensure_relation_configured("MorphOne", &[self.morph_name, self.local_key])?;
+        let pk = required_key(&self.parent_pk, "Parent primary key", context)?;
+        let table = self
+            .parent_table
+            .as_deref()
+            .ok_or_else(|| Error::query("Parent table not set for relation"))?;
+
+        Ok(where_key(
+            Related::query().where_eq(format!("{}_type", self.morph_name), table),
+            format!("{}_id", self.morph_name),
+            pk,
+        ))
     }
 
     /// Declare the morph prefix and the local key column.
@@ -289,10 +292,7 @@ impl<Related: Model> MorphOne<Related> {
         Self {
             morph_name,
             local_key,
-            cached: None,
-            parent_pk: None,
-            parent_table: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -313,7 +313,7 @@ impl<Related: Model> MorphOne<Related> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk
@@ -323,42 +323,25 @@ impl<Related: Model> MorphOne<Related> {
 
     /// Fetch the related row, returning `Ok(None)` when there is none.
     ///
-    /// Cache-first: if a row is cached — from an eager load or from
-    /// deserialization — it is cloned out and no query runs, even with a live
-    /// connection. Call it on a freshly loaded model, or go through
-    /// `Related::query()` directly, when you need a guaranteed round trip.
+    /// Queries whenever a connection is reachable. A cached row — from an eager
+    /// load or from deserialization — is only served without one, so a payload
+    /// that arrived in a request body is never reported as a stored row; read an
+    /// eager-loaded row itself with [`get_cached`](Self::get_cached).
     pub async fn load(&self) -> Result<Option<Related>> {
-        if let Some(cached) = &self.cached {
+        let can_query =
+            self.parent_pk.is_some() && self.parent_table.is_some() && has_active_database();
+        if let Some(cached) = &self.cached
+            && !can_query
+        {
             return Ok(Some((**cached).clone()));
         }
 
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "MorphOne::load")?;
-        let table = self
-            .parent_table
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-
-        let type_column = format!("{}_type", self.morph_name);
-        let id_column = format!("{}_id", self.morph_name);
-
-        Related::query()
-            .where_eq(&type_column, table.clone())
-            .where_eq(&id_column, pk.clone())
-            .first()
-            .await
+        self.query("MorphOne::load")?.first().await
     }
 
-    /// The cached row, if one is present. Never queries and never awaits — and
-    /// since [`load`](Self::load) is cache-first, a `Some` here is exactly what
-    /// `load()` would hand back.
+    /// The cached row, if one is present. Never queries and never awaits.
     pub fn get_cached(&self) -> Option<&Related> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 
     #[doc(hidden)]
@@ -375,12 +358,11 @@ impl<Related: Model> Default for MorphOne<Related> {
             cached: None,
             parent_pk: None,
             parent_table: None,
-            _marker: PhantomData,
         }
     }
 }
 
-impl<Related: Model + Serialize> Serialize for MorphOne<Related> {
+impl<Related: Model> Serialize for MorphOne<Related> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -412,8 +394,7 @@ impl<'de, Related: Model> Deserialize<'de> for MorphOne<Related> {
 ///
 /// Same column convention as [`MorphOne`] — `{morph_name}_type` and
 /// `{morph_name}_id` on `Related`'s table, with the type column matched against
-/// this model's table name — and the same cache-first
-/// [`load`](Self::load) behaviour.
+/// this model's table name — and the same [`load`](Self::load) behaviour.
 #[derive(Debug, Clone)]
 pub struct MorphMany<Related: Model> {
     /// Prefix the two polymorphic columns on `Related` are named after:
@@ -425,12 +406,24 @@ pub struct MorphMany<Related: Model> {
     cached: Option<Vec<Related>>,
     parent_pk: Option<serde_json::Value>,
     parent_table: Option<String>,
-    _marker: PhantomData<Related>,
 }
 
 impl<Related: Model> MorphMany<Related> {
-    fn ensure_configured(&self) -> Result<()> {
-        ensure_relation_configured("MorphMany", &[self.morph_name, self.local_key])
+    /// The query for the related rows: `_type` names this model's table, `_id`
+    /// holds its key.
+    fn query(&self, context: &str) -> Result<QueryBuilder<Related>> {
+        ensure_relation_configured("MorphMany", &[self.morph_name, self.local_key])?;
+        let pk = required_key(&self.parent_pk, "Parent primary key", context)?;
+        let table = self
+            .parent_table
+            .as_deref()
+            .ok_or_else(|| Error::query("Parent table not set for relation"))?;
+
+        Ok(where_key(
+            Related::query().where_eq(format!("{}_type", self.morph_name), table),
+            format!("{}_id", self.morph_name),
+            pk,
+        ))
     }
 
     /// Declare the morph prefix and the local key column.
@@ -442,10 +435,7 @@ impl<Related: Model> MorphMany<Related> {
         Self {
             morph_name,
             local_key,
-            cached: None,
-            parent_pk: None,
-            parent_table: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -466,7 +456,7 @@ impl<Related: Model> MorphMany<Related> {
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none() && previous.parent_table.is_none(),
+            owner_is_unsaved(&previous.parent_pk),
             self.morph_name == previous.morph_name
                 && self.local_key == previous.local_key
                 && self.parent_pk == previous.parent_pk
@@ -474,37 +464,22 @@ impl<Related: Model> MorphMany<Related> {
         );
     }
 
-    /// Fetch all related rows, in no particular order.
+    /// Fetch every related row, in no particular order.
     ///
-    /// Cache-first: if rows are cached — from an eager load or from
-    /// deserialization — they are cloned out and no query runs, even with a live
-    /// connection. [`load_with`](Self::load_with) and [`count`](Self::count)
-    /// always query, so reach for those when a round trip must happen.
+    /// Queries whenever a connection is reachable. Cached rows — from an eager
+    /// load or from deserialization — are only served without one, so a payload
+    /// that arrived in a request body is never reported as stored rows; read
+    /// eager-loaded rows themselves with [`get_cached`](Self::get_cached).
     pub async fn load(&self) -> Result<Vec<Related>> {
-        if let Some(cached) = &self.cached {
+        let can_query =
+            self.parent_pk.is_some() && self.parent_table.is_some() && has_active_database();
+        if let Some(cached) = &self.cached
+            && !can_query
+        {
             return Ok(cached.clone());
         }
 
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "MorphMany::load")?;
-        let table = self
-            .parent_table
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-
-        let type_column = format!("{}_type", self.morph_name);
-        let id_column = format!("{}_id", self.morph_name);
-
-        Related::query()
-            .where_eq(&type_column, table.clone())
-            .where_eq(&id_column, pk.clone())
-            .get()
-            .await
+        self.query("MorphMany::load")?.get().await
     }
 
     /// Fetch related rows through a caller-supplied refinement of the query.
@@ -517,26 +492,9 @@ impl<Related: Model> MorphMany<Related> {
     where
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "MorphMany::load_with")?;
-        let table = self
-            .parent_table
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-
-        let type_column = format!("{}_type", self.morph_name);
-        let id_column = format!("{}_id", self.morph_name);
-
-        let query = Related::query()
-            .where_eq(&type_column, table.clone())
-            .where_eq(&id_column, pk.clone());
-
-        constraint_fn(query).get().await
+        constraint_fn(self.query("MorphMany::load_with")?)
+            .get()
+            .await
     }
 
     /// Count related rows in the database without materializing them.
@@ -544,26 +502,7 @@ impl<Related: Model> MorphMany<Related> {
     /// Always queries, so this can legitimately disagree with
     /// `get_cached().len()` when the cache is stale.
     pub async fn count(&self) -> Result<u64> {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "MorphMany::count")?;
-        let table = self
-            .parent_table
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent table not set for relation")))?;
-
-        let type_column = format!("{}_type", self.morph_name);
-        let id_column = format!("{}_id", self.morph_name);
-
-        Related::query()
-            .where_eq(&type_column, table.clone())
-            .where_eq(&id_column, pk.clone())
-            .count()
-            .await
+        self.query("MorphMany::count")?.count().await
     }
 
     /// The cached rows, if this relation was populated. Never queries and never
@@ -573,7 +512,7 @@ impl<Related: Model> MorphMany<Related> {
     /// ever loaded — and it is the only state in which [`load`](Self::load) will
     /// query.
     pub fn get_cached(&self) -> Option<&[Related]> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 
     #[doc(hidden)]
@@ -590,12 +529,11 @@ impl<Related: Model> Default for MorphMany<Related> {
             cached: None,
             parent_pk: None,
             parent_table: None,
-            _marker: PhantomData,
         }
     }
 }
 
-impl<Related: Model + Serialize> Serialize for MorphMany<Related> {
+impl<Related: Model> Serialize for MorphMany<Related> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -615,108 +553,4 @@ impl<'de, Related: Model> Deserialize<'de> for MorphMany<Related> {
             ..Self::default()
         })
     }
-}
-
-/// A resolved [`MorphTo`] owner narrowed to one of two candidate types.
-///
-/// Nothing builds this for you: `MorphTo` resolves one type at a time through
-/// [`load_as`](MorphTo::load_as), and this is the container to fold those
-/// attempts into when a column is known to hold one of a small, fixed set of
-/// tables. It exists so callers can pass a resolved owner around as a single
-/// value with a `match` at the far end, instead of a tuple of `Option`s.
-///
-/// See [`MorphResult3`] and [`MorphResult4`] for three and four candidates.
-#[derive(Debug, Clone)]
-pub enum MorphResult<A, B> {
-    /// The owner resolved as the first candidate type.
-    TypeA(A),
-    /// The owner resolved as the second candidate type.
-    TypeB(B),
-    /// The discriminator matched neither candidate. Carries whatever the caller
-    /// chose to keep — typically the raw type/id values — so an unexpected table
-    /// name can be reported rather than lost.
-    Unknown(serde_json::Value),
-}
-
-impl<A, B> MorphResult<A, B> {
-    /// Whether this resolved as the first candidate type.
-    pub fn is_type_a(&self) -> bool {
-        matches!(self, MorphResult::TypeA(_))
-    }
-
-    /// Whether this resolved as the second candidate type.
-    pub fn is_type_b(&self) -> bool {
-        matches!(self, MorphResult::TypeB(_))
-    }
-
-    /// Whether the discriminator matched neither candidate.
-    pub fn is_unknown(&self) -> bool {
-        matches!(self, MorphResult::Unknown(_))
-    }
-
-    /// Borrow the first candidate, or `None` for any other variant.
-    pub fn as_type_a(&self) -> Option<&A> {
-        match self {
-            MorphResult::TypeA(a) => Some(a),
-            _ => None,
-        }
-    }
-
-    /// Borrow the second candidate, or `None` for any other variant.
-    pub fn as_type_b(&self) -> Option<&B> {
-        match self {
-            MorphResult::TypeB(b) => Some(b),
-            _ => None,
-        }
-    }
-
-    /// Take the first candidate by value, discarding any other variant.
-    pub fn into_type_a(self) -> Option<A> {
-        match self {
-            MorphResult::TypeA(a) => Some(a),
-            _ => None,
-        }
-    }
-
-    /// Take the second candidate by value, discarding any other variant.
-    pub fn into_type_b(self) -> Option<B> {
-        match self {
-            MorphResult::TypeB(b) => Some(b),
-            _ => None,
-        }
-    }
-}
-
-/// [`MorphResult`] widened to three candidate types.
-///
-/// Deliberately bare: it carries no accessor helpers, so consume it with a
-/// `match`.
-#[derive(Debug, Clone)]
-pub enum MorphResult3<A, B, C> {
-    /// The owner resolved as the first candidate type.
-    TypeA(A),
-    /// The owner resolved as the second candidate type.
-    TypeB(B),
-    /// The owner resolved as the third candidate type.
-    TypeC(C),
-    /// The discriminator matched none of the candidates.
-    Unknown(serde_json::Value),
-}
-
-/// [`MorphResult`] widened to four candidate types.
-///
-/// Deliberately bare: it carries no accessor helpers, so consume it with a
-/// `match`.
-#[derive(Debug, Clone)]
-pub enum MorphResult4<A, B, C, D> {
-    /// The owner resolved as the first candidate type.
-    TypeA(A),
-    /// The owner resolved as the second candidate type.
-    TypeB(B),
-    /// The owner resolved as the third candidate type.
-    TypeC(C),
-    /// The owner resolved as the fourth candidate type.
-    TypeD(D),
-    /// The discriminator matched none of the candidates.
-    Unknown(serde_json::Value),
 }

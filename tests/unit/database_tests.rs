@@ -1,4 +1,4 @@
-use super::{Connection, Database};
+use super::Database;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::sync::{Arc, Mutex};
@@ -66,7 +66,7 @@ fn debug_reports_disconnected_database_state() {
 async fn global_database_round_trips_through_set_and_reset() {
     Database::reset_global();
     assert!(!crate::database::has_global_db());
-    assert!(Database::try_global().is_none());
+    assert!(super::try_db().is_none());
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -75,13 +75,13 @@ async fn global_database_round_trips_through_set_and_reset() {
     Database::set_global(db.clone()).expect("setting global database should succeed");
 
     assert!(crate::database::has_global_db());
-    assert!(Database::try_global().is_some());
+    assert!(super::try_db().is_some());
     assert!(format!("{:?}", Database::global()).contains("connected: true"));
 
     Database::reset_global();
 
     assert!(!crate::database::has_global_db());
-    assert!(Database::try_global().is_none());
+    assert!(super::try_db().is_none());
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -100,10 +100,12 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
         .begin()
         .await
         .expect("transaction should begin successfully");
-    let handle = super::DatabaseHandle::Transaction(Arc::new(transaction));
+    let handle = super::ConnectionRef::Transaction(Arc::new(transaction));
     let polled_threads = Arc::new(Mutex::new(Vec::new()));
     let mut future = Box::pin(super::state::with_connection_override(
         handle,
+        None,
+        None,
         OverrideVisibleAcrossPolls {
             polled_threads: polled_threads.clone(),
             stage: 0,
@@ -183,7 +185,7 @@ async fn raw_json_preserves_boolean_and_json_column_types() {
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn raw_json_preserves_decimal_and_datetime_column_types() {
+async fn raw_json_reads_decimal_and_datetime_columns_by_what_sqlite_stores() {
     let db = Database::connect("sqlite::memory:")
         .await
         .expect("sqlite in-memory connection should succeed");
@@ -213,11 +215,9 @@ async fn raw_json_preserves_decimal_and_datetime_column_types() {
         .await
         .expect("querying typed raw JSON rows should succeed");
 
-    let expected_amount = serde_json::to_value(
-        rust_decimal::Decimal::from_str_exact("12.34")
-            .expect("decimal literal should parse for comparison"),
-    )
-    .expect("decimal should serialize to JSON");
+    // SQLite stores a `DECIMAL` as a REAL, and raw SQL has no model to say
+    // the column is meant as a decimal.
+    let expected_amount = serde_json::json!(12.34);
     let expected_created_at = serde_json::to_value(
         chrono::NaiveDateTime::parse_from_str("2026-03-21 10:11:12", "%Y-%m-%d %H:%M:%S")
             .expect("datetime literal should parse for comparison"),
@@ -273,6 +273,40 @@ async fn raw_json_preserves_count_aggregates_as_numbers() {
     );
 }
 
+/// A float sum, a running total and an average are numbers: they used to come
+/// back as decimal strings, which `as_f64()` reads as nothing.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn raw_json_reads_real_expressions_as_numbers() {
+    let db = Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    for statement in [
+        "CREATE TABLE raw_json_real_probe (id INTEGER PRIMARY KEY, amount REAL NOT NULL)",
+        "INSERT INTO raw_json_real_probe (amount) VALUES (1.5), (2.25)",
+    ] {
+        db.__execute_with_params(statement, vec![])
+            .await
+            .expect("setting up the probe table should succeed");
+    }
+
+    let rows = db
+        .__raw_json_with_params(
+            "SELECT SUM(amount) OVER (ORDER BY id) AS running, AVG(id) OVER () AS average              FROM raw_json_real_probe ORDER BY id",
+            vec![],
+        )
+        .await
+        .expect("querying real expressions should succeed");
+
+    assert_eq!(
+        rows,
+        vec![
+            serde_json::json!({"running": 1.5, "average": 1.5}),
+            serde_json::json!({"running": 3.75, "average": 1.5}),
+        ]
+    );
+}
+
 #[test]
 fn database_builder_records_an_acquire_timeout_override() {
     let default_debug = format!("{:?}", Database::builder());
@@ -289,6 +323,16 @@ fn database_builder_records_an_acquire_timeout_override() {
         configured_debug.contains("acquire_timeout: Some("),
         "the acquire_timeout knob must reach the pool options: {configured_debug}"
     );
+}
+
+#[test]
+fn database_builder_debug_masks_the_url_credentials() {
+    let password = format!("pw{}", std::process::id());
+    let builder = Database::builder().url(format!("postgres://app:{password}@db:5432/app"));
+    let debug = format!("{builder:?}");
+
+    assert!(!debug.contains(&password), "{debug}");
+    assert!(debug.contains("postgres://***@db:5432/app"), "{debug}");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

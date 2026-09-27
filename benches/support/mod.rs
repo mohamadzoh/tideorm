@@ -6,12 +6,22 @@ use std::time::Duration;
 use tideorm::{Database, TideConfig};
 use tokio::runtime::Runtime;
 
+#[path = "../../tests/support/postgres_test_config.rs"]
+mod postgres_test_config;
+
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-pub fn postgres_database_url() -> String {
-    let _ = dotenvy::dotenv();
-    std::env::var("POSTGRESQL_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/test_tide_orm".to_string())
+/// Whether the PostgreSQL benchmarks should run: they are opt-in like the
+/// PostgreSQL test suites, so a bare `cargo bench` skips them with a note
+/// instead of panicking without a server.
+pub fn postgres_benchmarks_enabled() -> bool {
+    let enabled = postgres_test_config::should_run_postgres_tests();
+    if !enabled {
+        println!(
+            "Skipping PostgreSQL benchmarks: set POSTGRESQL_DATABASE_URL, TEST_DATABASE_URL or RUN_POSTGRES_TESTS"
+        );
+    }
+    enabled
 }
 
 pub fn runtime() -> &'static Runtime {
@@ -28,9 +38,8 @@ where
 pub fn init_postgres_database(initialized: &OnceLock<()>, setup_statements: &[&str]) {
     initialized.get_or_init(|| {
         block_on(async {
-            let database_url = postgres_database_url();
             TideConfig::init()
-                .database(&database_url)
+                .database(postgres_test_config::test_database_url())
                 .max_connections(50)
                 .min_connections(5)
                 .acquire_timeout(Duration::from_secs(30))

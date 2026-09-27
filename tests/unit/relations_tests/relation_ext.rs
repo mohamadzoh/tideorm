@@ -13,6 +13,21 @@ fn relation_ext_get_field_value_reads_single_fields_by_field_or_column_name() {
     assert_eq!(model.get_field_value("id").unwrap(), json!(7));
 }
 
+/// The relation kind comes from the wrapper type: a `HasOne` declared with only its
+/// `foreign_key` used to be left an unwired `Default` with the key ignored.
+#[test]
+fn a_has_one_without_a_kind_attribute_is_wired_from_its_wrapper_type() {
+    let parent = RelationExtParentModel {
+        id: 42,
+        name: "parent".to_string(),
+        child: Default::default(),
+    }
+    .with_relations();
+
+    assert_eq!(parent.child.foreign_key, "parent_id");
+    assert_eq!(parent.child.local_key, "id");
+}
+
 #[test]
 fn relation_ext_get_field_value_falls_back_to_serialized_relation_fields() {
     let mut parent = RelationExtParentModel {

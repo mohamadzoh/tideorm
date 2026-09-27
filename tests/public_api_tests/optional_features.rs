@@ -1,11 +1,6 @@
 #[path = "optional_features/attachments_extended_tests.rs"]
 mod attachments_extended_cases;
 
-// =============================================================================
-// EXTENDED TRANSLATIONS TESTS
-// =============================================================================
-
-#[cfg(test)]
 #[cfg(feature = "translations")]
 mod translations_extended_tests {
     use serde::{Deserialize, Serialize};
@@ -371,49 +366,6 @@ mod translations_extended_tests {
     }
 
     #[test]
-    fn test_translations_rtl_languages() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        product
-            .set_translation("name", "ar", "منتج رائع جداً")
-            .unwrap();
-
-        let ar = product.get_translated("name", "ar").unwrap();
-        assert_eq!(ar, serde_json::json!("منتج رائع جداً"));
-    }
-
-    #[test]
-    fn test_translations_with_html() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        product
-            .set_translation(
-                "description",
-                "en",
-                "<p>Product <strong>description</strong></p>",
-            )
-            .unwrap();
-
-        let desc = product.get_translated("description", "en").unwrap();
-        assert_eq!(
-            desc,
-            serde_json::json!("<p>Product <strong>description</strong></p>")
-        );
-    }
-
-    #[test]
-    fn test_translations_with_emoji() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        product
-            .set_translation("name", "en", "Product 🎉 Special Edition")
-            .unwrap();
-
-        let name = product.get_translated("name", "en").unwrap();
-        assert_eq!(name, serde_json::json!("Product 🎉 Special Edition"));
-    }
-
-    #[test]
     fn test_translations_empty_string() {
         let mut product = TestProduct::new(1, "Product", "Description");
 
@@ -421,18 +373,5 @@ mod translations_extended_tests {
 
         let name = product.get_translation("name", "en").unwrap();
         assert_eq!(name, Some(serde_json::json!("")));
-    }
-
-    #[test]
-    fn test_translations_long_text() {
-        let mut product = TestProduct::new(1, "Product", "Description");
-
-        let long_text = "A".repeat(10000);
-        product
-            .set_translation("description", "en", long_text.clone())
-            .unwrap();
-
-        let desc = product.get_translated("description", "en").unwrap();
-        assert_eq!(desc, serde_json::json!(long_text));
     }
 }

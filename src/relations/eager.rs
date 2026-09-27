@@ -27,160 +27,6 @@ use crate::internal::InternalModel;
 use crate::model::Model;
 use crate::query::{Order, QueryBuilder};
 
-fn apply_primary_key_filter<M: Model>(
-    mut query: QueryBuilder<M>,
-    primary_key: &M::PrimaryKey,
-) -> Result<QueryBuilder<M>> {
-    let values = match serde_json::to_value(primary_key)
-        .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?
-    {
-        serde_json::Value::Array(values) => values,
-        value => vec![value],
-    };
-
-    let columns = M::primary_key_names();
-    if values.len() != columns.len() {
-        return Err(Error::invalid_query(format!(
-            "Primary key value for {} did not match declared key columns",
-            M::table_name()
-        )));
-    }
-
-    for (column, value) in columns.iter().zip(values) {
-        query = query.where_eq(*column, value);
-    }
-
-    Ok(query)
-}
-
-/// A reusable, storable bundle of constraints to narrow a relation query with.
-///
-/// `load_with` takes a closure, which is convenient inline but cannot be stored,
-/// cloned, or built up conditionally. `RelationConstraints` is the value form:
-/// assemble it anywhere, keep it in a struct, then hand it to
-/// [`apply`](Self::apply) inside the closure.
-///
-/// It is deliberately a small, declarative subset — equality filters, one
-/// ordering, paging, soft-delete scope — not a second query builder. Anything
-/// outside that (joins, raw SQL, `OR` groups) belongs in the closure directly.
-///
-/// ```ignore
-/// let recent = RelationConstraints::new().order_by("created_at", Order::Desc).limit(5);
-/// let posts = user.posts.load_with(|q| recent.apply(q)).await?;
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct RelationConstraints {
-    /// Accumulated `column = value` filters, applied in insertion order and
-    /// always `AND`-ed together.
-    pub conditions: Vec<(String, serde_json::Value)>,
-    /// The single ordering, if one was set. Calling
-    /// [`order_by`](Self::order_by) twice replaces rather than appends.
-    pub order_by: Option<(String, Order)>,
-    /// Maximum rows to return.
-    pub limit: Option<u64>,
-    /// Rows to skip. Set without a `limit` this still emits an `OFFSET`, which
-    /// some backends reject on its own — pair the two.
-    pub offset: Option<u64>,
-    /// Include soft-deleted rows alongside live ones.
-    pub with_trashed: bool,
-    /// Restrict to soft-deleted rows only.
-    pub only_trashed: bool,
-}
-
-impl RelationConstraints {
-    /// An empty constraint set that leaves a query exactly as it found it.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add an equality filter. Repeated calls accumulate and are `AND`-ed.
-    ///
-    /// Accepts either a string column name or a typed column
-    /// (`Post::columns.published`); the typed form is checked at compile time
-    /// and is the better default.
-    pub fn where_eq(
-        mut self,
-        column: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.conditions
-            .push((column.column_name().to_string(), value.into()));
-        self
-    }
-
-    /// Set the ordering. Last call wins — this is a single slot, not a list, so
-    /// multi-column ordering needs the closure form.
-    pub fn order_by(mut self, column: impl IntoColumnName, order: Order) -> Self {
-        self.order_by = Some((column.column_name().to_string(), order));
-        self
-    }
-
-    /// Cap the number of related rows returned.
-    ///
-    /// This limits the *whole* query, so it is only meaningful for a relation
-    /// loaded one parent at a time — applying it to a batched eager load would
-    /// truncate across parents rather than per parent.
-    pub fn limit(mut self, n: u64) -> Self {
-        self.limit = Some(n);
-        self
-    }
-
-    /// Skip `n` rows. Only meaningful together with an
-    /// [`order_by`](Self::order_by), since row order is otherwise unspecified.
-    pub fn offset(mut self, n: u64) -> Self {
-        self.offset = Some(n);
-        self
-    }
-
-    /// Include soft-deleted rows. No-op on a model without soft deletes.
-    pub fn with_trashed(mut self) -> Self {
-        self.with_trashed = true;
-        self
-    }
-
-    /// Return *only* soft-deleted rows.
-    ///
-    /// Setting this alongside [`with_trashed`](Self::with_trashed) is not
-    /// rejected here; both are forwarded to the query builder, and the narrower
-    /// scope applied last is what the query ends up with.
-    pub fn only_trashed(mut self) -> Self {
-        self.only_trashed = true;
-        self
-    }
-
-    /// Fold every recorded constraint into `query` and hand it back.
-    ///
-    /// Order of application is fixed — filters, ordering, limit, offset, then
-    /// soft-delete scope — regardless of the order the setters were called in.
-    pub fn apply<M: Model>(self, mut query: QueryBuilder<M>) -> QueryBuilder<M> {
-        for (column, value) in self.conditions {
-            query = query.where_eq(&column, value);
-        }
-
-        if let Some((column, order)) = self.order_by {
-            query = query.order_by(&column, order);
-        }
-
-        if let Some(limit) = self.limit {
-            query = query.limit(limit);
-        }
-
-        if let Some(offset) = self.offset {
-            query = query.offset(offset);
-        }
-
-        if self.with_trashed {
-            query = query.with_trashed();
-        }
-
-        if self.only_trashed {
-            query = query.only_trashed();
-        }
-
-        query
-    }
-}
-
 /// A model plus the relation payloads an eager load resolved for it.
 ///
 /// This is what every [`EagerQueryBuilder`] terminal returns. The relations are
@@ -223,16 +69,6 @@ impl<M: Model> WithRelations<M> {
             model,
             relations: HashMap::new(),
         }
-    }
-
-    /// Record a raw JSON payload under `name`, builder-style.
-    ///
-    /// The by-value counterpart of [`set_relation`](Self::set_relation), which
-    /// is what the eager loader itself uses. Takes JSON directly, so it cannot
-    /// fail; useful for stitching in a relation resolved outside the ORM.
-    pub fn with_relation(mut self, name: &str, data: serde_json::Value) -> Self {
-        self.relations.insert(name.to_string(), data);
-        self
     }
 
     /// Record an eagerly-loaded relation payload under `name`.
@@ -299,23 +135,20 @@ impl<M> std::ops::DerefMut for WithRelations<M> {
 /// "Unknown relation '..' on ..".
 #[derive(Debug, Clone)]
 pub struct RelationPath {
-    /// The path as written, with the dots.
-    pub full_path: String,
     /// The dot-separated hops, outermost first.
     pub segments: Vec<String>,
 }
 
 impl RelationPath {
-    /// Split a dotted path into segments.
-    ///
-    /// Splitting is unconditional, so an empty string parses to a single empty
-    /// segment rather than to nothing; [`RelationTree::add_path`] is what filters
-    /// such a path out.
+    /// Split a dotted path into segments, dropping empty ones: `""` parses to
+    /// no segments and `"posts..comments"` to two.
     pub fn parse(path: &str) -> Self {
-        let segments: Vec<String> = path.split('.').map(|s| s.to_string()).collect();
         Self {
-            full_path: path.to_string(),
-            segments,
+            segments: path
+                .split('.')
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -330,23 +163,11 @@ impl RelationPath {
     pub fn nested(&self) -> Option<RelationPath> {
         if self.segments.len() > 1 {
             Some(RelationPath {
-                full_path: self.segments[1..].join("."),
                 segments: self.segments[1..].to_vec(),
             })
         } else {
             None
         }
-    }
-
-    /// Whether more than one hop remains, i.e. [`nested`](Self::nested) is
-    /// `Some`.
-    pub fn is_nested(&self) -> bool {
-        self.segments.len() > 1
-    }
-
-    /// Number of hops. `1` for a direct relation.
-    pub fn depth(&self) -> usize {
-        self.segments.len()
     }
 }
 
@@ -399,8 +220,7 @@ impl RelationTree {
     /// not in this level at all.
     ///
     /// A leaf yields `Some` of an empty tree, which the loader treats as "stop
-    /// here" — [`has_nested`](Self::has_nested) is the check that tells the two
-    /// apart.
+    /// here".
     pub fn get_nested(&self, name: &str) -> Option<&RelationTree> {
         self.children.get(name)
     }
@@ -408,15 +228,6 @@ impl RelationTree {
     /// Whether this level has nothing to resolve.
     pub fn is_empty(&self) -> bool {
         self.children.is_empty()
-    }
-
-    /// Whether `name` has a further level below it — false both for an unknown
-    /// name and for a leaf.
-    pub fn has_nested(&self, name: &str) -> bool {
-        self.children
-            .get(name)
-            .map(|t| !t.is_empty())
-            .unwrap_or(false)
     }
 }
 
@@ -433,7 +244,7 @@ impl RelationTree {
 /// implements. Nothing is loaded until a terminal runs.
 pub struct EagerQueryBuilder<M: Model> {
     query: QueryBuilder<M>,
-    relation_tree: RelationTree,
+    pub(super) relation_tree: RelationTree,
 }
 
 /// Macro-generated eager-loading machinery. Implemented for every model by
@@ -465,11 +276,11 @@ pub trait EagerLoadModel: Model + InternalModel {
     /// stays one query instead of N+1. `morph_type` adds the polymorphic type
     /// discriminator as `(column, value)`.
     ///
-    /// Groups are keyed by the JSON rendering of the foreign key
-    /// (`serde_json::Value::to_string`), which is what callers must look up with.
+    /// Groups are keyed by [`__relation_key`] of the foreign key, which is what
+    /// callers must look up with.
     async fn __load_grouped_by_key(
         keys: &[serde_json::Value],
-        foreign_key: &'static str,
+        foreign_key: &str,
         morph_type: Option<(&'static str, &'static str)>,
     ) -> Result<HashMap<String, Vec<Self>>>
     where
@@ -477,30 +288,214 @@ pub trait EagerLoadModel: Model + InternalModel {
     {
         let mut grouped: HashMap<String, Vec<Self>> = HashMap::new();
 
-        let mut lookup_keys: Vec<serde_json::Value> = Vec::new();
-        for key in keys {
-            if key.is_null() || lookup_keys.contains(key) {
-                continue;
-            }
-            lookup_keys.push(key.clone());
-        }
+        // Each key once, by the text the rows are grouped by: a scan of the
+        // list per key would be quadratic in the number of parents.
+        let mut seen = std::collections::HashSet::new();
+        let lookup_keys: Vec<serde_json::Value> = keys
+            .iter()
+            .filter(|key| !key.is_null() && seen.insert(__relation_key(key)))
+            .cloned()
+            .collect();
 
         if lookup_keys.is_empty() {
             return Ok(grouped);
         }
 
-        let mut query = Self::query().where_in(foreign_key, lookup_keys);
-        if let Some((type_column, type_value)) = morph_type {
-            query = query.where_eq(type_column, type_value);
-        }
+        // A chunk per query keeps each IN list under the backends'
+        // bind-parameter limits however many parents there are.
+        for chunk in lookup_keys.chunks(5_000) {
+            let mut query = Self::query().where_in(foreign_key, chunk.to_vec());
+            if let Some((type_column, type_value)) = morph_type {
+                query = query.where_eq(type_column, type_value);
+            }
+            let rows = query.get().await?;
 
-        for row in query.get().await? {
-            let key = row.get_field_value(foreign_key)?;
-            grouped.entry(key.to_string()).or_default().push(row);
+            // The database matched each row under the column's collation,
+            // which can ignore case (SQLite's NOCASE, MySQL's default ones),
+            // accents or trailing spaces. When a row's key is not one of the
+            // requested keys as text, or two requested keys could be one
+            // such key, the database pairs them instead.
+            let requested: std::collections::HashSet<String> =
+                chunk.iter().map(__relation_key).collect();
+            let mut keyed = Vec::with_capacity(rows.len());
+            for row in rows {
+                let key = __relation_key(&row.get_field_value(foreign_key)?);
+                keyed.push((key, row));
+            }
+            if keyed.iter().all(|(key, _)| requested.contains(key)) && !fold_together(chunk) {
+                for (key, row) in keyed {
+                    grouped.entry(key).or_default().push(row);
+                }
+                continue;
+            }
+
+            let pairs = matching_keys::<Self>(chunk, foreign_key, morph_type).await?;
+            for (key, row) in keyed {
+                match pairs.get(&key) {
+                    Some(matched) => {
+                        for matched in matched {
+                            grouped
+                                .entry(matched.clone())
+                                .or_default()
+                                .push(row.clone());
+                        }
+                    }
+                    // A key the pairing read back in another form still
+                    // keeps the parent it names exactly.
+                    None if requested.contains(&key) => {
+                        grouped.entry(key).or_default().push(row);
+                    }
+                    None => {}
+                }
+            }
         }
 
         Ok(grouped)
     }
+}
+
+/// Whether two of `keys` are the same text but for case or trailing spaces,
+/// which a case-insensitive collation matches to the same rows.
+fn fold_together(keys: &[serde_json::Value]) -> bool {
+    let mut folded = std::collections::HashSet::new();
+    keys.iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|key| !folded.insert(key.trim_end_matches(' ').to_lowercase()))
+}
+
+/// How many keys one pairing query compares, one `UNION ALL` member each:
+/// SQLite takes at most 500 members in a compound select.
+const PAIRED_KEYS_PER_QUERY: usize = 200;
+
+/// Which of `keys` each stored foreign key of `M` matches, as the database
+/// compares them: `foreign_key = ?` for each key, under the column's own
+/// collation, mapped from the stored key's text to the matching keys' text.
+async fn matching_keys<M: Model>(
+    keys: &[serde_json::Value],
+    foreign_key: &str,
+    morph_type: Option<(&'static str, &'static str)>,
+) -> Result<HashMap<String, Vec<String>>> {
+    let column = M::canonical_column_name(foreign_key).unwrap_or(foreign_key);
+    let lookup = |index: usize, key: &serde_json::Value| {
+        let mut query = M::query()
+            .select(vec![column])
+            .select_raw(&format!("{index} AS tideorm_key_index"))
+            .where_eq(foreign_key, key.clone());
+        if let Some((type_column, type_value)) = morph_type {
+            query = query.where_eq(type_column, type_value);
+        }
+        query
+    };
+
+    let mut pairs: HashMap<String, Vec<String>> = HashMap::new();
+    for (batch, chunk) in keys.chunks(PAIRED_KEYS_PER_QUERY).enumerate() {
+        let offset = batch * PAIRED_KEYS_PER_QUERY;
+        let mut lookups = chunk
+            .iter()
+            .enumerate()
+            .map(|(index, key)| lookup(offset + index, key));
+        let Some(first) = lookups.next() else {
+            continue;
+        };
+        let query = lookups.fold(first, QueryBuilder::union_all);
+
+        for row in query.get_json().await? {
+            let index = row["tideorm_key_index"]
+                .as_u64()
+                .and_then(|index| usize::try_from(index).ok())
+                .and_then(|index| keys.get(index))
+                .ok_or_else(|| {
+                    Error::query(format!(
+                        "an eager load of {} paired a key it did not look up",
+                        M::table_name()
+                    ))
+                })?;
+            let matches = pairs.entry(__relation_key(&row[column])).or_default();
+            let key = __relation_key(index);
+            if !matches.contains(&key) {
+                matches.push(key);
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+/// How an eager load matches a key on one side of a relation with the other:
+/// by its text, so an `i64` key finds the `i32` or the text column holding the
+/// same value, as the database's own comparison does.
+#[doc(hidden)]
+pub fn __relation_key(key: &serde_json::Value) -> String {
+    match key {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// `models` with each primary key once, in order.
+#[doc(hidden)]
+pub fn __distinct_by_primary_key<M: crate::model::Model>(models: Vec<M>) -> Vec<M> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| {
+            seen.insert(serde_json::to_string(&model.primary_key()).unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Resolve the next level of a to-many relation for every parent at once.
+///
+/// Recursing per parent would be N+1, so the groups are flattened, loaded in one
+/// pass and split back apart by their recorded sizes.
+#[doc(hidden)]
+pub async fn __eager_load_nested_many<R: EagerLoadModel>(
+    grouped: Vec<Vec<R>>,
+    nested: Option<&RelationTree>,
+) -> Result<Vec<Vec<R>>> {
+    let Some(nested) = nested.filter(|tree| !tree.is_empty()) else {
+        return Ok(grouped);
+    };
+
+    let group_sizes: Vec<usize> = grouped.iter().map(Vec::len).collect();
+    let mut flattened: Vec<WithRelations<R>> = grouped
+        .into_iter()
+        .flatten()
+        .map(WithRelations::new)
+        .collect();
+    R::__eager_load(&mut flattened, nested).await?;
+
+    let mut restored = flattened.into_iter().map(WithRelations::into_inner);
+    Ok(group_sizes
+        .into_iter()
+        .map(|size| restored.by_ref().take(size).collect())
+        .collect())
+}
+
+/// The to-one counterpart of [`__eager_load_nested_many`]: resolve the next
+/// level for the present children of every parent at once, keeping each in its
+/// slot.
+#[doc(hidden)]
+pub async fn __eager_load_nested_one<R: EagerLoadModel>(
+    related: Vec<Option<R>>,
+    nested: Option<&RelationTree>,
+) -> Result<Vec<Option<R>>> {
+    let Some(nested) = nested.filter(|tree| !tree.is_empty()) else {
+        return Ok(related);
+    };
+
+    let slots: Vec<bool> = related.iter().map(Option::is_some).collect();
+    let mut flattened: Vec<WithRelations<R>> = related
+        .into_iter()
+        .flatten()
+        .map(WithRelations::new)
+        .collect();
+    R::__eager_load(&mut flattened, nested).await?;
+
+    let mut restored = flattened.into_iter().map(WithRelations::into_inner);
+    Ok(slots
+        .into_iter()
+        .map(|filled| if filled { restored.next() } else { None })
+        .collect())
 }
 
 impl<M: Model> EagerQueryBuilder<M> {
@@ -544,22 +539,36 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
+    /// Shape the *root* query with any [`QueryBuilder`] method, for the ones
+    /// this builder does not forward:
+    ///
+    /// ```ignore
+    /// let users = User::query()
+    ///     .with("posts")
+    ///     .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
+    ///     .get()
+    ///     .await?;
+    /// ```
+    ///
+    /// Relation queries are unaffected, as with the methods below.
+    #[must_use]
+    pub fn query(mut self, shape: impl FnOnce(QueryBuilder<M>) -> QueryBuilder<M>) -> Self {
+        self.query = shape(self.query);
+        self
+    }
+
     /// Filter the *root* query. Relation queries are unaffected — constrain
     /// those by loading them lazily with `load_with` instead.
-    pub fn where_eq<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl IntoColumnName,
-        value: V,
-    ) -> Self {
+    pub fn where_eq<V: serde::Serialize>(mut self, column: impl IntoColumnName, value: V) -> Self {
         self.query = self.query.where_eq(column, value);
         self
     }
 
     /// Restrict the root query to rows whose `column` is one of `values`.
-    pub fn where_in<V: Into<serde_json::Value>>(
+    pub fn where_in<V: serde::Serialize>(
         mut self,
         column: impl IntoColumnName,
-        values: Vec<V>,
+        values: impl IntoIterator<Item = V>,
     ) -> Self {
         self.query = self.query.where_in(column, values);
         self
@@ -596,12 +605,6 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
-    /// The merged set of relations this builder will resolve. Mostly useful for
-    /// asserting in tests what a chain of `.with(..)` calls added up to.
-    pub fn get_relation_tree(&self) -> &RelationTree {
-        &self.relation_tree
-    }
-
     /// Run the root query, then resolve every requested relation across all
     /// returned rows.
     ///
@@ -611,10 +614,21 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
+        let database = self.query.named_database();
         let models = self.query.get().await?;
         let mut results: Vec<WithRelations<M>> =
             models.into_iter().map(WithRelations::new).collect();
-        M::__eager_load(&mut results, &self.relation_tree).await?;
+        let load = M::__eager_load(&mut results, &self.relation_tree);
+        match database {
+            // A `query_with(db)` reads the relations from `db` too: the
+            // loaders run their queries on the scope's connection.
+            Some(database) => {
+                let connection = database.__get_connection()?;
+                let origin = crate::database::origin_of(&connection);
+                crate::database::with_connection_override(connection, origin, None, load).await?;
+            }
+            None => load.await?,
+        }
         Ok(results)
     }
 
@@ -643,7 +657,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
-        self.query = apply_primary_key_filter(self.query, &id)?.limit(1);
+        self.query = self.query.where_primary_key(&id)?.limit(1);
         self.first().await
     }
 }
@@ -657,7 +671,7 @@ impl<M: Model> Default for EagerQueryBuilder<M> {
 /// Blanket-implemented entry points for starting an eager load from the model
 /// type rather than from a query.
 ///
-/// `User::with_relation("posts")` and `User::query().with("posts")` build the
+/// `User::eager().with("posts")` and `User::query().with("posts")` build the
 /// same thing; these read better when there is nothing to filter, and are worse
 /// when there is, because they start from an unconstrained query.
 ///
@@ -671,14 +685,6 @@ pub trait EagerLoadExt: Model {
         Self: Sized,
     {
         EagerQueryBuilder::new()
-    }
-
-    /// Start an eager query for one relation, nested paths included.
-    fn with_relation(relation_name: &str) -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new().with(relation_name)
     }
 
     /// Start an eager query for several relations at once.
@@ -697,7 +703,6 @@ impl<T: Model> EagerLoadExt for T {}
 /// This is how relation loading gets at a key column without knowing the model's
 /// concrete field types — grouping eagerly-loaded rows by their foreign key, for
 /// instance. Blanket-implemented for every [`Model`].
-#[async_trait]
 pub trait RelationExt: Model {
     /// The value of `field`, rendered as JSON.
     ///

@@ -1,6 +1,7 @@
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::error::{Error, Result};
+use crate::types::encrypted;
 
 use super::{ModelMeta, UpdateValue};
 
@@ -25,9 +26,8 @@ where
         return Ok(value);
     }
 
-    let encrypted =
-        crate::types::__encrypt_json_value_for_attribute(&json, table_name, column_name)
-            .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))?;
+    let encrypted = encrypted::encrypt_json_value_for_attribute(&json, table_name, column_name)
+        .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))?;
     serde_json::from_value(serde_json::Value::String(encrypted)).map_err(|error| {
         Error::configuration(format!(
             "Encrypted field '{}' must use String/Text storage or Option<String>/Option<Text>: {}",
@@ -57,12 +57,15 @@ where
     match json {
         serde_json::Value::Null => Ok(value),
         serde_json::Value::String(text) => {
-            if !crate::types::__is_encrypted_json_value(&text) {
-                return Err(unencrypted_field_data_error(field_name, column_name));
+            if !encrypted::is_encrypted_json_value(&text) {
+                return Err(Error::conversion(format!(
+                    "Encrypted field '{}' loaded plaintext data; expected a TideORM encrypted payload or null",
+                    encrypted_field_label(field_name, column_name)
+                )));
             }
 
             let decrypted =
-                crate::types::__decrypt_json_value_for_attribute(&text, table_name, column_name)
+                encrypted::decrypt_json_value_for_attribute(&text, table_name, column_name)
                     .map_err(|error| {
                         annotate_crypto_error(error, "decrypt", field_name, column_name)
                     })?;
@@ -79,13 +82,6 @@ where
             encrypted_field_label(field_name, column_name)
         ))),
     }
-}
-
-fn unencrypted_field_data_error(field_name: &str, column_name: &str) -> Error {
-    Error::conversion(format!(
-        "Encrypted field '{}' loaded plaintext data; expected a TideORM encrypted payload or null",
-        encrypted_field_label(field_name, column_name)
-    ))
 }
 
 pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
@@ -173,10 +169,30 @@ fn encrypt_batch_json_value(
     if value.is_null() {
         return Ok(serde_json::Value::Null);
     }
+    // The field is a `String` and decrypts back into one: any other JSON value
+    // would be stored, then fail every load of the row.
+    if !value.is_string() {
+        return Err(Error::invalid_query(format!(
+            "Encrypted field '{}' takes a string or null, not a JSON {}",
+            encrypted_field_label(field_name, column_name),
+            json_kind(&value)
+        )));
+    }
 
-    crate::types::__encrypt_json_value_for_attribute(&value, table_name, column_name)
+    encrypted::encrypt_json_value_for_attribute(&value, table_name, column_name)
         .map(serde_json::Value::String)
         .map_err(|error| annotate_crypto_error(error, "encrypt", field_name, column_name))
+}
+
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn unsupported_batch_operation<T>(
@@ -199,6 +215,10 @@ fn encrypted_field_label(field_name: &str, column_name: &str) -> String {
     }
 }
 
+/// Name the field in a payload error while keeping its error class.
+///
+/// The payload helpers only produce configuration (no key), conversion (JSON)
+/// and tokenization (payload or cipher) errors; anything else passes through.
 fn annotate_crypto_error(
     error: Error,
     operation: &str,
@@ -215,100 +235,11 @@ fn annotate_crypto_error(
     match error {
         Error::Configuration { .. } => Error::configuration(message),
         Error::Conversion { .. } => Error::conversion(message),
-        Error::Query { .. } => Error::query(message),
         Error::Tokenization { .. } => Error::tokenization(message),
-        Error::InvalidToken { .. } => Error::invalid_token(message),
-        Error::Validation { field, .. } => Error::validation(field, message),
-        Error::Connection { .. } => Error::connection(message),
-        Error::Transaction { .. } => Error::transaction(message),
-        Error::NotFound { .. } => Error::query(message),
-        Error::BackendNotSupported { backend, .. } => {
-            Error::backend_not_supported(message, backend)
-        }
-        Error::PrimaryKeyNotSet { model, .. } => Error::primary_key_not_set(message, model),
-        Error::InsertReturningNotSupported { backend, .. } => {
-            Error::insert_returning_not_supported(message, backend)
-        }
-        // Authorization failures keep their own classification: the caller needs the
-        // 403 and the permission/resource pair, not a 500 with a decorated message.
-        Error::AccessDenied {
-            permission,
-            resource,
-        } => Error::access_denied(permission, resource),
-        Error::Rbac { .. } => Error::rbac(message),
-        Error::Internal { .. } => Error::internal(message),
+        other => other,
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Metadata whose two encrypted lists disagree. Macro-generated models
-    /// cannot produce this, but the trait lets it be written by hand and the
-    /// failure mode is silent plaintext, so it has to be rejected.
-    #[derive(Clone)]
-    struct MismatchedEncryptedMeta;
-
-    impl ModelMeta for MismatchedEncryptedMeta {
-        type PrimaryKey = i64;
-
-        fn table_name() -> &'static str {
-            "mismatched_encrypted_models"
-        }
-
-        fn primary_key_names() -> &'static [&'static str] {
-            &["id"]
-        }
-
-        fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
-            primary_key.to_string()
-        }
-
-        fn column_names() -> &'static [&'static str] {
-            &["id", "secret_column", "other_column"]
-        }
-
-        fn field_names() -> &'static [&'static str] {
-            &["id", "secret", "other"]
-        }
-
-        fn encrypted_fields() -> Vec<&'static str> {
-            vec!["secret", "other"]
-        }
-
-        fn encrypted_column_names() -> Vec<&'static str> {
-            vec!["secret_column"]
-        }
-    }
-
-    #[test]
-    fn mismatched_encrypted_metadata_is_rejected_instead_of_truncated() {
-        // `other` is the entry `zip` used to drop, which made it look like an
-        // unencrypted column and let plaintext through.
-        let error = prepare_batch_update_value::<MismatchedEncryptedMeta>(
-            "other",
-            UpdateValue::Value(serde_json::Value::String("plaintext".to_string())),
-        )
-        .expect_err("a metadata mismatch must not fall through to plaintext");
-
-        assert!(
-            error.to_string().contains("encrypted column name"),
-            "unexpected error: {error}"
-        );
-    }
-
-    #[test]
-    fn mismatched_encrypted_metadata_is_rejected_for_unrelated_columns_too() {
-        let error = prepare_batch_update_value::<MismatchedEncryptedMeta>(
-            "id",
-            UpdateValue::Value(serde_json::Value::from(1)),
-        )
-        .expect_err("a metadata mismatch must be reported, not skipped");
-
-        assert!(
-            error.to_string().contains("encrypted field name"),
-            "unexpected error: {error}"
-        );
-    }
-}
+#[path = "../../tests/unit/model_encryption_tests.rs"]
+mod tests;

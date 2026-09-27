@@ -97,6 +97,23 @@ fn batch_update_guard_accepts_or_filters() {
 }
 
 #[test]
+fn batch_update_guard_rejects_an_or_group_with_a_vacuous_member() {
+    // `name = 'alice' OR id NOT IN ()` holds for every row, so the OR group does
+    // not filter anything; counting its members used to accept it.
+    let err = BatchUpdateGuardUser::update_all()
+        .set("name", "updated")
+        .or_where_eq("name", "alice")
+        .or_where_not_in("id", Vec::<i64>::new())
+        .ensure_explicit_filters("update")
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("unfiltered bulk mutations are blocked"),
+        "{err}"
+    );
+}
+
+#[test]
 fn batch_update_guard_rejects_limit_without_where() {
     let err = BatchUpdateGuardUser::update_all()
         .set("name", "updated")
@@ -143,9 +160,10 @@ fn batch_update_builder_accepts_typed_filter_columns() {
         .where_eq(BatchUpdateGuardUser::columns.id, 1)
         .or_where_eq(BatchUpdateGuardUser::columns.name, "alice");
 
-    assert_eq!(builder.conditions.len(), 2);
+    assert_eq!(builder.conditions.len(), 1);
     assert_eq!(builder.conditions[0].column, "id");
-    assert_eq!(builder.conditions[1].column, "__OR__name");
+    assert_eq!(builder.or_group.conditions.len(), 1);
+    assert_eq!(builder.or_group.conditions[0].column, "name");
 }
 
 #[test]
@@ -155,7 +173,7 @@ fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
         .or_where_starts_with("name", r"lead%_")
         .or_where_ends_with("name", r"tail%_");
 
-    assert_eq!(builder.conditions.len(), 3);
+    assert_eq!(builder.conditions.len(), 1);
     assert!(matches!(
         builder.conditions[0].operator,
         crate::query::Operator::LikeEscaped
@@ -165,84 +183,44 @@ fn batch_update_builder_literal_like_helpers_escape_metacharacters() {
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
             if value == r"%100!%!_\done%"
     ));
+    assert_eq!(builder.or_group.conditions.len(), 2);
     assert!(matches!(
-        &builder.conditions[1].value,
+        &builder.or_group.conditions[0].value,
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
             if value == r"lead!%!_%"
     ));
     assert!(matches!(
-        &builder.conditions[2].value,
+        &builder.or_group.conditions[1].value,
         crate::query::ConditionValue::Single(serde_json::Value::String(value))
             if value == r"%tail!%!_"
     ));
 }
 
 #[test]
-fn batch_update_postgres_placeholder_offset_skips_single_quoted_literals() {
-    let sql = "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'";
-
-    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 3);
-
-    assert_eq!(
-        offset,
-        "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'"
-    );
-}
-
-#[test]
-fn batch_update_postgres_placeholder_offset_skips_dollar_quotes_and_comments() {
-    let sql = concat!(
-        "note = $$literal $1$$ AND id = $2 ",
-        "/* keep $3 */ ",
-        "-- keep $4\n",
-        "AND body = $tag$still $5$tag$"
-    );
-
-    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 2);
-
-    assert_eq!(
-        offset,
-        concat!(
-            "note = $$literal $1$$ AND id = $4 ",
-            "/* keep $3 */ ",
-            "-- keep $4\n",
-            "AND body = $tag$still $5$tag$"
-        )
-    );
-}
-
-#[test]
-fn batch_update_postgres_placeholder_offset_skips_escape_string_literals() {
-    let sql = "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'";
-
-    let offset = BatchUpdateBuilder::<BatchUpdateGuardUser>::offset_postgres_placeholders(sql, 4);
-
-    assert_eq!(
-        offset,
-        "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'"
-    );
-}
-
-#[test]
 fn batch_execute_returning_uses_backend_returning_capability() {
-    let err = BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
-        crate::config::DatabaseType::MySQL,
-    )
-    .unwrap_err();
+    // MariaDB has `UPDATE .. RETURNING` only from 13.0, a version TideORM does
+    // not check for.
+    for (db_type, name) in [
+        (crate::config::DatabaseType::MySQL, "MySQL"),
+        (crate::config::DatabaseType::MariaDB, "MariaDB"),
+    ] {
+        let err =
+            BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(db_type)
+                .unwrap_err();
 
-    assert!(
-        err.to_string()
-            .contains("MySQL does not support RETURNING clause")
-    );
+        assert!(
+            err.to_string()
+                .contains(&format!("execute_returning() is not supported on {name}")),
+            "{err}"
+        );
+        assert!(
+            matches!(&err, crate::Error::BackendNotSupported { backend, .. } if backend == name),
+            "a backend capability refusal must not be reported as a query error: {err:?}"
+        );
+    }
     assert!(
         BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
             crate::config::DatabaseType::SQLite,
-        )
-        .is_ok()
-    );
-    assert!(
-        BatchUpdateBuilder::<BatchUpdateGuardUser>::ensure_backend_supports_returning(
-            crate::config::DatabaseType::MariaDB,
         )
         .is_ok()
     );

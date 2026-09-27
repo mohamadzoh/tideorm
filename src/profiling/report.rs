@@ -3,13 +3,19 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant, SystemTime};
 
-use super::utils::{detect_operation, textwrap_simple};
+use super::GlobalProfiler;
+use super::utils::textwrap_simple;
+use crate::logging::QueryOperation;
 
 /// Manual profiler for collecting query timings into one report.
+///
+/// It records nothing on its own: it holds only what you hand it through
+/// [`record`](Self::record) or [`record_full`](Self::record_full), however many
+/// queries run meanwhile. To time every statement TideORM executes, turn on
+/// [`GlobalProfiler`] instead.
 pub struct Profiler {
     start_time: Instant,
     queries: Vec<ProfiledQuery>,
-    is_active: bool,
 }
 
 /// One recorded query plus timing metadata.
@@ -35,7 +41,7 @@ impl ProfiledQuery {
     /// Capture one SQL statement and its duration.
     pub fn new(sql: impl Into<String>, duration: Duration) -> Self {
         let sql = sql.into();
-        let operation = detect_operation(&sql);
+        let operation = QueryOperation::from_sql(&sql).as_str().to_string();
         Self {
             sql,
             table: None,
@@ -68,31 +74,28 @@ impl ProfiledQuery {
 
 impl Profiler {
     /// Begin collecting queries for a manual profiling run.
+    ///
+    /// Despite the name this starts no timing of executed queries; see the
+    /// type's documentation.
     pub fn start() -> Self {
         Self {
             start_time: Instant::now(),
             queries: Vec::new(),
-            is_active: true,
         }
     }
 
-    /// Append a SQL statement if the profiler is still active.
+    /// Append a SQL statement.
     pub fn record(&mut self, sql: impl Into<String>, duration: Duration) {
-        if self.is_active {
-            self.queries.push(ProfiledQuery::new(sql, duration));
-        }
+        self.queries.push(ProfiledQuery::new(sql, duration));
     }
 
     /// Append a fully populated query entry.
     pub fn record_full(&mut self, query: ProfiledQuery) {
-        if self.is_active {
-            self.queries.push(query);
-        }
+        self.queries.push(query);
     }
 
-    /// Freeze the session and build the final report.
-    pub fn stop(mut self) -> ProfileReport {
-        self.is_active = false;
+    /// End the session and build the final report.
+    pub fn stop(self) -> ProfileReport {
         let total_duration = self.start_time.elapsed();
         ProfileReport::from_queries(self.queries, total_duration)
     }
@@ -189,15 +192,8 @@ impl ProfileReport {
     pub fn suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
 
-        let mut table_counts: HashMap<&str, usize> = HashMap::new();
-        for query in &self.queries {
-            if let Some(ref table) = query.table {
-                *table_counts.entry(table.as_str()).or_insert(0) += 1;
-            }
-        }
-
-        for (table, count) in table_counts {
-            if count > 10 {
+        for (table, count) in &self.tables {
+            if *count > 10 {
                 suggestions.push(format!(
                     "Potential N+1 query detected: {} queries on '{}' table. Consider using eager loading with `.with(\"{}\")` or batch queries.",
                     count, table, table
@@ -205,16 +201,14 @@ impl ProfileReport {
             }
         }
 
-        let slow_count = self
-            .queries
-            .iter()
-            .filter(|query| query.duration > Duration::from_millis(100))
-            .count();
+        let threshold = GlobalProfiler::slow_threshold();
+        let slow_count = self.queries_slower_than(threshold).len();
 
         if slow_count > 0 {
             suggestions.push(format!(
-                "{} slow queries detected (>100ms). Review these queries and consider adding indexes.",
-                slow_count
+                "{} slow queries detected (>= {}ms). Review these queries and consider adding indexes.",
+                slow_count,
+                threshold.as_millis()
             ));
         }
 

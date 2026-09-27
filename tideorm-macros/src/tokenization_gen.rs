@@ -13,12 +13,6 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_ident = &ctx.pk_ident;
     let pk_type = &ctx.pk_type;
 
-    // `tokenization_enabled`, `token_encoder` and `token_decoder` are declared by
-    // `Tokenizable` alone. `ModelMeta` used to carry colliding copies, which made an
-    // unqualified `Model::tokenization_enabled()` an E0034 ambiguity whenever the
-    // prelude had both traits in scope; that was papered over with inherent shims.
-    // The `ModelMeta` copies are gone as of 0.10.0, so the call resolves on its own
-    // and no shim is emitted.
     quote! {
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::tokenization::Tokenizable for #struct_name {
@@ -32,17 +26,14 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
                 self.#pk_ident.clone()
             }
 
-            fn tokenization_enabled() -> bool {
-                true
-            }
-
+            // The error leaves the decoded key out: hiding it is what the
+            // token is for, and errors travel to logs and responses.
             async fn from_token(token: &str) -> ::tideorm::Result<Self> {
                 let id = Self::decode_token(token)?;
-                let display_id = <Self as ::tideorm::model::ModelMeta>::primary_key_display(&id);
-                Self::find(id.clone())
+                Self::find(id)
                     .await?
                     .ok_or_else(|| ::tideorm::Error::not_found(
-                        format!("{} with decoded token ID {} not found", #struct_name_str, display_id)
+                        format!("no {} matches this token", #struct_name_str)
                     ))
             }
         }

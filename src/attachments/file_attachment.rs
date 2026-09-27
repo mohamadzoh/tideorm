@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
 /// File attachment metadata
@@ -17,7 +18,13 @@ use std::collections::HashMap;
 /// Screen keys with [`FileAttachment::is_safe_key`] at the boundary where they
 /// enter the system, or generate keys server-side and never accept them from the
 /// client at all.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// It serializes as one JSON object: the fields below and, beside them, each
+/// [`metadata`](Self::metadata) entry. An entry named like a field that is set
+/// (`key`, `size`, ..) is left out, since the field owns that name; one named
+/// like an unset optional field is kept, and reads back as metadata when it is
+/// not that field's type, so `add_metadata("size", "12KB")` round-trips.
+#[derive(Debug, Clone)]
 pub struct FileAttachment {
     /// The file key/path (e.g., "uploads/2024/01/image.jpg")
     ///
@@ -32,20 +39,95 @@ pub struct FileAttachment {
     pub created_at: String,
 
     /// Original filename (if different from key)
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub original_filename: Option<String>,
 
     /// File size in bytes
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
 
     /// MIME type
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
 
     /// Custom metadata
-    #[serde(flatten, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, serde_json::Value>,
+}
+
+impl Serialize for FileAttachment {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("key", &self.key)?;
+        map.serialize_entry("filename", &self.filename)?;
+        map.serialize_entry("created_at", &self.created_at)?;
+        let optional = [
+            (
+                "original_filename",
+                self.original_filename
+                    .as_deref()
+                    .map(serde_json::Value::from),
+            ),
+            ("size", self.size.map(serde_json::Value::from)),
+            (
+                "mime_type",
+                self.mime_type.as_deref().map(serde_json::Value::from),
+            ),
+        ];
+        for (name, value) in &optional {
+            if let Some(value) = value {
+                map.serialize_entry(name, value)?;
+            }
+        }
+        for (name, value) in &self.metadata {
+            let owned_by_field = matches!(name.as_str(), "key" | "filename" | "created_at")
+                || optional
+                    .iter()
+                    .any(|(field, value)| field == name && value.is_some());
+            if !owned_by_field {
+                map.serialize_entry(name, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FileAttachment {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut members = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        // A member of the field's type is the field; anything else stays
+        // metadata. A `null` is an unset optional field.
+        let mut text = |name: &str| match members.get(name) {
+            Some(serde_json::Value::String(_)) => members
+                .remove(name)
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some(serde_json::Value::Null) => {
+                members.remove(name);
+                None
+            }
+            _ => None,
+        };
+        let required = |value: Option<String>, name: &'static str| {
+            value.ok_or_else(|| serde::de::Error::missing_field(name))
+        };
+        let key = required(text("key"), "key")?;
+        let filename = required(text("filename"), "filename")?;
+        let created_at = required(text("created_at"), "created_at")?;
+        let original_filename = text("original_filename");
+        let mime_type = text("mime_type");
+        let size = match members.get("size") {
+            Some(value) if value.is_u64() || value.is_null() => {
+                members.remove("size").and_then(|value| value.as_u64())
+            }
+            _ => None,
+        };
+
+        Ok(Self {
+            key,
+            filename,
+            created_at,
+            original_filename,
+            size,
+            mime_type,
+            metadata: members.into_iter().collect(),
+        })
+    }
 }
 
 impl FileAttachment {

@@ -27,6 +27,9 @@ pub struct QueryDebugInfo {
     pub sql: String,
     /// Query parameters
     pub params: Vec<String>,
+    /// Why running the query would fail before it reached the database, if
+    /// it would.
+    pub error: Option<String>,
 }
 
 impl QueryDebugInfo {
@@ -44,13 +47,8 @@ impl QueryDebugInfo {
             offset: None,
             sql: String::new(),
             params: Vec::new(),
+            error: None,
         }
-    }
-
-    /// Override the detected operation shown in the debug output.
-    pub fn with_operation(mut self, op: QueryOperation) -> Self {
-        self.operation = op;
-        self
     }
 
     /// Add one rendered condition line.
@@ -68,12 +66,6 @@ impl QueryDebugInfo {
         self.sql = sql.into();
         self
     }
-
-    /// Attach rendered parameter values.
-    pub fn with_params(mut self, params: Vec<String>) -> Self {
-        self.params = params;
-        self
-    }
 }
 
 impl fmt::Display for QueryDebugInfo {
@@ -86,6 +78,9 @@ impl fmt::Display for QueryDebugInfo {
         writeln!(f, "═══════════════════════════════════════════════════")?;
         writeln!(f, "Table:      {}", self.table)?;
         writeln!(f, "Operation:  {}", self.operation)?;
+        if let Some(error) = &self.error {
+            writeln!(f, "Invalid:    {}", error)?;
+        }
 
         if !self.select.is_empty() && self.select != vec!["*".to_string()] {
             writeln!(f, "Select:     {}", self.select.join(", "))?;

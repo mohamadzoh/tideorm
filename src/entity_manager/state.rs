@@ -1,6 +1,22 @@
 use super::*;
 
+/// The key a relation snapshot of `owner_key`'s `relation`, holding rows of `T`,
+/// is filed under.
+fn snapshot_key<T: 'static>(
+    owner_table: &'static str,
+    owner_key: &str,
+    relation: &'static str,
+) -> SnapshotKey {
+    (
+        owner_table,
+        TypeId::of::<T>(),
+        owner_key.to_string(),
+        relation,
+    )
+}
+
 impl EntityManager {
+    #[doc(hidden)]
     pub fn snapshot<T: 'static>(
         &self,
         owner_table: &'static str,
@@ -8,16 +24,12 @@ impl EntityManager {
         relation: &'static str,
         ids: &[String],
     ) {
-        let key = (
-            owner_table,
-            TypeId::of::<T>(),
-            owner_key.to_string(),
-            relation,
-        );
+        let key = snapshot_key::<T>(owner_table, owner_key, relation);
         let mut snapshots = self.snapshots.write();
         snapshots.insert(key, ids.iter().cloned().collect());
     }
 
+    #[doc(hidden)]
     pub fn deletions<T: 'static>(
         &self,
         owner_table: &'static str,
@@ -25,12 +37,7 @@ impl EntityManager {
         relation: &'static str,
         current_ids: &[String],
     ) -> Vec<String> {
-        let key = (
-            owner_table,
-            TypeId::of::<T>(),
-            owner_key.to_string(),
-            relation,
-        );
+        let key = snapshot_key::<T>(owner_table, owner_key, relation);
         let current: HashSet<_> = current_ids.iter().cloned().collect();
         let snapshots = self.snapshots.read();
         let Some(previous) = snapshots.get(&key) else {
@@ -52,12 +59,7 @@ impl EntityManager {
         relation: &'static str,
         current_ids: &[String],
     ) -> Vec<String> {
-        let key = (
-            owner_table,
-            TypeId::of::<T>(),
-            owner_key.to_string(),
-            relation,
-        );
+        let key = snapshot_key::<T>(owner_table, owner_key, relation);
         let current: HashSet<_> = current_ids.iter().cloned().collect();
         let snapshots = self.snapshots.read();
         // No snapshot means no baseline, and that is NOT symmetric with `deletions`:
@@ -86,7 +88,7 @@ impl EntityManager {
         pk: &<T as crate::model::ModelMeta>::PrimaryKey,
     ) -> crate::error::Result<Option<T>>
     where
-        T: crate::model::ModelMeta + Clone + Send + Sync + 'static,
+        T: crate::model::ModelMeta,
     {
         let key = (TypeId::of::<T>(), meta::pk_to_entity_manager_key(pk)?);
         Ok(self.get_by_key(&key))
@@ -107,7 +109,7 @@ impl EntityManager {
         value: &serde_json::Value,
     ) -> crate::error::Result<Option<T>>
     where
-        T: crate::internal::InternalModel + Clone + Send + Sync + 'static,
+        T: crate::internal::InternalModel,
     {
         let map = self.identity_map.read();
         for entry in map.values() {
@@ -166,20 +168,6 @@ impl EntityManager {
         Some(Managed::from_entry(entry))
     }
 
-    pub(crate) fn get_managed_by_model<T>(
-        &self,
-        entity: &T,
-    ) -> crate::error::Result<Option<Managed<T>>>
-    where
-        T: crate::model::Model + crate::model::ModelMeta + Send + Sync + 'static,
-    {
-        let Some(key) = meta::model_entity_manager_key(entity)? else {
-            return Ok(None);
-        };
-
-        Ok(self.get_managed_by_key::<T>(&key))
-    }
-
     pub(crate) fn put_managed_entry<T>(&self, key: &str, entry: Arc<managed::ManagedEntry<T>>)
     where
         T: Send + Sync + 'static,
@@ -206,14 +194,7 @@ impl EntityManager {
 
     pub(super) fn register_managed_entry<T>(&self, entry: Arc<managed::ManagedEntry<T>>)
     where
-        T: crate::model::Model
-            + TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + serde::Serialize
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
         <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             PartialEq,
     {

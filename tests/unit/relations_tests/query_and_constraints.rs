@@ -15,7 +15,11 @@ fn self_ref_tree_sql_uses_recursive_cte_and_local_key() {
     assert!(sql.contains("\"node\".\"slug\" AS \"tree_key\""));
     assert!(sql.contains("\"child\".\"parent_slug\" = \"tree\".\"tree_key\""));
     assert!(sql.contains("\"tree\".\"depth\" < $2"));
-    assert!(sql.contains("SELECT \"result_node\".*"));
+    assert!(sql.contains("SELECT \"result_node\".\"id\""), "{sql}");
+    assert!(
+        !sql.contains(".*"),
+        "the tree query must name its columns: {sql}"
+    );
     assert!(matches!(params.first(), Some(Value::String(Some(root))) if root == "root"));
     assert!(matches!(params.get(1), Some(Value::BigInt(Some(depth))) if *depth == 3));
 }
@@ -88,22 +92,7 @@ fn eager_query_builder_accepts_typed_columns() {
         .where_in(RelationTestNode::columns.id, vec![1, 2])
         .order_by(RelationTestNode::columns.slug, crate::query::Order::Asc);
 
-    assert_eq!(
-        builder.get_relation_tree().roots(),
-        vec!["owner".to_string()]
-    );
-}
-
-#[test]
-fn relation_constraints_accept_typed_columns() {
-    let constraints = RelationConstraints::new()
-        .where_eq(RelationTestNode::columns.slug, "root")
-        .order_by(RelationTestNode::columns.id, crate::query::Order::Desc);
-
-    let query = constraints.apply(RelationTestNode::query());
-
-    assert_eq!(query.conditions.len(), 1);
-    assert_eq!(query.conditions[0].column, "slug");
+    assert_eq!(builder.relation_tree.roots(), vec!["owner".to_string()]);
 }
 
 #[test]
@@ -129,20 +118,16 @@ fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
 }
 
 #[test]
-fn relation_info_has_many_through_records_the_related_key_in_its_own_field() {
-    let info = crate::relations::RelationInfo::has_many_through(
-        "tags",
-        "tags",
-        "post_tags",
-        "post_id",
-        "tag_id",
+fn self_ref_tree_sql_renders_a_field_name_as_its_column() {
+    let (sql, _params) = build_self_ref_tree_sql::<RelationExtLookupModel>(
+        "account_id",
         "id",
-    );
+        &json!(1),
+        2,
+        DatabaseType::Postgres,
+    )
+    .unwrap();
 
-    assert_eq!(info.pivot_table.as_deref(), Some("post_tags"));
-    assert_eq!(info.related_key.as_deref(), Some("tag_id"));
-    assert_eq!(
-        info.morph_type_column, None,
-        "a through relation has no polymorphic type column"
-    );
+    assert!(sql.contains("\"node\".\"owner_id\" = $1"), "{sql}");
+    assert!(!sql.contains("account_id"), "{sql}");
 }

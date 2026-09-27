@@ -1,0 +1,5 @@
+error: has_one relations require #[tideorm(foreign_key = "...")]
+  --> tests/ui/invalid_relation_missing_has_one_foreign_key.rs:15:5
+   |
+15 |     profile: HasOne<Profile>,
+   |     ^^^^^^^

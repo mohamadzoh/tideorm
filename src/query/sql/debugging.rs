@@ -1,6 +1,8 @@
 use super::*;
 
-#[allow(missing_docs)]
+/// The banner every SQL preview starts with.
+const PREVIEW_BANNER: &str = "-- DEBUG PREVIEW (not executable, values are approximate)";
+
 impl<M: Model> QueryBuilder<M> {
     fn operator_label(operator: &Operator) -> &'static str {
         match operator {
@@ -18,6 +20,7 @@ impl<M: Model> QueryBuilder<M> {
             Operator::IsNull => "IS NULL",
             Operator::IsNotNull => "IS NOT NULL",
             Operator::Between => "BETWEEN",
+            Operator::NotBetween => "NOT BETWEEN",
             Operator::JsonContains => "JSON_CONTAINS",
             Operator::JsonContainedBy => "JSON_CONTAINED_BY",
             Operator::JsonKeyExists => "JSON_KEY_EXISTS",
@@ -27,38 +30,21 @@ impl<M: Model> QueryBuilder<M> {
             Operator::ArrayContains => "ARRAY_CONTAINS",
             Operator::ArrayContainedBy => "ARRAY_CONTAINED_BY",
             Operator::ArrayOverlaps => "ARRAY_OVERLAPS",
-            Operator::ArrayContainsAny => "ARRAY_CONTAINS_ANY",
-            Operator::ArrayContainsAll => "ARRAY_CONTAINS_ALL",
-            Operator::SubqueryIn => "IN SUBQUERY",
-            Operator::SubqueryNotIn => "NOT IN SUBQUERY",
             Operator::Raw => "RAW",
             Operator::EqAny => "= ANY",
             Operator::NeAll => "<> ALL",
         }
     }
 
-    fn describe_condition_value(value: &ConditionValue) -> String {
-        match value {
-            ConditionValue::Single(value) => value.to_string(),
-            ConditionValue::List(values) => format!("{:?}", values),
-            ConditionValue::Range(low, high) => format!("{}..{}", low, high),
-            ConditionValue::None => "NULL".to_string(),
-            ConditionValue::Subquery(query_sql) => query_sql.clone(),
-            ConditionValue::RawExpr(raw_sql) => raw_sql.clone(),
-            // The debug description is for humans, so it shows the inline-literal
-            // rendering rather than the placeholders the executable form carries.
-            ConditionValue::RawExprWithValues { preview_sql, .. } => preview_sql.clone(),
-        }
-    }
-
     fn describe_condition(condition: &WhereCondition) -> String {
         match (&condition.operator, &condition.value) {
-            (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => raw_sql.clone(),
-            (Operator::Raw, ConditionValue::RawExprWithValues { preview_sql, .. }) => {
+            (Operator::Raw, ConditionValue::RawExpr(sql))
+            | (Operator::Raw, ConditionValue::RawExprWithValues { sql, .. })
+            | (Operator::Raw, ConditionValue::RawTemplate { sql, .. }) => {
                 if condition.column.is_empty() {
-                    preview_sql.clone()
+                    sql.clone()
                 } else {
-                    format!("{} {}", condition.column, preview_sql)
+                    format!("{} {}", condition.column, sql)
                 }
             }
             (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
@@ -72,33 +58,21 @@ impl<M: Model> QueryBuilder<M> {
                 "{} {} {}",
                 condition.column,
                 Self::operator_label(&condition.operator),
-                Self::describe_condition_value(&condition.value)
+                condition.value
             ),
         }
     }
 
-    fn describe_having_clause(&self, sql_template: &str, params: &[serde_json::Value]) -> String {
-        if params.is_empty() {
-            return sql_template.to_string();
-        }
-
-        let mut rendered = String::new();
-        let mut params_iter = params.iter();
-        let db_type = self.db_type_for_sql();
-
-        for ch in sql_template.chars() {
-            if ch == '?' {
-                if let Some(value) = params_iter.next() {
-                    rendered.push_str(&self.format_preview_value(db_type, value));
-                } else {
-                    rendered.push('?');
-                }
-            } else {
-                rendered.push(ch);
+    /// A HAVING template with each `?` replaced by the JSON value bound to it.
+    fn describe_having_clause(template: &str, bindings: &[crate::internal::Value]) -> String {
+        let mut values = bindings.iter();
+        db_sql::map_template_placeholders(template, || match values.next() {
+            // The value as the statement preview writes it.
+            Some(value) => {
+                db_sql::inline_parameters(DatabaseType::Postgres, "$1", std::slice::from_ref(value))
             }
-        }
-
-        rendered
+            None => "?".to_string(),
+        })
     }
 
     fn describe_or_group(group: &OrGroup) -> String {
@@ -121,90 +95,50 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn error_context_conditions(&self) -> Vec<String> {
-        let mut conditions: Vec<String> = self
-            .conditions
-            .iter()
-            .map(Self::describe_condition)
-            .collect();
-        conditions.extend(
-            self.or_groups
-                .iter()
-                .map(Self::describe_or_group)
-                .filter(|group| !group.is_empty()),
-        );
-        conditions.extend(
-            self.having_conditions
-                .iter()
-                .enumerate()
-                .map(|(index, having)| {
-                    let params = self
-                        .having_bindings
-                        .get(index)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    format!("HAVING {}", self.describe_having_clause(having, params))
-                }),
-        );
-        conditions
-    }
-
-    fn error_context_operator_chain(&self) -> Option<String> {
-        let mut parts = Vec::new();
-
-        if !self.conditions.is_empty() {
-            parts.push(
-                self.conditions
-                    .iter()
-                    .map(Self::describe_condition)
-                    .collect::<Vec<_>>()
-                    .join(" AND "),
-            );
-        }
-
-        parts.extend(
-            self.or_groups
-                .iter()
-                .map(Self::describe_or_group)
-                .filter(|group| !group.is_empty()),
-        );
-
-        if !self.having_conditions.is_empty() {
-            let having = self
-                .having_conditions
-                .iter()
-                .enumerate()
-                .map(|(index, clause)| {
-                    let params = self
-                        .having_bindings
-                        .get(index)
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[]);
-                    self.describe_having_clause(clause, params)
-                })
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            parts.push(format!("HAVING {}", having));
-        }
-
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join(" AND "))
-        }
-    }
-
     pub(crate) fn build_query_error_context(
         &self,
         query: Option<&str>,
     ) -> crate::error::ErrorContext {
-        let mut context = crate::error::ErrorContext::new()
-            .table(M::table_name())
-            .conditions(self.error_context_conditions());
+        let conditions: Vec<String> = self
+            .conditions
+            .iter()
+            .map(Self::describe_condition)
+            .collect();
+        let groups: Vec<String> = self
+            .or_groups
+            .iter()
+            .map(Self::describe_or_group)
+            .filter(|group| !group.is_empty())
+            .collect();
+        let having: Vec<String> = self
+            .having_clauses()
+            .map(|(template, bindings)| Self::describe_having_clause(template, bindings))
+            .collect();
 
-        if let Some(operator_chain) = self.error_context_operator_chain() {
-            context = context.operator_chain(operator_chain);
+        let mut operator_chain = Vec::new();
+        if !conditions.is_empty() {
+            operator_chain.push(conditions.join(" AND "));
         }
+        operator_chain.extend(groups.iter().cloned());
+        if !having.is_empty() {
+            operator_chain.push(format!("HAVING {}", having.join(" AND ")));
+        }
+
+        let mut context = crate::error::ErrorContext::new().table(M::table_name());
+        if !operator_chain.is_empty() {
+            context = context.operator_chain(operator_chain.join(" AND "));
+        }
+        context = context.conditions(
+            conditions
+                .into_iter()
+                .chain(groups)
+                .chain(
+                    having
+                        .into_iter()
+                        .map(|clause| format!("HAVING {}", clause)),
+                )
+                .collect(),
+        );
 
         if let Some(query) = query {
             context = context.query(query);
@@ -221,10 +155,7 @@ impl<M: Model> QueryBuilder<M> {
     /// success. `None` means nothing is observing this query — two atomic loads
     /// decide that, and no timer or SQL copy is allocated.
     pub(super) fn start_query_log(&self, sql: &str) -> Option<crate::logging::QueryTimer> {
-        if std::env::var("TIDE_LOG_QUERIES")
-            .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
-            .unwrap_or(false)
-        {
+        if crate::logging::query_logging_enabled() {
             crate::tide_debug!("Query: {}", sql);
         }
 
@@ -266,12 +197,19 @@ impl<M: Model> QueryBuilder<M> {
         crate::logging::QueryLogger::log(entry);
     }
 
+    /// Describe this query: its preview and parameterized SQL, bound values,
+    /// and the clauses it was built from.
     pub fn debug(&self) -> crate::logging::QueryDebugInfo {
         use crate::logging::QueryDebugInfo;
 
-        let (parameterized_sql, params) = self.build_select_sql_with_params();
-        let preview_sql = self.build_sql_preview();
-        let mut info = QueryDebugInfo::new(M::table_name()).with_sql(preview_sql.clone());
+        let db_type = self.db_type_for_sql();
+        let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
+        let preview = db_sql::inline_parameters(db_type, &sql, &params);
+
+        let mut info = QueryDebugInfo::new(M::table_name()).with_sql(format!(
+            "{}\n{}\n-- PARAMETERIZED SQL\n{}",
+            PREVIEW_BANNER, preview, sql
+        ));
         info.params = params
             .into_iter()
             .map(|value| format!("{:?}", value))
@@ -280,6 +218,13 @@ impl<M: Model> QueryBuilder<M> {
         for condition in &self.conditions {
             info.add_condition(Self::describe_condition(condition));
         }
+        for group in &self.or_groups {
+            let group = Self::describe_or_group(group);
+            if !group.is_empty() {
+                info.add_condition(group);
+            }
+        }
+        info.error = self.validate().err().map(|error| error.to_string());
 
         for (column, direction) in &self.order_by {
             info.add_order_by(format!("{} {}", column, direction.as_str()));
@@ -294,7 +239,7 @@ impl<M: Model> QueryBuilder<M> {
             info.select.extend(
                 self.subquery_select_expressions
                     .iter()
-                    .map(|(query_sql, alias)| format!("({}) AS {}", query_sql, alias)),
+                    .map(|subquery| format!("({}) AS {}", subquery.query_sql, subquery.alias)),
             );
         } else if let Some(columns) = &self.select_columns {
             info.select = columns.clone();
@@ -307,23 +252,31 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
-        if !parameterized_sql.is_empty() {
-            info.sql = format!(
-                "{}\n-- PARAMETERIZED SQL\n{}",
-                preview_sql, parameterized_sql
-            );
-        }
-
         info
     }
 
+    /// Check the query without running it: `Err` with the reason when a
+    /// terminal would refuse it — an unsafe column, a bad raw fragment, a
+    /// zero page — which is otherwise reported only when it runs.
+    ///
+    /// ```ignore
+    /// let query = Post::query().order_by(params.sort.as_str(), Order::Asc);
+    /// query.validate()?; // answer 400 before touching the database
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        self.ensure_query_is_executable()
+    }
+
+    /// The statement [`get()`](Self::get) would run, with its bound values
+    /// written in as literals, under a banner marking it display-only.
     pub fn build_sql_preview(&self) -> String {
         self.build_sql_preview_for_db(self.db_type_for_sql())
     }
 
     pub(crate) fn build_sql_preview_for_db(&self, db_type: DatabaseType) -> String {
         format!(
-            "-- DEBUG PREVIEW (not executable, values are approximate)\n{}",
+            "{}\n{}",
+            PREVIEW_BANNER,
             self.build_select_sql_for_db(db_type)
         )
     }

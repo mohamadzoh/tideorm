@@ -1,11 +1,23 @@
 use super::*;
 
-/// Fluent builder for chained OR conditions
+/// Fluent builder for an OR of AND-ed branches, started by
+/// [`QueryBuilder::begin_or`] and closed by [`end_or`](Self::end_or).
+///
+/// Each `or_where_*` call starts a new branch and each `and_where_*` call adds
+/// to the current one, so
+/// `.begin_or().or_where_eq("a", 1).and_where_eq("b", 2).or_where_eq("c", 3).end_or()`
+/// adds `((a = 1 AND b = 2) OR c = 3)` to the query.
 #[derive(Debug)]
 pub struct OrBranchBuilder<M: Model> {
     query: QueryBuilder<M>,
-    branches: Vec<OrBranch>,
-    current_branch: OrBranch,
+    branches: Vec<OrGroup>,
+    current_branch: OrGroup,
+}
+
+impl<M: Model> crate::columns::ConditionOwner for OrBranchBuilder<M> {
+    fn own_table() -> Option<&'static str> {
+        Some(M::table_name())
+    }
 }
 
 impl<M: Model> OrBranchBuilder<M> {
@@ -14,366 +26,28 @@ impl<M: Model> OrBranchBuilder<M> {
         Self {
             query,
             branches: Vec::new(),
-            current_branch: OrBranch::new(),
+            current_branch: OrGroup::and_group(),
         }
     }
 
-    #[must_use]
-    pub fn or_where_eq(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
+    fn start_branch(mut self, condition: WhereCondition) -> Self {
+        let previous = std::mem::replace(&mut self.current_branch, OrGroup::and_group());
+        if !previous.is_empty() {
+            self.branches.push(previous);
         }
-        self.current_branch = OrBranch::new().where_eq(column, value);
+        self.current_branch.conditions.push(condition);
         self
     }
 
-    #[must_use]
-    pub fn or_where_not(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_not(column, value);
+    fn extend_branch(mut self, condition: WhereCondition) -> Self {
+        self.current_branch.conditions.push(condition);
         self
     }
 
-    #[must_use]
-    pub fn or_where_gt(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_gt(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_gte(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_gte(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_lt(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_lt(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_lte(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_lte(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_like(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        pattern: &str,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_like(column, pattern);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_contains(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_contains(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_starts_with(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_starts_with(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_ends_with(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_ends_with(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_in(column, values);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_not_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_not_in(column, values);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_null(column);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_not_null(column);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_between(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        min: impl Into<serde_json::Value>,
-        max: impl Into<serde_json::Value>,
-    ) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_between(column, min, max);
-        self
-    }
-
-    #[must_use]
-    pub fn or_where_raw(mut self, raw_sql: &str) -> Self {
-        if !self.current_branch.is_empty() {
-            self.branches.push(self.current_branch);
-        }
-        self.current_branch = OrBranch::new().where_raw(raw_sql);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_eq(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_eq(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_not(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_not(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_gt(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_gt(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_gte(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_gte(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_lt(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_lt(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_lte(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_lte(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_like(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        pattern: &str,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_like(column, pattern);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_contains(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_contains(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_starts_with(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_starts_with(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_ends_with(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        value: &str,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_ends_with(column, value);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_not_like(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        pattern: &str,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_not_like(column, pattern);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_in(column, values);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_not_in<V: Into<serde_json::Value>>(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        values: Vec<V>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_not_in(column, values);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.current_branch = self.current_branch.where_null(column);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_not_null(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.current_branch = self.current_branch.where_not_null(column);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_between(
-        mut self,
-        column: impl crate::columns::IntoColumnName,
-        min: impl Into<serde_json::Value>,
-        max: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.current_branch = self.current_branch.where_between(column, min, max);
-        self
-    }
-
-    #[must_use]
-    pub fn and_where_raw(mut self, raw_sql: &str) -> Self {
-        self.current_branch = self.current_branch.where_raw(raw_sql);
-        self
-    }
-
+    /// Close the OR expression and return the query it was started on.
+    ///
+    /// A single-condition branch becomes a plain member of the OR group; a
+    /// longer one becomes a nested AND group. An empty expression adds nothing.
     #[must_use]
     pub fn end_or(mut self) -> QueryBuilder<M> {
         if !self.current_branch.is_empty() {
@@ -383,16 +57,11 @@ impl<M: Model> OrBranchBuilder<M> {
         if !self.branches.is_empty() {
             let mut or_group = OrGroup::new();
 
-            for branch in self.branches {
+            for mut branch in self.branches {
                 if branch.conditions.len() == 1 {
-                    if let Some(condition) = branch.conditions.into_iter().next() {
-                        or_group.conditions.push(condition);
-                    }
+                    or_group.conditions.append(&mut branch.conditions);
                 } else {
-                    let mut nested = OrGroup::new();
-                    nested.combine_with = LogicalOp::And;
-                    nested.conditions = branch.conditions;
-                    or_group.nested_groups.push(nested);
+                    or_group.nested_groups.push(branch);
                 }
             }
 
@@ -401,15 +70,11 @@ impl<M: Model> OrBranchBuilder<M> {
 
         self.query
     }
+}
 
-    pub fn branch_count(&self) -> usize {
-        let current = if self.current_branch.is_empty() { 0 } else { 1 };
-        self.branches.len() + current
-    }
-
-    pub fn total_conditions(&self) -> usize {
-        let mut total: usize = self.branches.iter().map(|b| b.len()).sum();
-        total += self.current_branch.len();
-        total
+crate::query::condition_methods! {
+    impl[M: Model] OrBranchBuilder<M> {
+        or_where + raw => start_branch, "Starts a new branch of the OR expression.";
+        and_where + raw => extend_branch, "ANDs the condition into the current branch.";
     }
 }

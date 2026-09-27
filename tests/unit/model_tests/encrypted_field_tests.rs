@@ -65,7 +65,13 @@ fn encrypted_field_ciphertext_is_bound_to_table_and_column_context() {
 fn encrypted_field_rejects_legacy_global_payloads() {
     init_encrypted_model_test_key();
 
-    let legacy_ciphertext = crate::types::__encrypt_json_value(&serde_json::json!("+15551234567"))
+    // The shape TideORM wrote before encrypted fields were keyed per
+    // `(table, column)`: the same envelope, sealed under the unscoped key.
+    let unscoped_key = crate::tokenization::TokenConfig::get_derived_encryption_key()
+        .expect("the test encryption key should be configured");
+    let plaintext = serde_json::to_vec(&serde_json::json!("+15551234567"))
+        .expect("the legacy plaintext should serialize");
+    let legacy_ciphertext = crate::types::encrypted::encode_payload(&unscoped_key, &plaintext)
         .expect("legacy encrypted payload should be produced");
 
     let error = crate::model::__decrypt_model_field::<String>(

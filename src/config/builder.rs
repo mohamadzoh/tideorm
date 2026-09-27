@@ -4,13 +4,14 @@ use std::time::Duration;
 use super::FileUrlGenerator;
 use super::database::rewrite_driver_url;
 use super::state::{
-    global_db_type, global_pool_config, global_schema_file_path, set_global_db_type,
-    set_global_pool_config, set_global_schema_file_path, with_global_config_mut,
+    global_db_type, global_schema_file_path, set_global_db_type, set_global_schema_file_path,
+    with_global_config_mut,
 };
-use super::{Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds};
+use super::{Config, DatabaseType, PoolConfig};
 
 use crate::database::Database;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::internal::Backend;
 use crate::migration::Migration;
 use crate::tide_info;
 use crate::tide_warn;
@@ -38,6 +39,7 @@ use crate::tide_warn;
 /// The settings are global, and both terminals overwrite the previous ones.
 /// [`reset`](TideConfig::reset) puts them back to defaults, which is how tests
 /// avoid leaking configuration into each other.
+#[derive(Default)]
 pub struct TideConfig {
     pub(crate) config: Config,
     pub(crate) database_type: Option<DatabaseType>,
@@ -63,22 +65,7 @@ impl TideConfig {
     /// [`database`](TideConfig::database) is called.
     #[must_use]
     pub fn init() -> Self {
-        Self {
-            config: Config::default(),
-            database_type: None,
-            database_url: None,
-            pool: PoolConfig::default(),
-            sync_enabled: false,
-            force_sync: false,
-            schema_file: None,
-            migrations: Vec::new(),
-            run_migrations: false,
-            seeds: Vec::new(),
-            run_seeds: false,
-            encryption_key: None,
-            token_encoder: None,
-            token_decoder: None,
-        }
+        Self::default()
     }
 
     /// Register one migration, appended after any already registered.
@@ -90,18 +77,6 @@ impl TideConfig {
     #[must_use]
     pub fn migration<M: Migration + 'static>(mut self, migration: M) -> Self {
         self.migrations.push(Box::new(migration));
-        self
-    }
-
-    /// Register a whole tuple of migrations at once.
-    ///
-    /// `T` is a tuple of migration types — `.migrations::<(CreateUsers, AddPosts)>()`
-    /// — which keeps a long list readable compared with repeated
-    /// [`migration`](TideConfig::migration) calls. Each type must implement
-    /// `Default`.
-    #[must_use]
-    pub fn migrations<T: RegisterMigrations>(mut self) -> Self {
-        self.migrations.extend(T::collect());
         self
     }
 
@@ -125,20 +100,12 @@ impl TideConfig {
         self
     }
 
-    /// Register a whole tuple of seeds at once.
-    ///
-    /// The seeding counterpart of [`migrations`](TideConfig::migrations).
-    #[must_use]
-    pub fn seeds<T: RegisterSeeds>(mut self) -> Self {
-        self.seeds.extend(T::collect());
-        self
-    }
-
     /// Choose whether [`connect`](TideConfig::connect) runs the registered seeds.
     ///
-    /// Off by default. Seeds run after migrations; if seeding fails, the
-    /// migrations that already ran are **not** rolled back and `connect` returns
-    /// the error with the database partially initialized.
+    /// Off by default. Seeds run after migrations and schema sync, so they can
+    /// fill the tables either creates; if seeding fails, what already ran is
+    /// **not** rolled back and `connect` returns the error with the database
+    /// partially initialized.
     #[must_use]
     pub fn run_seeds(mut self, enabled: bool) -> Self {
         self.run_seeds = enabled;
@@ -151,8 +118,9 @@ impl TideConfig {
     /// Schema sync creates and alters tables to match the models registered with
     /// [`models`](TideConfig::models) or [`models_matching`](TideConfig::models_matching),
     /// which is convenient in development and a poor substitute for migrations
-    /// in production. Destructive changes are skipped unless
-    /// [`force_sync`](TideConfig::force_sync) is also set.
+    /// in production. It only adds missing tables and columns;
+    /// [`force_sync`](TideConfig::force_sync) instead drops and recreates every
+    /// registered table.
     #[must_use]
     pub fn sync(mut self, enabled: bool) -> Self {
         self.sync_enabled = enabled;
@@ -183,11 +151,11 @@ impl TideConfig {
         self
     }
 
-    /// Allow schema sync to apply changes it would otherwise refuse.
+    /// Drop and recreate the table of every registered model on connect.
     ///
-    /// Without this, sync skips anything that could lose data. Turning it on
-    /// lets those statements through, so keep it out of production startup.
-    /// Has no effect unless [`sync(true)`](TideConfig::sync) is also set.
+    /// Every row in those tables is deleted, on every start. Keep it to local
+    /// development and tests, never production startup. Has no effect unless
+    /// [`sync(true)`](TideConfig::sync) is also set.
     #[must_use]
     pub fn force_sync(mut self, enabled: bool) -> Self {
         self.force_sync = enabled;
@@ -197,8 +165,9 @@ impl TideConfig {
     /// Write the generated schema SQL to `path` during [`connect`](TideConfig::connect).
     ///
     /// The file is a readable dump of what TideORM believes the schema is,
-    /// meant to be committed and reviewed in diffs. The path is remembered
-    /// globally so later schema changes rewrite the same file.
+    /// meant to be committed and reviewed in diffs. It is written once per
+    /// `connect`, after any schema sync; nothing rewrites it in between.
+    /// [`schema_file_path`](TideConfig::schema_file_path) reports the path.
     #[must_use]
     pub fn schema_file(mut self, path: &str) -> Self {
         self.schema_file = Some(path.to_string());
@@ -209,8 +178,8 @@ impl TideConfig {
     ///
     /// Only needed when the URL scheme is ambiguous. Note that a `mysql://` URL
     /// pointing at a MariaDB server is detected automatically during
-    /// [`connect`](TideConfig::connect) by querying the server version, which
-    /// matters because the two differ on `RETURNING` support.
+    /// [`connect`](TideConfig::connect) by querying the server version, and
+    /// [`get_database_type`](TideConfig::get_database_type) then reports MariaDB.
     #[must_use]
     pub fn database_type(mut self, db_type: DatabaseType) -> Self {
         self.database_type = Some(db_type);
@@ -249,6 +218,11 @@ impl TideConfig {
     }
 
     /// How long to wait when opening a new connection. Defaults to 8 seconds.
+    ///
+    /// The driver has one timeout for handing out a connection, opening one
+    /// when the pool has room, so this and
+    /// [`acquire_timeout`](TideConfig::acquire_timeout) set the same limit,
+    /// and the longer of the two applies.
     #[must_use]
     pub fn connect_timeout(mut self, duration: Duration) -> Self {
         self.pool.connect_timeout = duration;
@@ -277,7 +251,9 @@ impl TideConfig {
     /// How long a query may wait for a free pooled connection. Defaults to 8 seconds.
     ///
     /// This is the one that fires under load: exceeding it means the pool is
-    /// saturated, not that the database is unreachable.
+    /// saturated, not that the database is unreachable. It shares the
+    /// driver's one timeout with [`connect_timeout`](TideConfig::connect_timeout),
+    /// and the longer of the two applies.
     #[must_use]
     pub fn acquire_timeout(mut self, duration: Duration) -> Self {
         self.pool.acquire_timeout = duration;
@@ -307,13 +283,6 @@ impl TideConfig {
     #[must_use]
     pub fn hidden_attributes(mut self, attrs: &[&str]) -> Self {
         self.config.hidden_attributes = attrs.iter().map(|s| s.to_string()).collect();
-        self
-    }
-
-    /// Treat models as soft-deleting by default. Defaults to `false`.
-    #[must_use]
-    pub fn soft_delete_by_default(mut self, enabled: bool) -> Self {
-        self.config.soft_delete_by_default = enabled;
         self
     }
 
@@ -411,17 +380,20 @@ impl TideConfig {
     /// In order: the configuration and tokenization settings are installed
     /// globally, the pool is opened (auto-detecting MariaDB behind a `mysql://`
     /// URL), the connection becomes the global handle every model uses, then —
-    /// only when they were enabled — migrations run, seeds run, schema sync
-    /// runs, and the schema file is written.
+    /// only when they were enabled — migrations run, schema sync runs, seeds
+    /// run, and the schema file is written. Seeds come after sync so that they
+    /// can fill the tables sync creates, and a `force_sync` does not drop what
+    /// they wrote.
     ///
     /// The steps are **not** one atomic unit: a failure part-way through leaves
     /// the earlier steps applied, so a seed error can return `Err` with the
-    /// migrations already committed.
+    /// migrations and sync already applied.
     ///
     /// Errors when no database URL was set, when the backend cannot be inferred
-    /// from the URL, or when any startup step fails.
+    /// from the URL, when a MySQL server cannot report its version, or when any
+    /// startup step fails.
     pub async fn connect(self) -> Result<&'static Database> {
-        with_global_config_mut(|c| *c = self.config.clone());
+        with_global_config_mut(|c| *c = self.config);
 
         Self::install_tokenization_settings(
             self.encryption_key.as_deref(),
@@ -430,27 +402,23 @@ impl TideConfig {
         );
 
         let url = self.database_url.ok_or_else(|| {
-            crate::error::Error::configuration(
+            Error::configuration(
                 "Database URL is required. Use .database(\"postgres://...\") to set it.",
             )
         })?;
 
-        let mut db_type = match self.database_type {
+        let db_type = match self.database_type {
             Some(t) => t,
             None => DatabaseType::from_url(&url).ok_or_else(|| {
-                crate::error::Error::configuration(
+                Error::configuration(
                     "Could not detect database type from URL. \
                      Use .database_type(DatabaseType::Postgres) to set it explicitly.",
                 )
             })?,
         };
 
-        let connect_url = rewrite_driver_url(&url);
-
-        set_global_pool_config(Some(self.pool.clone()));
-
         let db = Database::builder()
-            .url(connect_url)
+            .url(rewrite_driver_url(&url))
             .max_connections(self.pool.max_connections)
             .min_connections(self.pool.min_connections)
             .connect_timeout(self.pool.connect_timeout)
@@ -460,14 +428,7 @@ impl TideConfig {
             .build()
             .await?;
 
-        if db_type == DatabaseType::MySQL
-            && let Ok(version) = Self::detect_server_version(&db).await
-            && version.to_lowercase().contains("mariadb")
-        {
-            db_type = DatabaseType::MariaDB;
-            tide_info!("Auto-detected MariaDB server: {}", version);
-        }
-
+        let db_type = Self::resolve_database_type(db_type, &db).await?;
         set_global_db_type(Some(db_type));
 
         let db_ref = Database::set_global(db)?;
@@ -483,6 +444,10 @@ impl TideConfig {
             }
         }
 
+        if self.sync_enabled {
+            crate::sync::sync_database_with_options(db_ref, self.force_sync).await?;
+        }
+
         if self.run_seeds && !self.seeds.is_empty() {
             let mut seeder = crate::seeding::Seeder::new();
             for seed in self.seeds {
@@ -492,7 +457,7 @@ impl TideConfig {
                 Ok(result) => result,
                 Err(error) => {
                     tide_warn!(
-                        "Database seeding failed after initialization steps were already applied. The database may be partially initialized: migrations may have run, but seed data is missing."
+                        "Database seeding failed after initialization steps were already applied. The database may be partially initialized: migrations and schema sync may have run, but seed data is missing."
                     );
                     return Err(error);
                 }
@@ -502,15 +467,9 @@ impl TideConfig {
             }
         }
 
-        if self.sync_enabled {
-            crate::sync::sync_database_with_options(db_ref, self.force_sync).await?;
-        }
-
+        set_global_schema_file_path(self.schema_file.clone());
         if let Some(path) = &self.schema_file {
-            set_global_schema_file_path(Some(path.clone()));
             crate::schema::SchemaWriter::write_schema(path).await?;
-        } else {
-            set_global_schema_file_path(None);
         }
 
         Ok(db_ref)
@@ -519,10 +478,10 @@ impl TideConfig {
     /// Install the settings globally without opening a connection.
     ///
     /// The offline half of [`connect`](TideConfig::connect): languages, hidden
-    /// attributes, pool settings, declared backend, schema-file path, and
-    /// tokenization keys all take effect, but no pool is created and no
-    /// migrations, seeds, or sync run. Use it in tests and in tools that need
-    /// the configuration but not the database.
+    /// attributes, declared backend, schema-file path, and tokenization keys
+    /// all take effect. No pool is created, so the URL and pool settings go
+    /// unused, and no migrations, seeds, sync, or schema-file write run. Use it
+    /// in tests and in tools that need the configuration but not the database.
     pub fn apply(self) {
         Self::install_tokenization_settings(
             self.encryption_key.as_deref(),
@@ -533,8 +492,6 @@ impl TideConfig {
         with_global_config_mut(|c| *c = self.config);
 
         set_global_db_type(self.database_type);
-
-        set_global_pool_config(Some(self.pool));
 
         set_global_schema_file_path(self.schema_file);
     }
@@ -549,31 +506,12 @@ impl TideConfig {
 
         set_global_db_type(None);
 
-        set_global_pool_config(None);
-
         set_global_schema_file_path(None);
 
         #[cfg(feature = "attachments")]
         {
             super::state::set_global_file_url_generator(None);
         }
-    }
-
-    /// Get the global database handle, or an error when none is connected.
-    ///
-    /// The non-panicking accessor. `tideorm::db()` returns the same handle but
-    /// panics when uninitialized, so prefer this one on any path that can run
-    /// before startup finished.
-    pub fn db() -> crate::error::Result<Database> {
-        crate::database::require_db()
-    }
-
-    /// Get the global database handle if one is connected.
-    ///
-    /// The `Option` form of [`db`](TideConfig::db), for code that has a
-    /// meaningful "not connected yet" branch rather than an error to report.
-    pub fn try_db() -> Option<Database> {
-        crate::database::try_db()
     }
 
     /// Return whether a global database connection has been installed.
@@ -596,104 +534,33 @@ impl TideConfig {
         global_db_type()
     }
 
-    /// Return whether the configured backend is PostgreSQL.
-    #[must_use]
-    pub fn is_postgres() -> bool {
-        Self::get_database_type() == Some(DatabaseType::Postgres)
-    }
-
-    /// Return whether the configured backend is MySQL specifically.
-    ///
-    /// This is `false` on MariaDB; use [`is_mysql_compatible`](TideConfig::is_mysql_compatible)
-    /// for the dialect both share.
-    #[must_use]
-    pub fn is_mysql() -> bool {
-        Self::get_database_type() == Some(DatabaseType::MySQL)
-    }
-
-    /// Return whether the configured backend is MariaDB specifically.
-    #[must_use]
-    pub fn is_mariadb() -> bool {
-        Self::get_database_type() == Some(DatabaseType::MariaDB)
-    }
-
-    /// Return whether the configured backend speaks the MySQL dialect.
-    ///
-    /// True for both MySQL and MariaDB. Use this for syntax questions, and the
-    /// narrower checks only for the places where the two really differ —
-    /// `RETURNING` support, for instance.
-    #[must_use]
-    pub fn is_mysql_compatible() -> bool {
-        matches!(
-            Self::get_database_type(),
-            Some(DatabaseType::MySQL) | Some(DatabaseType::MariaDB)
-        )
-    }
-
-    /// Return whether the configured backend is SQLite.
-    #[must_use]
-    pub fn is_sqlite() -> bool {
-        Self::get_database_type() == Some(DatabaseType::SQLite)
-    }
-
-    /// Return a snapshot of the active global configuration.
-    ///
-    /// A clone, so later changes to the global configuration are not reflected
-    /// in the value you hold.
-    #[must_use]
-    pub fn current() -> Config {
-        Config::global()
-    }
-
-    /// Return the active pool settings, or the defaults when none were installed.
-    #[must_use]
-    pub fn pool_config() -> PoolConfig {
-        global_pool_config().unwrap_or_default()
-    }
-
     /// Return the schema-file path set by [`schema_file`](TideConfig::schema_file).
     #[must_use]
     pub fn schema_file_path() -> Option<String> {
         global_schema_file_path()
     }
 
-    /// Write the schema SQL produced by `generator` to the configured schema file.
+    /// Settle the declared backend once the pool is open.
     ///
-    /// Does nothing and returns `Ok(())` when no schema file was configured, so
-    /// it is safe to call unconditionally after a schema change.
-    pub fn write_schema_with_generator(
-        generator: &crate::schema::SchemaGenerator,
-    ) -> std::io::Result<()> {
-        let Some(path) = Self::schema_file_path() else {
-            return Ok(());
-        };
-
-        let sql = generator.generate();
-        std::fs::write(path, sql)?;
-        Ok(())
-    }
-
-    /// Write already-rendered schema SQL to the configured schema file.
-    ///
-    /// The pre-rendered counterpart of
-    /// [`write_schema_with_generator`](TideConfig::write_schema_with_generator);
-    /// it likewise does nothing when no schema file was configured.
-    pub fn write_schema_sql(sql: &str) -> std::io::Result<()> {
-        let Some(path) = Self::schema_file_path() else {
-            return Ok(());
-        };
-
-        std::fs::write(path, sql)?;
-        Ok(())
-    }
-
-    async fn detect_server_version(db: &Database) -> Result<String> {
-        if !matches!(db.__internal_backend()?, crate::internal::Backend::MySql) {
-            return Err(crate::error::Error::internal("Not a MySQL-type connection"));
+    /// A `mysql://` URL can reach MariaDB, so a MySQL connection is asked for
+    /// its server version rather than assumed to be MySQL. The pool has only
+    /// just opened: if detection fails,
+    /// even on a statement as trivial as `SELECT VERSION()`, the connection is
+    /// unusable and the error is returned instead of silently settling on MySQL.
+    pub(super) async fn resolve_database_type(
+        declared: DatabaseType,
+        db: &Database,
+    ) -> Result<DatabaseType> {
+        if declared != DatabaseType::MySQL || db.__internal_backend()? != Backend::MySql {
+            return Ok(declared);
         }
 
-        db.__query_scalar::<String>("SELECT VERSION() AS version", "version")
-            .await?
-            .ok_or_else(|| crate::error::Error::query("Could not retrieve server version"))
+        // The pool asked the server when it opened.
+        if db.current_inner()?.is_mariadb() {
+            tide_info!("Auto-detected a MariaDB server");
+            Ok(DatabaseType::MariaDB)
+        } else {
+            Ok(DatabaseType::MySQL)
+        }
     }
 }

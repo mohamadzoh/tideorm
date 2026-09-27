@@ -96,6 +96,39 @@ async fn test_profile_future_skips_timing_when_disabled_at_entry() {
 }
 
 #[test]
+fn test_analyzer_flags_an_id_compared_with_a_string() {
+    for sql in [
+        "SELECT * FROM posts WHERE user_id = '5'",
+        "select * from users where id = '5'",
+    ] {
+        assert!(
+            QueryAnalyzer::analyze(sql)
+                .iter()
+                .any(|suggestion| suggestion.title == "Possible type mismatch"),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn test_report_slow_query_suggestion_uses_the_profiler_threshold() {
+    GlobalProfiler::set_slow_threshold(50);
+
+    let mut profiler = Profiler::start();
+    profiler.record("SELECT 1", Duration::from_millis(60));
+    let suggestions = profiler.stop().suggestions();
+
+    GlobalProfiler::set_slow_threshold(100);
+
+    assert!(
+        suggestions
+            .iter()
+            .any(|suggestion| suggestion.starts_with("1 slow queries detected (>= 50ms)")),
+        "{suggestions:?}"
+    );
+}
+
+#[test]
 fn test_missing_where_detection() {
     let suggestions = QueryAnalyzer::analyze("DELETE FROM users");
     assert!(

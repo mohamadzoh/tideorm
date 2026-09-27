@@ -8,39 +8,56 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
-    /// Add ROW_NUMBER() window function
-    #[must_use]
-    pub fn row_number(
-        mut self,
+    /// Add `function` over an optional partition, ordered by `order_by`.
+    fn ordered_window(
+        self,
+        function: WindowFunctionType,
         alias: &str,
         partition_by: Option<&str>,
         order_by: &str,
         order: Order,
     ) -> Self {
-        let mut wf =
-            WindowFunction::new(WindowFunctionType::RowNumber, alias).order_by(order_by, order);
+        let mut window = WindowFunction::new(function, alias).order_by(order_by, order);
         if let Some(partition) = partition_by {
-            wf = wf.partition_by(partition);
+            window = window.partition_by(partition);
         }
-        self.window_functions.push(wf);
-        self
+        self.window(window)
+    }
+
+    /// Add ROW_NUMBER() window function
+    #[must_use]
+    pub fn row_number(
+        self,
+        alias: &str,
+        partition_by: Option<&str>,
+        order_by: &str,
+        order: Order,
+    ) -> Self {
+        self.ordered_window(
+            WindowFunctionType::RowNumber,
+            alias,
+            partition_by,
+            order_by,
+            order,
+        )
     }
 
     /// Add RANK() window function
     #[must_use]
     pub fn rank(
-        mut self,
+        self,
         alias: &str,
         partition_by: Option<&str>,
         order_by: &str,
         order: Order,
     ) -> Self {
-        let mut wf = WindowFunction::new(WindowFunctionType::Rank, alias).order_by(order_by, order);
-        if let Some(partition) = partition_by {
-            wf = wf.partition_by(partition);
-        }
-        self.window_functions.push(wf);
-        self
+        self.ordered_window(
+            WindowFunctionType::Rank,
+            alias,
+            partition_by,
+            order_by,
+            order,
+        )
     }
 
     /// Add DENSE_RANK() window function
@@ -48,19 +65,19 @@ impl<M: Model> QueryBuilder<M> {
     /// Similar to RANK() but without gaps in ranking values.
     #[must_use]
     pub fn dense_rank(
-        mut self,
+        self,
         alias: &str,
         partition_by: Option<&str>,
         order_by: &str,
         order: Order,
     ) -> Self {
-        let mut wf =
-            WindowFunction::new(WindowFunctionType::DenseRank, alias).order_by(order_by, order);
-        if let Some(partition) = partition_by {
-            wf = wf.partition_by(partition);
-        }
-        self.window_functions.push(wf);
-        self
+        self.ordered_window(
+            WindowFunctionType::DenseRank,
+            alias,
+            partition_by,
+            order_by,
+            order,
+        )
     }
 
     /// Add LAG() window function
@@ -69,7 +86,7 @@ impl<M: Model> QueryBuilder<M> {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn lag(
-        mut self,
+        self,
         alias: &str,
         column: &str,
         offset: i32,
@@ -78,19 +95,17 @@ impl<M: Model> QueryBuilder<M> {
         order_by: &str,
         order: Order,
     ) -> Self {
-        let wf = WindowFunction::new(
+        self.ordered_window(
             WindowFunctionType::Lag(
                 column.to_string(),
                 Some(offset),
-                default.map(|s| s.to_string()),
+                default.map(str::to_string),
             ),
             alias,
+            Some(partition_by),
+            order_by,
+            order,
         )
-        .partition_by(partition_by)
-        .order_by(order_by, order);
-
-        self.window_functions.push(wf);
-        self
     }
 
     /// Add LEAD() window function
@@ -99,7 +114,7 @@ impl<M: Model> QueryBuilder<M> {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn lead(
-        mut self,
+        self,
         alias: &str,
         column: &str,
         offset: i32,
@@ -108,98 +123,63 @@ impl<M: Model> QueryBuilder<M> {
         order_by: &str,
         order: Order,
     ) -> Self {
-        let wf = WindowFunction::new(
+        self.ordered_window(
             WindowFunctionType::Lead(
                 column.to_string(),
                 Some(offset),
-                default.map(|s| s.to_string()),
+                default.map(str::to_string),
             ),
             alias,
+            Some(partition_by),
+            order_by,
+            order,
         )
-        .partition_by(partition_by)
-        .order_by(order_by, order);
-
-        self.window_functions.push(wf);
-        self
     }
 
     /// Add running SUM() window function
     #[must_use]
-    pub fn running_sum(mut self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
-        let wf = WindowFunction::new(WindowFunctionType::Sum(column.to_string()), alias)
-            .order_by(order_by, order)
-            .frame(
-                FrameType::Rows,
-                FrameBound::UnboundedPreceding,
-                FrameBound::CurrentRow,
-            );
-        self.window_functions.push(wf);
-        self
-    }
-
-    /// Add running AVG() window function
-    #[must_use]
-    pub fn running_avg(mut self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
-        let wf = WindowFunction::new(WindowFunctionType::Avg(column.to_string()), alias)
-            .order_by(order_by, order)
-            .frame(
-                FrameType::Rows,
-                FrameBound::UnboundedPreceding,
-                FrameBound::CurrentRow,
-            );
-        self.window_functions.push(wf);
-        self
+    pub fn running_sum(self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
+        self.window(
+            WindowFunction::new(WindowFunctionType::Sum(column.to_string()), alias)
+                .order_by(order_by, order)
+                .frame(
+                    FrameType::Rows,
+                    FrameBound::UnboundedPreceding,
+                    FrameBound::CurrentRow,
+                ),
+        )
     }
 
     /// Add NTILE() window function
     ///
     /// Distribute rows into specified number of groups.
     #[must_use]
-    pub fn ntile(mut self, alias: &str, buckets: u32, order_by: &str, order: Order) -> Self {
-        let wf = WindowFunction::new(WindowFunctionType::Ntile(buckets), alias)
-            .order_by(order_by, order);
-        self.window_functions.push(wf);
-        self
+    pub fn ntile(self, alias: &str, buckets: u32, order_by: &str, order: Order) -> Self {
+        self.ordered_window(
+            WindowFunctionType::Ntile(buckets),
+            alias,
+            None,
+            order_by,
+            order,
+        )
     }
 
     /// Add FIRST_VALUE() window function
     #[must_use]
     pub fn first_value(
-        mut self,
+        self,
         alias: &str,
         column: &str,
         partition_by: &str,
         order_by: &str,
         order: Order,
     ) -> Self {
-        let wf = WindowFunction::new(WindowFunctionType::FirstValue(column.to_string()), alias)
-            .partition_by(partition_by)
-            .order_by(order_by, order);
-        self.window_functions.push(wf);
-        self
-    }
-
-    /// Add LAST_VALUE() window function
-    /// Add LAST_VALUE() window function
-    #[must_use]
-    pub fn last_value(
-        mut self,
-        alias: &str,
-        column: &str,
-        partition_by: &str,
-        order_by: &str,
-        order: Order,
-    ) -> Self {
-        let wf = WindowFunction::new(WindowFunctionType::LastValue(column.to_string()), alias)
-            .partition_by(partition_by)
-            .order_by(order_by, order)
-            // Need to extend frame to see last value
-            .frame(
-                FrameType::Rows,
-                FrameBound::UnboundedPreceding,
-                FrameBound::UnboundedFollowing,
-            );
-        self.window_functions.push(wf);
-        self
+        self.ordered_window(
+            WindowFunctionType::FirstValue(column.to_string()),
+            alias,
+            Some(partition_by),
+            order_by,
+            order,
+        )
     }
 }

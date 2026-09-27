@@ -41,6 +41,30 @@ mod profiling_n_plus_one {
     }
 }
 
+mod profiler_lifecycle {
+    use std::time::Duration;
+    use tideorm::profiling::Profiler;
+
+    #[test]
+    fn test_profiler_query_count_increments() {
+        let mut profiler = Profiler::start();
+        assert_eq!(profiler.query_count(), 0);
+
+        profiler.record("SELECT 1", Duration::from_millis(1));
+        assert_eq!(profiler.query_count(), 1);
+
+        profiler.record("SELECT 2", Duration::from_millis(1));
+        assert_eq!(profiler.query_count(), 2);
+    }
+
+    #[test]
+    fn test_profiler_elapsed_increases() {
+        let profiler = Profiler::start();
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(profiler.elapsed() >= Duration::from_millis(5));
+    }
+}
+
 mod profiling_query_analyzer {
     use tideorm::profiling::{QueryAnalyzer, QueryComplexity, SuggestionLevel};
 

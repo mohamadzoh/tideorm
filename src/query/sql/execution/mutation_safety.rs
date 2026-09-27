@@ -42,6 +42,26 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// [`ensure_mutation_has_explicit_filters`](Self::ensure_mutation_has_explicit_filters)
+    /// for `restore()` and `force_delete()`, where a caller's `only_trashed()`
+    /// counts: it confines the statement to the trash, so restoring all of it
+    /// or emptying it needs no other filter. A model without soft delete has no
+    /// trash, and there the scope would be dropped and the statement would
+    /// reach live rows, so `only_trashed()` is refused.
+    pub(crate) fn ensure_trash_mutation_has_filters(&self, operation: &str) -> Result<()> {
+        if self.only_trashed {
+            if !M::soft_delete_enabled() {
+                return Err(Error::invalid_query(format!(
+                    "{} with only_trashed() on '{}', which has no soft delete and so no trash",
+                    operation,
+                    M::table_name()
+                )));
+            }
+            return Ok(());
+        }
+        self.ensure_mutation_has_explicit_filters(operation)
+    }
+
     /// True when a rendered WHERE body cannot exclude any row.
     ///
     /// Covers both an empty body and the constant-true placeholders sea-query can

@@ -6,11 +6,9 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::model::Model;
-
 use super::{
     EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-    save::{save_with_entity_manager_impl, sync_entity_manager_relations_only_impl},
+    save::{save_in_scope, sync_entity_manager_relations_only_impl},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,23 +233,13 @@ pub(crate) trait ManagedOps: Send + Sync {
     fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint>;
 
     /// Table this entry writes to, used to order the flush.
-    ///
-    /// The three relation-order hooks default to "no declared relations", so a
-    /// hand-written entry keeps flushing in registration order within its
-    /// operation kind instead of having to describe a schema it does not have.
-    fn table_name(&self) -> &'static str {
-        ""
-    }
+    fn table_name(&self) -> &'static str;
 
     /// Tables that must hold a row before this entry can be inserted.
-    fn parent_tables(&self) -> Vec<&'static str> {
-        Vec::new()
-    }
+    fn parent_tables(&self) -> Vec<&'static str>;
 
     /// Tables holding rows that reference this entry.
-    fn child_tables(&self) -> Vec<&'static str> {
-        Vec::new()
-    }
+    fn child_tables(&self) -> Vec<&'static str>;
 
     async fn flush(
         self: Arc<Self>,
@@ -338,36 +326,71 @@ impl<T> ManagedEntry<T> {
         *self.state.write() = EntityState::Managed;
     }
 
+    /// Hand the entry `entity` to write, taking back a pending removal. A row
+    /// already stored is updated; one not inserted yet (a `persist` that has
+    /// not flushed) stays an insert, which flushes in the insert phase, before
+    /// the children that point at it.
     pub(crate) fn overwrite_merged(&self, entity: T) {
+        let state = if self.persisted_key.read().is_some() {
+            EntityState::Managed
+        } else {
+            EntityState::New
+        };
         *self.current.write() = entity;
-        *self.state.write() = EntityState::Managed;
+        *self.state.write() = state;
+    }
+
+    /// Move the entry onto `saved`, the row as another path of this context
+    /// just stored it: a field the holder has not changed since loading takes
+    /// the stored value, one it changed keeps its edit, and the snapshot
+    /// becomes the stored row. A later flush then writes the edits over the
+    /// stored row instead of putting back the values the entry loaded. An
+    /// entry never loaded (a pending insert) has nothing to rebase.
+    ///
+    /// Inside a transaction the entry goes back to what it held if that
+    /// transaction does not commit.
+    pub(crate) fn rebase(self: &Arc<Self>, saved: &T) -> crate::error::Result<()>
+    where
+        T: crate::model::Model + Clone + Send + Sync + 'static,
+    {
+        let mut snapshot = self.snapshot.write();
+        let Some(loaded) = snapshot.clone() else {
+            return Ok(());
+        };
+        let mut current = self.current.write();
+        let previous = current.clone();
+        let mut rebased = previous.clone();
+        for field in <T as crate::model::ModelMeta>::field_names() {
+            if loaded.field_json_value(field)? == previous.field_json_value(field)?
+                && let Some(stored) = saved.field_json_value(field)?
+            {
+                rebased.set_field_json(field, stored)?;
+            }
+        }
+        *current = rebased;
+        *snapshot = Some(saved.clone());
+
+        let entry = Arc::clone(self);
+        crate::cache::undo_on_rollback(move || {
+            *entry.current.write() = previous;
+            *entry.snapshot.write() = Some(loaded);
+        });
+        Ok(())
     }
 
     pub(crate) fn mark_removed(&self) {
         *self.state.write() = EntityState::Removed;
     }
 
-    fn mark_detached(&self) {
+    pub(crate) fn mark_detached(&self) {
         *self.state.write() = EntityState::Detached;
-    }
-
-    pub(crate) fn mark_detached_public(&self) {
-        self.mark_detached();
     }
 }
 
 #[async_trait]
 impl<T> ManagedOps for ManagedEntry<T>
 where
-    T: Model
-        + TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + serde::Serialize
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
     <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
         PartialEq,
 {
@@ -429,7 +452,7 @@ where
                         .read()
                         .clone()
                         .unwrap_or_else(|| self.current.read().clone());
-                    super::__with_entity_manager_db(
+                    super::with_entity_manager_db(
                         entity_manager,
                         <T as crate::model::Model>::delete(entity),
                     )
@@ -449,6 +472,19 @@ where
             }
             EntityState::New | EntityState::Managed => {
                 let current = self.current.read().clone();
+                // A saved row is identified by its primary key, so writing
+                // this entity under a changed key would write another row.
+                if let Some(persisted) = self.persisted_key.read().as_deref() {
+                    let key = current.tide_pk_key();
+                    if key != persisted {
+                        return Err(crate::error::Error::invalid_query(format!(
+                            "the primary key of a managed {} row changed from {persisted} to \
+                             {key}; a managed entity keeps its key, so detach it and persist \
+                             a new one",
+                            <T as crate::model::ModelMeta>::table_name()
+                        )));
+                    }
+                }
                 let snapshot = self.snapshot.read().clone();
                 let columns_changed = match snapshot.as_ref() {
                     Some(snapshot) => snapshot.to_entity_model() != current.to_entity_model(),
@@ -460,7 +496,7 @@ where
                 // actually filed as, not under the persisted key it may not have.
                 let previous_key = self.identity_key.read().as_ref().cloned();
                 let saved = if columns_changed {
-                    save_with_entity_manager_impl(&current, entity_manager).await?
+                    save_in_scope(&current, entity_manager).await?
                 } else {
                     sync_entity_manager_relations_only_impl(&current, entity_manager).await?
                 };

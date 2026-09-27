@@ -44,14 +44,10 @@ pub(crate) fn query_scope_for<M: Model>(
 ///
 /// `#[tideorm(soft_delete)]` models receive an implementation automatically as long
 /// as they expose a `deleted_at` field/column, or declare a custom
-/// `deleted_at_column = "..."` override on the model.
+/// `deleted_at_column = "..."` override on the model. The column name itself is
+/// [`ModelMeta::deleted_at_column`](crate::model::ModelMeta::deleted_at_column).
 #[async_trait]
 pub trait SoftDelete: Model {
-    /// The name of the deleted_at column
-    fn deleted_at_column() -> &'static str {
-        "deleted_at"
-    }
-
     /// Get the deleted_at timestamp
     fn deleted_at(&self) -> Option<DateTime<Utc>>;
 
@@ -63,7 +59,11 @@ pub trait SoftDelete: Model {
         self.deleted_at().is_some()
     }
 
-    /// Mark the record as deleted by setting the soft-delete timestamp.
+    /// Mark the record as deleted, and return it as stored.
+    ///
+    /// On a `#[tideorm(soft_delete)]` model this is `delete()`: the delete
+    /// callbacks run, so a `before_delete` that refuses stops it, and a record
+    /// already deleted keeps its stamp, which a retention purge reads.
     ///
     /// The stamp is `Utc::now()` and never the database's `CURRENT_TIMESTAMP`.
     /// `deleted_at` is a `DateTime<Utc>`, so a session-local database clock —
@@ -71,28 +71,35 @@ pub trait SoftDelete: Model {
     /// an offset instant that is later read back as if it were UTC. The
     /// query-level `QueryBuilder::soft_delete` renders the same UTC instant for
     /// exactly this reason; keep the two in agreement.
-    async fn soft_delete(mut self) -> Result<Self>
-    where
-        Self: Sized,
-    {
-        self.set_deleted_at(Some(Utc::now()));
-        self.update().await
+    async fn soft_delete(mut self) -> Result<Self> {
+        // `delete()` removes the row of a model without the flag, so a hand
+        // written implementation on one only sets the stamp.
+        if !Self::soft_delete_enabled() {
+            self.set_deleted_at(Some(Utc::now()));
+            return self.update().await;
+        }
+        let primary_key = self.primary_key();
+        let display = Self::primary_key_display(&primary_key);
+        <Self as Model>::delete(self).await?;
+        crate::model::find_including_trashed::<Self>(primary_key)
+            .await?
+            .ok_or_else(|| {
+                crate::Error::not_found(format!(
+                    "{} with {} no longer exists",
+                    Self::table_name(),
+                    display
+                ))
+            })
     }
 
     /// Clear the soft-delete timestamp and persist the restored record.
-    async fn restore(mut self) -> Result<Self>
-    where
-        Self: Sized,
-    {
+    async fn restore(mut self) -> Result<Self> {
         self.set_deleted_at(None);
         self.update().await
     }
 
     /// Bypass soft deletion and remove the record permanently.
-    async fn force_delete(self) -> Result<u64>
-    where
-        Self: Sized,
-    {
-        <Self as Model>::delete(self).await
+    async fn force_delete(self) -> Result<u64> {
+        <Self as Model>::__force_delete(self).await
     }
 }

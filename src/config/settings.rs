@@ -18,7 +18,7 @@ pub type FileUrlGenerator =
 ///
 /// Build one through `TideConfig` rather than constructing it directly — that
 /// is the only path that installs it globally. The associated functions here
-/// (`get_languages`, `is_soft_delete_default`, ...) read whatever is currently
+/// (`get_languages`, `get_hidden_attributes`, ...) read whatever is currently
 /// installed and are what TideORM itself calls at runtime.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -29,8 +29,6 @@ pub struct Config {
     /// Attributes omitted from every model's `to_json()`, on top of each
     /// model's own hidden list.
     pub hidden_attributes: Vec<String>,
-    /// Whether models soft-delete unless they say otherwise. Defaults to `false`.
-    pub soft_delete_by_default: bool,
     /// Base URL prepended to attachment keys when no per-field base applies.
     pub file_base_url: Option<String>,
     /// Per-field base URLs, which take precedence over `file_base_url`.
@@ -43,7 +41,6 @@ impl Default for Config {
             languages: vec!["en".to_string()],
             fallback_language: "en".to_string(),
             hidden_attributes: vec![],
-            soft_delete_by_default: false,
             file_base_url: None,
             file_field_base_urls: HashMap::new(),
         }
@@ -51,15 +48,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Build a `Config` holding TideORM's defaults.
-    ///
-    /// Creating one does not install it; `TideConfig::apply()` or
-    /// `TideConfig::connect()` does that.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Take a snapshot of the currently installed configuration.
     ///
     /// A clone, so it does not track later changes.
@@ -68,21 +56,16 @@ impl Config {
         with_global_config(Clone::clone)
     }
 
-    #[inline]
-    fn with_global<T>(f: impl FnOnce(&Config) -> T) -> T {
-        with_global_config(f)
-    }
-
     /// Read the configured languages.
     #[must_use]
     pub fn get_languages() -> Vec<String> {
-        Self::with_global(|c| c.languages.clone())
+        with_global_config(|c| c.languages.clone())
     }
 
     /// Read the configured fallback language.
     #[must_use]
     pub fn get_fallback_language() -> String {
-        Self::with_global(|c| c.fallback_language.clone())
+        with_global_config(|c| c.fallback_language.clone())
     }
 
     /// Read the globally hidden attributes.
@@ -91,23 +74,7 @@ impl Config {
     /// renders it; they do not replace them.
     #[must_use]
     pub fn get_hidden_attributes() -> Vec<String> {
-        Self::with_global(|c| c.hidden_attributes.clone())
-    }
-
-    /// Read whether models soft-delete by default.
-    #[must_use]
-    pub fn is_soft_delete_default() -> bool {
-        Self::with_global(|c| c.soft_delete_by_default)
-    }
-
-    /// Read the global attachment base URL.
-    ///
-    /// This ignores per-field overrides; use
-    /// [`get_file_base_url_for`](Config::get_file_base_url_for) to resolve the
-    /// base that actually applies to a field.
-    #[must_use]
-    pub fn get_file_base_url() -> Option<String> {
-        Self::with_global(|c| c.file_base_url.clone())
+        with_global_config(|c| c.hidden_attributes.clone())
     }
 
     pub(crate) fn resolve_file_base_url(&self, field_name: &str) -> Option<&str> {
@@ -123,7 +90,7 @@ impl Config {
     /// means URLs fall back to the bare storage key.
     #[must_use]
     pub fn get_file_base_url_for(field_name: &str) -> Option<String> {
-        Self::with_global(|c| c.resolve_file_base_url(field_name).map(str::to_string))
+        with_global_config(|c| c.resolve_file_base_url(field_name).map(str::to_string))
     }
 
     /// Read the installed attachment URL generator, or the default one.
@@ -179,7 +146,7 @@ impl Config {
 /// Connection-pool limits and timeouts.
 ///
 /// Set these through the matching `TideConfig` methods; this struct is what
-/// they accumulate into and what `TideConfig::pool_config()` hands back.
+/// they accumulate into, and what `TideConfig::connect()` opens the pool with.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Ceiling on open connections for the whole process. Defaults to 10.

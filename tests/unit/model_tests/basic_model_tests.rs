@@ -126,14 +126,14 @@ fn test_to_hash_map_preserves_params_field() {
 }
 
 #[test]
-fn test_to_hash_map_preserves_structured_params_field() {
-    let model = PresenterSerializationModel {
+fn test_to_hash_map_omits_structured_params_field() {
+    let model = StructuredParamsModel {
         id: 8,
         params: serde_json::json!({
             "view": "minimal",
             "locale": "en"
         }),
-        title: "Presenter Output".to_string(),
+        title: "Structured Output".to_string(),
     };
 
     let map = model.to_hash_map();
@@ -141,7 +141,7 @@ fn test_to_hash_map_preserves_structured_params_field() {
     assert_eq!(map.get("id").map(String::as_str), Some("8"));
     assert_eq!(
         map.get("title").map(String::as_str),
-        Some("Presenter Output")
+        Some("Structured Output")
     );
     assert_eq!(map.get("params"), None);
     assert_eq!(map.get("_params"), None);
@@ -152,6 +152,24 @@ fn test_primary_key_name_uses_database_column_name() {
     assert_eq!(
         <CustomPrimaryKeyColumnModel as crate::model::ModelMeta>::primary_key_name(),
         "user_id"
+    );
+}
+
+#[test]
+fn test_canonical_field_name_accepts_field_and_column_names() {
+    use crate::model::ModelMeta;
+
+    assert_eq!(
+        CustomPrimaryKeyColumnModel::canonical_field_name("id"),
+        Some("id")
+    );
+    assert_eq!(
+        CustomPrimaryKeyColumnModel::canonical_field_name("user_id"),
+        Some("id")
+    );
+    assert_eq!(
+        CustomPrimaryKeyColumnModel::canonical_field_name("missing"),
+        None
     );
 }
 
@@ -277,8 +295,7 @@ fn test_original_value_accepts_field_and_column_names() {
         id: 7,
         name: "Alice".to_string(),
     };
-    crate::model::__remember_dirty_snapshot(&original)
-        .expect("dirty snapshot registration should succeed");
+    crate::model::__remember_dirty_snapshot(&original);
 
     let changed = CustomPrimaryKeyColumnModel {
         id: 7,
@@ -310,8 +327,7 @@ fn test_original_value_rejects_unknown_fields() {
         id: 1,
         name: "Alice".to_string(),
     };
-    crate::model::__remember_dirty_snapshot(&model)
-        .expect("dirty snapshot registration should succeed");
+    crate::model::__remember_dirty_snapshot(&model);
 
     let err = model
         .original_value("missing")

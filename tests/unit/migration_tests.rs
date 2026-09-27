@@ -1,4 +1,5 @@
 use super::*;
+use crate::internal::sql_safety::quote_ident;
 
 #[test]
 fn test_column_type_postgres() {
@@ -21,10 +22,16 @@ fn test_column_type_mysql() {
     assert_eq!(ColumnType::BigInteger.to_mysql_sql(), "BIGINT");
     assert_eq!(ColumnType::Boolean.to_mysql_sql(), "TINYINT(1)");
     assert_eq!(ColumnType::Jsonb.to_mysql_sql(), "JSON");
-    assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "TIMESTAMP");
-    assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "TIMESTAMP");
+    // DATETIME(6): MySQL's TIMESTAMP only spans 1970-2038, and a column without
+    // fractional digits rounds away microseconds.
+    assert_eq!(ColumnType::DateTime.to_mysql_sql(), "DATETIME(6)");
+    assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "DATETIME(6)");
+    assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "DATETIME(6)");
     assert_eq!(ColumnType::Date.to_mysql_sql(), "DATE");
-    assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME");
+    assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME(6)");
+    // TEXT and BLOB stop at 64 KB.
+    assert_eq!(ColumnType::Text.to_mysql_sql(), "LONGTEXT");
+    assert_eq!(ColumnType::Binary.to_mysql_sql(), "LONGBLOB");
 }
 
 #[test]
@@ -94,30 +101,160 @@ fn test_column_types_render_what_the_drivers_bind_and_decode() {
 
 #[test]
 fn test_default_value() {
-    assert_eq!(DefaultValue::String("test".to_string()).to_sql(), "'test'");
-    assert_eq!(DefaultValue::Integer(42).to_sql(), "42");
-    assert_eq!(DefaultValue::Boolean(true).to_sql(), "TRUE");
-    assert_eq!(DefaultValue::Boolean(false).to_sql(), "FALSE");
-    assert_eq!(DefaultValue::Null.to_sql(), "NULL");
+    let pg = DatabaseType::Postgres;
+    assert_eq!(
+        DefaultValue::String("test".to_string()).to_sql(pg),
+        "'test'"
+    );
+    assert_eq!(DefaultValue::Integer(42).to_sql(pg), "42");
+    assert_eq!(DefaultValue::Boolean(true).to_sql(pg), "TRUE");
+    assert_eq!(DefaultValue::Boolean(false).to_sql(pg), "FALSE");
+    assert_eq!(DefaultValue::Null.to_sql(pg), "NULL");
+
+    // MySQL reads a backslash as an escape; PostgreSQL and SQLite do not.
+    let path = DefaultValue::String(r"C:\temp\ it's".to_string());
+    assert_eq!(path.to_sql(pg), r"'C:\temp\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::SQLite), r"'C:\temp\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::MySQL), r"'C:\\temp\\ it''s'");
+    assert_eq!(path.to_sql(DatabaseType::MariaDB), r"'C:\\temp\\ it''s'");
+}
+
+const BACKENDS: [DatabaseType; 4] = [
+    DatabaseType::Postgres,
+    DatabaseType::MySQL,
+    DatabaseType::MariaDB,
+    DatabaseType::SQLite,
+];
+
+#[test]
+fn ledger_table_defaults_to_underscore_migrations() {
+    for migrator in [Migrator::new(), Migrator::default()] {
+        let ledger = migrator.ledger().expect("default table name is valid");
+        assert_eq!(ledger.table(), "_migrations");
+    }
 }
 
 #[test]
-fn test_migration_parameter_placeholders_are_backend_aware() {
-    assert_eq!(
-        migration_parameter_list(DatabaseType::Postgres, 2),
-        "$1, $2"
-    );
-    assert_eq!(
-        migration_parameter_placeholder(DatabaseType::Postgres, 1),
-        "$1"
-    );
+fn ledger_table_is_configurable() {
+    let migrator = Migrator::new().migrations_table("schema_migrations");
 
-    assert_eq!(migration_parameter_list(DatabaseType::MySQL, 2), "?, ?");
-    assert_eq!(migration_parameter_list(DatabaseType::MariaDB, 2), "?, ?");
-    assert_eq!(migration_parameter_list(DatabaseType::SQLite, 2), "?, ?");
     assert_eq!(
-        migration_parameter_placeholder(DatabaseType::SQLite, 1),
-        "?"
+        migrator.ledger().expect("valid table name").table(),
+        "schema_migrations"
+    );
+}
+
+#[test]
+fn ledger_table_name_is_validated_before_it_reaches_sql() {
+    for name in ["schema migrations", "users\"; DROP TABLE users --", "1bad"] {
+        let error = match Migrator::new().migrations_table(name).ledger() {
+            Ok(_) => panic!("unsafe ledger table name '{}' must be rejected", name),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains(name),
+            "Error should name the offending table. Got: {}",
+            error
+        );
+    }
+}
+
+#[test]
+fn ledger_sql_uses_the_configured_table_on_every_backend() {
+    let ledger = Ledger::migrations("schema_migrations");
+
+    for db_type in BACKENDS {
+        let quoted = quote_ident(db_type, "schema_migrations");
+
+        for sql in [
+            ledger.create_table_sql(db_type),
+            ledger.keys_sql(db_type),
+            ledger
+                .insert_sql(db_type, "20260101_001", &["create_users"])
+                .0,
+            ledger.delete_sql(db_type, "20260101_001").0,
+        ] {
+            assert!(
+                sql.contains(&quoted),
+                "{:?} statement should target the configured ledger. Got: {}",
+                db_type,
+                sql
+            );
+            assert!(
+                !sql.contains(&quote_ident(db_type, "_migrations")),
+                "{:?} statement should not fall back to the default ledger. Got: {}",
+                db_type,
+                sql
+            );
+        }
+    }
+}
+
+#[test]
+fn ledger_keys_are_ordered_by_insertion_id() {
+    for ledger in [Ledger::migrations("_migrations"), Ledger::seeds()] {
+        for db_type in BACKENDS {
+            let sql = ledger.keys_sql(db_type);
+
+            assert!(
+                sql.ends_with(&format!("ORDER BY {} ASC", quote_ident(db_type, "id"))),
+                "Rollback order must follow the ledger id, not the key. Got: {}",
+                sql
+            );
+        }
+    }
+}
+
+#[test]
+fn ledger_writes_bind_their_values_with_backend_placeholders() {
+    let ledger = Ledger::migrations("_migrations");
+
+    let (insert, params) = ledger.insert_sql(DatabaseType::Postgres, "v1", &["create_users"]);
+    assert_eq!(
+        insert,
+        "INSERT INTO \"_migrations\" (\"version\", \"name\") VALUES ($1, $2)"
+    );
+    assert_eq!(params.len(), 2);
+
+    let (delete, params) = ledger.delete_sql(DatabaseType::Postgres, "v1");
+    assert_eq!(delete, "DELETE FROM \"_migrations\" WHERE \"version\" = $1");
+    assert_eq!(params.len(), 1);
+
+    for db_type in [
+        DatabaseType::MySQL,
+        DatabaseType::MariaDB,
+        DatabaseType::SQLite,
+    ] {
+        let (insert, _) = ledger.insert_sql(db_type, "v1", &["create_users"]);
+        assert!(insert.ends_with("VALUES (?, ?)"), "Got: {}", insert);
+
+        let (delete, _) = Ledger::seeds().delete_sql(db_type, "user_seeder");
+        assert!(delete.ends_with(" = ?"), "Got: {}", delete);
+    }
+}
+
+#[test]
+fn ledger_table_ddl_keeps_its_shape() {
+    // The CLI creates the same tables, so the columns and their order are
+    // fixed: a monotonic id, the unique key, the details, the timestamp.
+    assert_eq!(
+        Ledger::migrations("_migrations").create_table_sql(DatabaseType::Postgres),
+        "CREATE TABLE IF NOT EXISTS \"_migrations\" (\"id\" SERIAL PRIMARY KEY, \
+         \"version\" VARCHAR(255) NOT NULL UNIQUE, \"name\" VARCHAR(255) NOT NULL, \
+         \"applied_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    assert_eq!(
+        Ledger::seeds().create_table_sql(DatabaseType::MySQL),
+        "CREATE TABLE IF NOT EXISTS `_seeds` (`id` INT AUTO_INCREMENT PRIMARY KEY, \
+         `name` VARCHAR(255) NOT NULL UNIQUE, \
+         `executed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    );
+    assert_eq!(
+        Ledger::seeds().create_table_sql(DatabaseType::SQLite),
+        "CREATE TABLE IF NOT EXISTS \"_seeds\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT, \
+         \"name\" TEXT NOT NULL UNIQUE, \
+         \"executed_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
     );
 }
 
@@ -130,7 +267,7 @@ fn test_table_builder_create() {
     builder.boolean("active").default(true);
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(sql.contains("CREATE TABLE"));
     assert!(sql.contains("\"users\""));
     assert!(sql.contains("\"id\" BIGSERIAL"));
@@ -148,7 +285,7 @@ fn test_timestamps_feature() {
     builder.string("title").not_null();
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP"),
         "PostgreSQL should have created_at with TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
@@ -165,15 +302,17 @@ fn test_timestamps_feature() {
     builder.string("title").not_null();
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
+    // The default has to match the column's six fractional digits, or MySQL
+    // rejects it as an invalid default.
     assert!(
-        sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-        "MySQL should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+        sql.contains("`created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
+        "MySQL should have created_at with DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6). Got: {}",
         sql
     );
     assert!(
-        sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-        "MySQL should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+        sql.contains("`updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
+        "MySQL should have updated_at with DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6). Got: {}",
         sql
     );
 
@@ -182,15 +321,15 @@ fn test_timestamps_feature() {
     builder.string("title").not_null();
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
-        sql.contains("`created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-        "MariaDB should have created_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+        sql.contains("`created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
+        "MariaDB should have created_at with DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6). Got: {}",
         sql
     );
     assert!(
-        sql.contains("`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-        "MariaDB should have updated_at with TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
+        sql.contains("`updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)"),
+        "MariaDB should have updated_at with DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6). Got: {}",
         sql
     );
 
@@ -199,7 +338,7 @@ fn test_timestamps_feature() {
     builder.string("title").not_null();
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"created_at\" TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
         "SQLite should have created_at with TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP. Got: {}",
@@ -219,7 +358,7 @@ fn test_timestamps_naive_feature() {
     builder.text("message").not_null();
     builder.timestamps_naive();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"created_at\" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"),
         "PostgreSQL timestamps_naive should use TIMESTAMP. Got: {}",
@@ -240,7 +379,7 @@ fn test_timestamptz_column() {
     builder.timestamptz("expires_at").not_null();
     builder.timestamptz("last_activity").nullable();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"expires_at\" TIMESTAMPTZ NOT NULL"),
         "Should have expires_at as TIMESTAMPTZ NOT NULL. Got: {}",
@@ -265,7 +404,7 @@ fn test_timestamp_vs_timestamptz() {
     builder.timestamp("local_time");
     builder.timestamptz("utc_time");
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"local_time\" TIMESTAMP"),
         "timestamp() should produce TIMESTAMP. Got: {}",
@@ -288,7 +427,7 @@ fn test_date_time_columns() {
     builder.timestamp("naive_timestamp");
     builder.timestamptz("utc_timestamp");
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"event_date\" DATE"),
         "Should have DATE column. Got: {}",
@@ -322,7 +461,7 @@ fn test_soft_deletes_feature() {
     builder.id();
     builder.soft_deletes();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("\"deleted_at\" TIMESTAMPTZ"),
         "Should have deleted_at TIMESTAMPTZ column. Got: {}",
@@ -350,6 +489,69 @@ fn test_alter_table_builder() {
 }
 
 #[test]
+fn test_alter_add_column_renders_every_setting() {
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::Postgres);
+    builder
+        .add_column("age", ColumnType::Integer)
+        .not_null()
+        .default(0)
+        .unique();
+    builder
+        .add_column("seen_at", ColumnType::TimestampTz)
+        .default_now();
+
+    let statements = builder.build().expect("alter statements");
+    assert_eq!(
+        statements,
+        vec![
+            "ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER NOT NULL DEFAULT 0 UNIQUE",
+            "ALTER TABLE \"users\" ADD COLUMN \"seen_at\" TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP",
+        ]
+    );
+}
+
+#[test]
+fn test_increments_keep_their_width_on_postgres() {
+    let mut builder = TableBuilder::new("counters", DatabaseType::Postgres);
+    builder.increments("id");
+
+    let sql = builder.build_create(false);
+    assert!(sql.contains("\"id\" SERIAL"), "Got: {}", sql);
+    assert!(!sql.contains("BIGSERIAL"), "Got: {}", sql);
+    assert!(sql.contains("PRIMARY KEY (\"id\")"), "Got: {}", sql);
+}
+
+#[test]
+fn test_change_column_keeps_what_a_mysql_modify_would_drop() {
+    // What `SHOW CREATE TABLE` writes, MySQL's spelling and MariaDB's.
+    let create_table = "CREATE TABLE `users` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `age` int(11) NOT NULL DEFAULT 5 COMMENT 'years',
+  `code` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `kind` enum('a','b c') NOT NULL,
+  `plain` int,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::MySQL);
+    for column in ["id", "age", "code", "kind", "plain", "missing"] {
+        builder.change_column(column, ColumnType::BigInteger);
+    }
+    builder.keep_column_attributes(create_table);
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `users` MODIFY COLUMN `id` BIGINT NOT NULL AUTO_INCREMENT",
+            "ALTER TABLE `users` MODIFY COLUMN `age` BIGINT NOT NULL DEFAULT 5 COMMENT 'years'",
+            "ALTER TABLE `users` MODIFY COLUMN `code` BIGINT DEFAULT NULL",
+            "ALTER TABLE `users` MODIFY COLUMN `kind` BIGINT NOT NULL",
+            "ALTER TABLE `users` MODIFY COLUMN `plain` BIGINT",
+            "ALTER TABLE `users` MODIFY COLUMN `missing` BIGINT",
+        ]
+    );
+}
+
+#[test]
 fn test_change_column_type_is_rejected_on_sqlite() {
     let mut builder = AlterTableBuilder::new("users", DatabaseType::SQLite);
     builder.change_column("age", ColumnType::BigInteger);
@@ -357,7 +559,11 @@ fn test_change_column_type_is_rejected_on_sqlite() {
     let error = builder
         .build()
         .expect_err("SQLite cannot alter a column type");
-    assert!(error.is_backend_not_supported(), "Got: {}", error);
+    assert!(
+        matches!(error, crate::error::Error::BackendNotSupported { .. }),
+        "Got: {}",
+        error
+    );
 
     let message = error.to_string();
     assert!(
@@ -385,7 +591,7 @@ fn test_multi_column_unique_constraint() {
     builder.big_integer("role_id").not_null();
     builder.unique(&["user_id", "role_id"]);
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("UNIQUE (\"user_id\", \"role_id\")"),
         "Should have multi-column unique constraint. Got: {}",
@@ -398,7 +604,7 @@ fn test_multi_column_unique_constraint() {
     builder.big_integer("tenant_id").not_null();
     builder.unique_named("uq_user_email_tenant", &["email", "tenant_id"]);
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("CONSTRAINT \"uq_user_email_tenant\" UNIQUE (\"email\", \"tenant_id\")"),
         "Should have named unique constraint. Got: {}",
@@ -414,7 +620,7 @@ fn test_composite_primary_key() {
     builder.timestamps();
     builder.primary_key(&["user_id", "role_id"]);
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
         "Should have composite primary key. Got: {}",
@@ -435,7 +641,7 @@ fn test_composite_primary_key_replaces_column_level_key() {
     builder.big_integer("role_id").not_null();
     builder.primary_key(&["user_id", "role_id"]);
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert_eq!(
         sql.matches("PRIMARY KEY").count(),
         1,
@@ -456,14 +662,16 @@ fn test_create_index_if_not_exists_is_omitted_for_mysql() {
     builder.string("email").not_null();
     builder.index(&["email"]);
 
-    let indexes = builder.build_indexes_if_not_exists();
+    let indexes = builder.build_indexes(true);
     assert_eq!(indexes.len(), 1);
+    let (name, sql) = &indexes[0];
+    assert_eq!(*name, "idx_users_email");
     assert!(
-        !indexes[0].contains("IF NOT EXISTS"),
+        !sql.contains("IF NOT EXISTS"),
         "MySQL has no CREATE INDEX IF NOT EXISTS. Got: {}",
-        indexes[0]
+        sql
     );
-    assert!(indexes[0].starts_with("CREATE INDEX `idx_users_email` ON `users`"));
+    assert!(sql.starts_with("CREATE INDEX `idx_users_email` ON `users`"));
 
     for database_type in [
         DatabaseType::Postgres,
@@ -472,12 +680,12 @@ fn test_create_index_if_not_exists_is_omitted_for_mysql() {
     ] {
         let mut builder = TableBuilder::new("users", database_type);
         builder.index(&["email"]);
-        let indexes = builder.build_indexes_if_not_exists();
+        let indexes = builder.build_indexes(true);
         assert!(
-            indexes[0].contains("IF NOT EXISTS"),
+            indexes[0].1.contains("IF NOT EXISTS"),
             "{:?} supports CREATE INDEX IF NOT EXISTS. Got: {}",
             database_type,
-            indexes[0]
+            indexes[0].1
         );
     }
 }
@@ -489,7 +697,7 @@ fn test_check_constraint() {
     builder.decimal("price").check("price >= 0");
     builder.integer("quantity").check("quantity >= 0");
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("CHECK (price >= 0)"),
         "Should have CHECK constraint on price. Got: {}",
@@ -508,7 +716,7 @@ fn test_extra_sql_attribute() {
     builder.id();
     builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("COLLATE utf8mb4_unicode_ci"),
         "Should include extra SQL. Got: {}",
@@ -519,7 +727,7 @@ fn test_extra_sql_attribute() {
     builder.id();
     builder.text("message").extra("COLLATE utf8mb4_unicode_ci");
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(
         sql.contains("COLLATE utf8mb4_unicode_ci"),
         "MariaDB should include extra SQL. Got: {}",
@@ -533,10 +741,16 @@ fn test_column_type_mariadb() {
     assert_eq!(ColumnType::BigInteger.to_mysql_sql(), "BIGINT");
     assert_eq!(ColumnType::Boolean.to_mysql_sql(), "TINYINT(1)");
     assert_eq!(ColumnType::Jsonb.to_mysql_sql(), "JSON");
-    assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "TIMESTAMP");
-    assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "TIMESTAMP");
+    // DATETIME(6): MySQL's TIMESTAMP only spans 1970-2038, and a column without
+    // fractional digits rounds away microseconds.
+    assert_eq!(ColumnType::DateTime.to_mysql_sql(), "DATETIME(6)");
+    assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "DATETIME(6)");
+    assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "DATETIME(6)");
     assert_eq!(ColumnType::Date.to_mysql_sql(), "DATE");
-    assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME");
+    assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME(6)");
+    // TEXT and BLOB stop at 64 KB.
+    assert_eq!(ColumnType::Text.to_mysql_sql(), "LONGTEXT");
+    assert_eq!(ColumnType::Binary.to_mysql_sql(), "LONGBLOB");
 }
 
 #[test]
@@ -548,7 +762,7 @@ fn test_mariadb_table_builder_create() {
     builder.boolean("active").default(true);
     builder.timestamps();
 
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
     assert!(sql.contains("CREATE TABLE"));
     assert!(sql.contains("`users`"));
     assert!(sql.contains("`id` BIGINT AUTO_INCREMENT"));
@@ -557,6 +771,30 @@ fn test_mariadb_table_builder_create() {
     assert!(sql.contains("`active`"));
     assert!(sql.contains("`created_at`"));
     assert!(sql.contains("`updated_at`"));
+}
+
+/// A MySQL table otherwise inherits the database's character set, and a latin1
+/// default rejects `日本語` or an emoji.
+#[test]
+fn mysql_tables_are_created_utf8mb4() {
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        let mut builder = TableBuilder::new("notes", db_type);
+        builder.id();
+        assert!(
+            builder
+                .build_create(false)
+                .ends_with(") DEFAULT CHARSET=utf8mb4"),
+            "{db_type:?}"
+        );
+    }
+    for db_type in [DatabaseType::Postgres, DatabaseType::SQLite] {
+        let mut builder = TableBuilder::new("notes", db_type);
+        builder.id();
+        assert!(
+            !builder.build_create(false).contains("CHARSET"),
+            "{db_type:?}"
+        );
+    }
 }
 
 #[test]
@@ -578,24 +816,10 @@ fn test_mariadb_alter_table_builder() {
 }
 
 #[test]
-fn test_mariadb_quoting() {
-    let schema = Schema::new(DatabaseType::MariaDB);
-    assert_eq!(schema.quote_identifier("users"), "`users`");
-    assert_eq!(schema.quote_identifier("email"), "`email`");
-}
-
-#[test]
 fn test_postgres_identifier_quoting_escapes_inner_quotes() {
-    let schema = Schema::new(DatabaseType::Postgres);
-    assert_eq!(schema.quote_identifier("user\"roles"), "\"user\"\"roles\"");
-    assert_eq!(
-        quote_migration_identifier("col\"name", DatabaseType::Postgres),
-        "\"col\"\"name\""
-    );
-
     let mut builder = TableBuilder::new("user\"roles", DatabaseType::Postgres);
     builder.string("display\"name");
-    let sql = builder.build_create();
+    let sql = builder.build_create(false);
 
     assert!(
         sql.contains("CREATE TABLE \"user\"\"roles\""),
@@ -611,13 +835,6 @@ fn test_postgres_identifier_quoting_escapes_inner_quotes() {
 
 #[test]
 fn test_mysql_identifier_quoting_escapes_inner_backticks() {
-    let schema = Schema::new(DatabaseType::MySQL);
-    assert_eq!(schema.quote_identifier("user`roles"), "`user``roles`");
-    assert_eq!(
-        quote_migration_identifier("col`name", DatabaseType::MySQL),
-        "`col``name`"
-    );
-
     let mut builder = AlterTableBuilder::new("user`roles", DatabaseType::MySQL);
     builder.rename_column("old`name", "new`name");
     let statements = builder.build().expect("alter statements");
@@ -632,4 +849,89 @@ fn test_mysql_identifier_quoting_escapes_inner_backticks() {
         "SQL should escape embedded backticks in column names. Got: {}",
         statements[0]
     );
+}
+
+#[test]
+fn test_varchar_columns_carry_their_length() {
+    assert_eq!(
+        ColumnType::Varchar(64).to_sql(DatabaseType::Postgres),
+        "VARCHAR(64)"
+    );
+    assert_eq!(
+        ColumnType::Varchar(64).to_sql(DatabaseType::MySQL),
+        "VARCHAR(64)"
+    );
+    assert_eq!(ColumnType::Varchar(64).to_sql(DatabaseType::SQLite), "TEXT");
+
+    let mut builder = TableBuilder::new("users", DatabaseType::Postgres);
+    builder.id();
+    builder.string_with("code", 12).not_null();
+    let sql = builder.build_create(false);
+    assert!(sql.contains("\"code\" VARCHAR(12) NOT NULL"), "{sql}");
+}
+
+#[test]
+fn a_mysql_array_column_default_is_written_as_an_expression() {
+    // An array column is `JSON` on MySQL, which takes a default only as an
+    // expression; `DEFAULT '[]'` fails with error 1101.
+    let mut column = super::ddl::ColumnDefinition::new("tags", ColumnType::TextArray);
+    column.default = Some("'[]'".to_string());
+    let sql = column.to_sql(DatabaseType::MySQL);
+    assert!(sql.contains("JSON DEFAULT ('[]')"), "{sql}");
+    assert!(
+        column
+            .to_sql(DatabaseType::Postgres)
+            .contains("TEXT[] DEFAULT '[]'")
+    );
+}
+
+#[test]
+fn test_rename_table_uses_each_backends_statement() {
+    assert_eq!(
+        ddl::rename_table(DatabaseType::Postgres, "users", "members"),
+        "ALTER TABLE \"users\" RENAME TO \"members\""
+    );
+    assert_eq!(
+        ddl::rename_table(DatabaseType::SQLite, "users", "members"),
+        "ALTER TABLE \"users\" RENAME TO \"members\""
+    );
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(
+            ddl::rename_table(db_type, "users", "members"),
+            "RENAME TABLE `users` TO `members`"
+        );
+    }
+    assert_eq!(
+        ddl::rename_table(DatabaseType::Postgres, "we\"ird", "members"),
+        "ALTER TABLE \"we\"\"ird\" RENAME TO \"members\""
+    );
+}
+
+/// Generated index names fit PostgreSQL's 63 bytes and MySQL's 64
+/// characters: past that PostgreSQL cut two names with a common prefix to
+/// one, skipping the second index, and MySQL refused them.
+#[test]
+fn generated_index_names_fit_every_backend() {
+    let mut builder = TableBuilder::new(
+        "organization_membership_invitations",
+        DatabaseType::Postgres,
+    );
+    builder.index(&["organization_id", "invited_at"]);
+    builder.unique_index(&["organization_id", "invited_email"]);
+    builder.unique_index(&["organization_id", "invited_phone"]);
+    builder.index(&["email"]);
+    let names: Vec<String> = builder
+        .build_indexes(true)
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+
+    assert_eq!(
+        names[0],
+        "idx_organization_membership_invitations_organization_i_75abc36e"
+    );
+    assert_ne!(names[1], names[2]);
+    assert!(names.iter().all(|name| name.len() <= 63), "{names:?}");
+    // A name that fits is left as it was.
+    assert_eq!(names[3], "idx_organization_membership_invitations_email");
 }

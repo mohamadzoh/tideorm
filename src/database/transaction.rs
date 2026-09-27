@@ -5,8 +5,9 @@ use crate::error::{Error, Result};
 use crate::internal::Backend;
 use crate::tide_warn;
 
+use super::Database;
 use super::state::with_connection_override;
-use super::{Database, DatabaseHandle};
+use crate::cache::PendingInvalidations;
 
 /// Reported when a clone of the transaction handle outlived the closure.
 const LEAKED_TRANSACTION_MESSAGE: &str = "transaction handle leaked outside the transaction scope";
@@ -26,7 +27,9 @@ const LEAKED_TRANSACTION_MESSAGE: &str = "transaction handle leaked outside the 
 ///   transaction's connection, so there is no separate connection to free.
 /// - The driver must resynchronize afterwards. Postgres and MySQL decrement
 ///   their transaction-depth counter unconditionally when the engine later runs
-///   its queued drop-time rollback, so the extra rollback is a harmless no-op.
+///   its queued drop-time rollback. A `BEGIN` follows the `ROLLBACK`, so the
+///   stray handle writes into a transaction of its own, which that drop-time
+///   rollback ends, instead of committing each statement on its own.
 ///   SQLite only decrements when its own rollback succeeds, so a rollback issued
 ///   behind its back would leave the pooled connection permanently off by one
 ///   and turn later `BEGIN`s into savepoints that never close. SQLite (and any
@@ -74,7 +77,17 @@ async fn end_leaked_transaction(
     tide_warn!("{LEAKED_TRANSACTION_MESSAGE}. Rolling it back explicitly.");
 
     match txn.execute_unprepared("ROLLBACK").await {
-        Ok(_) => LeakedRollback::RolledBack,
+        Ok(_) => {
+            // Without a transaction open, a statement through the stray
+            // handle would commit by itself; a leaked transaction never does.
+            if let Err(err) = txn.execute_unprepared("BEGIN").await {
+                tide_warn!(
+                    "Reopening the leaked transaction failed, so statements through the stray handle commit on their own: {}",
+                    transaction_error(err)
+                );
+            }
+            LeakedRollback::RolledBack
+        }
         Err(err) => {
             let err = transaction_error(err);
             tide_warn!("Failed to roll back the leaked transaction: {err}");
@@ -116,6 +129,31 @@ fn leaked_transaction_error(rollback: LeakedRollback, closure_error: Option<Erro
     Error::Transaction { message, source }
 }
 
+/// Refuse to commit a PostgreSQL transaction that a failed statement aborted.
+///
+/// PostgreSQL answers the `COMMIT` of such a transaction with a rollback and
+/// no error, so a closure that caught the failure and returned `Ok` would
+/// report a commit that never happened. Any statement fails in an aborted
+/// transaction, so one is sent first; the other backends keep the transaction
+/// going after a failed statement.
+async fn ensure_transaction_can_commit(txn: &crate::internal::OrmTransaction) -> Result<()> {
+    use crate::internal::ConnectionTrait;
+
+    if Backend::from_orm_backend(txn.get_database_backend()) != Some(Backend::Postgres) {
+        return Ok(());
+    }
+    match txn.execute_unprepared("SELECT 1").await {
+        Ok(_) => Ok(()),
+        Err(err) => Err(Error::Transaction {
+            message: format!(
+                "the transaction cannot commit: a statement inside it failed, which aborted it, so it was rolled back ({})",
+                err
+            ),
+            source: transaction_error(err).into_db_failure(),
+        }),
+    }
+}
+
 /// Classify a transaction-control failure.
 ///
 /// The engine error is translated first so that connection-level failures (a
@@ -125,7 +163,7 @@ fn leaked_transaction_error(rollback: LeakedRollback, closure_error: Option<Erro
 /// error onto a different variant, so the structured driver failure is carried
 /// over explicitly — otherwise a serialization failure would arrive with no
 /// SQLSTATE and no source chain.
-fn transaction_error(err: crate::internal::OrmError) -> Error {
+pub(crate) fn transaction_error(err: crate::internal::OrmError) -> Error {
     let message = err.to_string();
     match crate::internal::translate_error(err) {
         connection @ Error::Connection { .. } => connection,
@@ -156,38 +194,64 @@ impl Database {
             + Send,
         T: Send,
     {
-        use crate::internal::TransactionTrait;
-
+        let connection = self.__get_connection()?;
         // Whether this is a SAVEPOINT inside a caller's transaction rather than
         // a top-level one, which decides how a leaked handle can be terminated.
-        let (txn, nested) = match self.__get_connection()? {
-            ConnectionRef::Database(conn) => (
-                conn.connection().begin().await.map_err(transaction_error)?,
-                false,
-            ),
-            ConnectionRef::Transaction(tx) => {
-                (tx.as_ref().begin().await.map_err(transaction_error)?, true)
-            }
-        };
+        let nested = matches!(connection, ConnectionRef::Transaction(_));
+        // The pool the transaction runs on, for what is remembered per database.
+        let origin = super::state::origin_of(&connection);
+        let txn = Arc::new(
+            connection
+                .executor()
+                .begin()
+                .await
+                .map_err(transaction_error)?,
+        );
 
-        let outcome = {
-            let txn = Arc::new(txn);
-            let tx = Transaction { inner: txn.clone() };
-            let override_handle = DatabaseHandle::Transaction(txn.clone());
-            let outcome = with_connection_override(override_handle, f(&tx)).await;
-
-            (txn, outcome)
-        };
-
-        let (txn, outcome) = outcome;
+        let tx = Transaction { inner: txn.clone() };
+        let pending = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+        let outcome = with_connection_override(
+            ConnectionRef::Transaction(txn.clone()),
+            origin,
+            Some(pending.clone()),
+            f(&tx),
+        )
+        .await;
+        drop(tx);
 
         match (Arc::try_unwrap(txn), outcome) {
             (Ok(txn), Ok(result)) => {
+                let (statement_failed, deadlocked) = {
+                    let pending = pending.lock();
+                    (pending.statement_failed(), pending.deadlocked())
+                };
+                if deadlocked {
+                    let _ = txn.rollback().await;
+                    return Err(Error::Transaction {
+                        message: "the transaction cannot commit: a statement inside it \
+                                  deadlocked, and the database rolled the whole transaction \
+                                  back; on MySQL and MariaDB the statements after the deadlock \
+                                  ran outside it and are not undone"
+                            .to_string(),
+                        source: None,
+                    });
+                }
+                if statement_failed {
+                    ensure_transaction_can_commit(&txn).await?;
+                }
                 txn.commit().await.map_err(transaction_error)?;
+                std::mem::take(&mut *pending.lock()).replay();
                 Ok(result)
             }
             (Ok(txn), Err(e)) => {
-                let _ = txn.rollback().await;
+                // The closure's error is the one the caller needs; a rollback
+                // failure on top of it is reported, not swallowed.
+                if let Err(rollback) = txn.rollback().await {
+                    tide_warn!(
+                        "Rolling back the failed transaction also failed: {}",
+                        transaction_error(rollback)
+                    );
+                }
                 Err(e)
             }
             (Err(txn), outcome) => {
@@ -208,122 +272,34 @@ impl Transaction {
     pub fn connection(&self) -> &crate::internal::OrmTransaction {
         self.inner.as_ref()
     }
-
-    /// Get the raw internal transaction (for internal use only)
-    #[doc(hidden)]
-    pub fn __internal_transaction(&self) -> &crate::internal::OrmTransaction {
-        self.inner.as_ref()
-    }
 }
 
-/// Trait for types that can be used as a database connection
-pub trait Connection: Send + Sync {
-    /// Get the internal connection for query execution
-    #[doc(hidden)]
-    fn __get_connection(&self) -> Result<ConnectionRef>;
-}
-
-/// Internal connection reference (hidden from users)
+/// The connection a statement runs on: the pool, or the transaction an
+/// enclosing [`Database::transaction`] scope installed.
 #[doc(hidden)]
+#[derive(Clone)]
 pub enum ConnectionRef {
     Database(Arc<crate::internal::InternalConnection>),
     Transaction(Arc<crate::internal::OrmTransaction>),
 }
 
-impl Connection for Database {
-    fn __get_connection(&self) -> Result<ConnectionRef> {
-        Ok(match self.current_handle()? {
-            DatabaseHandle::Connection(inner) => ConnectionRef::Database(inner),
-            DatabaseHandle::Transaction(tx) => ConnectionRef::Transaction(tx),
-            #[cfg(test)]
-            DatabaseHandle::TestScope => {
-                unreachable!("test scope marker does not carry a connection reference")
-            }
+impl ConnectionRef {
+    /// Borrow this connection as one executor, so a statement is written once
+    /// whichever of the two it runs on.
+    pub fn executor(&self) -> crate::internal::Executor<'_> {
+        crate::internal::Executor::new(match self {
+            Self::Database(conn) => conn.connection().into(),
+            Self::Transaction(tx) => tx.as_ref().into(),
         })
     }
-}
 
-impl Connection for Transaction {
-    fn __get_connection(&self) -> Result<ConnectionRef> {
-        Ok(ConnectionRef::Transaction(self.inner.clone()))
+    pub(crate) fn backend(&self) -> Backend {
+        use crate::internal::ConnectionTrait;
+
+        Backend::from(self.executor().get_database_backend())
     }
 }
 
 #[cfg(test)]
-mod leaked_transaction_tests {
-    use super::{Backend, can_rollback_leaked_transaction};
-    use super::{Error, LEAKED_TRANSACTION_MESSAGE, LeakedRollback, leaked_transaction_error};
-
-    #[test]
-    fn top_level_leaks_are_rolled_back_where_the_driver_resynchronizes() {
-        assert!(can_rollback_leaked_transaction(
-            Some(Backend::Postgres),
-            false
-        ));
-        assert!(can_rollback_leaked_transaction(Some(Backend::MySql), false));
-    }
-
-    #[test]
-    fn sqlite_and_unknown_backends_keep_the_drop_time_rollback() {
-        assert!(!can_rollback_leaked_transaction(
-            Some(Backend::Sqlite),
-            false
-        ));
-        assert!(!can_rollback_leaked_transaction(None, false));
-    }
-
-    #[test]
-    fn a_leaked_savepoint_never_issues_a_bare_rollback() {
-        for backend in [
-            Some(Backend::Postgres),
-            Some(Backend::MySql),
-            Some(Backend::Sqlite),
-            None,
-        ] {
-            assert!(
-                !can_rollback_leaked_transaction(backend, true),
-                "a bare ROLLBACK would abort the enclosing transaction: {backend:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_rollback_outcome_is_part_of_the_reported_leak() {
-        let rolled_back = leaked_transaction_error(LeakedRollback::RolledBack, None).to_string();
-        assert!(
-            rolled_back.contains(LEAKED_TRANSACTION_MESSAGE),
-            "{rolled_back}"
-        );
-        assert!(
-            rolled_back.contains("rolled back explicitly"),
-            "{rolled_back}"
-        );
-
-        let deferred = leaked_transaction_error(LeakedRollback::DeferredToDrop, None).to_string();
-        assert!(deferred.contains(LEAKED_TRANSACTION_MESSAGE), "{deferred}");
-        assert!(
-            deferred.contains("when the stray handle drops"),
-            "{deferred}"
-        );
-    }
-
-    #[test]
-    fn a_rejected_rollback_is_never_swallowed() {
-        let rollback = LeakedRollback::Failed(Error::connection("connection closed"));
-        let message = leaked_transaction_error(rollback, None).to_string();
-
-        assert!(message.contains(LEAKED_TRANSACTION_MESSAGE), "{message}");
-        assert!(message.contains("rolling it back failed"), "{message}");
-        assert!(message.contains("connection closed"), "{message}");
-    }
-
-    #[test]
-    fn the_closure_error_survives_the_leak_report() {
-        let closure_error = Some(Error::validation("email", "is required"));
-        let message = leaked_transaction_error(LeakedRollback::RolledBack, closure_error);
-        let message = message.to_string();
-
-        assert!(message.contains(LEAKED_TRANSACTION_MESSAGE), "{message}");
-        assert!(message.contains("email"), "{message}");
-    }
-}
+#[path = "../../tests/unit/database_transaction_tests.rs"]
+mod leaked_transaction_tests;

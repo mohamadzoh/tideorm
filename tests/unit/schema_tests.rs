@@ -1,23 +1,14 @@
+use super::writer::{CatalogColumn, CatalogIndexColumn, catalog_table, group_indexes};
 use super::*;
+use crate::config::DatabaseType;
+use crate::model::IndexDefinition;
 
-#[test]
-fn test_index_definition_parse() {
-    let indexes = IndexDefinition::parse("users", "email", false);
-    assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0].columns, vec!["email"]);
-    assert!(!indexes[0].unique);
-
-    let indexes = IndexDefinition::parse("users", "first_name,last_name", false);
-    assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0].columns, vec!["first_name", "last_name"]);
-
-    let indexes = IndexDefinition::parse("users", "my_idx:email", false);
-    assert_eq!(indexes.len(), 1);
-    assert_eq!(indexes[0].name, "my_idx");
-    assert_eq!(indexes[0].columns, vec!["email"]);
-
-    let indexes = IndexDefinition::parse("users", "email;name:first_name,last_name", false);
-    assert_eq!(indexes.len(), 2);
+/// What a Rust type renders to on `db_type` through the shared mapping table.
+#[track_caller]
+fn sql_for(rust_type: &str, db_type: DatabaseType) -> String {
+    rust_type_to_column_type(rust_type)
+        .unwrap_or_else(|| panic!("'{rust_type}' should be mapped"))
+        .to_sql(db_type)
 }
 
 #[test]
@@ -323,7 +314,7 @@ fn test_table_schema_builder() {
     assert_eq!(table.name, "users");
     assert_eq!(table.columns.len(), 2);
     assert_eq!(table.indexes.len(), 1);
-    assert_eq!(table.primary_key, "id");
+    assert_eq!(table.primary_keys, vec!["id"]);
 }
 
 #[test]
@@ -363,172 +354,129 @@ fn test_schema_generator_supports_composite_primary_keys() {
 }
 
 #[test]
-fn test_rust_type_to_sql_postgres() {
-    assert_eq!(rust_type_to_sql("i64", DatabaseType::Postgres), "BIGINT");
-    assert_eq!(rust_type_to_sql("i32", DatabaseType::Postgres), "INTEGER");
-    assert_eq!(rust_type_to_sql("String", DatabaseType::Postgres), "TEXT");
-    assert_eq!(rust_type_to_sql("bool", DatabaseType::Postgres), "BOOLEAN");
+fn test_rust_type_mapping_postgres() {
+    assert_eq!(sql_for("i64", DatabaseType::Postgres), "BIGINT");
+    assert_eq!(sql_for("i32", DatabaseType::Postgres), "INTEGER");
+    assert_eq!(sql_for("String", DatabaseType::Postgres), "TEXT");
+    assert_eq!(sql_for("bool", DatabaseType::Postgres), "BOOLEAN");
+    assert_eq!(sql_for("f64", DatabaseType::Postgres), "DOUBLE PRECISION");
+    assert_eq!(sql_for("Option<i64>", DatabaseType::Postgres), "BIGINT");
     assert_eq!(
-        rust_type_to_sql("f64", DatabaseType::Postgres),
-        "DOUBLE PRECISION"
-    );
-    assert_eq!(
-        rust_type_to_sql("Option<i64>", DatabaseType::Postgres),
-        "BIGINT"
-    );
-    assert_eq!(
-        rust_type_to_sql("serde_json::Value", DatabaseType::Postgres),
+        sql_for("serde_json::Value", DatabaseType::Postgres),
         "JSONB"
     );
 }
 
 #[test]
-fn test_rust_type_to_sql_maps_unsigned_types_to_what_postgres_reads_back() {
+fn test_rust_type_mapping_maps_unsigned_types_to_what_postgres_reads_back() {
     // PostgreSQL has no unsigned integers, so the mapping picks the signed type
     // sea-orm's decoder actually accepts. `u32` is read as an `Oid` and then as
     // an `i32`; widening it to BIGINT makes every read fail. `u64` is only
     // decodable on MySQL, and the binder narrows it to `i64` on the way in, so
     // an exact NUMERIC column buys nothing BIGINT does not already give.
     let pg = DatabaseType::Postgres;
-    assert_eq!(rust_type_to_sql("u8", pg), "SMALLINT");
-    assert_eq!(rust_type_to_sql("u16", pg), "INTEGER");
-    assert_eq!(rust_type_to_sql("u32", pg), "INTEGER");
-    assert_eq!(rust_type_to_sql("u64", pg), "BIGINT");
-    assert_eq!(rust_type_to_sql("Option<u32>", pg), "INTEGER");
+    assert_eq!(sql_for("u8", pg), "SMALLINT");
+    assert_eq!(sql_for("u16", pg), "INTEGER");
+    assert_eq!(sql_for("u32", pg), "INTEGER");
+    assert_eq!(sql_for("u64", pg), "BIGINT");
+    assert_eq!(sql_for("Option<u32>", pg), "INTEGER");
 
     // MySQL does have unsigned column types, so nothing widens there.
     let mysql = DatabaseType::MySQL;
-    assert_eq!(rust_type_to_sql("u32", mysql), "INT UNSIGNED");
-    assert_eq!(rust_type_to_sql("u64", mysql), "BIGINT UNSIGNED");
+    assert_eq!(sql_for("u32", mysql), "INT UNSIGNED");
+    assert_eq!(sql_for("u64", mysql), "BIGINT UNSIGNED");
 
     // SQLite has one integer storage class for all of them.
     let sqlite = DatabaseType::SQLite;
-    assert_eq!(rust_type_to_sql("u32", sqlite), "INTEGER");
-    assert_eq!(rust_type_to_sql("u64", sqlite), "INTEGER");
+    assert_eq!(sql_for("u32", sqlite), "INTEGER");
+    assert_eq!(sql_for("u64", sqlite), "INTEGER");
 }
 
 #[test]
-fn test_rust_type_to_sql_keeps_decimals_readable() {
+fn test_rust_type_mapping_keeps_decimals_readable() {
     // TEXT would be the lossless target on SQLite, but sea-orm decodes both
     // Decimal and BigDecimal there through `try_get::<Option<f64>>`, and sqlx
     // only yields an f64 from a REAL-affinity column - a TEXT column cannot be
     // read at all.
     let pg = DatabaseType::Postgres;
     let sqlite = DatabaseType::SQLite;
-    assert_eq!(rust_type_to_sql("Decimal", pg), "DECIMAL");
-    assert_eq!(rust_type_to_sql("Decimal", sqlite), "REAL");
-    assert_eq!(rust_type_to_sql("BigDecimal", sqlite), "REAL");
-    assert_eq!(rust_type_to_sql("rust_decimal::Decimal", sqlite), "REAL");
+    assert_eq!(sql_for("Decimal", pg), "DECIMAL");
+    assert_eq!(sql_for("Decimal", sqlite), "REAL");
+    assert_eq!(sql_for("BigDecimal", sqlite), "REAL");
+    assert_eq!(sql_for("rust_decimal::Decimal", sqlite), "REAL");
 }
 
 #[test]
-fn test_rust_type_to_sql_maps_128_bit_integers_per_backend() {
+fn test_rust_type_mapping_maps_128_bit_integers_per_backend() {
     // i128/u128 map to Decimal { precision: 39, scale: 0 }, so they inherit the
     // decimal rendering - including SQLite's REAL, which cannot hold the range.
     let pg = DatabaseType::Postgres;
-    assert_eq!(rust_type_to_sql("i128", pg), "DECIMAL(39, 0)");
-    assert_eq!(rust_type_to_sql("u128", pg), "DECIMAL(39, 0)");
-    assert_eq!(
-        rust_type_to_sql("i128", DatabaseType::MySQL),
-        "DECIMAL(39, 0)"
-    );
-    assert_eq!(rust_type_to_sql("i128", DatabaseType::SQLite), "REAL");
+    assert_eq!(sql_for("i128", pg), "DECIMAL(39, 0)");
+    assert_eq!(sql_for("u128", pg), "DECIMAL(39, 0)");
+    assert_eq!(sql_for("i128", DatabaseType::MySQL), "DECIMAL(39, 0)");
+    assert_eq!(sql_for("i128", DatabaseType::SQLite), "REAL");
 }
 
 #[test]
-fn test_rust_type_to_sql_mysql() {
-    assert_eq!(rust_type_to_sql("i64", DatabaseType::MySQL), "BIGINT");
-    assert_eq!(rust_type_to_sql("bool", DatabaseType::MySQL), "TINYINT(1)");
-    assert_eq!(rust_type_to_sql("f64", DatabaseType::MySQL), "DOUBLE");
-    assert_eq!(rust_type_to_sql("Uuid", DatabaseType::MySQL), "BINARY(16)");
-    assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MySQL), "JSON");
-    assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MySQL), "JSON");
-    assert_eq!(rust_type_to_sql("Vec<String>", DatabaseType::MySQL), "JSON");
+fn test_rust_type_mapping_mysql() {
+    assert_eq!(sql_for("i64", DatabaseType::MySQL), "BIGINT");
+    assert_eq!(sql_for("bool", DatabaseType::MySQL), "TINYINT(1)");
+    assert_eq!(sql_for("f64", DatabaseType::MySQL), "DOUBLE");
+    assert_eq!(sql_for("Uuid", DatabaseType::MySQL), "BINARY(16)");
+    assert_eq!(sql_for("Vec<i32>", DatabaseType::MySQL), "JSON");
+    assert_eq!(sql_for("Vec<i64>", DatabaseType::MySQL), "JSON");
+    assert_eq!(sql_for("Vec<String>", DatabaseType::MySQL), "JSON");
 }
 
 #[test]
-fn test_rust_type_to_sql_mariadb() {
-    assert_eq!(rust_type_to_sql("i64", DatabaseType::MariaDB), "BIGINT");
-    assert_eq!(
-        rust_type_to_sql("bool", DatabaseType::MariaDB),
-        "TINYINT(1)"
-    );
-    assert_eq!(rust_type_to_sql("f64", DatabaseType::MariaDB), "DOUBLE");
-    assert_eq!(
-        rust_type_to_sql("Uuid", DatabaseType::MariaDB),
-        "BINARY(16)"
-    );
-    assert_eq!(rust_type_to_sql("Vec<i32>", DatabaseType::MariaDB), "JSON");
-    assert_eq!(rust_type_to_sql("Vec<i64>", DatabaseType::MariaDB), "JSON");
-    assert_eq!(
-        rust_type_to_sql("Vec<String>", DatabaseType::MariaDB),
-        "JSON"
-    );
+fn test_rust_type_mapping_mariadb() {
+    assert_eq!(sql_for("i64", DatabaseType::MariaDB), "BIGINT");
+    assert_eq!(sql_for("bool", DatabaseType::MariaDB), "TINYINT(1)");
+    assert_eq!(sql_for("f64", DatabaseType::MariaDB), "DOUBLE");
+    assert_eq!(sql_for("Uuid", DatabaseType::MariaDB), "BINARY(16)");
+    assert_eq!(sql_for("Vec<i32>", DatabaseType::MariaDB), "JSON");
+    assert_eq!(sql_for("Vec<i64>", DatabaseType::MariaDB), "JSON");
+    assert_eq!(sql_for("Vec<String>", DatabaseType::MariaDB), "JSON");
 }
 
 #[test]
-fn test_rust_type_to_sql_sqlite() {
-    assert_eq!(rust_type_to_sql("i64", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(rust_type_to_sql("i32", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(rust_type_to_sql("bool", DatabaseType::SQLite), "INTEGER");
-    assert_eq!(rust_type_to_sql("f64", DatabaseType::SQLite), "REAL");
-    assert_eq!(rust_type_to_sql("String", DatabaseType::SQLite), "TEXT");
-}
-
-#[test]
-fn test_rust_type_to_column_type_is_the_single_mapping_table() {
-    // `rust_type_to_sql` must be nothing but this lookup plus a render, so the
-    // schema writer, sync and migrations cannot drift apart.
-    for rust_type in ["i64", "u32", "Decimal", "DateTime<Utc>", "Vec<String>"] {
-        let mapped = rust_type_to_column_type(rust_type).expect("mapped type");
-        for db_type in [
-            DatabaseType::Postgres,
-            DatabaseType::MySQL,
-            DatabaseType::MariaDB,
-            DatabaseType::SQLite,
-        ] {
-            let rendered = rust_type_to_sql(rust_type, db_type);
-            assert_eq!(rendered, mapped.to_sql(db_type));
-        }
-    }
+fn test_rust_type_mapping_sqlite() {
+    assert_eq!(sql_for("i64", DatabaseType::SQLite), "INTEGER");
+    assert_eq!(sql_for("i32", DatabaseType::SQLite), "INTEGER");
+    assert_eq!(sql_for("bool", DatabaseType::SQLite), "INTEGER");
+    assert_eq!(sql_for("f64", DatabaseType::SQLite), "REAL");
+    assert_eq!(sql_for("String", DatabaseType::SQLite), "TEXT");
 }
 
 #[test]
 fn test_rust_type_to_column_type_reports_unknown_types() {
-    // The fallback belongs to the caller: schema export uses TEXT silently,
-    // sync warns first.
+    // The fallback belongs to the caller: sync warns and uses TEXT.
     assert!(rust_type_to_column_type("MyCustomType").is_none());
-    assert_eq!(
-        rust_type_to_sql("MyCustomType", DatabaseType::Postgres),
-        "TEXT"
-    );
 }
 
 #[test]
 fn test_rust_type_normalization_strips_paths_lifetimes_and_options() {
     let pg = DatabaseType::Postgres;
-    assert_eq!(
-        rust_type_to_sql("chrono::DateTime<chrono::Utc>", pg),
-        "TIMESTAMPTZ"
-    );
-    assert_eq!(rust_type_to_sql("&'static str", pg), "TEXT");
-    assert_eq!(rust_type_to_sql("Option < i32 >", pg), "INTEGER");
-    assert_eq!(rust_type_to_sql("Option<Option<String>>", pg), "TEXT");
-    assert_eq!(rust_type_to_sql("rust_decimal::Decimal", pg), "DECIMAL");
-    assert_eq!(rust_type_to_sql("Vec<serde_json::Value>", pg), "JSONB[]");
+    assert_eq!(sql_for("chrono::DateTime<chrono::Utc>", pg), "TIMESTAMPTZ");
+    assert_eq!(sql_for("&'static str", pg), "TEXT");
+    assert_eq!(sql_for("Option < i32 >", pg), "INTEGER");
+    assert_eq!(sql_for("Option<Option<String>>", pg), "TEXT");
+    assert_eq!(sql_for("rust_decimal::Decimal", pg), "DECIMAL");
+    assert_eq!(sql_for("Vec<serde_json::Value>", pg), "JSONB[]");
 }
 
 #[test]
 fn test_naive_and_aware_timestamps_get_different_columns() {
     // A naive timestamp carries no offset, so it must not land in a column the
-    // server shifts by session timezone.
+    // server shifts by session timezone. MySQL stores both in DATETIME(6): its
+    // TIMESTAMP only spans 1970-2038, and sqlx pins the session to UTC.
     let mysql = DatabaseType::MySQL;
-    assert_eq!(rust_type_to_sql("NaiveDateTime", mysql), "DATETIME");
-    assert_eq!(rust_type_to_sql("DateTime<Utc>", mysql), "TIMESTAMP");
+    assert_eq!(sql_for("NaiveDateTime", mysql), "DATETIME(6)");
+    assert_eq!(sql_for("DateTime<Utc>", mysql), "DATETIME(6)");
 
     let pg = DatabaseType::Postgres;
-    assert_eq!(rust_type_to_sql("NaiveDateTime", pg), "TIMESTAMP");
-    assert_eq!(rust_type_to_sql("DateTime<Utc>", pg), "TIMESTAMPTZ");
+    assert_eq!(sql_for("NaiveDateTime", pg), "TIMESTAMP");
+    assert_eq!(sql_for("DateTime<Utc>", pg), "TIMESTAMPTZ");
 }
 
 #[test]
@@ -580,54 +528,149 @@ fn test_schema_generator_header() {
     assert!(sql.contains("-- Generated at:"));
 }
 
-#[test]
-fn test_schema_writer_registry() {
-    SchemaWriter::clear_registry();
+fn catalog_column(name: &str, sql_type: &str) -> CatalogColumn {
+    CatalogColumn {
+        name: name.to_string(),
+        sql_type: sql_type.to_string(),
+        nullable: false,
+        default: None,
+        auto_increment: false,
+    }
+}
 
-    let table = TableSchemaBuilder::new("test_table")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key())
-        .build();
-
-    SchemaWriter::register_schema(table.clone());
-
-    let schemas = SchemaWriter::get_registered_schemas();
-    assert_eq!(schemas.len(), 1);
-    assert_eq!(schemas[0].name, "test_table");
-    assert_eq!(schemas[0].schema_name, None);
-
-    SchemaWriter::register_schema(table);
-    let schemas = SchemaWriter::get_registered_schemas();
-    assert_eq!(schemas.len(), 1);
-
-    SchemaWriter::clear_registry();
-    let schemas = SchemaWriter::get_registered_schemas();
-    assert!(schemas.is_empty());
+fn index_column(index: &str, unique: bool, column: &str) -> CatalogIndexColumn {
+    CatalogIndexColumn {
+        index: index.to_string(),
+        unique,
+        column: column.to_string(),
+    }
 }
 
 #[test]
-fn test_schema_writer_registry_keeps_distinct_schemas() {
-    SchemaWriter::clear_registry();
+fn test_catalog_indexes_come_out_sorted_and_keep_key_order() {
+    // Grouping used to go through a HashMap, so the same database exported
+    // its indexes in a different order on every run.
+    let indexes = group_indexes([
+        index_column("idx_users_tenant_email", false, "tenant_id"),
+        index_column("idx_users_tenant_email", false, "email"),
+        index_column("idx_b", true, "b"),
+        index_column("idx_a", false, "a"),
+    ]);
 
-    let public_table = TableSchemaBuilder::new("posts")
-        .schema("public")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key())
-        .build();
-    let audit_table = TableSchemaBuilder::new("posts")
-        .schema("audit")
-        .column(ColumnSchema::new("id", "BIGINT").primary_key())
-        .build();
+    let names: Vec<&str> = indexes.iter().map(|index| index.name.as_str()).collect();
+    assert_eq!(names, vec!["idx_a", "idx_b", "idx_users_tenant_email"]);
+    assert!(indexes[1].unique);
+    assert_eq!(indexes[2].columns, vec!["tenant_id", "email"]);
+}
 
-    SchemaWriter::register_schema(public_table);
-    SchemaWriter::register_schema(audit_table);
+#[test]
+fn test_catalog_table_keeps_every_primary_key_column_in_key_order() {
+    // Only the first key column used to survive introspection, which exported
+    // a composite key as a single-column one.
+    let table = catalog_table(
+        "user_roles",
+        Some("public"),
+        vec![
+            catalog_column("role_id", "bigint"),
+            catalog_column("user_id", "bigint"),
+            catalog_column("note", "text"),
+        ],
+        vec!["user_id".to_string(), "role_id".to_string()],
+        Vec::new(),
+        true,
+    );
 
-    let schemas = SchemaWriter::get_registered_schemas();
-    assert_eq!(schemas.len(), 2);
-    assert!(schemas.iter().any(|schema| {
-        schema.name == "posts" && schema.schema_name.as_deref() == Some("public")
-    }));
-    assert!(schemas.iter().any(|schema| {
-        schema.name == "posts" && schema.schema_name.as_deref() == Some("audit")
-    }));
+    assert_eq!(table.primary_keys, vec!["user_id", "role_id"]);
+    assert!(table.columns[0].primary_key && table.columns[1].primary_key);
+    assert!(!table.columns[2].primary_key);
 
-    SchemaWriter::clear_registry();
+    let mut generator = SchemaGenerator::new(DatabaseType::Postgres);
+    generator.add_table(table);
+    let sql = generator.generate();
+    assert!(
+        sql.contains("PRIMARY KEY (\"user_id\", \"role_id\")"),
+        "Got: {}",
+        sql
+    );
+}
+
+#[test]
+fn test_catalog_table_auto_increments_key_columns_unless_any_column_counts() {
+    let columns = || {
+        let mut id = catalog_column("id", "bigint");
+        id.auto_increment = true;
+        let mut counter = catalog_column("counter", "integer");
+        counter.auto_increment = true;
+        counter.default = Some("0".to_string());
+        vec![id, counter]
+    };
+
+    let table = catalog_table(
+        "events",
+        None,
+        columns(),
+        vec!["id".to_string()],
+        Vec::new(),
+        false,
+    );
+
+    assert!(table.columns[0].auto_increment);
+    assert!(!table.columns[1].auto_increment);
+    assert_eq!(table.columns[1].default.as_deref(), Some("0"));
+    assert_eq!(table.schema_name, None);
+
+    // PostgreSQL's serial type numbers a column that is not the key, as an
+    // identity column does.
+    let table = catalog_table(
+        "events",
+        Some("public"),
+        columns(),
+        vec!["id".to_string()],
+        Vec::new(),
+        true,
+    );
+    assert!(table.columns[0].auto_increment && table.columns[1].auto_increment);
+}
+
+#[test]
+fn test_mysql_defaults_are_restored_to_a_default_clause() {
+    use super::writer::mysql_default;
+
+    let default = |value: &str, sql_type: &str, extra: &str| {
+        mysql_default(Some(value.to_string()), sql_type, extra, false)
+    };
+    // MySQL 8 reports a literal bare and an expression without parentheses.
+    assert_eq!(
+        default("draft", "varchar(20)", "").as_deref(),
+        Some("'draft'")
+    );
+    assert_eq!(default("", "varchar(20)", "").as_deref(), Some("''"));
+    assert_eq!(default("it's", "text", "").as_deref(), Some("'it''s'"));
+    assert_eq!(
+        default(r"C:\temp", "varchar(20)", "").as_deref(),
+        Some(r"'C:\\temp'")
+    );
+    assert_eq!(default("5", "int", "").as_deref(), Some("5"));
+    assert_eq!(
+        default("1.50", "decimal(10,2)", "").as_deref(),
+        Some("1.50")
+    );
+    assert_eq!(
+        default("CURRENT_TIMESTAMP(6)", "datetime(6)", "DEFAULT_GENERATED").as_deref(),
+        Some("CURRENT_TIMESTAMP(6)")
+    );
+    assert_eq!(
+        default(r"_utf8mb4\'x\'", "longtext", "DEFAULT_GENERATED").as_deref(),
+        Some("(_utf8mb4'x')")
+    );
+    assert_eq!(
+        default("uuid()", "char(36)", "DEFAULT_GENERATED").as_deref(),
+        Some("(uuid())")
+    );
+    assert_eq!(mysql_default(None, "varchar(20)", "", false), None);
+    // MariaDB reports the clause's own spelling.
+    assert_eq!(
+        mysql_default(Some("'draft'".to_string()), "varchar(20)", "", true).as_deref(),
+        Some("'draft'")
+    );
 }

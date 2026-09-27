@@ -8,7 +8,7 @@
 use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::quote_ident;
-use crate::query::{LogicalOp, OrGroup, QueryBuilder};
+use crate::query::{OrGroup, QueryBuilder, WhereCondition};
 
 use super::Model;
 
@@ -20,21 +20,29 @@ mod validation_helpers;
 ///
 /// # Soft-delete scope
 ///
-/// Unlike [`crate::query::QueryBuilder`], a batch update **includes
-/// soft-deleted rows by default** — it behaves as if `with_trashed()` had been
-/// called. That default exists so bulk maintenance writes (restoring a batch of
-/// trashed rows, backfilling a column, scrubbing personal data) still reach the
-/// rows they are aimed at. Call
-/// [`BatchUpdateBuilder::without_trashed`] to restrict the update to rows that
-/// are not soft-deleted.
+/// Like [`crate::query::QueryBuilder`], a batch update leaves soft-deleted
+/// rows out; [`BatchUpdateBuilder::with_trashed`] reaches them too, for a
+/// backfill or a scrub that must cover the trash. An update started from a
+/// query with [`QueryBuilder::update_all`](crate::query::QueryBuilder::update_all)
+/// keeps that query's scope.
 pub struct BatchUpdateBuilder<M: Model> {
     _marker: std::marker::PhantomData<M>,
     updates: std::collections::HashMap<String, UpdateValue>,
-    conditions: Vec<crate::query::WhereCondition>,
-    returning: bool,
+    /// Filters ANDed together.
+    conditions: Vec<WhereCondition>,
+    /// The group every `or_where_*` call joins, ANDed with `conditions`.
+    or_group: OrGroup,
     limit_value: Option<u64>,
-    /// Whether soft-deleted rows are in scope. Defaults to `true`.
-    include_trashed: bool,
+    /// Whether soft-deleted rows are in scope, when the update chose: by
+    /// default they are, except for an update started from a query, which
+    /// keeps that query's scope.
+    include_trashed: Option<bool>,
+    /// The query an update started from, whose filters, scope and database
+    /// it keeps.
+    base: Option<crate::query::QueryBuilder<M>>,
+    /// Why the update cannot run, recorded by a setter given a value SQL
+    /// cannot hold and reported when the update runs.
+    invalid_reason: Option<String>,
 }
 
 /// What a batch update writes into one column.

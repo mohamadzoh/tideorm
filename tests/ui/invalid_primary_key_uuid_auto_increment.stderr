@@ -1,0 +1,5 @@
+error: #[tideorm(auto_increment)] requires an integer primary key; a Uuid key gets a random value on create without it
+ --> tests/ui/invalid_primary_key_uuid_auto_increment.rs:6:9
+  |
+6 |     id: Uuid,
+  |         ^^^^

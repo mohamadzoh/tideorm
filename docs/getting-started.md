@@ -29,6 +29,8 @@ TideConfig::init()
     .await?;
 ```
 
+The driver has one timeout for handing out a connection, opening a new one when the pool has room, so `connect_timeout` and `acquire_timeout` set the same limit, and the longer of the two applies.
+
 ### Database Types
 
 ```rust
@@ -67,25 +69,31 @@ TideConfig::init()
 
 | Rust Type | PostgreSQL | MySQL | SQLite | Notes |
 |-----------|------------|-------|--------|-------|
-| `i8`, `i16` | SMALLINT | SMALLINT | INTEGER | |
+| `i8` | — | SMALLINT | INTEGER | The PostgreSQL driver has no binding for `i8`; use `i16` there |
+| `i16` | SMALLINT | SMALLINT | INTEGER | |
 | `i32` | INTEGER | INT | INTEGER | |
 | `i64` | BIGINT | BIGINT | INTEGER | Recommended for primary keys |
-| `u8`, `u16` | SMALLINT | SMALLINT UNSIGNED | INTEGER | |
-| `u32` | INTEGER | INT UNSIGNED | INTEGER | |
-| `u64` | BIGINT | BIGINT UNSIGNED | INTEGER | |
+| `u8` | — | TINYINT UNSIGNED | INTEGER | Not supported on PostgreSQL |
+| `u16` | — | SMALLINT UNSIGNED | INTEGER | Not supported on PostgreSQL |
+| `u32` | INTEGER | INT UNSIGNED | INTEGER | PostgreSQL stores only up to `i32::MAX` |
+| `u64` | — | BIGINT UNSIGNED | — | MySQL only |
 | `f32` | REAL | FLOAT | REAL | |
 | `f64` | DOUBLE PRECISION | DOUBLE | REAL | |
 | `bool` | BOOLEAN | TINYINT(1) | INTEGER | |
-| `String` | TEXT | TEXT | TEXT | |
+| `String` | TEXT | LONGTEXT | TEXT | Schema sync creates a MySQL key or indexed column as `VARCHAR(255)`, because MySQL cannot index `TEXT` without a prefix length |
 | `Option<T>` | (nullable) | (nullable) | (nullable) | Wraps any type to make it nullable |
 | `uuid::Uuid` | UUID | BINARY(16) | TEXT | MySQL binds a UUID as 16 raw bytes, so the column must be `BINARY(16)` |
 | `rust_decimal::Decimal` | DECIMAL | DECIMAL(65,30) | REAL | SQLite reads decimals back through `f64`, so REAL is forced; store a string or minor units if you need exactness |
 | `serde_json::Value` | JSONB | JSON | TEXT | |
-| `Vec<u8>` | BYTEA | BLOB | BLOB | Binary data |
+| `Vec<u8>` | BYTEA | LONGBLOB | BLOB | Binary data |
 | `chrono::NaiveDate` | DATE | DATE | TEXT | Date only |
-| `chrono::NaiveTime` | TIME | TIME | TEXT | Time only |
-| `chrono::NaiveDateTime` | TIMESTAMP | DATETIME | TEXT | No timezone |
-| `chrono::DateTime<Utc>` | **TIMESTAMPTZ** | TIMESTAMP | TEXT | **With timezone** |
+| `chrono::NaiveTime` | TIME | TIME(6) | TEXT | Time only |
+| `chrono::NaiveDateTime` | TIMESTAMP | DATETIME(6) | TEXT | No timezone |
+| `chrono::DateTime<Utc>` | **TIMESTAMPTZ** | DATETIME(6) | TEXT | **With timezone** |
+
+On PostgreSQL a field can also be an array: `Vec<i32>`, `Vec<i64>`, `Vec<f64>`, `Vec<bool>`, `Vec<String>` or `Vec<serde_json::Value>`. A field of any other type is a compile error on that field: store an enum as a `String` or an integer, and mark a field that is not a column `#[tideorm(skip)]`.
+
+On MySQL and MariaDB every timestamp is a `DATETIME(6)`: MySQL's `TIMESTAMP` only spans 1970–2038 and a column without fractional digits drops microseconds. The connection runs in UTC, so a `DateTime<Utc>` is stored as its UTC wall time. Text and binary columns are `LONGTEXT`/`LONGBLOB` because `TEXT` and `BLOB` stop at 64 KB, and tables are created `DEFAULT CHARSET=utf8mb4` whatever the database default is, so any Rust `String` fits.
 
 ### Date and Time Types
 
@@ -233,6 +241,9 @@ cargo test --test postgres_integration_tests
 
 # MySQL integration suite
 cargo test --test mysql_integration_tests --features mysql
+
+# MariaDB integration suite
+cargo test --test mariadb_integration_tests --features mysql
 
 # SQLite smoke test
 cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-default-features

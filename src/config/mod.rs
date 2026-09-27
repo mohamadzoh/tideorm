@@ -9,22 +9,17 @@
 
 mod builder;
 mod database;
-mod registration;
 mod settings;
 mod state;
 
 pub use builder::TideConfig;
 pub use database::DatabaseType;
-pub use registration::{RegisterMigrations, RegisterSeeds};
+pub(crate) use database::rewrite_driver_url;
 pub use settings::{Config, PoolConfig};
+pub(crate) use state::note_detected_mariadb;
 
 #[cfg(feature = "attachments")]
 pub use settings::FileUrlGenerator;
-
-#[cfg(test)]
-pub(crate) use database::rewrite_driver_url;
-#[cfg(test)]
-use std::time::Duration;
 
 #[cfg(test)]
 #[path = "../../tests/unit/config_tests.rs"]

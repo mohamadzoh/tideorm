@@ -1,0 +1,5 @@
+error: #[tideorm(encrypted = ...)] cannot name a primary key field: its stored ciphertext changes on every write, so no lookup by the key could match it
+ --> tests/ui/invalid_primary_key_encrypted.rs:4:5
+  |
+4 |     code: String,
+  |     ^^^^

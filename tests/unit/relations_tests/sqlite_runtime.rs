@@ -1,5 +1,7 @@
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use super::*;
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+use crate::model::Model as _;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
@@ -495,6 +497,123 @@ async fn direct_relation_load_preserves_cached_payloads_without_query_context() 
             .expect("cached user should exist")
             .name,
         "Cached User"
+    );
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn self_referencing_load_does_not_serve_a_deserialized_payload() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_employees (id INTEGER PRIMARY KEY, manager_id INTEGER)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_employees should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_employees (id, manager_id) VALUES (?, ?), (?, ?), (?, ?)",
+        vec![
+            Value::BigInt(Some(1)),
+            Value::BigInt(None),
+            Value::BigInt(Some(2)),
+            Value::BigInt(Some(1)),
+            Value::BigInt(Some(3)),
+            Value::BigInt(Some(2)),
+        ],
+    )
+    .await
+    .expect("inserting employees should succeed");
+
+    // A request body claiming employee 2 answers to 99 and manages 98. The
+    // payload survives the model's own relation rebuild, so only `load`
+    // preferring the database keeps it from being reported as stored rows.
+    let employee: RelationTestEmployee = serde_json::from_value(json!({
+        "id": 2,
+        "manager_id": 1,
+        "manager": { "id": 99, "manager_id": null, "reports": [], "avatar": null },
+        "reports": [{ "id": 98, "manager_id": 2, "reports": [], "avatar": null }],
+        "avatar": null
+    }))
+    .expect("employee should deserialize");
+    assert_eq!(employee.manager.get_cached().map(|m| m.id), Some(99));
+
+    let manager = employee
+        .manager
+        .load()
+        .await
+        .expect("loading the manager should succeed")
+        .expect("employee 2 has a manager");
+    assert_eq!(manager.id, 1);
+
+    let reports = employee
+        .reports
+        .load()
+        .await
+        .expect("loading the reports should succeed");
+    assert_eq!(
+        reports.iter().map(|report| report.id).collect::<Vec<_>>(),
+        vec![3]
+    );
+
+    cleanup_direct_relation_test_db();
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn morph_load_does_not_serve_a_deserialized_payload() {
+    let _guard = direct_relation_db_guard().lock().await;
+
+    let db = setup_direct_relation_test_db().await;
+
+    db.__execute_with_params(
+        "CREATE TABLE relation_test_images (id INTEGER PRIMARY KEY, imageable_type TEXT NOT NULL, imageable_id INTEGER NOT NULL)",
+        vec![],
+    )
+    .await
+    .expect("creating relation_test_images should succeed");
+    db.__execute_with_params(
+        "INSERT INTO relation_test_images (id, imageable_type, imageable_id) VALUES (?, ?, ?)",
+        vec![
+            Value::BigInt(Some(7)),
+            Value::String(Some("relation_test_employees".to_string())),
+            Value::BigInt(Some(2)),
+        ],
+    )
+    .await
+    .expect("inserting the stored image should succeed");
+
+    // A payload claiming employee 2 owns image 99 stands in for a request body.
+    let forged = RelationTestImage {
+        id: 99,
+        imageable_type: "relation_test_employees".to_string(),
+        imageable_id: 2,
+        owner: Default::default(),
+    };
+
+    let mut one = MorphOne::<RelationTestImage>::new("imageable", "id")
+        .with_parent(json!(2), "relation_test_employees".to_string());
+    one.set_cached(Some(forged.clone()));
+    let loaded = one
+        .load()
+        .await
+        .expect("loading the morph-one should succeed");
+    assert_eq!(loaded.map(|image| image.id), Some(7));
+
+    let mut many = MorphMany::<RelationTestImage>::new("imageable", "id")
+        .with_parent(json!(2), "relation_test_employees".to_string());
+    many.set_cached(vec![forged]);
+    let loaded = many
+        .load()
+        .await
+        .expect("loading the morph-many should succeed");
+    assert_eq!(
+        loaded.iter().map(|image| image.id).collect::<Vec<_>>(),
+        vec![7]
     );
 
     cleanup_direct_relation_test_db();

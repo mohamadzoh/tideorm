@@ -1,16 +1,25 @@
 use crate::config::DatabaseType;
 use crate::internal::Value;
-use crate::internal::sql_safety;
 
-mod previews_and_arrays;
+mod arrays;
+mod mysql_json;
+mod placeholders;
+mod sqlite_json;
 
-pub(crate) use previews_and_arrays::*;
-
-pub(crate) use sql_safety::escape_sql_literal_for_db as escape_sql_literal;
-
-fn escape_mysql_literal(value: &str) -> String {
-    escape_sql_literal(DatabaseType::MySQL, value)
-}
+pub(crate) use crate::internal::placeholder;
+pub(crate) use crate::internal::sql_safety::{
+    format_identifier_reference, is_safe_identifier_segment, push_quoted_ident, quote_ident,
+    validate_compound_subquery_sql, validate_having_sql_fragment, validate_identifier,
+    validate_identifier_reference, validate_join_column, validate_raw_sql_fragment,
+    validate_subquery_sql,
+};
+pub(crate) use arrays::{
+    postgres_array_contained_by, postgres_array_contains, postgres_array_overlaps,
+};
+pub(crate) use placeholders::{
+    count_template_placeholders, inline_parameters, map_template_placeholders,
+    offset_postgres_placeholders, placeholders,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BoundSql {
@@ -24,45 +33,135 @@ impl BoundSql {
     }
 }
 
-fn json_text_value(text: String) -> Value {
-    Value::String(Some(text))
+/// `M`'s table as a statement names it: quoted, and qualified with the model's
+/// schema when it declares one.
+///
+/// Column references stay qualified with the bare table name, which every
+/// backend resolves against a schema-qualified `FROM`.
+pub(crate) fn quote_table<M: crate::model::ModelMeta>(db_type: DatabaseType) -> String {
+    let mut table = String::new();
+    push_quoted_table::<M>(&mut table, db_type);
+    table
 }
 
-fn json_scalar_parameter(value: &serde_json::Value) -> Value {
-    json_text_value(serde_json::to_string(value).unwrap())
+/// Append [`quote_table`]'s rendering to `out`.
+pub(crate) fn push_quoted_table<M: crate::model::ModelMeta>(
+    out: &mut String,
+    db_type: DatabaseType,
+) {
+    if let Some(schema) = M::schema_name() {
+        push_quoted_ident(out, db_type, schema);
+        out.push('.');
+    }
+    push_quoted_ident(out, db_type, M::table_name());
+}
+
+/// `M`'s own columns as a projection, each qualified with `qualifier` when given.
+///
+/// Model reads name their columns instead of selecting `*`, so a column added
+/// to the table cannot change the result shape of a statement a connection has
+/// already prepared: PostgreSQL rejects that statement (`cached plan must not
+/// change result type`) until the connection is recycled, and SQLite's driver
+/// mis-decodes its rows.
+pub(crate) fn model_columns_sql<M: crate::model::ModelMeta>(
+    db_type: DatabaseType,
+    qualifier: Option<&str>,
+) -> String {
+    let columns = M::column_names();
+    let mut sql = String::with_capacity(columns.len() * 24);
+    for (index, column) in columns.iter().enumerate() {
+        if index > 0 {
+            sql.push_str(", ");
+        }
+        if let Some(qualifier) = qualifier {
+            push_quoted_ident(&mut sql, db_type, qualifier);
+            sql.push('.');
+        }
+        push_quoted_ident(&mut sql, db_type, column);
+    }
+    sql
+}
+
+/// Bind a JSON value as its JSON text, for backends that parse it server-side.
+pub(crate) fn json_scalar_parameter(value: &serde_json::Value) -> Value {
+    Value::String(Some(value.to_string()))
+}
+
+/// Bind a list of JSON values as the text of one JSON array.
+pub(crate) fn json_array_parameter(values: &[serde_json::Value]) -> Value {
+    json_scalar_parameter(&serde_json::Value::Array(values.to_vec()))
 }
 
 fn json_native_parameter(value: &serde_json::Value) -> Value {
     Value::Json(Some(Box::new(value.clone())))
 }
 
-fn sqlite_json_compare_parameter(value: &serde_json::Value) -> Value {
-    match value {
-        serde_json::Value::String(text) => Value::String(Some(text.clone())),
-        serde_json::Value::Null => Value::String(Some("null".to_string())),
-        serde_json::Value::Bool(boolean) => Value::Bool(Some(*boolean)),
-        serde_json::Value::Number(number) => {
-            if let Some(integer) = number.as_i64() {
-                Value::BigInt(Some(integer))
-            } else if let Some(float) = number.as_f64() {
-                Value::Double(Some(float))
-            } else {
-                Value::String(Some(number.to_string()))
-            }
-        }
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Value::String(Some(value.to_string()))
-        }
-    }
-}
-
 fn json_string_contents(value: &str) -> String {
-    let json = serde_json::to_string(value).unwrap();
+    let json = serde_json::Value::String(value.to_string()).to_string();
     json[1..json.len() - 1].to_string()
 }
 
 pub(crate) fn canonical_json_member_path(key: &str) -> String {
     format!("$.\"{}\"", json_string_contents(key))
+}
+
+/// `column_sql` as `jsonb`, which PostgreSQL's JSON operators require: a
+/// `json` column has none of them. On a `jsonb` column the cast is dropped at
+/// planning, so its indexes still apply.
+pub(crate) fn postgres_jsonb(column_sql: &str) -> String {
+    format!("({column_sql})::jsonb")
+}
+
+/// Render "`column` holds the JSON document `value`" (or does not, when
+/// `negated`), compared as JSON rather than as text, so key order and
+/// spacing do not count and `1` equals `1.0`. PostgreSQL's `json` type has
+/// no `=` at all, MySQL compared the document with a string, which never
+/// matched, and SQLite, which compares JSON only as text, compares the
+/// document's structure.
+pub(crate) fn json_equals_bound(
+    db_type: DatabaseType,
+    column_sql: &str,
+    value: &serde_json::Value,
+    negated: bool,
+) -> BoundSql {
+    let operator = if negated { "<>" } else { "=" };
+    let text = || vec![Value::String(Some(value.to_string()))];
+    match db_type {
+        DatabaseType::Postgres => BoundSql::new(
+            format!("{} {} $1", postgres_jsonb(column_sql), operator),
+            vec![json_native_parameter(value)],
+        ),
+        DatabaseType::MySQL => BoundSql::new(
+            format!("{} {} CAST(? AS JSON)", column_sql, operator),
+            text(),
+        ),
+        // MariaDB has no `CAST(.. AS JSON)`.
+        DatabaseType::MariaDB => BoundSql::new(
+            format!(
+                "{}JSON_EQUALS({}, ?)",
+                if negated { "NOT " } else { "" },
+                column_sql
+            ),
+            text(),
+        ),
+        // A NULL column matches neither the test nor its negation.
+        DatabaseType::SQLite => {
+            let (equal, values) = sqlite_json::sqlite_json_equals(column_sql, value);
+            let sql = if negated {
+                format!("({column_sql} IS NOT NULL AND NOT {equal})")
+            } else {
+                equal
+            };
+            BoundSql::new(sql, values)
+        }
+    }
+}
+
+/// Render "the `json_each` row `alias` holds the JSON value `value`" on
+/// SQLite, compared as [`json_equals_bound`] compares documents.
+pub(crate) fn sqlite_json_element_equals(alias: &str, value: &serde_json::Value) -> BoundSql {
+    let (sql, values) = sqlite_json::sqlite_json_element_equals(alias, value);
+    BoundSql::new(sql, values)
 }
 
 pub(crate) fn json_contains_bound(
@@ -72,20 +171,17 @@ pub(crate) fn json_contains_bound(
 ) -> BoundSql {
     match db_type {
         DatabaseType::Postgres => BoundSql::new(
-            format!("{} @> $1", column_sql),
+            format!("{} @> $1", postgres_jsonb(column_sql)),
             vec![json_native_parameter(value)],
         ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => BoundSql::new(
-            format!("JSON_CONTAINS({}, CAST(? AS JSON))", column_sql),
-            vec![json_scalar_parameter(value)],
-        ),
-        DatabaseType::SQLite => BoundSql::new(
-            format!(
-                "EXISTS (SELECT 1 FROM json_each({}) WHERE value = ?)",
-                column_sql
-            ),
-            vec![sqlite_json_compare_parameter(value)],
-        ),
+        DatabaseType::MySQL | DatabaseType::MariaDB => {
+            let (sql, values) = mysql_json::mysql_json_contains(column_sql, value);
+            BoundSql::new(sql, values)
+        }
+        DatabaseType::SQLite => {
+            let (sql, values) = sqlite_json::sqlite_json_contains(column_sql, value);
+            BoundSql::new(sql, values)
+        }
     }
 }
 
@@ -96,117 +192,82 @@ pub(crate) fn json_contained_by_bound(
 ) -> BoundSql {
     match db_type {
         DatabaseType::Postgres => BoundSql::new(
-            format!("{} <@ $1", column_sql),
+            format!("{} <@ $1", postgres_jsonb(column_sql)),
             vec![json_native_parameter(value)],
         ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => BoundSql::new(
-            format!("JSON_CONTAINS(CAST(? AS JSON), {})", column_sql),
-            vec![json_scalar_parameter(value)],
-        ),
-        DatabaseType::SQLite => BoundSql::new(
-            format!(
-                "json_type({}) IS NOT NULL AND ? LIKE '%' || {} || '%'",
-                column_sql, column_sql
-            ),
-            vec![json_scalar_parameter(value)],
-        ),
+        DatabaseType::MySQL | DatabaseType::MariaDB => {
+            let (sql, values) = mysql_json::mysql_json_contained_by(column_sql, value);
+            BoundSql::new(sql, values)
+        }
+        DatabaseType::SQLite => {
+            let (sql, values) = sqlite_json::sqlite_json_contained_by(column_sql, value);
+            BoundSql::new(sql, values)
+        }
     }
 }
 
-pub(crate) fn json_key_exists_bound(
+/// What a JSON existence predicate looks for.
+#[derive(Clone, Copy)]
+pub(crate) enum JsonExistence {
+    /// A top-level member, named by a plain key.
+    Key,
+    /// A JSON path such as `$.user.name`.
+    Path,
+}
+
+/// Render a JSON key- or path-existence test, or its negation.
+///
+/// PostgreSQL tests a key with `?` and a path with `@?`. MySQL/MariaDB and
+/// SQLite have no key operator, so a key is tested as the one-member path that
+/// names it. `None` means the path cannot be expressed on this backend.
+///
+/// On SQLite, `json_type` finds a member that holds JSON `null`, which
+/// `json_extract` reports as SQL `NULL`, and the `CASE` leaves a `NULL`
+/// column unknown, as the other backends do, so that the negation does not
+/// match it either.
+pub(crate) fn json_exists_bound(
     db_type: DatabaseType,
     column_sql: &str,
-    key: &str,
-) -> BoundSql {
-    match db_type {
-        DatabaseType::Postgres => BoundSql::new(
-            format!("{} ? $1", column_sql),
-            vec![Value::String(Some(key.to_string()))],
+    existence: JsonExistence,
+    target: &str,
+    negated: bool,
+) -> Option<BoundSql> {
+    let sqlite_exists = || {
+        format!(
+            "CASE WHEN {column_sql} IS NOT NULL THEN json_type({column_sql}, ?) IS NOT NULL END"
+        )
+    };
+    let (sql, bound) = match (db_type, existence) {
+        (DatabaseType::Postgres, JsonExistence::Key) => (
+            format!("{} ? $1", postgres_jsonb(column_sql)),
+            target.to_string(),
         ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => BoundSql::new(
+        (DatabaseType::Postgres, JsonExistence::Path) => (
+            format!("{} @? ($1::jsonpath)", postgres_jsonb(column_sql)),
+            target.to_string(),
+        ),
+        (DatabaseType::SQLite, JsonExistence::Key) => {
+            (sqlite_exists(), canonical_json_member_path(target))
+        }
+        (DatabaseType::SQLite, JsonExistence::Path) => {
+            (sqlite_exists(), normalize_mysql_sqlite_json_path(target)?)
+        }
+        (DatabaseType::MySQL | DatabaseType::MariaDB, JsonExistence::Key) => (
             format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-            vec![Value::String(Some(canonical_json_member_path(key)))],
+            canonical_json_member_path(target),
         ),
-        DatabaseType::SQLite => BoundSql::new(
-            format!("json_extract({}, ?) IS NOT NULL", column_sql),
-            vec![Value::String(Some(canonical_json_member_path(key)))],
+        (DatabaseType::MySQL | DatabaseType::MariaDB, JsonExistence::Path) => (
+            format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
+            normalize_mysql_sqlite_json_path(target)?,
         ),
-    }
-}
+    };
 
-pub(crate) fn json_key_not_exists_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    key: &str,
-) -> BoundSql {
-    match db_type {
-        DatabaseType::Postgres => BoundSql::new(
-            format!("NOT ({} ? $1)", column_sql),
-            vec![Value::String(Some(key.to_string()))],
-        ),
-        DatabaseType::MySQL | DatabaseType::MariaDB => BoundSql::new(
-            format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-            vec![Value::String(Some(canonical_json_member_path(key)))],
-        ),
-        DatabaseType::SQLite => BoundSql::new(
-            format!("json_extract({}, ?) IS NULL", column_sql),
-            vec![Value::String(Some(canonical_json_member_path(key)))],
-        ),
-    }
-}
-
-pub(crate) fn json_path_exists_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    path: &str,
-) -> Option<BoundSql> {
-    match db_type {
-        DatabaseType::Postgres => Some(BoundSql::new(
-            format!("{} @? ($1::jsonpath)", column_sql),
-            vec![Value::String(Some(path.to_string()))],
-        )),
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            normalize_mysql_sqlite_json_path(path).map(|normalized| {
-                BoundSql::new(
-                    format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(normalized))],
-                )
-            })
-        }
-        DatabaseType::SQLite => normalize_mysql_sqlite_json_path(path).map(|normalized| {
-            BoundSql::new(
-                format!("json_extract({}, ?) IS NOT NULL", column_sql),
-                vec![Value::String(Some(normalized))],
-            )
-        }),
-    }
-}
-
-pub(crate) fn json_path_not_exists_bound(
-    db_type: DatabaseType,
-    column_sql: &str,
-    path: &str,
-) -> Option<BoundSql> {
-    match db_type {
-        DatabaseType::Postgres => Some(BoundSql::new(
-            format!("NOT ({} @? ($1::jsonpath))", column_sql),
-            vec![Value::String(Some(path.to_string()))],
-        )),
-        DatabaseType::MySQL | DatabaseType::MariaDB => {
-            normalize_mysql_sqlite_json_path(path).map(|normalized| {
-                BoundSql::new(
-                    format!("NOT JSON_CONTAINS_PATH({}, 'one', ?)", column_sql),
-                    vec![Value::String(Some(normalized))],
-                )
-            })
-        }
-        DatabaseType::SQLite => normalize_mysql_sqlite_json_path(path).map(|normalized| {
-            BoundSql::new(
-                format!("json_extract({}, ?) IS NULL", column_sql),
-                vec![Value::String(Some(normalized))],
-            )
-        }),
-    }
+    let sql = if negated {
+        format!("NOT ({})", sql)
+    } else {
+        sql
+    };
+    Some(BoundSql::new(sql, vec![Value::String(Some(bound))]))
 }
 
 pub(crate) fn normalize_mysql_sqlite_json_path(path: &str) -> Option<String> {
@@ -305,49 +366,11 @@ fn parse_quoted_json_path_segment(chars: &[char], index: &mut usize) -> Option<S
     None
 }
 
+/// The predicate a JSON path that cannot be expressed renders as: it matches
+/// nothing rather than being dropped from the WHERE clause.
 pub(crate) fn invalid_json_path_predicate() -> String {
     "0 = 1".to_string()
 }
-
-fn sql_array_value_to_json(value: &str) -> serde_json::Value {
-    let trimmed = value.trim();
-    if trimmed.starts_with('\'') && trimmed.ends_with('\'') && trimmed.len() >= 2 {
-        return serde_json::Value::String(trimmed[1..trimmed.len() - 1].replace("''", "'"));
-    }
-
-    match trimmed {
-        "null" | "NULL" => serde_json::Value::Null,
-        "true" | "TRUE" => serde_json::Value::Bool(true),
-        "false" | "FALSE" => serde_json::Value::Bool(false),
-        _ => serde_json::from_str(trimmed)
-            .unwrap_or_else(|_| serde_json::Value::String(trimmed.to_string())),
-    }
-}
-
-fn mysql_json_array_literal(values: &[String]) -> String {
-    let json = serde_json::to_string(
-        &values
-            .iter()
-            .map(|value| sql_array_value_to_json(value))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
-    escape_mysql_literal(&json)
-}
-
-fn mysql_json_scalar_literal(value: &str) -> String {
-    let json = serde_json::to_string(&sql_array_value_to_json(value)).unwrap();
-    escape_mysql_literal(&json)
-}
-
-#[cfg(test)]
-pub(crate) use sql_safety::quote_char;
-pub(crate) use sql_safety::{
-    format_identifier_reference, is_safe_identifier_segment, quote_ident,
-    validate_compound_subquery_sql, validate_having_sql_fragment, validate_identifier,
-    validate_identifier_reference, validate_join_column, validate_raw_sql_fragment,
-    validate_subquery_sql,
-};
 
 /// Format a trusted column/expression slot for rendering paths that intentionally
 /// allow raw SQL expressions after higher-level validation.
@@ -371,40 +394,7 @@ pub(crate) fn format_column_or_trusted_expression(
 /// single identifier instead of being passed through as raw SQL. Call
 /// `format_column_or_trusted_expression()` only from rendering paths that
 /// intentionally support validated raw expressions.
-pub fn format_column(db_type: DatabaseType, column: &str) -> String {
+pub(crate) fn format_column(db_type: DatabaseType, column: &str) -> String {
     let trimmed = column.trim();
     format_identifier_reference(db_type, trimmed).unwrap_or_else(|| quote_ident(db_type, trimmed))
-}
-
-/// Generate aggregate function with proper casting for the database
-pub fn cast_to_float(db_type: DatabaseType, expr: &str) -> String {
-    match db_type {
-        DatabaseType::Postgres => format!("CAST({} AS FLOAT8)", expr),
-        DatabaseType::MySQL | DatabaseType::MariaDB => format!("CAST({} AS DOUBLE)", expr),
-        DatabaseType::SQLite => format!("CAST({} AS REAL)", expr),
-    }
-}
-
-/// Generate = ANY(array) expression (PostgreSQL optimization for IN)
-pub fn eq_any(db_type: DatabaseType, column: &str, values: &[String]) -> String {
-    match db_type {
-        DatabaseType::Postgres => {
-            format!("{} = ANY(ARRAY[{}])", column, values.join(","))
-        }
-        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
-            format!("{} IN ({})", column, values.join(","))
-        }
-    }
-}
-
-/// Generate <> ALL(array) expression (PostgreSQL optimization for NOT IN)
-pub fn ne_all(db_type: DatabaseType, column: &str, values: &[String]) -> String {
-    match db_type {
-        DatabaseType::Postgres => {
-            format!("{} <> ALL(ARRAY[{}])", column, values.join(","))
-        }
-        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => {
-            format!("{} NOT IN ({})", column, values.join(","))
-        }
-    }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -6,64 +6,40 @@ use crate::config::DatabaseType;
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::quote_ident;
 use crate::internal::{
-    Backend, ConnectionTrait, TryGetable, build_statement, build_statement_with_values,
+    Backend, ConnectionTrait, OrmConnection, QueryResult, TryGetable, Value,
+    build_statement_with_values, translate_error,
 };
 use crate::model::IndexDefinition;
 
-use super::{ColumnSchema, SCHEMA_REGISTRY, SchemaGenerator, TableSchema, TableSchemaBuilder};
+use super::{ColumnSchema, SchemaGenerator, TableSchema, TableSchemaBuilder};
 
 /// Schema writer for auto-generating schema files
 pub struct SchemaWriter;
 
 impl SchemaWriter {
-    /// Register a table schema for generation.
+    /// Write the connected database's schema to `path` as SQL.
     ///
-    /// Nothing calls this automatically: the derive macro registers models with
-    /// [`crate::sync::SyncRegistry::register_schema`] for schema *sync*, which
-    /// is a separate registry. Call this yourself for tables you want
-    /// [`SchemaWriter::write_schema`] to emit without introspecting a database.
-    pub fn register_schema(schema: TableSchema) {
-        let mut registry = SCHEMA_REGISTRY.write();
-        if !registry
-            .iter()
-            .any(|table| table.name == schema.name && table.schema_name == schema.schema_name)
-        {
-            registry.push(schema);
-        }
-    }
-
-    /// Generate schema SQL and write it to a file.
+    /// On PostgreSQL, MySQL and MariaDB every base table is read back from
+    /// the catalog - its columns, primary key and secondary indexes - and
+    /// rendered by [`SchemaGenerator`]. What a table's columns and indexes
+    /// cannot describe comes after the tables as the catalog reports it: a
+    /// full-text, expression, partial or prefix index.
+    ///
+    /// SQLite keeps the statement that created each table, view, index and
+    /// trigger, so its file is those statements, generated columns,
+    /// collations and `AUTOINCREMENT` included. Its FTS5 shadow tables are
+    /// left out; the virtual table recreates them.
     pub async fn write_schema<P: AsRef<Path>>(path: P) -> Result<()> {
-        let db_type =
-            crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);
-        let schemas = SCHEMA_REGISTRY.read().clone();
+        let db = crate::require_db()?;
+        let db_type = db.backend();
+        let conn = db.__internal_connection()?;
 
-        if schemas.is_empty() {
-            return Self::write_schema_from_db(path).await;
-        }
-
-        let mut generator = SchemaGenerator::new(db_type);
-        for schema in schemas {
-            generator.add_table(schema);
-        }
-
-        let sql = generator.generate();
-
-        fs::write(path.as_ref(), sql)
-            .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
-
-        Ok(())
-    }
-
-    /// Generate schema from current database state (introspection)
-    pub async fn write_schema_from_db<P: AsRef<Path>>(path: P) -> Result<()> {
-        let db_type =
-            crate::config::TideConfig::get_database_type().unwrap_or(DatabaseType::Postgres);
-
-        let tables = match db_type {
-            DatabaseType::Postgres => Self::introspect_postgres().await?,
-            DatabaseType::MySQL | DatabaseType::MariaDB => Self::introspect_mysql().await?,
-            DatabaseType::SQLite => Self::introspect_sqlite().await?,
+        let Catalog { tables, verbatim } = match db_type {
+            DatabaseType::Postgres => introspect_postgres(&conn).await?,
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                introspect_mysql(&conn, db_type == DatabaseType::MariaDB).await?
+            }
+            DatabaseType::SQLite => introspect_sqlite(&conn).await?,
         };
 
         let mut generator = SchemaGenerator::new(db_type);
@@ -71,428 +47,547 @@ impl SchemaWriter {
             generator.add_table(table);
         }
 
-        let sql = generator.generate();
+        let mut text = generator.generate();
+        for statement in verbatim {
+            if statement.starts_with("--") {
+                text.push_str(&statement);
+                text.push('\n');
+            } else {
+                text.push_str(statement.trim_end().trim_end_matches(';'));
+                text.push_str(";\n");
+            }
+        }
 
-        fs::write(path.as_ref(), sql)
+        fs::write(path.as_ref(), text)
             .map_err(|e| Error::internal(format!("Failed to write schema file: {}", e)))?;
 
         Ok(())
     }
+}
 
-    async fn introspect_postgres() -> Result<Vec<TableSchema>> {
-        let conn = crate::require_db()?.__internal_connection()?;
+/// What a catalog read found: the tables the generator renders, and the
+/// statements written as the catalog reports them, or a comment naming what
+/// could not be exported.
+#[derive(Default)]
+struct Catalog {
+    tables: Vec<TableSchema>,
+    verbatim: Vec<String>,
+}
 
-        let table_rows = conn
-            .query_all_raw(build_statement(
-                Backend::Postgres,
-                "SELECT table_schema, table_name FROM information_schema.tables 
-             WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
-             AND table_schema NOT LIKE 'pg_toast%'
-             AND table_schema NOT LIKE 'pg_temp_%'
-             AND table_type = 'BASE TABLE'
-             ORDER BY table_schema, table_name",
-            ))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+/// One column as the catalog reports it.
+pub(super) struct CatalogColumn {
+    pub(super) name: String,
+    pub(super) sql_type: String,
+    pub(super) nullable: bool,
+    pub(super) default: Option<String>,
+    /// Whether the column draws its values from a sequence or counter.
+    pub(super) auto_increment: bool,
+}
 
-        let mut schemas = Vec::new();
+/// One key column of an index, as the catalog reports it.
+pub(super) struct CatalogIndexColumn {
+    pub(super) index: String,
+    pub(super) unique: bool,
+    pub(super) column: String,
+}
 
-        for row in table_rows {
-            let table_schema: String = row
-                .try_get("", "table_schema")
-                .map_err(|e| Error::query(e.to_string()))?;
-            let table_name: String = row
-                .try_get("", "table_name")
-                .map_err(|e| Error::query(e.to_string()))?;
+/// Assemble a table from what the catalog reported.
+///
+/// `primary_key` is in key order, which can differ from column order, so it
+/// is set on the table as given rather than collected from the columns. Only
+/// key columns keep their auto-increment flag unless `counters_anywhere`:
+/// MySQL requires the counter to be a key, where PostgreSQL's serial type
+/// numbers any column.
+pub(super) fn catalog_table(
+    name: &str,
+    schema_name: Option<&str>,
+    columns: Vec<CatalogColumn>,
+    primary_key: Vec<String>,
+    indexes: Vec<IndexDefinition>,
+    counters_anywhere: bool,
+) -> TableSchema {
+    let mut builder = TableSchemaBuilder::new(name);
+    if let Some(schema_name) = schema_name {
+        builder = builder.schema(schema_name);
+    }
 
-            // `information_schema.columns.data_type` is a *category*, not a
-            // declared type: it reports `text[]` as "ARRAY", an enum as
-            // "USER-DEFINED", `varchar(50)` as an unbounded "character varying"
-            // and `numeric(10,2)` as a bare "numeric". Replaying that produces
-            // invalid SQL, so read the exact declared type from pg_catalog
-            // instead - `format_type` renders element type, length and
-            // precision the way the column was declared.
-            let col_rows = conn
-                .query_all_raw(build_statement_with_values(
-                    Backend::Postgres,
-                    "SELECT a.attname AS column_name,
-                        pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
-                        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
-                        pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default
-                 FROM pg_catalog.pg_attribute a
-                 JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-                 JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
-                 LEFT JOIN pg_catalog.pg_attrdef d
-                     ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-                 WHERE ns.nspname = $1 AND c.relname = $2
-                 AND a.attnum > 0 AND NOT a.attisdropped
-                 ORDER BY a.attnum",
-                    vec![table_schema.clone().into(), table_name.clone().into()],
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
+    for column in columns {
+        let mut schema = ColumnSchema::new(column.name, column.sql_type);
 
-            let pk_rows = conn
-                .query_all_raw(build_statement_with_values(
-                    Backend::Postgres,
-                    "SELECT c.column_name
-                 FROM information_schema.table_constraints tc
-                 JOIN information_schema.constraint_column_usage AS ccu 
-                     ON ccu.constraint_name = tc.constraint_name
-                     AND ccu.constraint_schema = tc.constraint_schema
-                     AND ccu.table_schema = tc.table_schema
-                     AND ccu.table_name = tc.table_name
-                 JOIN information_schema.columns AS c 
-                     ON c.table_schema = ccu.table_schema AND c.table_name = ccu.table_name AND c.column_name = ccu.column_name
-                 WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $1 AND tc.table_name = $2",
-                    vec![table_schema.clone().into(), table_name.clone().into()],
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
+        let is_key = primary_key.contains(&schema.name);
+        if is_key {
+            schema = schema.primary_key();
+        }
+        if column.auto_increment && (is_key || counters_anywhere) {
+            schema = schema.auto_increment();
+        }
 
-            let pk_column = pk_rows
-                .first()
-                .and_then(|row| String::try_get(row, "", "column_name").ok())
-                .unwrap_or_default();
+        if !column.nullable {
+            schema = schema.not_null();
+        }
 
-            let index_rows = conn
-                .query_all_raw(build_statement_with_values(
-                    Backend::Postgres,
-                    "SELECT i.relname as index_name, ix.indisunique, a.attname as column_name
-                 FROM pg_class t
-                      JOIN pg_namespace ns ON ns.oid = t.relnamespace
-                 JOIN pg_index ix ON t.oid = ix.indrelid
-                 JOIN pg_class i ON i.oid = ix.indexrelid
-                 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-                      WHERE t.relkind = 'r' AND ns.nspname = $1 AND t.relname = $2
-                 AND NOT ix.indisprimary
-                 ORDER BY i.relname, a.attnum",
-                    vec![table_schema.clone().into(), table_name.clone().into()],
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
+        if let Some(default) = column.default {
+            schema = schema.default(default);
+        }
 
-            let mut index_map: HashMap<String, (bool, Vec<String>)> = HashMap::new();
-            for row in index_rows {
-                let idx_name: String = row.try_get("", "index_name").unwrap_or_default();
-                let is_unique: bool = row.try_get("", "indisunique").unwrap_or(false);
-                let col_name: String = row.try_get("", "column_name").unwrap_or_default();
+        builder = builder.column(schema);
+    }
 
-                index_map
-                    .entry(idx_name)
-                    .or_insert((is_unique, Vec::new()))
-                    .1
-                    .push(col_name);
+    let mut table = builder.indexes(indexes).build();
+    table.primary_keys = primary_key;
+    table
+}
+
+/// Group index key columns into index definitions.
+///
+/// Each index keeps the column order its rows arrive in, which every catalog
+/// query below sorts by key position. The indexes themselves come out sorted
+/// by name, so the same database always exports the same file.
+pub(super) fn group_indexes(
+    columns: impl IntoIterator<Item = CatalogIndexColumn>,
+) -> Vec<IndexDefinition> {
+    let mut indexes: BTreeMap<String, IndexDefinition> = BTreeMap::new();
+
+    for CatalogIndexColumn {
+        index,
+        unique,
+        column,
+    } in columns
+    {
+        indexes
+            .entry(index.clone())
+            .or_insert_with(|| IndexDefinition::new(index, Vec::new(), unique))
+            .columns
+            .push(column);
+    }
+
+    indexes.into_values().collect()
+}
+
+/// Decode one catalog value.
+///
+/// A value that does not decode fails the export: read as empty, it would
+/// silently drop a column's type, key or default from the written schema.
+fn get<T: TryGetable>(row: &QueryResult, column: &str) -> Result<T> {
+    row.try_get("", column).map_err(translate_error)
+}
+
+async fn query(
+    conn: &OrmConnection,
+    backend: Backend,
+    sql: &str,
+    params: Vec<Value>,
+) -> Result<Vec<QueryResult>> {
+    conn.query_all_raw(build_statement_with_values(backend, sql, params))
+        .await
+        .map_err(translate_error)
+}
+
+async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
+    let pg = Backend::Postgres;
+    let table_rows = query(
+        conn,
+        pg,
+        "SELECT table_schema::text AS table_schema, table_name::text AS table_name
+         FROM information_schema.tables
+         WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+         AND table_schema NOT LIKE 'pg_toast%'
+         AND table_schema NOT LIKE 'pg_temp_%'
+         AND table_type = 'BASE TABLE'
+         ORDER BY table_schema, table_name",
+        Vec::new(),
+    )
+    .await?;
+
+    let mut catalog = Catalog::default();
+
+    for row in table_rows {
+        let table_schema: String = get(&row, "table_schema")?;
+        let table_name: String = get(&row, "table_name")?;
+        let params = || vec![table_schema.clone().into(), table_name.clone().into()];
+
+        // `information_schema.columns.data_type` is a *category*, not a
+        // declared type: it reports `text[]` as "ARRAY", an enum as
+        // "USER-DEFINED", `varchar(50)` as an unbounded "character varying"
+        // and `numeric(10,2)` as a bare "numeric". Replaying that produces
+        // invalid SQL, so read the exact declared type from pg_catalog
+        // instead - `format_type` renders element type, length and precision
+        // the way the column was declared. It already returns the canonical
+        // spelling and quotes what needs quoting, so it is used verbatim:
+        // upcasing it would turn a quoted mixed-case enum type such as
+        // `"MyStatus"` into an identifier that does not exist.
+        let columns = query(
+            conn,
+            pg,
+            "SELECT a.attname AS column_name,
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                    NOT a.attnotnull AS is_nullable,
+                    pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default,
+                    a.attidentity::text AS identity
+             FROM pg_catalog.pg_attribute a
+             JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+             JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
+             LEFT JOIN pg_catalog.pg_attrdef d
+                 ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE ns.nspname = $1 AND c.relname = $2
+             AND a.attnum > 0 AND NOT a.attisdropped
+             ORDER BY a.attnum",
+            params(),
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            let default: Option<String> = get(row, "column_default")?;
+            // A serial column's default is its sequence, which the serial
+            // type recreates, as it does an identity column's.
+            let identity: String = get(row, "identity")?;
+            let auto_increment = !identity.is_empty()
+                || default
+                    .as_deref()
+                    .is_some_and(|default| default.contains("nextval"));
+
+            Ok(CatalogColumn {
+                name: get(row, "column_name")?,
+                sql_type: get(row, "data_type")?,
+                nullable: get(row, "is_nullable")?,
+                default: default.filter(|_| !auto_increment),
+                auto_increment,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+        // One row per key column, in key order: `indkey` lists the columns
+        // the way the index was declared, which `attnum` does not. An index
+        // on an expression, a partial one or one not a B-tree cannot be told
+        // by its columns, and is exported as `pg_get_indexdef` renders it.
+        const PLAIN_INDEX: &str =
+            "ix.indexprs IS NULL AND ix.indpred IS NULL AND am.amname = 'btree'";
+        let mut primary_key = Vec::new();
+        let mut index_columns = Vec::new();
+        for row in query(
+            conn,
+            pg,
+            &format!(
+                "SELECT i.relname AS index_name, ix.indisprimary AS is_primary,
+                        ix.indisunique AS is_unique, a.attname AS column_name
+                 FROM pg_catalog.pg_index ix
+                 JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+                 JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
+                 JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_catalog.pg_am am ON am.oid = i.relam
+                 CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, position)
+                 JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                 WHERE ns.nspname = $1 AND t.relname = $2 AND {PLAIN_INDEX}
+                 ORDER BY i.relname, k.position"
+            ),
+            params(),
+        )
+        .await?
+        {
+            let column: String = get(&row, "column_name")?;
+            if get(&row, "is_primary")? {
+                primary_key.push(column);
+            } else {
+                index_columns.push(CatalogIndexColumn {
+                    index: get(&row, "index_name")?,
+                    unique: get(&row, "is_unique")?,
+                    column,
+                });
             }
+        }
 
-            let indexes: Vec<IndexDefinition> = index_map
+        for row in query(
+            conn,
+            pg,
+            &format!(
+                "SELECT pg_catalog.pg_get_indexdef(ix.indexrelid) AS definition
+                 FROM pg_catalog.pg_index ix
+                 JOIN pg_catalog.pg_class t ON t.oid = ix.indrelid
+                 JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
+                 JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_catalog.pg_am am ON am.oid = i.relam
+                 WHERE ns.nspname = $1 AND t.relname = $2
+                 AND NOT ix.indisprimary AND NOT ({PLAIN_INDEX})
+                 ORDER BY i.relname"
+            ),
+            params(),
+        )
+        .await?
+        {
+            catalog.verbatim.push(get(&row, "definition")?);
+        }
+
+        catalog.tables.push(catalog_table(
+            &table_name,
+            Some(&table_schema),
+            columns,
+            primary_key,
+            group_indexes(index_columns),
+            true,
+        ));
+    }
+
+    Ok(catalog)
+}
+
+async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog> {
+    let mysql = Backend::MySql;
+    let database_row = query(conn, mysql, "SELECT DATABASE() AS db_name", Vec::new()).await?;
+    let Some(db_name) = database_row
+        .first()
+        .map(|row| get::<Option<String>>(row, "db_name"))
+        .transpose()?
+        .flatten()
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(Catalog::default());
+    };
+
+    // Every catalog column is aliased: MySQL 8 labels information_schema
+    // columns in upper case unless told otherwise, while MariaDB keeps the
+    // case the query spelled.
+    let table_rows = query(
+        conn,
+        mysql,
+        "SELECT table_name AS table_name FROM information_schema.tables
+         WHERE table_schema = ? AND table_type = 'BASE TABLE'
+         ORDER BY table_name",
+        vec![db_name.clone().into()],
+    )
+    .await?;
+
+    let mut catalog = Catalog::default();
+
+    for row in table_rows {
+        let table_name: String = get(&row, "table_name")?;
+        let params = || vec![db_name.clone().into(), table_name.clone().into()];
+
+        // `column_type` is the declared type, used verbatim: upcasing it would
+        // rewrite the values of an ENUM or SET.
+        let columns = query(
+            conn,
+            mysql,
+            "SELECT column_name AS column_name, column_type AS column_type,
+                    is_nullable AS is_nullable, column_default AS column_default,
+                    extra AS extra
+             FROM information_schema.columns
+             WHERE table_schema = ? AND table_name = ?
+             ORDER BY ordinal_position",
+            params(),
+        )
+        .await?
+        .iter()
+        .map(|row| {
+            let is_nullable: String = get(row, "is_nullable")?;
+            let extra: String = get(row, "extra")?;
+            let sql_type: String = get(row, "column_type")?;
+            let default = mysql_default(get(row, "column_default")?, &sql_type, &extra, mariadb);
+
+            Ok(CatalogColumn {
+                name: get(row, "column_name")?,
+                sql_type,
+                nullable: is_nullable == "YES",
+                default,
+                auto_increment: extra.contains("auto_increment"),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+        // `non_unique` is an INT on MySQL and a BIGINT on MariaDB, so it is
+        // cast to one width, as is the prefix length `sub_part`.
+        let mut primary_key = Vec::new();
+        let mut keys: BTreeMap<String, MysqlKey> = BTreeMap::new();
+        for row in query(
+            conn,
+            mysql,
+            "SELECT index_name AS index_name, CAST(non_unique AS SIGNED) AS non_unique,
+                    column_name AS column_name, index_type AS index_type,
+                    CAST(sub_part AS SIGNED) AS sub_part
+             FROM information_schema.statistics
+             WHERE table_schema = ? AND table_name = ?
+             ORDER BY index_name, seq_in_index",
+            params(),
+        )
+        .await?
+        {
+            let index: String = get(&row, "index_name")?;
+            let column: Option<String> = get(&row, "column_name")?;
+            if index == "PRIMARY" {
+                primary_key.extend(column);
+                continue;
+            }
+            let key = keys.entry(index).or_insert_with(|| MysqlKey {
+                unique: false,
+                kind: String::new(),
+                parts: Vec::new(),
+            });
+            key.unique = get::<i64>(&row, "non_unique")? == 0;
+            key.kind = get(&row, "index_type")?;
+            let prefix: Option<i64> = get(&row, "sub_part")?;
+            key.parts.push(column.map(|column| (column, prefix)));
+        }
+
+        // A plain key is described by its columns; a full-text, spatial or
+        // prefix one is written out, and one with an expression part, which
+        // the catalog does not spell, is named in a comment.
+        let table = quote_ident(DatabaseType::MySQL, &table_name);
+        let mut index_columns = Vec::new();
+        for (index, key) in keys {
+            let Some(parts) = key
+                .parts
                 .into_iter()
-                .map(|(name, (unique, columns))| IndexDefinition::new(name, columns, unique))
+                .collect::<Option<Vec<(String, Option<i64>)>>>()
+            else {
+                catalog.verbatim.push(format!(
+                    "-- index {} on {} has an expression key part and is not exported",
+                    quote_ident(DatabaseType::MySQL, &index),
+                    table
+                ));
+                continue;
+            };
+            let plain = matches!(key.kind.as_str(), "BTREE" | "HASH")
+                && parts.iter().all(|(_, prefix)| prefix.is_none());
+            if plain {
+                index_columns.extend(parts.into_iter().map(|(column, _)| CatalogIndexColumn {
+                    index: index.clone(),
+                    unique: key.unique,
+                    column,
+                }));
+                continue;
+            }
+            let kind = match key.kind.as_str() {
+                "FULLTEXT" => "FULLTEXT ",
+                "SPATIAL" => "SPATIAL ",
+                _ if key.unique => "UNIQUE ",
+                _ => "",
+            };
+            let columns: Vec<String> = parts
+                .iter()
+                .map(|(column, prefix)| {
+                    let column = quote_ident(DatabaseType::MySQL, column);
+                    match prefix {
+                        Some(length) => format!("{column}({length})"),
+                        None => column,
+                    }
+                })
                 .collect();
-
-            let mut builder = TableSchemaBuilder::new(&table_name).schema(&table_schema);
-
-            for row in col_rows {
-                let col_name: String = row.try_get("", "column_name").unwrap_or_default();
-                // `format_type` already returns the canonical spelling and
-                // quotes what needs quoting, so it is used verbatim: upcasing
-                // it would turn a quoted mixed-case enum type such as
-                // `"MyStatus"` into an identifier that does not exist.
-                let sql_type: String = row.try_get("", "data_type").unwrap_or_default();
-                let is_nullable: String = row.try_get("", "is_nullable").unwrap_or_default();
-                let default: Option<String> = row.try_get("", "column_default").ok();
-
-                let mut col = ColumnSchema::new(&col_name, &sql_type);
-
-                if col_name == pk_column {
-                    col = col.primary_key();
-                    if sql_type.to_uppercase().contains("SERIAL")
-                        || default
-                            .as_ref()
-                            .map(|value| value.contains("nextval"))
-                            .unwrap_or(false)
-                    {
-                        col = col.auto_increment();
-                    }
-                }
-
-                if is_nullable == "NO" {
-                    col = col.not_null();
-                }
-
-                if let Some(default) = default
-                    && !default.contains("nextval")
-                {
-                    col = col.default(default);
-                }
-
-                builder = builder.column(col);
-            }
-
-            builder = builder.indexes(indexes);
-            schemas.push(builder.build());
+            catalog.verbatim.push(format!(
+                "CREATE {kind}INDEX {} ON {table} ({})",
+                quote_ident(DatabaseType::MySQL, &index),
+                columns.join(", ")
+            ));
         }
 
-        Ok(schemas)
+        catalog.tables.push(catalog_table(
+            &table_name,
+            None,
+            columns,
+            primary_key,
+            group_indexes(index_columns),
+            false,
+        ));
     }
 
-    async fn introspect_mysql() -> Result<Vec<TableSchema>> {
-        let conn = crate::require_db()?.__internal_connection()?;
+    Ok(catalog)
+}
 
-        let db_name_row = conn
-            .query_one_raw(build_statement(
-                Backend::MySql,
-                "SELECT DATABASE() as db_name",
-            ))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
+/// One MySQL index as `information_schema.statistics` lists it: each key
+/// part is a column and its prefix length, or `None` for an expression.
+struct MysqlKey {
+    unique: bool,
+    kind: String,
+    parts: Vec<Option<(String, Option<i64>)>>,
+}
 
-        let db_name: String = db_name_row
-            .and_then(|row| row.try_get("", "db_name").ok())
-            .unwrap_or_default();
-
-        if db_name.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let table_rows = conn
-            .query_all_raw(build_statement_with_values(
-                Backend::MySql,
-                "SELECT table_name FROM information_schema.tables 
-             WHERE table_schema = ? AND table_type = 'BASE TABLE'
-             ORDER BY table_name",
-                vec![db_name.clone().into()],
-            ))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
-
-        let mut schemas = Vec::new();
-
-        for row in table_rows {
-            let table_name: String = row
-                .try_get("", "table_name")
-                .or_else(|_| row.try_get("", "TABLE_NAME"))
-                .map_err(|e| Error::query(e.to_string()))?;
-
-            let col_rows = conn
-                .query_all_raw(build_statement_with_values(
-                    Backend::MySql,
-                    "SELECT column_name, column_type, is_nullable, column_default, column_key, extra
-                 FROM information_schema.columns
-                 WHERE table_schema = ? AND table_name = ?
-                 ORDER BY ordinal_position",
-                    vec![db_name.clone().into(), table_name.clone().into()],
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
-
-            let index_rows = conn
-                .query_all_raw(build_statement_with_values(
-                    Backend::MySql,
-                    "SELECT index_name, non_unique, column_name
-                 FROM information_schema.statistics
-                 WHERE table_schema = ? AND table_name = ?
-                 AND index_name != 'PRIMARY'
-                 ORDER BY index_name, seq_in_index",
-                    vec![db_name.clone().into(), table_name.clone().into()],
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
-
-            let mut index_map: HashMap<String, (bool, Vec<String>)> = HashMap::new();
-            for row in index_rows {
-                let idx_name: String = row
-                    .try_get("", "index_name")
-                    .or_else(|_| row.try_get("", "INDEX_NAME"))
-                    .unwrap_or_default();
-                let non_unique: i32 = row
-                    .try_get("", "non_unique")
-                    .or_else(|_| row.try_get("", "NON_UNIQUE"))
-                    .unwrap_or(1);
-                let col_name: String = row
-                    .try_get("", "column_name")
-                    .or_else(|_| row.try_get("", "COLUMN_NAME"))
-                    .unwrap_or_default();
-
-                index_map
-                    .entry(idx_name)
-                    .or_insert((non_unique == 0, Vec::new()))
-                    .1
-                    .push(col_name);
-            }
-
-            let indexes: Vec<IndexDefinition> = index_map
-                .into_iter()
-                .map(|(name, (unique, columns))| IndexDefinition::new(name, columns, unique))
-                .collect();
-
-            let mut builder = TableSchemaBuilder::new(&table_name);
-
-            for row in col_rows {
-                let col_name: String = row
-                    .try_get("", "column_name")
-                    .or_else(|_| row.try_get("", "COLUMN_NAME"))
-                    .unwrap_or_default();
-                let col_type: String = row
-                    .try_get("", "column_type")
-                    .or_else(|_| row.try_get("", "COLUMN_TYPE"))
-                    .unwrap_or_default();
-                let is_nullable: String = row
-                    .try_get("", "is_nullable")
-                    .or_else(|_| row.try_get("", "IS_NULLABLE"))
-                    .unwrap_or_default();
-                let default: Option<String> = row
-                    .try_get("", "column_default")
-                    .or_else(|_| row.try_get("", "COLUMN_DEFAULT"))
-                    .ok();
-                let col_key: String = row
-                    .try_get("", "column_key")
-                    .or_else(|_| row.try_get("", "COLUMN_KEY"))
-                    .unwrap_or_default();
-                let extra: String = row
-                    .try_get("", "extra")
-                    .or_else(|_| row.try_get("", "EXTRA"))
-                    .unwrap_or_default();
-
-                let sql_type = col_type.to_uppercase();
-                let mut col = ColumnSchema::new(&col_name, &sql_type);
-
-                if col_key == "PRI" {
-                    col = col.primary_key();
-                    if extra.contains("auto_increment") {
-                        col = col.auto_increment();
-                    }
-                }
-
-                if is_nullable == "NO" {
-                    col = col.not_null();
-                }
-
-                if let Some(default) = default {
-                    col = col.default(default);
-                }
-
-                builder = builder.column(col);
-            }
-
-            builder = builder.indexes(indexes);
-            schemas.push(builder.build());
-        }
-
-        Ok(schemas)
+/// A MySQL or MariaDB `column_default` as a `DEFAULT` clause writes it.
+///
+/// MariaDB reports the clause's own spelling. MySQL 8 reports a literal bare
+/// (`draft` for `DEFAULT 'draft'`), and an expression, which `extra` marks
+/// `DEFAULT_GENERATED`, without its parentheses and with its quotes escaped;
+/// both are restored here. A current-timestamp default stays bare, as MySQL
+/// takes it.
+pub(super) fn mysql_default(
+    default: Option<String>,
+    sql_type: &str,
+    extra: &str,
+    mariadb: bool,
+) -> Option<String> {
+    let default = default?;
+    if mariadb {
+        return Some(default);
     }
-
-    async fn introspect_sqlite() -> Result<Vec<TableSchema>> {
-        let conn = crate::require_db()?.__internal_connection()?;
-
-        let table_rows = conn
-            .query_all_raw(build_statement(
-                Backend::Sqlite,
-                "SELECT name FROM sqlite_master 
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-             ORDER BY name",
-            ))
-            .await
-            .map_err(|e| Error::query(e.to_string()))?;
-
-        let mut schemas = Vec::new();
-
-        for row in table_rows {
-            let table_name: String = row
-                .try_get("", "name")
-                .map_err(|e| Error::query(e.to_string()))?;
-            let quoted_table_name = quote_ident(DatabaseType::SQLite, &table_name);
-
-            let col_rows = conn
-                .query_all_raw(build_statement(
-                    Backend::Sqlite,
-                    format!("PRAGMA table_info({})", quoted_table_name),
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
-
-            let index_list = conn
-                .query_all_raw(build_statement(
-                    Backend::Sqlite,
-                    format!("PRAGMA index_list({})", quoted_table_name),
-                ))
-                .await
-                .map_err(|e| Error::query(e.to_string()))?;
-
-            let mut indexes = Vec::new();
-            for idx_row in index_list {
-                let idx_name: String = idx_row.try_get("", "name").unwrap_or_default();
-                let is_unique: i32 = idx_row.try_get("", "unique").unwrap_or(0);
-                let origin: String = idx_row.try_get("", "origin").unwrap_or_default();
-
-                if origin == "pk" {
-                    continue;
-                }
-
-                let idx_info = conn
-                    .query_all_raw(build_statement(
-                        Backend::Sqlite,
-                        format!(
-                            "PRAGMA index_info({})",
-                            quote_ident(DatabaseType::SQLite, &idx_name)
-                        ),
-                    ))
-                    .await
-                    .map_err(|e| Error::query(e.to_string()))?;
-
-                let columns: Vec<String> = idx_info
-                    .iter()
-                    .filter_map(|row| row.try_get("", "name").ok())
-                    .collect();
-
-                if !columns.is_empty() {
-                    indexes.push(IndexDefinition::new(idx_name, columns, is_unique == 1));
-                }
-            }
-
-            let mut builder = TableSchemaBuilder::new(&table_name);
-
-            for row in col_rows {
-                let col_name: String = row.try_get("", "name").unwrap_or_default();
-                let col_type: String = row.try_get("", "type").unwrap_or_default();
-                let notnull: i32 = row.try_get("", "notnull").unwrap_or(0);
-                let default: Option<String> = row.try_get("", "dflt_value").ok();
-                let pk: i32 = row.try_get("", "pk").unwrap_or(0);
-
-                let sql_type = col_type.to_uppercase();
-                let mut col = ColumnSchema::new(&col_name, &sql_type);
-
-                if pk > 0 {
-                    col = col.primary_key();
-                    if sql_type == "INTEGER" {
-                        col = col.auto_increment();
-                    }
-                }
-
-                if notnull == 1 {
-                    col = col.not_null();
-                }
-
-                if let Some(default) = default {
-                    col = col.default(default);
-                }
-                builder = builder.column(col);
-            }
-
-            builder = builder.indexes(indexes);
-            schemas.push(builder.build());
-        }
-
-        Ok(schemas)
+    if default
+        .to_ascii_uppercase()
+        .starts_with("CURRENT_TIMESTAMP")
+    {
+        return Some(default);
     }
-
-    /// Get the currently registered schemas
-    pub fn get_registered_schemas() -> Vec<TableSchema> {
-        SCHEMA_REGISTRY.read().clone()
+    if extra.to_ascii_uppercase().contains("DEFAULT_GENERATED") {
+        return Some(format!("({})", default.replace("\\'", "'")));
     }
+    let lowered = sql_type.to_ascii_lowercase();
+    let numeric = [
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "int",
+        "bigint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "bit",
+        "year",
+    ]
+    .iter()
+    .any(|prefix| lowered.starts_with(prefix));
+    Some(if numeric {
+        default
+    } else {
+        format!(
+            "'{}'",
+            crate::internal::sql_safety::escape_sql_literal_for_db(DatabaseType::MySQL, &default)
+        )
+    })
+}
 
-    /// Clear the schema registry
-    pub fn clear_registry() {
-        SCHEMA_REGISTRY.write().clear();
+/// SQLite keeps every table, view, index and trigger as the statement that
+/// created it, rewritten by each `ALTER TABLE`, so the schema file carries
+/// those statements. Rebuilt from `PRAGMA` metadata, a table lost what the
+/// pragmas leave out: a generated column, a collation, `AUTOINCREMENT`, a
+/// `CHECK` or foreign key constraint, `WITHOUT ROWID`.
+async fn introspect_sqlite(conn: &OrmConnection) -> Result<Catalog> {
+    // `pragma_table_list` tells a virtual table (an FTS5 index) and the
+    // shadow tables it keeps its data in from an ordinary table. The virtual
+    // table recreates its shadow tables, so they are left out. Tables come
+    // first, then virtual tables and views, which can read them, then the
+    // indexes (a key or `UNIQUE` constraint's is part of its table) and the
+    // triggers, which keep an FTS5 index in step with its table.
+    let statements = query(
+        conn,
+        Backend::Sqlite,
+        "SELECT sql FROM (
+             SELECT CASE l.type WHEN 'table' THEN 0 ELSE 1 END AS rank, l.name AS name, m.sql AS sql
+             FROM pragma_table_list l
+             JOIN sqlite_master m ON m.name = l.name AND m.type = 'table'
+             WHERE l.schema = 'main' AND l.type IN ('table', 'virtual')
+               AND l.name NOT LIKE 'sqlite_%'
+             UNION ALL
+             SELECT CASE type WHEN 'view' THEN 2 WHEN 'index' THEN 3 ELSE 4 END, name, sql
+             FROM sqlite_master
+             WHERE type IN ('view', 'index', 'trigger')
+               AND tbl_name NOT LIKE 'sqlite_%'
+               AND tbl_name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow')
+         )
+         WHERE sql IS NOT NULL
+         ORDER BY rank, name",
+        Vec::new(),
+    )
+    .await?;
+
+    let mut catalog = Catalog::default();
+    for row in statements {
+        catalog.verbatim.push(get(&row, "sql")?);
     }
+    Ok(catalog)
 }

@@ -1,8 +1,5 @@
 use super::*;
 
-// FULL-TEXT SEARCH CONFIGURATION
-// =============================================================================
-
 /// Full-text search configuration for different databases
 #[derive(Debug, Clone, Default)]
 pub struct FullTextConfig {
@@ -10,11 +7,12 @@ pub struct FullTextConfig {
     pub language: Option<String>,
     /// Search mode
     pub mode: SearchMode,
-    /// Minimum word length to index
+    /// Search terms shorter than this many characters are left out of the
+    /// query. The index is untouched: this filters what is searched for.
     pub min_word_length: Option<u32>,
-    /// Maximum word length to index
+    /// Search terms longer than this many characters are left out of the query.
     pub max_word_length: Option<u32>,
-    /// Custom stop words to exclude
+    /// Search terms left out of the query, compared without regard to case.
     pub stop_words: Vec<String>,
     /// Weight configuration for ranked searches
     pub weights: Option<SearchWeights>,
@@ -38,22 +36,53 @@ impl FullTextConfig {
         self
     }
 
-    /// Set minimum word length
+    /// Leave search terms shorter than `len` characters out of the query.
     pub fn min_word_length(mut self, len: u32) -> Self {
         self.min_word_length = Some(len);
         self
     }
 
-    /// Set maximum word length
+    /// Leave search terms longer than `len` characters out of the query.
     pub fn max_word_length(mut self, len: u32) -> Self {
         self.max_word_length = Some(len);
         self
     }
 
-    /// Add stop words to exclude from indexing
+    /// Leave these words out of the query, compared without regard to case.
     pub fn stop_words(mut self, words: Vec<String>) -> Self {
         self.stop_words = words;
         self
+    }
+
+    /// Whether any term filter is set.
+    pub(crate) fn filters_terms(&self) -> bool {
+        self.min_word_length.is_some()
+            || self.max_word_length.is_some()
+            || !self.stop_words.is_empty()
+    }
+
+    /// Whether the query token survives the term filters. The operators around
+    /// a term (`+`, `-`, `*`, quotes, parentheses) count toward neither its
+    /// length nor its stop-word match, and a token that is only operators is
+    /// kept for the backend's sanitizer to deal with.
+    pub(crate) fn keeps_term(&self, token: &str) -> bool {
+        let word = token.trim_matches(|character: char| !character.is_alphanumeric());
+        if word.is_empty() {
+            return true;
+        }
+        let length = word.chars().count();
+        let too_short = self
+            .min_word_length
+            .is_some_and(|min| length < min as usize);
+        let too_long = self
+            .max_word_length
+            .is_some_and(|max| length > max as usize);
+        let lowered = word.to_lowercase();
+        let stop_word = self
+            .stop_words
+            .iter()
+            .any(|stop| stop.to_lowercase() == lowered);
+        !(too_short || too_long || stop_word)
     }
 
     /// Set search weights for ranking
@@ -64,30 +93,27 @@ impl FullTextConfig {
 }
 
 /// Search mode for full-text queries
+///
+/// Every mode builds the backend's query syntax from the words of the search
+/// text, so no operator a user types reaches a query parser as syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
-    /// Natural language search (default)
-    /// Finds rows that match the search terms naturally
+    /// The words, as the backend's natural-language search reads them
+    /// (default).
     #[default]
     Natural,
-    /// Boolean search mode
-    /// Uses backend-specific boolean search behavior.
-    /// MySQL forwards native boolean operators, while PostgreSQL and SQLite
-    /// sanitize user input into literal terms to avoid query-parser injection.
+    /// Every term is required, one written `-term` or `-"a phrase"` is left
+    /// out, and a quoted phrase matches as a phrase. MySQL also reads its own
+    /// `~ < > *` operators, and there a term written without `+` is optional.
+    /// SQLite cannot subtract from nothing, so a search of exclusions only
+    /// matches nothing there.
     Boolean,
-    /// Phrase search mode
-    /// Matches exact phrases
+    /// The words, in order, as one phrase.
     Phrase,
-    /// Prefix search mode
-    /// Matches words that start with the given prefix.
-    /// Backends that require parser syntax build that syntax from sanitized
-    /// literal terms instead of trusting raw user operators.
+    /// Words beginning with each search word, all of them required.
     Prefix,
-    /// Fuzzy search mode (PostgreSQL only)
-    /// Matches similar words using trigrams
-    Fuzzy,
-    /// Proximity search
-    /// Finds terms within a certain distance of each other
+    /// The words within this many words of each other, in either order; at
+    /// most 64 on PostgreSQL.
     Proximity(u32),
 }
 
@@ -98,7 +124,6 @@ impl fmt::Display for SearchMode {
             SearchMode::Boolean => write!(f, "boolean"),
             SearchMode::Phrase => write!(f, "phrase"),
             SearchMode::Prefix => write!(f, "prefix"),
-            SearchMode::Fuzzy => write!(f, "fuzzy"),
             SearchMode::Proximity(d) => write!(f, "proximity({})", d),
         }
     }
@@ -111,7 +136,7 @@ pub struct SearchWeights {
     pub a: f32,
     /// Weight for 'B' category
     pub b: f32,
-    /// Weight for 'C' category  
+    /// Weight for 'C' category
     pub c: f32,
     /// Weight for 'D' category (lowest priority, e.g., body)
     pub d: f32,
@@ -136,13 +161,14 @@ impl SearchWeights {
 
     /// Convert to PostgreSQL weights array format
     pub fn to_pg_array(&self) -> String {
-        format!("'{{{},{},{},{}}}'", self.d, self.c, self.b, self.a)
+        format!("'{}'", self.pg_array())
+    }
+
+    /// The `{D,C,B,A}` array `ts_rank_cd` takes, lowest weight first.
+    pub(super) fn pg_array(&self) -> String {
+        format!("{{{},{},{},{}}}", self.d, self.c, self.b, self.a)
     }
 }
-
-// =============================================================================
-// SEARCH RESULT TYPES
-// =============================================================================
 
 /// A search result with ranking information
 #[derive(Debug, Clone)]
@@ -151,7 +177,9 @@ pub struct SearchResult<T> {
     pub record: T,
     /// Relevance score (higher = more relevant)
     pub rank: f64,
-    /// Highlighted snippets (if requested)
+    /// The searched fields with their matches marked, filled by
+    /// [`get_ranked`](super::FullTextSearchBuilder::get_ranked) when the search
+    /// asked for them with [`highlight`](super::FullTextSearchBuilder::highlight).
     pub highlights: Vec<HighlightedField>,
 }
 
@@ -181,7 +209,7 @@ pub struct HighlightedField {
     pub highlighted: String,
     /// Original value
     pub original: String,
-    /// Number of matches found
+    /// Number of matches marked in `highlighted`
     pub match_count: usize,
 }
 
@@ -194,7 +222,6 @@ impl HighlightedField {
     ) -> Self {
         let highlighted = highlighted.into();
         let original = original.into();
-        // Count matches by looking for start tags
         let match_count = highlighted.matches("<mark>").count();
         Self {
             field: field.into(),
@@ -204,10 +231,6 @@ impl HighlightedField {
         }
     }
 }
-
-// =============================================================================
-// FULL-TEXT SEARCH TRAIT
-// =============================================================================
 
 /// Trait for models that support full-text search
 pub trait FullTextSearch: Model + Sized {
@@ -225,21 +248,10 @@ pub trait FullTextSearch: Model + Sized {
         FullTextSearchBuilder::new(columns, query).config(config)
     }
 
-    /// Search with ranking (returns results ordered by relevance)
+    /// Search with ranking enabled; see [`FullTextSearchBuilder::with_ranking`].
     fn search_ranked(columns: &[&str], query: &str) -> FullTextSearchBuilder<Self> {
         FullTextSearchBuilder::new(columns, query).with_ranking()
     }
-
-    /// Search with highlighting
-    fn search_highlighted(
-        columns: &[&str],
-        query: &str,
-        start_tag: &str,
-        end_tag: &str,
-    ) -> FullTextSearchBuilder<Self> {
-        FullTextSearchBuilder::new(columns, query).with_highlights(start_tag, end_tag)
-    }
 }
 
-// Implement FullTextSearch for all Models
 impl<T: Model> FullTextSearch for T {}

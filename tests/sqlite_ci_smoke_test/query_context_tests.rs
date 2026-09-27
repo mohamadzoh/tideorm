@@ -2,27 +2,12 @@ use super::*;
 
 #[tokio::test]
 async fn sqlite_query_with_and_find_with_work_without_global_db() {
-    use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
+    use tideorm::internal::{ActiveModelTrait, InternalModel};
 
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to connect to local SQLite database");
+    let db = local_db_with(CI_USERS_DDL).await;
     let conn = db
         .__internal_connection()
         .expect("local SQLite connection should be available");
-
-    conn.execute_unprepared(
-        r#"
-            CREATE TABLE ci_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-        "#,
-    )
-    .await
-    .expect("failed to create ci_users table for local db");
 
     let inserted = CiUser {
         id: 0,
@@ -52,27 +37,12 @@ async fn sqlite_query_with_and_find_with_work_without_global_db() {
 
 #[tokio::test]
 async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
-    use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
+    use tideorm::internal::{ActiveModelTrait, InternalModel};
 
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to connect to local SQLite database");
+    let db = local_db_with(CI_USERS_DDL).await;
     let conn = db
         .__internal_connection()
         .expect("local SQLite connection should be available");
-
-    conn.execute_unprepared(
-        r#"
-            CREATE TABLE ci_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-        "#,
-    )
-    .await
-    .expect("failed to create ci_users table for local db");
 
     let first = CiUser {
         id: 0,
@@ -107,12 +77,12 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
     .await
     .expect("failed to seed third local user");
 
-    let active_sum = CiUser::query_with(&db)
+    let active_sum: i64 = CiUser::query_with(&db)
         .where_eq("active", true)
         .sum("id")
         .await
         .expect("sum with explicit db should succeed");
-    assert_eq!(active_sum, (first.id + second.id) as f64);
+    assert_eq!(active_sum, first.id + second.id);
 
     let inactive_distinct = CiUser::query_with(&db)
         .where_eq("active", false)
@@ -121,37 +91,19 @@ async fn sqlite_query_with_supports_aggregate_queries_without_global_db() {
         .expect("count_distinct with explicit db should succeed");
     assert_eq!(inactive_distinct, 1);
 
-    let total_avg = CiUser::query_with(&db)
+    let total_avg: Option<f64> = CiUser::query_with(&db)
         .avg("id")
         .await
         .expect("avg with explicit db should succeed");
-    assert_eq!(total_avg, (first.id + second.id + third.id) as f64 / 3.0);
+    assert_eq!(
+        total_avg,
+        Some((first.id + second.id + third.id) as f64 / 3.0)
+    );
 }
 
 #[tokio::test]
 async fn sqlite_query_errors_include_query_builder_context() {
-    use tideorm::Database;
-    use tideorm::internal::ConnectionTrait;
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to connect to local SQLite database");
-    let conn = db
-        .__internal_connection()
-        .expect("local SQLite connection should be available");
-
-    conn.execute_unprepared(
-        r#"
-            CREATE TABLE ci_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-        "#,
-    )
-    .await
-    .expect("failed to create ci_users table for local db");
+    let db = local_db_with(CI_USERS_DDL).await;
 
     let err = CiUser::query_with(&db)
         .where_eq("active", true)
@@ -201,32 +153,17 @@ async fn sqlite_query_errors_include_query_builder_context() {
 #[tokio::test]
 async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
     use tideorm::QueryCache;
-    use tideorm::internal::{ActiveModelTrait, ConnectionTrait, InternalModel};
+    use tideorm::internal::{ActiveModelTrait, InternalModel};
 
     let cache = QueryCache::global();
     cache.clear();
     cache.reset_stats();
     cache.enable();
 
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("failed to connect to local SQLite database");
+    let db = local_db_with(CI_USERS_DDL).await;
     let conn = db
         .__internal_connection()
         .expect("local SQLite connection should be available");
-
-    conn.execute_unprepared(
-        r#"
-            CREATE TABLE ci_users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                name TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            )
-        "#,
-    )
-    .await
-    .expect("failed to create ci_users table for local db");
 
     CiUser {
         id: 0,
@@ -269,17 +206,7 @@ async fn sqlite_uncached_queries_do_not_touch_global_query_cache() {
 
 #[tokio::test]
 async fn sqlite_model_crud_errors_include_model_context() {
-    if !tideorm::has_global_db() {
-        TideConfig::init()
-            .database_type(DatabaseType::SQLite)
-            .database("sqlite::memory:")
-            .max_connections(1)
-            .connect()
-            .await
-            .expect("failed to initialize global SQLite database");
-    }
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+    connect_global().await;
 
     let find_err = CiUser::find(1)
         .await
@@ -326,17 +253,7 @@ async fn sqlite_model_crud_errors_include_model_context() {
 
 #[tokio::test]
 async fn sqlite_model_helper_errors_include_context() {
-    if !tideorm::has_global_db() {
-        TideConfig::init()
-            .database_type(DatabaseType::SQLite)
-            .database("sqlite::memory:")
-            .max_connections(1)
-            .connect()
-            .await
-            .expect("failed to initialize global SQLite database");
-    }
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
+    connect_global().await;
 
     let all_err = CiUser::all()
         .await

@@ -1,0 +1,5 @@
+error: unsupported TideORM column type 'Status': a model field can be bool, i8-i64, u8-u64, f32, f64, String, Text, Uuid, Decimal, DateTime<Utc>, NaiveDateTime, NaiveDate, NaiveTime, Json (serde_json::Value), Vec<u8>, a PostgreSQL array (Vec<i32>, Vec<i64>, Vec<f64>, Vec<bool>, Vec<String>, Vec<Json>), or an Option of one. Store an enum as a String, and mark a field that is not a column #[tideorm(skip)]
+  --> tests/ui/invalid_field_type.rs:12:13
+   |
+12 |     status: Status,
+   |             ^^^^^^

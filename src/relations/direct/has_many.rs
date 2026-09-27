@@ -1,4 +1,3 @@
-#[cfg_attr(feature = "entity-manager", allow(dead_code))]
 use super::*;
 
 /// A one-to-many relation: every row of `E` whose foreign key points back at
@@ -44,17 +43,28 @@ pub struct HasMany<E: Model> {
     /// Column on *this* model whose value the foreign key matches — the primary
     /// key unless `local_key = ".."` overrides it.
     pub local_key: &'static str,
-    cached: Option<Vec<E>>,
+    pub(crate) cached: Option<Vec<E>>,
     parent_pk: Option<serde_json::Value>,
-    #[cfg(feature = "entity-manager")]
-    query_db: Option<crate::database::Database>,
-    _marker: PhantomData<E>,
+    source: QuerySource,
 }
 
-#[cfg_attr(feature = "entity-manager", allow(dead_code))]
 impl<E: Model> HasMany<E> {
     fn ensure_configured(&self) -> Result<()> {
         ensure_relation_configured("HasMany", &[self.foreign_key, self.local_key])
+    }
+
+    /// The query for the related rows.
+    pub(crate) fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
+        self.ensure_configured()?;
+        let pk = required_key(&self.parent_pk, "Parent primary key", context)?;
+        Ok(where_key(self.source.query(), self.foreign_key, pk))
+    }
+
+    /// Whether `other` describes the same relation of the same owner.
+    pub(crate) fn same_relation(&self, other: &Self) -> bool {
+        self.foreign_key == other.foreign_key
+            && self.local_key == other.local_key
+            && self.parent_pk == other.parent_pk
     }
 
     /// Declare the relation's key pair.
@@ -67,11 +77,7 @@ impl<E: Model> HasMany<E> {
         Self {
             foreign_key,
             local_key,
-            cached: None,
-            parent_pk: None,
-            #[cfg(feature = "entity-manager")]
-            query_db: None,
-            _marker: PhantomData,
+            ..Self::default()
         }
     }
 
@@ -94,38 +100,25 @@ impl<E: Model> HasMany<E> {
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        let same_relation = self.same_relation(previous);
+
         preserve_cached_value(
             &mut self.cached,
             &previous.cached,
-            previous.parent_pk.is_none(),
-            self.foreign_key == previous.foreign_key
-                && self.local_key == previous.local_key
-                && self.parent_pk == previous.parent_pk,
+            owner_is_unsaved(&previous.parent_pk),
+            same_relation,
         );
 
         #[cfg(feature = "entity-manager")]
-        if self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk
-            && self.query_db.is_none()
-        {
-            self.query_db = previous.query_db.clone();
-        }
-    }
-
-    #[cfg(feature = "entity-manager")]
-    fn query_builder(&self) -> QueryBuilder<E> {
-        if let Some(db) = &self.query_db {
-            E::query_with(db)
-        } else {
-            E::query()
+        if same_relation {
+            self.source.preserve_from(&previous.source);
         }
     }
 
     #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.query_db = Some(database.clone());
+        self.source.database = Some(database.clone());
     }
 
     /// Fetch all related rows, in no particular order — add one with
@@ -138,61 +131,16 @@ impl<E: Model> HasMany<E> {
     /// carries no parent key (a bare `Default`, or a deserialized model that was
     /// never refreshed).
     pub async fn load(&self) -> Result<Vec<E>> {
-        let can_query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.query_db.is_some() || has_active_database()
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                has_active_database()
-            }
-        };
-
-        if can_query
-            && self.ensure_configured().is_ok()
-            && let Some(pk) = self.parent_pk.as_ref()
+        let can_query = self.source.prefers_database()
+            && self.parent_pk.is_some()
+            && self.ensure_configured().is_ok();
+        if let Some(cached) = &self.cached
+            && !can_query
         {
-            let pk = require_scalar_relation_key(pk, "HasMany::load")?;
-
-            let query = {
-                #[cfg(feature = "entity-manager")]
-                {
-                    self.query_builder()
-                }
-                #[cfg(not(feature = "entity-manager"))]
-                {
-                    E::query()
-                }
-            };
-
-            return query.where_eq(self.foreign_key, pk.clone()).get().await;
-        }
-
-        if let Some(cached) = &self.cached {
             return Ok(cached.clone());
         }
 
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::load")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.query_builder()
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                E::query()
-            }
-        };
-
-        query.where_eq(self.foreign_key, pk.clone()).get().await
+        self.query("HasMany::load")?.get().await
     }
 
     /// Fetch related rows through a caller-supplied refinement of the query.
@@ -210,26 +158,7 @@ impl<E: Model> HasMany<E> {
     where
         F: FnOnce(QueryBuilder<E>) -> QueryBuilder<E> + Send,
     {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::load_with")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.query_builder()
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                E::query()
-            }
-        }
-        .where_eq(self.foreign_key, pk.clone());
-        constraint_fn(query).get().await
+        constraint_fn(self.query("HasMany::load_with")?).get().await
     }
 
     /// Count related rows in the database without materializing them.
@@ -238,51 +167,13 @@ impl<E: Model> HasMany<E> {
     /// disagree with `get_cached().len()` when the cache is stale or was
     /// constrained by an eager load.
     pub async fn count(&self) -> Result<u64> {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::count")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.query_builder()
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                E::query()
-            }
-        };
-
-        query.where_eq(self.foreign_key, pk.clone()).count().await
+        self.query("HasMany::count")?.count().await
     }
 
     /// Whether at least one related row exists. Cheaper than
     /// [`count`](Self::count) when you only need the yes/no answer.
     pub async fn exists(&self) -> Result<bool> {
-        self.ensure_configured()?;
-
-        let pk = self
-            .parent_pk
-            .as_ref()
-            .ok_or_else(|| Error::query(String::from("Parent primary key not set for relation")))?;
-        let pk = require_scalar_relation_key(pk, "HasMany::exists")?;
-
-        let query = {
-            #[cfg(feature = "entity-manager")]
-            {
-                self.query_builder()
-            }
-            #[cfg(not(feature = "entity-manager"))]
-            {
-                E::query()
-            }
-        };
-
-        query.where_eq(self.foreign_key, pk.clone()).exists().await
+        self.query("HasMany::exists")?.exists().await
     }
 
     /// The eagerly-loaded rows, if this relation was populated. Never queries
@@ -293,7 +184,7 @@ impl<E: Model> HasMany<E> {
     /// deserializing a payload that contained the key — not by
     /// [`load`](Self::load), which does not write its result back.
     pub fn get_cached(&self) -> Option<&[E]> {
-        cached_ref(&self.cached)
+        self.cached.as_deref()
     }
 }
 
@@ -304,14 +195,12 @@ impl<E: Model> Default for HasMany<E> {
             local_key: "",
             cached: None,
             parent_pk: None,
-            #[cfg(feature = "entity-manager")]
-            query_db: None,
-            _marker: PhantomData,
+            source: QuerySource::default(),
         }
     }
 }
 
-impl<E: Model + Serialize> Serialize for HasMany<E> {
+impl<E: Model> Serialize for HasMany<E> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: Serializer,

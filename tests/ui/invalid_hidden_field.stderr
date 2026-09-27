@@ -1,0 +1,5 @@
+error: #[tideorm(hidden = ...)] references unknown field, column or attachment 'pasword'
+ --> tests/ui/invalid_hidden_field.rs:2:8
+  |
+2 | struct User {
+  |        ^^^^

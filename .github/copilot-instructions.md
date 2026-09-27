@@ -11,27 +11,30 @@
 - Fast smoke test: `cargo test --lib`
 - Broad unit compatibility pass: `cargo test --all-features --lib`
 - Proc-macro pass: `cargo test -p tideorm-macros --lib`
-- Default backend test pass: `cargo test --features postgres`
+- Default backend test pass: `cargo test` (the PostgreSQL suites run only when a PostgreSQL URL or `RUN_POSTGRES_TESTS` is set)
 - SQLite integration suite: `cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features`
 - PostgreSQL integration suite: `cargo test --test postgres_integration_tests`
 - Advanced PostgreSQL suite: `cargo test --test postgres_advanced_tests`
 - MySQL integration suite: `cargo test --test mysql_integration_tests --features mysql`
+- MariaDB integration suite: `cargo test --test mariadb_integration_tests --features mysql`
 - Strict lint pass: `cargo clippy --all-targets --all-features -- -D warnings`
-- Benchmarks: always target one bench, e.g. `cargo bench --bench validation_benchmarks`. A bare `cargo bench` is not usable: `crud_benchmarks`, `query_benchmarks`, and `or_clause_benchmarks` require a live PostgreSQL server, and `cache_benchmarks` requires the `sqlite` feature.
+- Benchmarks: always target one bench, e.g. `cargo bench --bench validation_benchmarks`. A bare `cargo bench` is not usable: `crud_benchmarks`, `query_benchmarks`, and `or_clause_benchmarks` need a live PostgreSQL server and are opt-in like the PostgreSQL tests, and `cache_benchmarks` requires the `sqlite` feature.
 - Docs build: `mdbook build`
 - Docs preview: `mdbook serve --open`
 
 ## Environment And Prerequisites
 
-- Rust `1.85+` is the declared MSRV (`rust-version` in both manifests). CI installs `stable` only, so the MSRV is not enforced anywhere; raise `rust-version` in both manifests together if you rely on a newer API.
+- Rust `1.94` is the declared MSRV (`rust-version` in both manifests), set by the dependency tree (sea-orm 2.x and sqlx 0.9 both require it). The CI `msrv` job checks it; see CONTRIBUTING.md for the places a bump has to touch.
 - Integration tests may require database servers and environment variables loaded from `.env` via `dotenvy`.
 - PostgreSQL tests read `TEST_DATABASE_URL` first, then `POSTGRESQL_DATABASE_URL`, then default to `postgres://postgres:postgres@localhost:5432/test_tide_orm`.
 - SQLite tests default to `sqlite://./test_tide_orm.db?mode=rwc` when `SQLITE_DATABASE_URL` is absent.
-- The three backends have three different gate semantics:
+- The backends have different gate semantics:
   - SQLite is opt-out via `SKIP_SQLITE_TESTS`.
-  - MySQL is opt-in via `RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`. There is no `SKIP_MYSQL_TESTS`; no code reads it. Unset `MYSQL_DATABASE_URL` to turn MySQL tests off.
-  - PostgreSQL is always on. `SKIP_POSTGRES_TESTS` gates only `postgres_entity_manager_tests`; the main PostgreSQL suites ignore it and hard-fail without a server.
-- Benchmarks expect PostgreSQL access through `POSTGRESQL_DATABASE_URL` only (`TEST_DATABASE_URL` is not consulted by benches).
+  - MySQL is opt-in via `RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`; `SKIP_MYSQL_TESTS` overrides both.
+  - MariaDB is opt-in via `RUN_MARIADB_TESTS` or `MARIADB_DATABASE_URL`; `SKIP_MARIADB_TESTS` overrides both.
+  - PostgreSQL is opt-in via `TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS`; `SKIP_POSTGRES_TESTS` overrides all three.
+  - An enabled backend that cannot connect fails its suites.
+- Benchmarks resolve the PostgreSQL URL the same way the tests do.
 
 ## Architecture Boundaries
 

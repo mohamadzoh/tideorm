@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 pub use consolidation::JoinResultConsolidator;
 
 /// Type of JOIN operation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JoinType {
     /// `INNER JOIN` — keeps only rows that matched on both sides.
     Inner,
@@ -59,7 +59,7 @@ impl JoinType {
 ///
 /// The `ON` condition is always a single equality between two columns; there is
 /// no representation for a composite or non-equi join.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JoinClause {
     /// Which JOIN keyword to emit.
     pub join_type: JoinType,
@@ -74,33 +74,21 @@ pub struct JoinClause {
     pub right_column: String,
 }
 
-/// A named aggregate over a column.
+/// A scalar subquery projected by
+/// [`select_subquery()`](super::QueryBuilder::select_subquery).
 ///
-/// This is a descriptive value type, not a builder input: the aggregate
-/// terminals ([`sum()`](super::QueryBuilder::sum),
-/// [`avg()`](super::QueryBuilder::avg),
-/// [`count_distinct()`](super::QueryBuilder::count_distinct), ...) render their
-/// own SQL and never construct one of these. Reach for it when your own code
-/// needs to carry a user-chosen aggregate around — match on it and call the
-/// matching terminal.
+/// Like [`UnionClause`], the subquery is kept as parameterized SQL with its
+/// bound values beside it; rendering renumbers its placeholders for its
+/// position in the projection.
 #[derive(Debug, Clone)]
-pub enum AggregateFunction {
-    /// `COUNT(*)` — counts rows, including rows that are NULL in every column.
-    Count,
-    /// `COUNT(DISTINCT column)` — counts distinct non-NULL values of the column.
-    CountDistinct(String),
-    /// `SUM(column)`.
-    Sum(String),
-    /// `AVG(column)`, which ignores NULL rows rather than treating them as zero.
-    Avg(String),
-    /// `MIN(column)`.
-    Min(String),
-    /// `MAX(column)`.
-    Max(String),
+pub(crate) struct SubquerySelect {
+    pub(crate) query_sql: String,
+    pub(crate) alias: String,
+    pub(crate) params: Vec<Value>,
 }
 
 /// Which compound-select operator joins two result sets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnionType {
     /// `UNION` — combines both sides and removes duplicate rows, which forces
     /// the backend to sort or hash the whole result.
@@ -141,6 +129,8 @@ pub struct UnionClause {
     /// SQLite, whose compound-select grammar rejects a parenthesized operand.
     pub query_sql: String,
     pub(crate) params: Vec<Value>,
+    /// Whether the operand is caller-written SQL of unknown shape.
+    pub(crate) raw: bool,
 }
 
 impl UnionClause {
@@ -155,6 +145,7 @@ impl UnionClause {
             union_type,
             query_sql,
             params: Vec::new(),
+            raw: true,
         }
     }
 
@@ -172,6 +163,7 @@ impl UnionClause {
             union_type,
             query_sql,
             params,
+            raw: false,
         }
     }
 }
@@ -182,7 +174,7 @@ impl UnionClause {
 /// [`Rows`](FrameType::Rows) they are physical row counts, under
 /// [`Range`](FrameType::Range) they are offsets from the current row's ORDER BY
 /// value, and under [`Groups`](FrameType::Groups) they count peer groups.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FrameBound {
     /// Start the frame at the first row of the partition.
     UnboundedPreceding,
@@ -212,7 +204,7 @@ impl FrameBound {
 }
 
 /// The unit a window frame's bounds are measured in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrameType {
     /// Count physical rows. Ties in the ORDER BY are split, so two peer rows can
     /// see different frames — which is what makes this the right choice for a
@@ -246,7 +238,7 @@ impl FrameType {
 /// take from a caller; [`Custom`](Self::Custom) and the `default` argument of
 /// [`Lag`](Self::Lag)/[`Lead`](Self::Lead) are the two exceptions and are
 /// emitted verbatim as trusted SQL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WindowFunctionType {
     /// `ROW_NUMBER()` — 1-based position within the partition, never tied.
     RowNumber,
@@ -262,7 +254,9 @@ pub enum WindowFunctionType {
     ///
     /// The offset and default are only rendered when the offset is `Some`: a
     /// default supplied alongside `None` is silently dropped, because SQL has no
-    /// way to pass the third argument without the second.
+    /// way to pass the third argument without the second. MariaDB takes no
+    /// third argument at all, so on MySQL and MariaDB the window renders the
+    /// default itself; see [`WindowFunction::to_sql_for_db`].
     Lag(String, Option<i32>, Option<String>),
     /// `LEAD(column, offset, default)` — a value from a later row, with the same
     /// argument rule as [`Lag`](Self::Lag).
@@ -274,7 +268,6 @@ pub enum WindowFunctionType {
     /// The default frame ends at the current row, so without a frame that
     /// extends to [`UnboundedFollowing`](FrameBound::UnboundedFollowing) this
     /// returns the current row's own value.
-    /// [`last_value()`](super::QueryBuilder::last_value) sets that frame for you.
     LastValue(String),
     /// `NTH_VALUE(column, n)` — the column's value in the frame's `n`-th row,
     /// 1-based.
@@ -298,6 +291,28 @@ pub enum WindowFunctionType {
 }
 
 impl WindowFunctionType {
+    /// This function with its column argument, if any, passed through `column`.
+    fn map_column(&self, column: &dyn Fn(&str) -> String) -> Self {
+        match self {
+            Self::Lag(col, offset, default) => Self::Lag(column(col), *offset, default.clone()),
+            Self::Lead(col, offset, default) => Self::Lead(column(col), *offset, default.clone()),
+            Self::FirstValue(col) => Self::FirstValue(column(col)),
+            Self::LastValue(col) => Self::LastValue(column(col)),
+            Self::NthValue(col, n) => Self::NthValue(column(col), *n),
+            Self::Sum(col) => Self::Sum(column(col)),
+            Self::Avg(col) => Self::Avg(column(col)),
+            Self::Count(Some(col)) => Self::Count(Some(column(col))),
+            Self::Min(col) => Self::Min(column(col)),
+            Self::Max(col) => Self::Max(column(col)),
+            Self::RowNumber
+            | Self::Rank
+            | Self::DenseRank
+            | Self::Ntile(_)
+            | Self::Count(None)
+            | Self::Custom(_) => self.clone(),
+        }
+    }
+
     /// Render the function call itself — no `OVER (..)` clause, which
     /// [`WindowFunction::to_sql_for_db`] adds around it.
     ///
@@ -313,19 +328,14 @@ impl WindowFunctionType {
             WindowFunctionType::Rank => "RANK()".to_string(),
             WindowFunctionType::DenseRank => "DENSE_RANK()".to_string(),
             WindowFunctionType::Ntile(n) => format!("NTILE({})", n),
-            WindowFunctionType::Lag(col, offset, default) => {
-                let mut s = format!("LAG({}", quote_column(col));
-                if let Some(o) = offset {
-                    s.push_str(&format!(", {}", o));
-                    if let Some(d) = default {
-                        s.push_str(&format!(", {}", d));
-                    }
-                }
-                s.push(')');
-                s
-            }
-            WindowFunctionType::Lead(col, offset, default) => {
-                let mut s = format!("LEAD({}", quote_column(col));
+            WindowFunctionType::Lag(col, offset, default)
+            | WindowFunctionType::Lead(col, offset, default) => {
+                let name = if matches!(self, WindowFunctionType::Lag(..)) {
+                    "LAG"
+                } else {
+                    "LEAD"
+                };
+                let mut s = format!("{}({}", name, quote_column(col));
                 if let Some(o) = offset {
                     s.push_str(&format!(", {}", o));
                     if let Some(d) = default {
@@ -355,16 +365,6 @@ impl WindowFunctionType {
             WindowFunctionType::Custom(expr) => expr.clone(),
         }
     }
-
-    /// Render the call with PostgreSQL identifier quoting.
-    ///
-    /// A convenience for previews and tests only. Executed queries go through
-    /// [`as_sql_for_db`](Self::as_sql_for_db) with the connection's real backend,
-    /// because MySQL and MariaDB reject `"column"` under their default
-    /// `sql_mode`.
-    pub fn as_sql(&self) -> String {
-        self.as_sql_for_db(DatabaseType::Postgres)
-    }
 }
 
 /// A window function and the `OVER (..)` clause it is evaluated in.
@@ -375,7 +375,7 @@ impl WindowFunctionType {
 /// shapes. Window functions are appended to the projection *after* every other
 /// select source and never suppress the `table.*` fallback, so a query that
 /// selects nothing else still returns the model's own columns alongside them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WindowFunction {
     /// The function being computed.
     pub function: WindowFunctionType,
@@ -419,9 +419,25 @@ impl WindowFunction {
         }
     }
 
+    /// This window with every column it names passed through `column`: its
+    /// function's argument and its `PARTITION BY` and `ORDER BY` columns.
+    pub(crate) fn map_columns(&self, column: &dyn Fn(&str) -> String) -> Self {
+        Self {
+            function: self.function.map_column(column),
+            partition_by: self.partition_by.iter().map(|c| column(c)).collect(),
+            order_by: self
+                .order_by
+                .iter()
+                .map(|(c, direction)| (column(c), *direction))
+                .collect(),
+            ..self.clone()
+        }
+    }
+
     /// Append a `PARTITION BY` column. Repeated calls accumulate left to right.
     pub fn partition_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.partition_by.push(column.column_name().to_string());
+        self.partition_by
+            .push(crate::columns::column_reference(&column, None));
         self
     }
 
@@ -434,7 +450,7 @@ impl WindowFunction {
         direction: Order,
     ) -> Self {
         self.order_by
-            .push((column.column_name().to_string(), direction));
+            .push((crate::columns::column_reference(&column, None), direction));
         self
     }
 
@@ -455,11 +471,39 @@ impl WindowFunction {
     /// for `db_type`. This is the rendering the executable path uses.
     ///
     /// Empty clauses are omitted rather than emitted empty, so an unpartitioned,
-    /// unordered, unframed window renders as a bare `OVER ()`.
+    /// unordered, unframed window renders as a bare `OVER ()`. On MySQL and
+    /// MariaDB a `LAG`/`LEAD` default is chosen by a `CASE` around the call.
     pub fn to_sql_for_db(&self, db_type: DatabaseType) -> String {
-        let mut sql = self.function.as_sql_for_db(db_type);
-        sql.push_str(" OVER (");
+        let over = self.over_clause_for_db(db_type);
+        let with_default = match &self.function {
+            WindowFunctionType::Lag(column, Some(offset), Some(default)) => {
+                Some(("LAG", column, offset, default))
+            }
+            WindowFunctionType::Lead(column, Some(offset), Some(default)) => {
+                Some(("LEAD", column, offset, default))
+            }
+            _ => None,
+        };
+        let call = match with_default {
+            // MariaDB's LAG and LEAD take no default. The same window finds no
+            // row for a constant exactly where the default applies, where a
+            // COALESCE would also replace a NULL value.
+            Some((name, column, offset, default))
+                if matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) =>
+            {
+                format!(
+                    "CASE WHEN {name}(1, {offset}) OVER ({over}) IS NULL THEN {default} \
+                     ELSE {name}({}, {offset}) OVER ({over}) END",
+                    db_sql::format_column(db_type, column)
+                )
+            }
+            _ => format!("{} OVER ({over})", self.function.as_sql_for_db(db_type)),
+        };
+        format!("{call} AS {}", db_sql::quote_ident(db_type, &self.alias))
+    }
 
+    /// What goes inside `OVER (..)`: the partition, the order and the frame.
+    fn over_clause_for_db(&self, db_type: DatabaseType) -> String {
         let mut clauses = Vec::new();
 
         if !self.partition_by.is_empty() {
@@ -496,21 +540,7 @@ impl WindowFunction {
             clauses.push(frame_sql);
         }
 
-        sql.push_str(&clauses.join(" "));
-        sql.push_str(&format!(
-            ") AS {}",
-            db_sql::quote_ident(db_type, &self.alias)
-        ));
-        sql
-    }
-
-    /// Render with PostgreSQL identifier quoting, for previews and tests.
-    ///
-    /// Prefer [`to_sql_for_db`](Self::to_sql_for_db), which is what the
-    /// executable path calls: the double-quoted identifiers this emits are
-    /// rejected by MySQL and MariaDB under their default `sql_mode`.
-    pub fn to_sql(&self) -> String {
-        self.to_sql_for_db(DatabaseType::Postgres)
+        clauses.join(" ")
     }
 }
 
@@ -597,16 +627,6 @@ impl CTE {
         self
     }
 
-    /// Render the CTE using PostgreSQL identifier quoting.
-    ///
-    /// Prefer [`to_sql_for_db`](Self::to_sql_for_db): MySQL and MariaDB reject
-    /// `"name"` under their default `sql_mode`, so this rendering is only
-    /// correct on PostgreSQL and SQLite. The Postgres default is kept for
-    /// backwards compatibility, matching [`WindowFunction::to_sql`].
-    pub fn to_sql(&self) -> String {
-        self.to_sql_for_db(DatabaseType::Postgres)
-    }
-
     /// Render the CTE for `db_type`, quoting the name and the optional column
     /// list with that backend's identifier quote character.
     ///
@@ -670,6 +690,9 @@ pub struct QueryFragment<M: Model> {
     /// Parenthesized OR groups, AND-ed with [`conditions`](Self::conditions).
     /// **Appended.**
     pub or_groups: Vec<super::OrGroup>,
+    /// Index into `or_groups` of the group the `or_where_*` calls built; on
+    /// merge it joins the builder's own such group instead of being appended.
+    pub(crate) simple_or_group: Option<usize>,
     /// ORDER BY terms as `(column, direction)` pairs. **Appended**, so the
     /// fragment's terms become the least significant sort keys.
     ///
@@ -697,10 +720,10 @@ pub struct QueryFragment<M: Model> {
     /// **Appended**, except that the sentinel is deduplicated on merge so an
     /// already-distinct builder does not collect a second copy.
     pub raw_select_expressions: Vec<String>,
-    /// Scalar subquery projections as `(subquery_sql, alias)` pairs, from
-    /// [`select_subquery()`](super::QueryBuilder::select_subquery).
-    /// **Appended.**
-    pub subquery_select_expressions: Vec<(String, String)>,
+    /// Scalar subquery projections from
+    /// [`select_subquery()`](super::QueryBuilder::select_subquery), with their
+    /// bound values. **Appended.**
+    pub(crate) subquery_select_expressions: Vec<SubquerySelect>,
     /// GROUP BY columns. **Appended.** These are validated as column references
     /// only — unlike ORDER BY there is no raw escape hatch, because GROUP BY is
     /// rendered outside any quoted literal.
@@ -716,7 +739,7 @@ pub struct QueryFragment<M: Model> {
     /// Values bound to each HAVING clause, indexed in lockstep with
     /// `having_conditions`: slot `i` holds the values for the `?` placeholders
     /// in clause `i`, and is empty for a clause written as raw SQL.
-    pub(crate) having_bindings: Vec<Vec<serde_json::Value>>,
+    pub(crate) having_bindings: Vec<Vec<crate::internal::Value>>,
     /// JOIN clauses, in the order they will be rendered. **Appended.**
     pub joins: Vec<JoinClause>,
     /// Compound-select operands. **Appended.**
@@ -738,6 +761,8 @@ pub struct QueryFragment<M: Model> {
     /// **First-wins**, so the earliest failure is the one reported and later
     /// ones do not mask it.
     pub invalid_query_reason: Option<String>,
+    /// A page `page()` refused, carried as the field and reason it reports.
+    pub(crate) invalid_page: Option<(&'static str, String)>,
     /// `with_trashed()`: include soft-deleted rows. **Last-wins**, and mutually
     /// exclusive with [`only_trashed`](Self::only_trashed) — a fragment that set
     /// neither leaves the builder's scope untouched.
@@ -745,6 +770,9 @@ pub struct QueryFragment<M: Model> {
     /// `only_trashed()`: return *only* soft-deleted rows. Takes precedence over
     /// [`include_trashed`](Self::include_trashed) when merged.
     pub only_trashed: bool,
+    /// [`lock_for_update()`](super::QueryBuilder::lock_for_update). **Sticky**:
+    /// a fragment that locks makes the builder it is applied to lock.
+    pub lock_for_update: bool,
 }
 
 impl<M: Model> Default for QueryFragment<M> {
@@ -764,6 +792,7 @@ impl<M: Model> QueryFragment<M> {
             _marker: PhantomData,
             conditions: Vec::new(),
             or_groups: Vec::new(),
+            simple_or_group: None,
             order_by: Vec::new(),
             limit_value: None,
             offset_value: None,
@@ -780,8 +809,10 @@ impl<M: Model> QueryFragment<M> {
             cache_options: None,
             cache_key: None,
             invalid_query_reason: None,
+            invalid_page: None,
             include_trashed: false,
             only_trashed: false,
+            lock_for_update: false,
         }
     }
 
@@ -807,7 +838,9 @@ impl<M: Model> QueryFragment<M> {
             || !self.ctes.is_empty()
             || self.cache_options.is_some()
             || self.cache_key.is_some()
-            || self.invalid_query_reason.is_some();
+            || self.invalid_query_reason.is_some()
+            || self.invalid_page.is_some()
+            || self.lock_for_update;
 
         let has_soft_delete_scope = self.include_trashed || self.only_trashed;
 

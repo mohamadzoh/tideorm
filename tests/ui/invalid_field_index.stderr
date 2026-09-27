@@ -1,0 +1,5 @@
+error: on a field, write #[unique_index] to index its column; name columns or the index with #[unique_index(..)] on the struct
+ --> tests/ui/invalid_field_index.rs:6:5
+  |
+6 |     #[unique_index("email", "name")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

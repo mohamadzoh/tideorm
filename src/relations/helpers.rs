@@ -1,8 +1,14 @@
-use std::ops::Deref;
+#[cfg(feature = "entity-manager")]
+use std::sync::Arc;
 
+use crate::database::Database;
 use crate::error::{Error, Result};
 use crate::internal::Value;
 use crate::model::Model;
+use crate::query::QueryBuilder;
+
+#[cfg(feature = "entity-manager")]
+use crate::entity_manager::{EntityManager, TideEntityManagerMeta, model_entity_manager_key};
 
 pub(crate) use crate::internal::sql_safety::quote_ident;
 
@@ -19,6 +25,90 @@ pub(crate) fn ensure_relation_configured(
     Ok(())
 }
 
+pub(crate) fn require_scalar_relation_key<'a>(
+    value: &'a serde_json::Value,
+    context: &str,
+) -> Result<&'a serde_json::Value> {
+    if value.is_array() || value.is_object() {
+        return Err(Error::invalid_query(format!(
+            "{} only supports scalar relation keys; composite primary keys require an explicit single-column relation key or a custom query",
+            context
+        )));
+    }
+
+    Ok(value)
+}
+
+/// `query` narrowed to the rows whose `column` holds `key`.
+///
+/// A NULL key relates to no row, as SQL's `=` has it, where `where_eq` reads
+/// a null as `IS NULL`: an owner whose nullable `local_key` is unset would
+/// otherwise load every row that points nowhere.
+pub(crate) fn where_key<M: Model>(
+    query: QueryBuilder<M>,
+    column: impl Into<String>,
+    key: &serde_json::Value,
+) -> QueryBuilder<M> {
+    let column = column.into();
+    if key.is_null() {
+        query.eq_any(column, Vec::<serde_json::Value>::new())
+    } else {
+        query.where_eq(column, key.clone())
+    }
+}
+
+/// `key`, which a write links rows by; a NULL one links none.
+pub(crate) fn linkable_key<'a>(
+    key: &'a serde_json::Value,
+    context: &str,
+) -> Result<&'a serde_json::Value> {
+    if key.is_null() {
+        return Err(Error::invalid_query(format!(
+            "{context}: the owner's key is NULL, so no row can be linked to it"
+        )));
+    }
+    Ok(key)
+}
+
+/// Whether a query issued now has a connection to run on — the ambient
+/// transaction or the global database.
+pub(crate) fn has_active_database() -> bool {
+    crate::database::__current_db().is_ok()
+}
+
+/// A relation's lookup key, which must have been supplied and be a scalar.
+///
+/// `what` names the key in the error for a wrapper that never received one — a
+/// bare `Default`, or a model deserialized without being refreshed.
+pub(crate) fn required_key<'a>(
+    key: &'a Option<serde_json::Value>,
+    what: &str,
+    context: &str,
+) -> Result<&'a serde_json::Value> {
+    let key = key
+        .as_ref()
+        .ok_or_else(|| Error::query(format!("{what} not set for relation")))?;
+    require_scalar_relation_key(key, context)
+}
+
+/// Whether `key`, the owner key a relation wrapper was built with, names no
+/// stored row yet: absent, or the placeholder a new model holds (`null`, `0`,
+/// `""`, the nil UUID). The rows cached in such a wrapper are the caller's,
+/// so they are kept when saving the owner rebuilds the wrapper under its
+/// stored key: an entity manager then saves them as its children.
+pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
+    match key {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Number(number)) => {
+            number.as_i64() == Some(0) || number.as_u64() == Some(0)
+        }
+        Some(serde_json::Value::String(text)) => {
+            text.is_empty() || uuid::Uuid::parse_str(text).is_ok_and(|uuid| uuid.is_nil())
+        }
+        Some(_) => false,
+    }
+}
+
 pub(crate) fn preserve_cached_value<C: Clone>(
     cached: &mut Option<C>,
     previous_cached: &Option<C>,
@@ -30,39 +120,149 @@ pub(crate) fn preserve_cached_value<C: Clone>(
     }
 }
 
-pub(crate) fn cached_ref<C>(cached: &Option<C>) -> Option<&C::Target>
-where
-    C: Deref,
-{
-    cached.as_deref()
+/// Where a relation's statements run.
+///
+/// By default that is the scope's connection: the enclosing transaction, else
+/// the global database. Under the `entity-manager` feature a relation can also
+/// be tied to the manager that loaded it, or to the database its owner was read
+/// from, which keeps it loadable with no global connection at all.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct QuerySource {
+    /// The manager that loaded the relation. It owns the cached instances, so
+    /// `load` serves them rather than re-querying.
+    #[cfg(feature = "entity-manager")]
+    pub(crate) entity_manager: Option<Arc<EntityManager>>,
+    /// The database the owning model was loaded from.
+    #[cfg(feature = "entity-manager")]
+    pub(crate) database: Option<Database>,
 }
 
-pub(crate) fn resolve_model_column_name<E: Model>(name: &str) -> Result<&'static str> {
-    if E::column_from_str(name).is_none() {
-        return Err(Error::query(format!(
-            "Unknown self-reference column '{}' for table '{}'",
-            name,
-            E::table_name()
-        )));
+impl QuerySource {
+    /// Whether `load` should read the database rather than serve a cached
+    /// value: a connection is reachable and no entity manager owns the cache.
+    ///
+    /// The cache is also filled by deserializing, so a request body can plant
+    /// relation contents; preferring the database keeps such a payload from
+    /// passing itself off as stored rows.
+    pub(crate) fn prefers_database(&self) -> bool {
+        #[cfg(feature = "entity-manager")]
+        {
+            if self.entity_manager.is_some() {
+                return false;
+            }
+            if self.database.is_some() {
+                return true;
+            }
+        }
+        crate::database::__current_db().is_ok()
     }
 
-    E::field_names()
-        .iter()
-        .zip(E::column_names().iter())
-        .find_map(|(field_name, column_name)| {
-            if *field_name == name || *column_name == name {
-                Some(*column_name)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
+    /// A query over `M` that runs where this relation's statements do.
+    pub(crate) fn query<M: Model>(&self) -> QueryBuilder<M> {
+        match self.attached() {
+            Some(database) => M::query_with(&database),
+            None => M::query(),
+        }
+    }
+
+    /// The database this relation's raw statements run on.
+    pub(crate) fn database(&self) -> Result<Database> {
+        match self.attached() {
+            Some(database) => Ok(database),
+            None => crate::database::__current_db(),
+        }
+    }
+
+    /// The database the relation is tied to, unless an enclosing transaction
+    /// outranks it: statements inside one must join it, and raw SQL has to be
+    /// rendered for the backend it then reaches.
+    fn attached(&self) -> Option<Database> {
+        #[cfg(feature = "entity-manager")]
+        if !matches!(
+            crate::database::__current_connection(),
+            Ok(crate::database::ConnectionRef::Transaction(_))
+        ) {
+            return match &self.entity_manager {
+                Some(entity_manager) => Some(entity_manager.database().clone()),
+                None => self.database.clone(),
+            };
+        }
+        None
+    }
+
+    /// Keep whatever `previous` was tied to wherever this source is not.
+    #[cfg(feature = "entity-manager")]
+    pub(crate) fn preserve_from(&mut self, previous: &Self) {
+        if self.entity_manager.is_none() {
+            self.entity_manager = previous.entity_manager.clone();
+        }
+        if self.database.is_none() {
+            self.database = previous.database.clone();
+        }
+    }
+}
+
+/// The owning row a loaded relation's snapshot is recorded under.
+#[cfg(feature = "entity-manager")]
+pub(crate) struct SnapshotOwner<'a> {
+    table: &'static str,
+    key: &'a str,
+    relation: &'static str,
+}
+
+#[cfg(feature = "entity-manager")]
+impl<'a> SnapshotOwner<'a> {
+    /// Fails when the wrapper never received its owner's identity key, which
+    /// the derive supplies through `with_owner_key`.
+    pub(crate) fn new(
+        table: &'static str,
+        key: &'a Option<String>,
+        relation: &'static str,
+    ) -> Result<Self> {
+        let key = key.as_deref().ok_or_else(|| {
             Error::query(format!(
-                "Unknown self-reference column '{}' for table '{}'",
-                name,
-                E::table_name()
+                "entity manager owner key not set for relation '{relation}'"
             ))
+        })?;
+        Ok(Self {
+            table,
+            key,
+            relation,
         })
+    }
+}
+
+/// Hand a relation's loaded models to `entity_manager`, replacing each in place
+/// with the instance its identity map holds.
+///
+/// `register` keeps an instance the manager already tracks — in-memory edits
+/// and all — rather than letting this copy, possibly a stale eager load,
+/// overwrite it, so the relation, `find` and the managed baselines share one
+/// instance per row. With an `owner`, the models' keys are then recorded as the
+/// snapshot a later save diffs the relation against.
+#[cfg(feature = "entity-manager")]
+pub(crate) async fn register_loaded<'m, E>(
+    entity_manager: &EntityManager,
+    models: impl IntoIterator<Item = &'m mut E>,
+    owner: Option<SnapshotOwner<'_>>,
+) -> Result<()>
+where
+    E: Model + TideEntityManagerMeta,
+{
+    let mut keys = Vec::new();
+    for model in models {
+        *model = entity_manager.register(model.clone()).await;
+        if owner.is_some()
+            && let Some(key) = model_entity_manager_key(&*model)?
+        {
+            keys.push(key);
+        }
+    }
+
+    if let Some(owner) = owner {
+        entity_manager.snapshot::<E>(owner.table, owner.key, owner.relation, &keys);
+    }
+    Ok(())
 }
 
 pub(crate) fn scoped_column(
@@ -107,11 +307,20 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     max_depth: usize,
     db_type: crate::config::DatabaseType,
 ) -> Result<(String, Vec<Value>)> {
-    let foreign_key = resolve_model_column_name::<E>(foreign_key)?;
-    let local_key = resolve_model_column_name::<E>(local_key)?;
-    let primary_key = resolve_model_column_name::<E>(E::primary_key_name())?;
+    let column = |name: &str| {
+        E::canonical_column_name(name).ok_or_else(|| {
+            Error::query(format!(
+                "Unknown self-reference column '{}' for table '{}'",
+                name,
+                E::table_name()
+            ))
+        })
+    };
+    let foreign_key = column(foreign_key)?;
+    let local_key = column(local_key)?;
+    let primary_key = column(E::primary_key_name())?;
 
-    let table = quote_ident(db_type, E::table_name());
+    let table = crate::query::db_sql::quote_table::<E>(db_type);
     let cte = quote_ident(db_type, "tide_tree");
     let node = quote_ident(db_type, "node");
     let child = quote_ident(db_type, "child");
@@ -125,7 +334,10 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     let parent_placeholder = crate::internal::push_param(
         db_type,
         &mut params,
-        crate::internal::json_to_db_value(parent_pk),
+        crate::internal::json_to_column_value(
+            parent_pk,
+            crate::internal::column_type_of::<E>(foreign_key).as_ref(),
+        ),
     );
     let max_depth = i64::try_from(max_depth)
         .map_err(|_| Error::query("Self-reference tree depth exceeds i64 range"))?;
@@ -158,7 +370,7 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
          INNER JOIN {cte} {tree} ON {child_foreign_key} = {tree}.{tree_key_alias} \
          WHERE {recursive_where} \
          ) \
-         SELECT {result}.* \
+         SELECT {result_columns} \
          FROM {table} {result} \
          INNER JOIN ( \
          SELECT {cte}.{pk_alias} AS {pk_alias}, MIN({cte}.{depth_alias}) AS {depth_alias} \
@@ -167,6 +379,7 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
          ) {result_tree} ON {result_pk} = {result_tree}.{pk_alias} \
          ORDER BY {result_tree}.{depth_alias}",
         cte = cte,
+        result_columns = crate::query::db_sql::model_columns_sql::<E>(db_type, Some("result_node")),
         pk_alias = pk_alias,
         tree_key_alias = tree_key_alias,
         depth_alias = depth_alias,

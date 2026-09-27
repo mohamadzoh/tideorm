@@ -30,6 +30,36 @@ fn test_translations_data_from_json() {
 }
 
 #[test]
+fn test_translations_data_from_json_skips_only_malformed_fields() {
+    let json = serde_json::json!({
+        "name": {"en": "Product"},
+        "legacy": "not a language map",
+        "empty": null
+    });
+
+    let data = TranslationsData::from_json(&json);
+
+    assert_eq!(data.get("name", "en"), Some(&serde_json::json!("Product")));
+    assert_eq!(data.fields().len(), 1);
+    assert_eq!(
+        data.to_json(),
+        serde_json::json!({"name": {"en": "Product"}})
+    );
+    assert!(
+        TranslationsData::from_json(&serde_json::json!([1, 2]))
+            .fields()
+            .is_empty()
+    );
+}
+
+#[test]
+fn test_translation_input_from_json_rejects_a_non_object() {
+    let error = TranslationInput::from_json(&serde_json::json!("name"))
+        .expect_err("a payload that is not an object cannot carry translations");
+    assert!(matches!(error, TranslationError::ParseError(_)));
+}
+
+#[test]
 fn test_translations_data_to_json() {
     let mut data = TranslationsData::new();
     data.set("name", "en", "Product");
@@ -135,6 +165,29 @@ fn test_apply_translations_accepts_allowed_field_and_language() {
 }
 
 #[test]
+fn test_translation_lookups_fall_back_to_the_fallback_language_then_the_default() {
+    let mut model = TranslatableProbe::default();
+    model.set_translation("name", "en", "Product").unwrap();
+
+    assert_eq!(
+        model.get_translated("name", "ar").unwrap(),
+        serde_json::json!("Product")
+    );
+
+    model.set_translation("name", "ar", "منتج").unwrap();
+    assert_eq!(
+        model.get_translated("name", "ar").unwrap(),
+        serde_json::json!("منتج")
+    );
+
+    model.clear_translations().unwrap();
+    assert_eq!(
+        model.get_translated("name", "ar").unwrap(),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
 fn test_apply_translations_rejects_untranslatable_field() {
     let mut model = TranslatableProbe::default();
     let mut input = TranslationInput::new();
@@ -174,4 +227,62 @@ fn test_apply_translations_stores_nothing_when_part_of_the_batch_is_invalid() {
         .expect_err("a partially invalid batch must be rejected as a whole");
 
     assert_eq!(model.translations, serde_json::Value::Null);
+}
+
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenamedTranslatableProbe {
+    meta_title: String,
+    translations: serde_json::Value,
+}
+
+impl HasTranslations for RenamedTranslatableProbe {
+    fn translatable_fields() -> Vec<&'static str> {
+        vec!["meta_title"]
+    }
+
+    fn allowed_languages() -> Vec<String> {
+        vec!["en".to_string()]
+    }
+
+    fn fallback_language() -> String {
+        "en".to_string()
+    }
+
+    fn get_translations_data(&self) -> Result<TranslationsData, TranslationError> {
+        Ok(TranslationsData::from_json(&self.translations))
+    }
+
+    fn set_translations_data(&mut self, data: TranslationsData) -> Result<(), TranslationError> {
+        self.translations = data.to_json();
+        Ok(())
+    }
+
+    fn get_default_value(&self, _field: &str) -> Result<serde_json::Value, TranslationError> {
+        Ok(serde_json::json!(self.meta_title))
+    }
+
+    fn serialized_key(field: &'static str) -> &'static str {
+        match field {
+            "meta_title" => "metaTitle",
+            other => other,
+        }
+    }
+}
+
+#[test]
+fn translated_json_writes_the_translation_under_the_serialized_key() {
+    let mut model = RenamedTranslatableProbe {
+        meta_title: "Default".to_string(),
+        ..Default::default()
+    };
+    model
+        .set_translation("meta_title", "en", "Translated")
+        .unwrap();
+
+    let json = model.to_translated_json(None);
+
+    assert_eq!(json["metaTitle"], "Translated");
+    assert!(json.get("meta_title").is_none(), "{json}");
+    assert!(json.get("translations").is_none(), "{json}");
 }

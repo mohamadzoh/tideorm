@@ -2,28 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn sqlite_eager_find_preserves_existing_filters() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     let created = CiUser {
         id: 0,
@@ -58,28 +37,15 @@ async fn sqlite_eager_find_preserves_existing_filters() {
 
 #[tokio::test]
 async fn sqlite_save_and_update_run_model_validation() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_validated_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_validated_users (
+    fresh_table(
+        "CREATE TABLE ci_validated_users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL,
             name TEXT NOT NULL,
             active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
+        )",
     )
-    .await
-    .expect("failed to create ci_validated_users table");
+    .await;
 
     let create_err = CiValidatedUser {
         id: 0,
@@ -90,7 +56,7 @@ async fn sqlite_save_and_update_run_model_validation() {
     .save()
     .await
     .expect_err("invalid model save should fail validation");
-    assert!(create_err.is_validation_error());
+    assert!(matches!(create_err, Error::Validation { .. }));
 
     let count_after_failed_create = CiValidatedUser::count()
         .await
@@ -115,7 +81,7 @@ async fn sqlite_save_and_update_run_model_validation() {
     .update()
     .await
     .expect_err("invalid model update should fail validation");
-    assert!(update_err.is_validation_error());
+    assert!(matches!(update_err, Error::Validation { .. }));
 
     let reloaded = CiValidatedUser::find(1_i64)
         .await
@@ -128,27 +94,7 @@ async fn sqlite_save_and_update_run_model_validation() {
 
 #[tokio::test]
 async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_soft_delete_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_soft_delete_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            deleted_at TEXT NULL
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_soft_delete_users table");
+    fresh_table(CI_SOFT_DELETE_USERS_DDL).await;
 
     let first = CiSoftDeleteUser {
         id: 0,
@@ -243,28 +189,7 @@ async fn sqlite_direct_crud_helpers_respect_soft_delete_scope() {
 
 #[tokio::test]
 async fn sqlite_reload_returns_not_found_after_delete() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     let user = CiUser {
         id: 0,
@@ -282,34 +207,14 @@ async fn sqlite_reload_returns_not_found_after_delete() {
         .reload()
         .await
         .expect_err("reload should fail after delete");
-    assert!(err.is_not_found());
+    assert!(matches!(err, Error::NotFound { .. }));
     assert!(err.to_string().contains("ci_users"));
     assert!(err.to_string().contains("no longer exists"));
 }
 
 #[tokio::test]
 async fn sqlite_reload_still_finds_soft_deleted_records() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_soft_delete_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_soft_delete_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            deleted_at TEXT NULL
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_soft_delete_users table");
+    fresh_table(CI_SOFT_DELETE_USERS_DDL).await;
 
     let user = CiSoftDeleteUser {
         id: 0,

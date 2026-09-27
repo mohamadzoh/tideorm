@@ -1,12 +1,5 @@
 use super::*;
-
-#[test]
-fn test_quote_char() {
-    assert_eq!(db_sql::quote_char(DatabaseType::Postgres), '"');
-    assert_eq!(db_sql::quote_char(DatabaseType::MySQL), '`');
-    assert_eq!(db_sql::quote_char(DatabaseType::MariaDB), '`');
-    assert_eq!(db_sql::quote_char(DatabaseType::SQLite), '"');
-}
+use crate::query::db_sql::JsonExistence;
 
 #[test]
 fn test_quote_ident() {
@@ -37,82 +30,6 @@ fn test_quote_ident() {
 }
 
 #[test]
-fn test_json_contains_postgres() {
-    let sql =
-        db_sql::preview_json_contains(DatabaseType::Postgres, "metadata", r#"{"key": "value"}"#);
-    assert!(sql.contains("@>"));
-    assert!(sql.contains("\"metadata\""));
-}
-
-#[test]
-fn test_json_contains_mysql() {
-    let sql = db_sql::preview_json_contains(DatabaseType::MySQL, "metadata", r#"{"key": "value"}"#);
-    assert!(sql.contains("JSON_CONTAINS"));
-    assert!(sql.contains("`metadata`"));
-
-    let sql =
-        db_sql::preview_json_contains(DatabaseType::MariaDB, "metadata", r#"{"key": "value"}"#);
-    assert!(sql.contains("JSON_CONTAINS"));
-    assert!(sql.contains("`metadata`"));
-}
-
-#[test]
-fn test_json_contains_sqlite() {
-    let sql = db_sql::preview_json_contains(DatabaseType::SQLite, "metadata", "test_value");
-    assert!(sql.contains("json_each"));
-    assert!(sql.contains("\"metadata\""));
-}
-
-#[test]
-fn test_json_key_exists_postgres() {
-    let sql = db_sql::preview_json_key_exists(DatabaseType::Postgres, "data", "email");
-    assert_eq!(sql, "\"data\" ? 'email'");
-}
-
-#[test]
-fn test_json_key_exists_mysql() {
-    let sql = db_sql::preview_json_key_exists(DatabaseType::MySQL, "data", "email");
-    assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.\"email\""));
-
-    let sql = db_sql::preview_json_key_exists(DatabaseType::MariaDB, "data", "email");
-    assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.\"email\""));
-}
-
-#[test]
-fn test_json_key_exists_sqlite() {
-    let sql = db_sql::preview_json_key_exists(DatabaseType::SQLite, "data", "email");
-    assert!(sql.contains("json_extract"));
-    assert!(sql.contains("$.\"email\""));
-    assert!(sql.contains("IS NOT NULL"));
-}
-
-#[test]
-fn test_json_path_exists_postgres() {
-    let sql = db_sql::preview_json_path_exists(DatabaseType::Postgres, "data", "$.user.name");
-    assert!(sql.contains("@?"));
-}
-
-#[test]
-fn test_json_path_exists_mysql() {
-    let sql = db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", "$.user.name");
-    assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.\"user\".\"name\""));
-
-    let sql = db_sql::preview_json_path_exists(DatabaseType::MariaDB, "data", "$.user.name");
-    assert!(sql.contains("JSON_CONTAINS_PATH"));
-    assert!(sql.contains("$.\"user\".\"name\""));
-}
-
-#[test]
-fn test_json_path_exists_sqlite() {
-    let sql = db_sql::preview_json_path_exists(DatabaseType::SQLite, "data", "$.user.name");
-    assert!(sql.contains("json_extract"));
-    assert!(sql.contains("$.\"user\".\"name\""));
-}
-
-#[test]
 fn test_json_contains_bound_mysql_uses_parameterized_json() {
     let bound = db_sql::json_contains_bound(
         DatabaseType::MySQL,
@@ -120,11 +37,41 @@ fn test_json_contains_bound_mysql_uses_parameterized_json() {
         &serde_json::json!({"role": "admin'"}),
     );
 
-    assert_eq!(bound.sql, "JSON_CONTAINS(`data`, CAST(? AS JSON))");
-    assert!(matches!(
-        bound.values.as_slice(),
-        [Value::String(Some(json))] if json == "{\"role\":\"admin'\"}"
-    ));
+    // PostgreSQL's reading: the scalar under `role` must not match an array
+    // holding it, and the document must be an object.
+    assert_eq!(
+        bound.sql,
+        "JSON_CONTAINS(`data`, ?) \
+         AND JSON_TYPE(JSON_EXTRACT(`data`, ?)) <> 'ARRAY' \
+         AND JSON_TYPE(JSON_EXTRACT(`data`, ?)) = 'OBJECT'"
+    );
+    assert_eq!(
+        bound.values,
+        vec![
+            Value::String(Some("{\"role\":\"admin'\"}".to_string())),
+            Value::String(Some("$.\"role\"".to_string())),
+            Value::String(Some("$".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn test_json_contained_by_bound_mysql_requires_arrays_where_the_target_has_them() {
+    let bound = db_sql::json_contained_by_bound(
+        DatabaseType::MySQL,
+        "`data`",
+        &serde_json::json!({"tags": ["a", "b"]}),
+    );
+
+    assert_eq!(
+        bound.sql,
+        "JSON_CONTAINS(?, `data`) \
+         AND COALESCE(JSON_TYPE(JSON_EXTRACT(`data`, ?)), 'ARRAY') = 'ARRAY'"
+    );
+    assert_eq!(
+        bound.values[1],
+        Value::String(Some("$.\"tags\"".to_string()))
+    );
 }
 
 #[test]
@@ -135,136 +82,162 @@ fn test_json_contains_bound_postgres_uses_postgres_placeholder() {
         &serde_json::json!({"role": "admin'"}),
     );
 
-    assert_eq!(bound.sql, "\"data\" @> $1");
+    assert_eq!(bound.sql, "(\"data\")::jsonb @> $1");
     assert!(matches!(bound.values.as_slice(), [Value::Json(Some(_))]));
 }
 
-#[test]
-fn test_json_key_exists_bound_mysql_uses_parameterized_path() {
-    let bound = db_sql::json_key_exists_bound(DatabaseType::MySQL, "`data`", "unsafe'key");
-
-    assert_eq!(bound.sql, "JSON_CONTAINS_PATH(`data`, 'one', ?)");
-    assert!(matches!(
-        bound.values.as_slice(),
-        [Value::String(Some(path))] if path == "$.\"unsafe'key\""
-    ));
+fn json_exists(
+    db_type: DatabaseType,
+    existence: JsonExistence,
+    target: &str,
+    negated: bool,
+) -> Option<(String, String)> {
+    db_sql::json_exists_bound(db_type, "\"data\"", existence, target, negated).map(|bound| {
+        let [Value::String(Some(path))] = bound.values.as_slice() else {
+            panic!("expected one bound string, got {:?}", bound.values);
+        };
+        (bound.sql, path.clone())
+    })
 }
 
 #[test]
-fn test_json_path_exists_bound_postgres_uses_jsonpath_placeholder() {
-    let bound = db_sql::json_path_exists_bound(DatabaseType::Postgres, "\"data\"", "$.user.name")
-        .expect("postgres jsonpath helper should always bind valid paths");
-
-    assert_eq!(bound.sql, "\"data\" @? ($1::jsonpath)");
-    assert!(matches!(
-        bound.values.as_slice(),
-        [Value::String(Some(path))] if path == "$.user.name"
-    ));
-}
-
-fn json_values(values: &[&str]) -> Vec<serde_json::Value> {
-    values
-        .iter()
-        .map(|value| serde_json::Value::String((*value).to_string()))
-        .collect()
-}
-
-#[test]
-fn test_array_contains_postgres() {
-    let values = json_values(&["admin", "user"]);
-    let sql = db_sql::array_contains(DatabaseType::Postgres, "roles", &values);
+fn test_json_key_exists_renders_each_backend_operator() {
     assert_eq!(
-        sql,
-        "('admin' = ANY(\"roles\") AND 'user' = ANY(\"roles\"))"
+        json_exists(DatabaseType::Postgres, JsonExistence::Key, "email", false),
+        Some(("(\"data\")::jsonb ? $1".to_string(), "email".to_string()))
     );
-    assert!(!sql.contains("ARRAY["), "sql: {sql}");
-}
 
-#[test]
-fn test_array_contains_mysql() {
-    let values = json_values(&["admin", "user"]);
-    let sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
-    assert!(sql.contains("JSON_CONTAINS"));
-
-    let sql = db_sql::array_contains(DatabaseType::MariaDB, "roles", &values);
-    assert!(sql.contains("JSON_CONTAINS"));
-}
-
-#[test]
-fn test_array_contains_sqlite() {
-    let values = json_values(&["admin", "user"]);
-    let sql = db_sql::array_contains(DatabaseType::SQLite, "roles", &values);
-    assert!(sql.contains("json_each"));
-}
-
-#[test]
-fn test_array_contained_by_postgres_unnests_the_column() {
-    let values = json_values(&["admin", "user"]);
-    let sql = db_sql::array_contained_by(DatabaseType::Postgres, "roles", &values);
-    // Both NULL guards are part of the contract, because `NOT EXISTS` over
-    // `unnest` inverts what `<@` does with unknowns: it is TRUE for a NULL
-    // column (zero rows to find) and for a NULL element (`NULL NOT IN (..)`
-    // is unknown, so the offending row goes uncounted), where `<@` matches
-    // neither.
-    assert_eq!(
-        sql,
-        "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
-         tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
-         tideorm_array_element.element NOT IN ('admin', 'user')))"
-    );
-    assert!(!sql.contains("ARRAY["), "sql: {sql}");
-}
-
-#[test]
-fn test_array_overlaps_postgres() {
-    let values = json_values(&["a", "b"]);
-    let sql = db_sql::array_overlaps(DatabaseType::Postgres, "tags", &values);
-    assert_eq!(sql, "('a' = ANY(\"tags\") OR 'b' = ANY(\"tags\"))");
-    assert!(!sql.contains("ARRAY["), "sql: {sql}");
-}
-
-#[test]
-fn test_array_overlaps_mysql() {
-    let values = json_values(&["a", "b"]);
-    let sql = db_sql::array_overlaps(DatabaseType::MySQL, "tags", &values);
-    assert!(sql.contains(" OR "));
-
-    let sql = db_sql::array_overlaps(DatabaseType::MariaDB, "tags", &values);
-    assert!(sql.contains(" OR "));
-}
-
-#[test]
-fn test_array_overlaps_sqlite() {
-    let values = json_values(&["a", "b"]);
-    let sql = db_sql::array_overlaps(DatabaseType::SQLite, "tags", &values);
-    assert!(sql.contains(" OR "));
-}
-
-#[test]
-fn test_array_preview_escapes_quotes_exactly_once() {
-    let values = json_values(&["it's"]);
+    for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(
+            json_exists(db_type, JsonExistence::Key, "email", false),
+            Some((
+                "JSON_CONTAINS_PATH(\"data\", 'one', ?)".to_string(),
+                "$.\"email\"".to_string()
+            ))
+        );
+    }
 
     assert_eq!(
-        db_sql::array_contains(DatabaseType::SQLite, "tags", &values),
-        "(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = 'it''s'))"
+        json_exists(DatabaseType::SQLite, JsonExistence::Key, "email", false),
+        Some((
+            "CASE WHEN \"data\" IS NOT NULL THEN json_type(\"data\", ?) IS NOT NULL END"
+                .to_string(),
+            "$.\"email\"".to_string()
+        ))
     );
+}
+
+#[test]
+fn test_json_existence_negation_wraps_the_positive_test() {
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::MariaDB,
+        DatabaseType::SQLite,
+    ] {
+        for existence in [JsonExistence::Key, JsonExistence::Path] {
+            let (positive, path) = json_exists(db_type, existence, "$.user", false).unwrap();
+            let (negative, negated_path) = json_exists(db_type, existence, "$.user", true).unwrap();
+
+            assert_eq!(negative, format!("NOT ({})", positive), "{db_type:?}");
+            assert_eq!(path, negated_path, "{db_type:?}");
+        }
+    }
+}
+
+#[test]
+fn test_json_key_is_bound_not_spliced() {
+    let (sql, path) = json_exists(
+        DatabaseType::MySQL,
+        JsonExistence::Key,
+        "key'; DROP TABLE--",
+        false,
+    )
+    .unwrap();
+
+    assert!(!sql.contains("DROP"), "{sql}");
+    assert_eq!(path, "$.\"key'; DROP TABLE--\"");
+}
+
+#[test]
+fn test_json_path_exists_binds_the_path() {
     assert_eq!(
-        db_sql::array_contained_by(DatabaseType::SQLite, "tags", &values),
-        "NOT EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value NOT IN ('it''s'))"
+        json_exists(
+            DatabaseType::Postgres,
+            JsonExistence::Path,
+            "$.user.name",
+            false
+        ),
+        Some((
+            "(\"data\")::jsonb @? ($1::jsonpath)".to_string(),
+            "$.user.name".to_string()
+        ))
     );
-    assert_eq!(
-        db_sql::array_overlaps(DatabaseType::SQLite, "tags", &values),
-        "(EXISTS (SELECT 1 FROM json_each(\"tags\") WHERE value = 'it''s'))"
+
+    for db_type in [DatabaseType::MySQL, DatabaseType::SQLite] {
+        let (_, path) = json_exists(db_type, JsonExistence::Path, "$.user.name", false).unwrap();
+        assert_eq!(path, "$.\"user\".\"name\"", "{db_type:?}");
+    }
+}
+
+#[test]
+fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
+    let path = "$.user') OR 1=1 --";
+
+    for db_type in [DatabaseType::MySQL, DatabaseType::SQLite] {
+        for negated in [false, true] {
+            assert_eq!(
+                json_exists(db_type, JsonExistence::Path, path, negated),
+                None,
+                "{db_type:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_json_path_special_keys_are_quoted_safely() {
+    let (_, path) = json_exists(
+        DatabaseType::MySQL,
+        JsonExistence::Path,
+        "$['weird.key'][0].name",
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(path, "$.\"weird.key\"[0].\"name\"");
+}
+
+#[test]
+fn test_unexpressible_json_path_matches_nothing_instead_of_being_dropped() {
+    let path = "$.user') OR 1=1 --";
+    for query in [
+        QueryBuilder::<QueryTestUser>::new().where_json_path_exists("data", path),
+        QueryBuilder::<QueryTestUser>::new().where_json_path_not_exists("data", path),
+    ] {
+        let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::MySQL);
+
+        assert!(sql.ends_with("WHERE 0 = 1"), "{sql}");
+        assert!(params.is_empty());
+    }
+}
+
+#[test]
+fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
+    let (sql, params) = QueryBuilder::<QueryTestUser>::new()
+        .where_json_path_not_exists("data", "$.user.name")
+        .build_select_sql_with_params_for_db(DatabaseType::Postgres);
+
+    assert!(
+        sql.ends_with("WHERE NOT ((\"data\")::jsonb @? ($1::jsonpath))"),
+        "{sql}"
     );
-    assert_eq!(
-        db_sql::array_contains(DatabaseType::Postgres, "tags", &values),
-        "('it''s' = ANY(\"tags\"))"
-    );
+    assert!(matches!(params.as_slice(), [Value::String(Some(path))] if path == "$.user.name"));
 }
 
 #[test]
 fn test_empty_array_predicates_are_valid_and_consistent() {
-    let empty: Vec<serde_json::Value> = Vec::new();
+    let empty: Vec<&str> = Vec::new();
 
     for db_type in [
         DatabaseType::Postgres,
@@ -272,29 +245,183 @@ fn test_empty_array_predicates_are_valid_and_consistent() {
         DatabaseType::MariaDB,
         DatabaseType::SQLite,
     ] {
+        let render = |query: QueryBuilder<QueryTestUser>| {
+            let (sql, _) = query.build_select_sql_with_params_for_db(db_type);
+            sql.split_once(" WHERE ")
+                .map(|(_, where_sql)| where_sql.to_string())
+                .unwrap_or_default()
+        };
+
         // An empty "contains all" is vacuously satisfied.
-        let contains = db_sql::array_contains(db_type, "tags", &empty);
+        let contains = render(QueryBuilder::new().where_array_contains("tags", empty.clone()));
         assert!(!contains.contains("ARRAY[]"), "{db_type:?}: {contains}");
         assert!(!contains.contains("()"), "{db_type:?}: {contains}");
 
         // An empty "contains any" can never match.
-        assert_eq!(db_sql::array_overlaps(db_type, "tags", &empty), "0 = 1");
+        let overlaps = render(QueryBuilder::new().where_array_overlaps("tags", empty.clone()));
+        assert_eq!(overlaps, "0 = 1", "{db_type:?}");
 
         // An empty "contained by" only holds for an empty column.
-        let contained_by = db_sql::array_contained_by(db_type, "tags", &empty);
+        let contained_by =
+            render(QueryBuilder::new().where_array_contained_by("tags", empty.clone()));
         assert!(
             !contained_by.contains("ARRAY[]"),
             "{db_type:?}: {contained_by}"
         );
     }
+}
+
+#[test]
+fn test_postgres_array_predicates_take_their_placeholders_outside_brackets() {
+    let operands = db_sql::placeholders(DatabaseType::Postgres, 2);
 
     assert_eq!(
-        db_sql::array_contains(DatabaseType::Postgres, "tags", &empty),
-        "1 = 1"
+        db_sql::postgres_array_contains("\"roles\"", &operands),
+        "($1 = ANY(\"roles\") AND $2 = ANY(\"roles\"))"
     );
     assert_eq!(
-        db_sql::array_contains(DatabaseType::SQLite, "tags", &empty),
-        "1 = 1"
+        db_sql::postgres_array_overlaps("\"roles\"", &operands),
+        "($1 = ANY(\"roles\") OR $2 = ANY(\"roles\"))"
+    );
+    // Both NULL guards are part of the contract, because `NOT EXISTS` over
+    // `unnest` inverts what `<@` does with unknowns: it is TRUE for a NULL
+    // column (zero rows to find) and for a NULL element (`NULL NOT IN (..)`
+    // is unknown, so the offending row goes uncounted), where `<@` matches
+    // neither.
+    assert_eq!(
+        db_sql::postgres_array_contained_by("\"roles\"", &operands, false),
+        "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
+         tideorm_array_element(element) WHERE tideorm_array_element.element IS NULL OR \
+         tideorm_array_element.element NOT IN ($1, $2)))"
+    );
+    // A NULL in the list lets a NULL element through and stays out of NOT IN.
+    assert_eq!(
+        db_sql::postgres_array_contained_by("\"roles\"", &operands, true),
+        "(\"roles\" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM unnest(\"roles\") AS \
+         tideorm_array_element(element) WHERE tideorm_array_element.element NOT IN ($1, $2)))"
+    );
+}
+
+#[test]
+fn test_placeholders_follow_the_backend_marker() {
+    assert_eq!(
+        db_sql::placeholders(DatabaseType::Postgres, 3),
+        vec!["$1", "$2", "$3"]
+    );
+    assert_eq!(
+        db_sql::placeholders(DatabaseType::SQLite, 2),
+        vec!["?", "?"]
+    );
+    assert!(db_sql::placeholders(DatabaseType::MySQL, 0).is_empty());
+}
+
+#[test]
+fn test_inline_parameters_writes_values_the_way_the_backend_spells_them() {
+    let params = vec![
+        Value::String(Some("it's".to_string())),
+        Value::BigInt(Some(7)),
+    ];
+
+    assert_eq!(
+        db_sql::inline_parameters(
+            DatabaseType::SQLite,
+            "SELECT 1 WHERE name = ? AND id = ?",
+            &params
+        ),
+        "SELECT 1 WHERE name = 'it''s' AND id = 7"
+    );
+    assert_eq!(
+        db_sql::inline_parameters(
+            DatabaseType::Postgres,
+            "SELECT 1 WHERE id = $2 AND name = $1",
+            &params
+        ),
+        "SELECT 1 WHERE id = 7 AND name = E'it\\'s'"
+    );
+}
+
+#[test]
+fn test_inline_parameters_leaves_unbound_placeholders_alone() {
+    // A raw fragment can carry a placeholder with no value behind it;
+    // sea-query's inliner would index past the values and panic.
+    let one = vec![Value::BigInt(Some(1))];
+
+    for (db_type, sql) in [
+        (DatabaseType::MySQL, "SELECT 1 WHERE a = ? AND b = ?"),
+        (DatabaseType::SQLite, "SELECT 1 WHERE a = ? AND b = ?"),
+        (DatabaseType::Postgres, "SELECT 1 WHERE a = $1 AND b = $2"),
+        (DatabaseType::Postgres, "SELECT 1 WHERE a = $0"),
+    ] {
+        assert_eq!(db_sql::inline_parameters(db_type, sql, &one), sql);
+    }
+
+    // Every value has to be placed, too.
+    assert_eq!(
+        db_sql::inline_parameters(DatabaseType::Postgres, "SELECT 1", &one),
+        "SELECT 1"
+    );
+}
+
+#[test]
+fn test_inline_parameters_keeps_placeholders_inside_quotes() {
+    let one = vec![Value::BigInt(Some(1))];
+
+    assert_eq!(
+        db_sql::inline_parameters(DatabaseType::MySQL, "SELECT '?' WHERE a = ?", &one),
+        "SELECT '?' WHERE a = 1"
+    );
+}
+
+#[test]
+fn test_inline_parameters_does_not_guess_around_backslashes() {
+    // The backends disagree on whether `\'` ends a literal, so a statement
+    // that contains a backslash is shown with its placeholders instead.
+    let one = vec![Value::BigInt(Some(1))];
+    let sql = r"SELECT 1 WHERE note = 'C:\' AND a = $1";
+
+    assert_eq!(
+        db_sql::inline_parameters(DatabaseType::Postgres, sql, &one),
+        sql
+    );
+}
+
+#[test]
+fn test_offset_postgres_placeholders_skips_single_quoted_literals() {
+    let sql = "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'";
+
+    assert_eq!(
+        db_sql::offset_postgres_placeholders(sql, 3),
+        "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'"
+    );
+}
+
+#[test]
+fn test_offset_postgres_placeholders_skips_dollar_quotes_and_comments() {
+    let sql = concat!(
+        "note = $$literal $1$$ AND id = $2 ",
+        "/* keep $3 */ ",
+        "-- keep $4\n",
+        "AND body = $tag$still $5$tag$"
+    );
+
+    assert_eq!(
+        db_sql::offset_postgres_placeholders(sql, 2),
+        concat!(
+            "note = $$literal $1$$ AND id = $4 ",
+            "/* keep $3 */ ",
+            "-- keep $4\n",
+            "AND body = $tag$still $5$tag$"
+        )
+    );
+}
+
+#[test]
+fn test_offset_postgres_placeholders_skips_escape_string_literals() {
+    let sql = "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'";
+
+    assert_eq!(
+        db_sql::offset_postgres_placeholders(sql, 4),
+        "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'"
     );
 }
 
@@ -348,12 +475,6 @@ fn test_format_column_quotes_non_identifier_input() {
 }
 
 #[test]
-fn test_json_contains_quotes_unsafe_column_input() {
-    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data\" OR 1=1 --", "value");
-    assert_eq!(sql, "\"data\"\" OR 1=1 --\" @> 'value'");
-}
-
-#[test]
 fn test_format_identifier_reference_quotes_reserved_words() {
     assert_eq!(
         db_sql::format_identifier_reference(DatabaseType::Postgres, "order"),
@@ -362,116 +483,6 @@ fn test_format_identifier_reference_quotes_reserved_words() {
     assert_eq!(
         db_sql::format_identifier_reference(DatabaseType::MySQL, "users.group"),
         Some("`users`.`group`".to_string())
-    );
-}
-
-#[test]
-fn test_cast_to_float() {
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::Postgres, "value"),
-        "CAST(value AS FLOAT8)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::MySQL, "value"),
-        "CAST(value AS DOUBLE)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::MariaDB, "value"),
-        "CAST(value AS DOUBLE)"
-    );
-    assert_eq!(
-        db_sql::cast_to_float(DatabaseType::SQLite, "value"),
-        "CAST(value AS REAL)"
-    );
-}
-
-#[test]
-fn test_sql_injection_prevention() {
-    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data", "O'Brien");
-    assert!(sql.contains("O''Brien"));
-
-    let sql = db_sql::preview_json_key_exists(DatabaseType::MySQL, "data", "key'; DROP TABLE--");
-    assert_eq!(
-        sql,
-        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
-    );
-
-    let sql = db_sql::preview_json_key_exists(DatabaseType::MariaDB, "data", "key'; DROP TABLE--");
-    assert_eq!(
-        sql,
-        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"key''; DROP TABLE--\"')"
-    );
-}
-
-#[test]
-fn test_mysql_json_literals_escape_backslash_quote_pairs() {
-    let payload = r#"\' OR 1=1 --"#;
-
-    let sql = db_sql::preview_json_contains(DatabaseType::MySQL, "data", payload);
-    assert_eq!(sql, "JSON_CONTAINS(`data`, '\\\\'' OR 1=1 --')");
-
-    let sql = db_sql::preview_json_contains(DatabaseType::MariaDB, "data", payload);
-    assert_eq!(sql, "JSON_CONTAINS(`data`, '\\\\'' OR 1=1 --')");
-}
-
-#[test]
-fn test_postgres_json_literals_preserve_literal_backslashes() {
-    let sql = db_sql::preview_json_contains(DatabaseType::Postgres, "data", r#"C:\temp"#);
-    assert_eq!(sql, "\"data\" @> 'C:\\temp'");
-}
-
-#[test]
-fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
-    let path = "$.user') OR 1=1 --";
-
-    assert_eq!(
-        db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", path),
-        "0 = 1"
-    );
-    assert_eq!(
-        db_sql::preview_json_path_not_exists(DatabaseType::MySQL, "data", path),
-        "0 = 1"
-    );
-    assert_eq!(
-        db_sql::preview_json_path_exists(DatabaseType::SQLite, "data", path),
-        "0 = 1"
-    );
-    assert_eq!(
-        db_sql::preview_json_path_not_exists(DatabaseType::SQLite, "data", path),
-        "0 = 1"
-    );
-}
-
-#[test]
-fn test_json_path_special_keys_are_quoted_safely() {
-    let sql =
-        db_sql::preview_json_path_exists(DatabaseType::MySQL, "data", "$['weird.key'][0].name");
-    assert_eq!(
-        sql,
-        "JSON_CONTAINS_PATH(`data`, 'one', '$.\"weird.key\"[0].\"name\"')"
-    );
-}
-
-#[test]
-fn test_mysql_array_literals_are_json_encoded() {
-    // These take raw values now: the helpers render the SQL literal themselves
-    // rather than receiving one pre-rendered, so the escaping is exercised
-    // end to end.
-    let values = vec![
-        serde_json::json!("ad\"min"),
-        serde_json::json!("slash\\user"),
-    ];
-
-    let contains_sql = db_sql::array_contains(DatabaseType::MySQL, "roles", &values);
-    assert_eq!(
-        contains_sql,
-        "JSON_CONTAINS(`roles`, '[\"ad\\\\\"min\",\"slash\\\\\\\\user\"]')"
-    );
-
-    let overlaps_sql = db_sql::array_overlaps(DatabaseType::MySQL, "roles", &values);
-    assert_eq!(
-        overlaps_sql,
-        "(JSON_CONTAINS(`roles`, '\"ad\\\\\"min\"') OR JSON_CONTAINS(`roles`, '\"slash\\\\\\\\user\"'))"
     );
 }
 
@@ -583,7 +594,43 @@ fn test_subquery_validation_rejects_top_level_compound_queries() {
 }
 
 #[test]
+fn test_subquery_validation_tells_a_function_from_a_statement() {
+    for sql in [
+        "SELECT REPLACE(name, 'a', 'b') FROM users",
+        "SELECT id FROM users WHERE LOWER(REPLACE (email, ' ', '')) = 'x'",
+    ] {
+        db_sql::validate_subquery_sql(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+    }
+    for sql in [
+        "SELECT 1; REPLACE INTO users VALUES (1)",
+        "SELECT id FROM users UPDATE users SET name = 'x'",
+    ] {
+        assert!(db_sql::validate_subquery_sql(sql).is_err(), "{sql}");
+    }
+    db_sql::validate_having_sql_fragment("HAVING", "LEFT(MAX(name), 1) = 'a'")
+        .expect("LEFT() is a string function in HAVING");
+    assert!(db_sql::validate_having_sql_fragment("HAVING", "COUNT(*) > 1 LEFT JOIN x").is_err());
+}
+
+#[test]
 fn test_compound_subquery_validation_allows_recursive_cte_shape() {
     db_sql::validate_compound_subquery_sql("SELECT 1 UNION ALL SELECT 2")
         .expect("recursive CTE bodies should allow top-level UNION ALL");
+}
+
+#[test]
+fn test_a_question_mark_in_quotes_is_no_placeholder() {
+    assert_eq!(
+        db_sql::count_template_placeholders("MAX(note) LIKE '%?%'"),
+        0
+    );
+    assert_eq!(
+        db_sql::count_template_placeholders("SUM(\"a?\") > ? AND b = '?'"),
+        1
+    );
+    assert_eq!(
+        db_sql::map_template_placeholders("x = ? AND y LIKE 'it''s ?' AND z = ?", || "$"
+            .to_string()),
+        "x = $ AND y LIKE 'it''s ?' AND z = $"
+    );
 }

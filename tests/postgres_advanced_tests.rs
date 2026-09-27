@@ -1,13 +1,9 @@
-//! Advanced PostgreSQL Integration Tests for TideORM
+//! PostgreSQL-only integration tests: JSONB and array operators, joins, and
+//! relation loading.
 //!
-//! Tests for JSON/JSONB operators, array operators, and relations.
-//!
-//! These tests require a running PostgreSQL instance with:
-//! - Host: localhost
-//! - Port: 5432
-//! - User: postgres
-//! - Password: postgres
-//! - Database: test_tide_orm
+//! Opt-in like `postgres_integration_tests`: set `RUN_POSTGRES_TESTS`,
+//! `TEST_DATABASE_URL` or `POSTGRESQL_DATABASE_URL`. Once enabled, an
+//! unreachable server fails the run.
 //!
 //! Run with: cargo test --test postgres_advanced_tests
 
@@ -22,18 +18,14 @@ mod test_config;
 
 use test_config::test_database_url;
 
-// =============================================================================
-// TEST MODELS WITH JSON AND ARRAY COLUMNS
-// =============================================================================
-
 #[tideorm::model(table = "test_documents")]
 pub struct TestDocument {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub title: String,
-    pub metadata: serde_json::Value, // JSONB column
-    pub tags: Vec<String>,           // Array column
-    pub ratings: Vec<i32>,           // Array of integers
+    pub metadata: serde_json::Value,
+    pub tags: Vec<String>,
+    pub ratings: Vec<i32>,
 }
 
 #[tideorm::model(table = "test_authors")]
@@ -43,7 +35,6 @@ pub struct TestAuthor {
     pub name: String,
     pub country: String,
 
-    // HasMany relation - author has many books
     #[tideorm(has_many = "TestBook", foreign_key = "author_id")]
     pub books: HasMany<TestBook>,
 }
@@ -56,11 +47,9 @@ pub struct TestBook {
     pub title: String,
     pub year: i32,
 
-    // BelongsTo relation - book belongs to an author
     #[tideorm(belongs_to = "TestAuthor", foreign_key = "author_id")]
     pub author: BelongsTo<TestAuthor>,
 
-    // HasOne relation - book has one detail record
     #[tideorm(has_one = "TestBookDetail", foreign_key = "book_id")]
     pub detail: HasOne<TestBookDetail>,
 }
@@ -73,20 +62,16 @@ pub struct TestBookDetail {
     pub isbn: String,
     pub pages: i32,
 
-    // BelongsTo relation - detail belongs to a book
     #[tideorm(belongs_to = "TestBook", foreign_key = "book_id")]
     pub book: BelongsTo<TestBook>,
 }
 
-// =============================================================================
-// MAIN TEST SUITE
-// =============================================================================
-
 #[tokio::test]
 async fn postgres_advanced_tests() {
-    println!(" Starting Advanced PostgreSQL Integration Tests...\n");
-
-    // Setup database
+    if !test_config::should_run_postgres_tests() {
+        println!("{}", test_config::SKIPPED);
+        return;
+    }
     TideConfig::init()
         .database(test_database_url())
         .max_connections(10)
@@ -95,48 +80,16 @@ async fn postgres_advanced_tests() {
         .await
         .expect("Failed to connect to database");
 
-    // =========================================================================
-    // SETUP: CREATE TABLES
-    // =========================================================================
     setup_tables().await;
-
-    // =========================================================================
-    // JSON/JSONB OPERATOR TESTS
-    // =========================================================================
     test_json_operators().await;
-
-    // =========================================================================
-    // ARRAY OPERATOR TESTS
-    // =========================================================================
     test_array_operators().await;
-
-    // =========================================================================
-    // RELATION TESTS
-    // =========================================================================
     relations::test_relations().await;
-
-    // =========================================================================
-    // CLEANUP
-    // =========================================================================
     cleanup_tables().await;
-
-    println!("\n All advanced PostgreSQL tests passed!\n");
 }
 
-// =============================================================================
-// SETUP & CLEANUP FUNCTIONS
-// =============================================================================
-
 async fn setup_tables() {
-    println!("📋 Setting up test tables...");
+    cleanup_tables().await;
 
-    // Drop existing tables
-    let _ = Database::execute("DROP TABLE IF EXISTS test_book_details CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_books CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_authors CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_documents CASCADE").await;
-
-    // Create documents table with JSONB and array columns
     Database::execute(
         r#"
         CREATE TABLE test_documents (
@@ -151,7 +104,6 @@ async fn setup_tables() {
     .await
     .expect("Failed to create test_documents table");
 
-    // Create authors table
     Database::execute(
         r#"
         CREATE TABLE test_authors (
@@ -164,7 +116,6 @@ async fn setup_tables() {
     .await
     .expect("Failed to create test_authors table");
 
-    // Create books table
     Database::execute(
         r#"
         CREATE TABLE test_books (
@@ -178,7 +129,6 @@ async fn setup_tables() {
     .await
     .expect("Failed to create test_books table");
 
-    // Create book_details table
     Database::execute(
         r#"
         CREATE TABLE test_book_details (
@@ -191,28 +141,22 @@ async fn setup_tables() {
     )
     .await
     .expect("Failed to create test_book_details table");
-
-    println!("   ✓ Tables created\n");
 }
 
 async fn cleanup_tables() {
-    println!("🧹 Cleaning up test tables...");
-    let _ = Database::execute("DROP TABLE IF EXISTS test_book_details CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_books CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_authors CASCADE").await;
-    let _ = Database::execute("DROP TABLE IF EXISTS test_documents CASCADE").await;
+    for table in [
+        "test_book_details",
+        "test_books",
+        "test_authors",
+        "test_documents",
+    ] {
+        Database::execute(&format!("DROP TABLE IF EXISTS {table} CASCADE"))
+            .await
+            .expect("Failed to drop test table");
+    }
 }
 
-// =============================================================================
-// JSON/JSONB TESTS
-// =============================================================================
-
 async fn test_json_operators() {
-    println!(" Testing: JSON/JSONB Operators");
-
-    // Seed test data
-    let _ = Database::execute("TRUNCATE TABLE test_documents RESTART IDENTITY CASCADE").await;
-
     let docs = vec![
         TestDocument {
             id: 0,
@@ -262,132 +206,78 @@ async fn test_json_operators() {
         doc.save().await.expect("Failed to save document");
     }
 
-    // Test JSON contains (@>)
-    {
-        let docs = TestDocument::query()
-            .where_json_contains("metadata", json!({"role": "admin"}))
-            .get()
-            .await
-            .expect("Query failed");
+    let docs = TestDocument::query()
+        .where_json_contains("metadata", json!({"role": "admin"}))
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 1, "Should find 1 admin document");
+    assert_eq!(docs[0].title, "User Profile");
 
-        assert_eq!(docs.len(), 1, "Should find 1 admin document");
-        assert_eq!(docs[0].title, "User Profile");
-        println!("   ✓ where_json_contains");
-    }
+    // Only the admin document is a subset of this object: the guest one has a
+    // different role and the moderator one an extra key.
+    let docs = TestDocument::query()
+        .where_json_contained_by(
+            "metadata",
+            json!({
+                "role": "admin",
+                "settings": {
+                    "theme": "dark",
+                    "notifications": true
+                },
+                "age": 30,
+                "extra": "ignored"
+            }),
+        )
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 1, "only the admin metadata is contained");
+    assert_eq!(docs[0].title, "User Profile");
 
-    // Test JSON contained by (<@)
-    {
-        let search_obj = json!({
-            "role": "admin",
-            "settings": {
-                "theme": "dark",
-                "notifications": true
-            },
-            "age": 30,
-            "extra": "ignored"
-        });
+    let docs = TestDocument::query()
+        .where_json_key_exists("metadata", "permissions")
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 1, "Should find 1 document with permissions key");
+    assert_eq!(docs[0].title, "Moderator Profile");
 
-        let _docs = TestDocument::query()
-            .where_json_contained_by("metadata", search_obj)
-            .get()
-            .await
-            .expect("Query failed");
-
-        // Query executed successfully
-        println!("   ✓ where_json_contained_by");
-    }
-
-    // Test JSON key exists (?)
-    {
-        let docs = TestDocument::query()
-            .where_json_key_exists("metadata", "permissions")
-            .get()
-            .await
-            .expect("Query failed");
-
-        assert_eq!(docs.len(), 1, "Should find 1 document with permissions key");
-        assert_eq!(docs[0].title, "Moderator Profile");
-        println!("   ✓ where_json_key_exists");
-    }
-
-    // Test JSON path query
-    {
-        let docs = TestDocument::query()
-            .where_json_path_exists("metadata", "$.settings.theme")
-            .get()
-            .await
-            .expect("Query failed");
-
-        assert_eq!(docs.len(), 3, "All documents should have settings.theme");
-        println!("   ✓ where_json_path_exists");
-    }
-
-    println!();
+    let docs = TestDocument::query()
+        .where_json_path_exists("metadata", "$.settings.theme")
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 3, "All documents should have settings.theme");
 }
-
-// =============================================================================
-// ARRAY OPERATOR TESTS
-// =============================================================================
 
 async fn test_array_operators() {
-    println!("📊 Testing: Array Operators");
+    let docs = TestDocument::query()
+        .where_array_contains("tags", vec!["admin".to_string()])
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 1, "Should find 1 document with admin tag");
+    assert_eq!(docs[0].title, "User Profile");
 
-    // Test array contains (@>)
-    {
-        let docs = TestDocument::query()
-            .where_array_contains("tags", vec!["admin".to_string()])
-            .get()
-            .await
-            .expect("Query failed");
+    let docs = TestDocument::query()
+        .where_array_overlaps("tags", vec!["moderator".to_string(), "guest".to_string()])
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 2, "moderator and guest documents overlap");
 
-        assert_eq!(docs.len(), 1, "Should find 1 document with admin tag");
-        assert_eq!(docs[0].title, "User Profile");
-        println!("   ✓ where_array_contains");
-    }
+    let docs = TestDocument::query()
+        .where_array_contains_any("tags", vec!["admin".to_string(), "guest".to_string()])
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 2, "admin and guest documents");
 
-    // Test array overlaps (&&)
-    {
-        let docs = TestDocument::query()
-            .where_array_overlaps("tags", vec!["moderator".to_string(), "guest".to_string()])
-            .get()
-            .await
-            .expect("Query failed");
-
-        assert_eq!(
-            docs.len(),
-            2,
-            "Should find 2 documents with overlapping tags"
-        );
-        println!("   ✓ where_array_overlaps");
-    }
-
-    // Test array contains any
-    {
-        let docs = TestDocument::query()
-            .where_array_contains_any("tags", vec!["admin".to_string(), "guest".to_string()])
-            .get()
-            .await
-            .expect("Query failed");
-
-        assert!(docs.len() >= 2, "Should find at least 2 documents");
-        println!("   ✓ where_array_contains_any");
-    }
-
-    // Test with integer arrays
-    {
-        let docs = TestDocument::query()
-            .where_array_contains("ratings", vec![5])
-            .get()
-            .await
-            .expect("Query failed");
-
-        assert!(docs.len() >= 2, "Should find documents with rating 5");
-        println!("   ✓ array operations with integers");
-    }
-
-    println!();
+    let docs = TestDocument::query()
+        .where_array_contains("ratings", vec![5])
+        .get()
+        .await
+        .expect("Query failed");
+    assert_eq!(docs.len(), 2, "user and moderator documents rate a 5");
 }
-
-// =============================================================================
-// RELATION TESTS
-// =============================================================================

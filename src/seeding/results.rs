@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::migration::write_report_section;
+
 /// Result of seed operations
 #[derive(Debug, Clone)]
 pub struct SeedResult {
@@ -24,42 +26,21 @@ impl SeedResult {
     pub fn has_executed(&self) -> bool {
         !self.executed.is_empty()
     }
-
-    /// Check if any seeds were rolled back
-    pub fn has_rolled_back(&self) -> bool {
-        !self.rolled_back.is_empty()
-    }
-
-    /// Total number of seeds processed
-    pub fn total(&self) -> usize {
-        self.executed.len() + self.skipped.len() + self.rolled_back.len()
-    }
 }
 
 impl fmt::Display for SeedResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if !self.executed.is_empty() {
-            writeln!(f, "Executed seeds:")?;
-            for seed in &self.executed {
-                writeln!(f, "  ✓ {}", seed.name)?;
-            }
-        }
+        let label = |seed: &SeedInfo| seed.name.clone();
 
-        if !self.skipped.is_empty() {
-            writeln!(f, "Skipped seeds (already executed):")?;
-            for seed in &self.skipped {
-                writeln!(f, "  - {}", seed.name)?;
-            }
-        }
-
-        if !self.rolled_back.is_empty() {
-            writeln!(f, "Rolled back seeds:")?;
-            for seed in &self.rolled_back {
-                writeln!(f, "  ↩ {}", seed.name)?;
-            }
-        }
-
-        Ok(())
+        write_report_section(f, "Executed seeds", "✓", &self.executed, label)?;
+        write_report_section(
+            f,
+            "Skipped seeds (already executed)",
+            "-",
+            &self.skipped,
+            label,
+        )?;
+        write_report_section(f, "Rolled back seeds", "↩", &self.rolled_back, label)
     }
 }
 

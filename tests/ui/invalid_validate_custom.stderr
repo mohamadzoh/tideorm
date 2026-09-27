@@ -1,0 +1,5 @@
+error: `#[validate(custom = ..)]` is not supported: implement `tideorm::Callbacks::after_validation` (or `before_validation`) on the model and return `Err(tideorm::Error::validation(field, message))` from it
+ --> tests/ui/invalid_validate_custom.rs:5:16
+  |
+5 |     #[validate(custom = "no_reserved_names")]
+  |                ^^^^^^

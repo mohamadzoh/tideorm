@@ -1,3 +1,5 @@
+//! Opt-in JPA-like entity manager and persistence-context support.
+
 #![allow(missing_docs)]
 
 mod managed;
@@ -20,13 +22,14 @@ pub use meta::{
 pub use save::save_with_entity_manager;
 pub use tracked::{TrackedHasMany, TrackedHasManyEntityManagerExt};
 
+pub(crate) use meta::model_entity_manager_key;
 #[doc(hidden)]
-pub use meta::{
-    model_entity_manager_key as __model_entity_manager_key,
-    pk_to_entity_manager_key as __pk_to_entity_manager_key,
-};
+pub use meta::model_entity_manager_key as __model_entity_manager_key;
 #[doc(hidden)]
-pub use save::{__save_with_entity_manager_in_scope, __with_entity_manager_db};
+pub use meta::pk_to_entity_manager_key as __pk_to_entity_manager_key;
+pub(crate) use save::with_entity_manager_db;
+#[doc(hidden)]
+pub use save::{__delete_detached_entities, __sync_related_entity};
 
 type IdentityKey = (TypeId, String);
 type SnapshotKey = (&'static str, TypeId, String, &'static str);
@@ -59,7 +62,23 @@ pub trait EntityManagerLoad {
     ) -> impl std::future::Future<Output = crate::error::Result<Self::Output<'a>>> + Send;
 }
 
-#[doc(hidden)]
+/// An explicit persistence context: one database handle, an identity map that
+/// hands out one instance per loaded row, and the managed entities a
+/// [`flush`](Self::flush) writes back.
+///
+/// Two workflows share it. The aggregate one loads a root with
+/// [`find`](Self::find), loads relations with [`load`](Self::load), edits the
+/// graph and writes it back with [`save`](Self::save). The managed one hands out
+/// [`Managed`] handles through [`find_managed`](Self::find_managed),
+/// [`persist`](Self::persist) and [`merge`](Self::merge), and writes every
+/// pending insert, update and delete in one transaction on `flush`.
+///
+/// Everything goes through the manager's own database handle, so a manager
+/// works without any global connection. Managers are independent of each other:
+/// each has its own identity map, which holds every loaded model until the
+/// manager is dropped or [`clear`](Self::clear)ed. Use one per request or unit
+/// of work: a long-lived manager grows without bound, and its `find` keeps
+/// serving rows other connections have changed since.
 pub struct EntityManager {
     identity_map: RwLock<HashMap<IdentityKey, Box<dyn Any + Send + Sync>>>,
     managed_identity_map: RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>,
@@ -69,6 +88,7 @@ pub struct EntityManager {
 }
 
 impl EntityManager {
+    /// Create an empty context over `db`.
     pub fn new(db: Arc<crate::database::Database>) -> Arc<Self> {
         Arc::new(Self {
             identity_map: RwLock::new(HashMap::new()),
@@ -79,20 +99,17 @@ impl EntityManager {
         })
     }
 
+    /// Load the row with primary key `pk` as a [`Managed`] entity.
+    ///
+    /// An entity this context already manages is handed back as the same
+    /// handle; otherwise the row is looked up like [`find`](Self::find) and
+    /// starts out managed and clean.
     pub async fn find_managed<T>(
         self: &Arc<Self>,
         pk: <T as crate::model::ModelMeta>::PrimaryKey,
     ) -> crate::error::Result<Option<Managed<T>>>
     where
-        T: crate::model::Model
-            + TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + serde::Serialize
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
         <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             PartialEq,
     {
@@ -108,12 +125,17 @@ impl EntityManager {
         }
     }
 
+    /// Load the row with primary key `pk`, serving it from the identity map when
+    /// this context already holds it.
+    ///
+    /// The row's relations query through this manager's database, so they stay
+    /// loadable without a global connection.
     pub async fn find<T>(
         self: &Arc<Self>,
         pk: <T as crate::model::ModelMeta>::PrimaryKey,
     ) -> crate::error::Result<Option<T>>
     where
-        T: crate::model::Model + TideEntityManagerMeta + Clone + Send + Sync + 'static,
+        T: crate::model::Model + TideEntityManagerMeta,
     {
         if let Some(cached) = self.get::<T>(&pk)? {
             return Ok(Some(cached));
@@ -126,33 +148,35 @@ impl EntityManager {
         }
     }
 
+    /// Schedule `entity` for insertion on the next [`flush`](Self::flush).
+    ///
+    /// An entity with a client-assigned primary key that this context already
+    /// manages is replaced in place, and its existing handle returned.
     pub fn persist<T>(self: &Arc<Self>, entity: T) -> Managed<T>
     where
-        T: crate::model::Model
-            + TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + serde::Serialize
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
         <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             PartialEq,
     {
         let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
 
-        if let Some(existing) = self.get_managed_by_model(&entity).unwrap_or(None) {
-            existing.entry.replace(entity);
-            return existing;
-        }
-
         // Auto-increment models have no usable key until the insert flushes; a
         // client-assigned primary key can be tracked in the managed identity map
         // right away so a later `find_managed`/`merge` reuses this handle instead
-        // of opening a second one for the same row.
-        let key = meta::model_entity_manager_key(&entity).unwrap_or(None);
+        // of opening a second one for the same row. `tide_pk_key` is the spelling
+        // every other path files the map under.
+        let key = (!entity.tide_pk_is_new()).then(|| entity.tide_pk_key());
+
+        // Persisting an entity this context was about to remove takes the
+        // removal back: the row is written as given instead of deleted.
+        if let Some(existing) = key
+            .as_deref()
+            .and_then(|key| self.get_managed_by_key::<T>(key))
+        {
+            existing.entry.overwrite_merged(entity);
+            return existing;
+        }
 
         // `persisted_key` stays `None`: it means "this row exists in the database",
         // and nothing has been inserted yet. The flush stamps it once the save
@@ -176,17 +200,15 @@ impl EntityManager {
         Managed::from_entry(entry)
     }
 
+    /// Attach a detached instance to this context.
+    ///
+    /// An entity this context already manages takes on `entity`'s values;
+    /// otherwise a new managed entry is created, clean against whatever the
+    /// identity map holds for that row. An entity with no primary key yet is
+    /// [`persist`](Self::persist)ed instead.
     pub fn merge<T>(self: &Arc<Self>, entity: T) -> crate::error::Result<Managed<T>>
     where
-        T: crate::model::Model
-            + TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + serde::Serialize
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
         <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             PartialEq,
     {
@@ -215,6 +237,8 @@ impl EntityManager {
         Ok(Managed::from_entry(entry))
     }
 
+    /// Schedule `managed` for deletion on the next [`flush`](Self::flush). An
+    /// entity that was never inserted is simply dropped.
     pub fn remove<T>(&self, managed: &Managed<T>)
     where
         T: Send + Sync + 'static,
@@ -222,6 +246,8 @@ impl EntityManager {
         managed.entry.mark_removed();
     }
 
+    /// Stop managing `managed`: later flushes ignore it, while the handle keeps
+    /// its in-memory value.
     pub fn detach<T>(&self, managed: &Managed<T>)
     where
         T: Send + Sync + 'static,
@@ -235,25 +261,28 @@ impl EntityManager {
         }
         managed.entry.set_identity_key(None);
 
-        managed.entry.mark_detached_public();
+        managed.entry.mark_detached();
         self.remove_managed_ops_entry(managed);
     }
 
+    /// Write every pending change in one transaction: inserts, then updates,
+    /// then deletes, each ordered so a parent row exists before the child that
+    /// references it.
+    ///
+    /// On failure the transaction rolls back and the context is restored to its
+    /// state before the flush, as it is when the flush is cancelled part way or
+    /// a transaction enclosing it rolls back afterwards. Inside an enclosing
+    /// save or flush it joins that unit of work instead of opening its own.
     pub async fn flush(self: &Arc<Self>) -> crate::error::Result<()> {
         if save::in_entity_manager_transaction_scope() {
             return self.flush_in_scope().await;
         }
 
-        let rollback_state = save::capture_entity_manager_rollback_state(self.as_ref());
-        let checkpoints = Arc::new(parking_lot::Mutex::new(Vec::<
-            Box<dyn managed::ManagedCheckpoint>,
-        >::new()));
-        let identity_rollback = save::new_identity_rollback_log();
+        let rollback = save::PendingRollback::new(self, Vec::new());
         let entity_manager = self.clone();
-        let transaction_checkpoints = checkpoints.clone();
-        let transaction_identity_rollback = identity_rollback.clone();
-        let result = self
-            .db
+        let transaction_checkpoints = rollback.checkpoints();
+        let transaction_identity_rollback = rollback.identity_rollback();
+        self.db
             .transaction(move |_| {
                 Box::pin(async move {
                     save::with_entity_manager_transaction_scope(
@@ -264,18 +293,8 @@ impl EntityManager {
                     .await
                 })
             })
-            .await;
-
-        if let Err(error) = result {
-            let checkpoints = std::mem::take(&mut *checkpoints.lock());
-            save::rollback_entity_manager_state(
-                self.as_ref(),
-                checkpoints,
-                rollback_state,
-                &identity_rollback,
-            );
-            return Err(error);
-        }
+            .await?;
+        rollback.committed();
 
         Ok(())
     }
@@ -343,6 +362,7 @@ impl EntityManager {
         Ok(())
     }
 
+    /// Detach every managed entity and empty the identity map.
     pub fn clear(&self) {
         let entries: Vec<_> = self.managed_entries.read().iter().cloned().collect();
         for entry in &entries {
@@ -355,6 +375,8 @@ impl EntityManager {
         self.snapshots.write().clear();
     }
 
+    /// Load `relation` through this context, so its rows are the identity map's
+    /// instances and a later [`save`](Self::save) syncs its changes.
     pub async fn load<'a, R>(
         self: &'a Arc<Self>,
         relation: &'a mut R,
@@ -365,16 +387,11 @@ impl EntityManager {
         relation.load_with_entity_manager(self).await
     }
 
+    /// Save `entity` and its loaded relations in one transaction, returning the
+    /// saved aggregate.
     pub async fn save<T>(self: &Arc<Self>, entity: &T) -> crate::error::Result<T>
     where
-        T: TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + crate::model::Model
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
     {
         save::save_with_entity_manager(entity, self).await
     }
@@ -386,15 +403,7 @@ impl EntityManager {
 
     fn attach_persisted_managed<T>(self: &Arc<Self>, entity: T) -> Managed<T>
     where
-        T: crate::model::Model
-            + TideEntityManagerMeta
-            + TideEntityManagerMergePersisted
-            + TideEntityManagerSync
-            + serde::Serialize
-            + Clone
-            + Send
-            + Sync
-            + 'static,
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
         <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
             PartialEq,
     {
@@ -420,6 +429,12 @@ impl EntityManager {
         Managed::from_entry(entry)
     }
 
+    /// File `entity` in the identity map and return the instance the map holds
+    /// for its row — `entity` itself, unless the context already tracks that
+    /// row, in which case the tracked instance wins.
+    ///
+    /// An entity with no primary key yet has no identity to share and is handed
+    /// straight back.
     pub async fn register<T>(&self, entity: T) -> T
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,

@@ -1,12 +1,20 @@
-use super::table::{ColumnDefinition, IndexBuilder};
-use super::{ColumnType, DatabaseType, DefaultValue, quote_identifier_for_db};
 use crate::error::{Error, Result};
+use crate::internal::sql_safety::quote_ident;
+
+use super::ddl::{self, ColumnDefinition};
+use super::{ColumnBuilder, ColumnType, DatabaseType};
+
+/// Builder for adding columns in ALTER TABLE
+pub type AlterColumnBuilder<'a> = ColumnBuilder<'a, AlterTableBuilder>;
 
 /// Builder for ALTER TABLE operations
 pub struct AlterTableBuilder {
     name: String,
     database_type: DatabaseType,
     operations: Vec<AlterOperation>,
+    /// What MySQL's `MODIFY COLUMN` would drop from a column whose type
+    /// changes — its NOT NULL, DEFAULT, AUTO_INCREMENT, COMMENT — by column.
+    kept_attributes: std::collections::HashMap<String, String>,
 }
 
 impl AlterTableBuilder {
@@ -16,25 +24,19 @@ impl AlterTableBuilder {
             name: name.to_string(),
             database_type,
             operations: Vec::new(),
+            kept_attributes: std::collections::HashMap::new(),
         }
     }
 
     /// Add a new column
     pub fn add_column(&mut self, name: &str, column_type: ColumnType) -> AlterColumnBuilder<'_> {
-        AlterColumnBuilder {
-            builder: self,
-            definition: ColumnDefinition {
-                name: name.to_string(),
-                column_type,
-                nullable: true,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-                unique: false,
-                check: None,
-                extra: None,
-            },
-        }
+        let database_type = self.database_type;
+        ColumnBuilder::new(
+            self,
+            database_type,
+            ColumnDefinition::new(name, column_type),
+            |alter, column| alter.operations.push(AlterOperation::AddColumn(column)),
+        )
     }
 
     /// Drop a column
@@ -53,7 +55,11 @@ impl AlterTableBuilder {
         self
     }
 
-    /// Change column type
+    /// Change a column's type, keeping its nullability, default and
+    /// auto-increment: PostgreSQL's `ALTER COLUMN .. TYPE` keeps them, and on
+    /// MySQL and MariaDB, whose `MODIFY COLUMN` restates the whole column,
+    /// [`Schema::alter_table`](super::Schema::alter_table) reads them from the
+    /// table first. SQLite cannot change a column's type.
     pub fn change_column(&mut self, name: &str, column_type: ColumnType) -> &mut Self {
         self.operations.push(AlterOperation::ChangeColumnType(
             name.to_string(),
@@ -62,21 +68,27 @@ impl AlterTableBuilder {
         self
     }
 
-    /// Add an index
-    pub fn add_index(&mut self, name: &str, columns: &[&str], unique: bool) -> &mut Self {
-        self.operations.push(AlterOperation::AddIndex(IndexBuilder {
-            name: name.to_string(),
-            columns: columns.iter().map(|value| value.to_string()).collect(),
-            unique,
-        }));
-        self
+    /// Whether a MySQL `MODIFY COLUMN` needs the table's current definition.
+    pub(crate) fn changes_mysql_column_types(&self) -> bool {
+        matches!(
+            self.database_type,
+            DatabaseType::MySQL | DatabaseType::MariaDB
+        ) && self
+            .operations
+            .iter()
+            .any(|operation| matches!(operation, AlterOperation::ChangeColumnType(..)))
     }
 
-    /// Drop an index
-    pub fn drop_index(&mut self, name: &str) -> &mut Self {
-        self.operations
-            .push(AlterOperation::DropIndex(name.to_string()));
-        self
+    /// Keep what `create_table`, the table's `SHOW CREATE TABLE`, declares
+    /// for each column whose type changes, besides the type.
+    pub(crate) fn keep_column_attributes(&mut self, create_table: &str) {
+        for operation in &self.operations {
+            if let AlterOperation::ChangeColumnType(name, _) = operation
+                && let Some(attributes) = mysql_column_attributes(create_table, name)
+            {
+                self.kept_attributes.insert(name.clone(), attributes);
+            }
+        }
     }
 
     pub(crate) fn build(&self) -> Result<Vec<String>> {
@@ -87,48 +99,53 @@ impl AlterTableBuilder {
     }
 
     fn build_operation(&self, operation: &AlterOperation) -> Result<String> {
+        let db_type = self.database_type;
+        let table = quote_ident(db_type, &self.name);
+
         let sql = match operation {
-            AlterOperation::AddColumn(column) => {
-                let column_definition = self.build_column_def(column);
-                format!(
-                    "ALTER TABLE {} ADD COLUMN {}",
-                    self.quote_identifier(&self.name),
-                    column_definition.trim()
-                )
-            }
+            AlterOperation::AddColumn(column) => ddl::add_column(db_type, &table, column),
             AlterOperation::DropColumn(name) => {
                 format!(
                     "ALTER TABLE {} DROP COLUMN {}",
-                    self.quote_identifier(&self.name),
-                    self.quote_identifier(name)
+                    table,
+                    quote_ident(db_type, name)
                 )
             }
             AlterOperation::RenameColumn(from, to) => {
                 format!(
                     "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    self.quote_identifier(&self.name),
-                    self.quote_identifier(from),
-                    self.quote_identifier(to)
+                    table,
+                    quote_ident(db_type, from),
+                    quote_ident(db_type, to)
                 )
             }
             AlterOperation::ChangeColumnType(name, column_type) => {
-                let type_sql = self.type_to_sql(column_type);
-                match self.database_type {
+                let type_sql = column_type.to_sql(db_type);
+                match db_type {
                     DatabaseType::Postgres => {
                         format!(
                             "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                            self.quote_identifier(&self.name),
-                            self.quote_identifier(name),
+                            table,
+                            quote_ident(db_type, name),
                             type_sql
                         )
                     }
                     DatabaseType::MySQL | DatabaseType::MariaDB => {
-                        format!(
+                        let mut sql = format!(
                             "ALTER TABLE {} MODIFY COLUMN {} {}",
-                            self.quote_identifier(&self.name),
-                            self.quote_identifier(name),
+                            table,
+                            quote_ident(db_type, name),
                             type_sql
-                        )
+                        );
+                        if let Some(attributes) = self
+                            .kept_attributes
+                            .get(name)
+                            .filter(|kept| !kept.is_empty())
+                        {
+                            sql.push(' ');
+                            sql.push_str(attributes);
+                        }
+                        sql
                     }
                     // Emitting a SQL comment here would let the migration be
                     // recorded as applied while the column keeps its old type.
@@ -146,135 +163,80 @@ impl AlterTableBuilder {
                     }
                 }
             }
-            AlterOperation::AddIndex(index) => {
-                let index_type = if index.unique {
-                    "UNIQUE INDEX"
-                } else {
-                    "INDEX"
-                };
-                let columns: Vec<String> = index
-                    .columns
-                    .iter()
-                    .map(|column| self.quote_identifier(column))
-                    .collect();
-
-                format!(
-                    "CREATE {} {} ON {} ({})",
-                    index_type,
-                    self.quote_identifier(&index.name),
-                    self.quote_identifier(&self.name),
-                    columns.join(", ")
-                )
-            }
-            AlterOperation::DropIndex(name) => match self.database_type {
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    format!(
-                        "DROP INDEX {} ON {}",
-                        self.quote_identifier(name),
-                        self.quote_identifier(&self.name)
-                    )
-                }
-                _ => format!("DROP INDEX {}", self.quote_identifier(name)),
-            },
         };
 
         Ok(sql)
     }
-
-    fn build_column_def(&self, column: &ColumnDefinition) -> String {
-        let mut definition = format!(
-            "{} {}",
-            self.quote_identifier(&column.name),
-            self.type_to_sql(&column.column_type)
-        );
-
-        if !column.nullable {
-            definition.push_str(" NOT NULL");
-        }
-
-        if let Some(default) = &column.default {
-            definition.push_str(&format!(" DEFAULT {}", default));
-        }
-
-        if column.unique {
-            definition.push_str(" UNIQUE");
-        }
-
-        definition
-    }
-
-    fn type_to_sql(&self, column_type: &ColumnType) -> String {
-        match self.database_type {
-            DatabaseType::Postgres => column_type.to_postgres_sql(),
-            DatabaseType::MySQL | DatabaseType::MariaDB => column_type.to_mysql_sql(),
-            DatabaseType::SQLite => column_type.to_sqlite_sql(),
-        }
-    }
-
-    fn quote_identifier(&self, name: &str) -> String {
-        quote_identifier_for_db(name, self.database_type)
-    }
 }
 
-/// Builder for adding columns in ALTER TABLE
-pub struct AlterColumnBuilder<'a> {
-    builder: &'a mut AlterTableBuilder,
-    definition: ColumnDefinition,
-}
+/// What `create_table`, a MySQL or MariaDB `SHOW CREATE TABLE`, declares for
+/// `column` after its type, character set and collation: `NOT NULL DEFAULT '5'`,
+/// `NOT NULL AUTO_INCREMENT`, `DEFAULT NULL COMMENT '..'`. `None` when the table
+/// has no such column.
+fn mysql_column_attributes(create_table: &str, column: &str) -> Option<String> {
+    // The first word of a column's definition that is not part of its type.
+    const ATTRIBUTES: [&str; 17] = [
+        "NOT",
+        "NULL",
+        "DEFAULT",
+        "AUTO_INCREMENT",
+        "ON",
+        "COMMENT",
+        "GENERATED",
+        "AS",
+        "INVISIBLE",
+        "VISIBLE",
+        "CHECK",
+        "COLUMN_FORMAT",
+        "STORAGE",
+        "SRID",
+        "PRIMARY",
+        "UNIQUE",
+        "REFERENCES",
+    ];
 
-impl<'a> AlterColumnBuilder<'a> {
-    /// Mark as NOT NULL
-    pub fn not_null(mut self) -> Self {
-        self.definition.nullable = false;
-        self
-    }
+    let quoted = format!("`{}`", column.replace('`', "``"));
+    let definition = create_table.lines().map(str::trim).find_map(|line| {
+        let head = line.get(..quoted.len())?;
+        let rest = line.get(quoted.len()..)?;
+        (head.eq_ignore_ascii_case(&quoted) && rest.starts_with(' ')).then_some(rest)
+    })?;
+    let mut rest = definition.trim().trim_end_matches(',');
 
-    /// Mark as nullable
-    pub fn nullable(mut self) -> Self {
-        self.definition.nullable = true;
-        self
-    }
-
-    /// Set default value
-    pub fn default(mut self, value: impl Into<DefaultValue>) -> Self {
-        self.definition.default = Some(value.into().to_sql());
-        self
-    }
-
-    /// Set default to current timestamp
-    pub fn default_now(mut self) -> Self {
-        self.definition.default = Some("CURRENT_TIMESTAMP".to_string());
-        self
-    }
-
-    /// Mark as unique
-    pub fn unique(mut self) -> Self {
-        self.definition.unique = true;
-        self
-    }
-}
-
-impl<'a> Drop for AlterColumnBuilder<'a> {
-    fn drop(&mut self) {
-        let definition = std::mem::replace(
-            &mut self.definition,
-            ColumnDefinition {
-                name: String::new(),
-                column_type: ColumnType::String,
-                nullable: true,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-                unique: false,
-                check: None,
-                extra: None,
-            },
-        );
-        if !definition.name.is_empty() {
-            self.builder
-                .operations
-                .push(AlterOperation::AddColumn(definition));
+    loop {
+        rest = rest.trim_start();
+        let first = rest.chars().next()?;
+        // A quoted literal or a parenthesized group is one word.
+        let end = match first {
+            '\'' | '"' | '`' => rest[1..].find(first).map_or(rest.len(), |end| end + 2),
+            '(' => {
+                let mut depth = 0usize;
+                rest.char_indices()
+                    .find(|&(_, character)| {
+                        match character {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth == 0
+                    })
+                    .map_or(rest.len(), |(index, _)| index + 1)
+            }
+            _ => rest
+                .find(|character: char| character.is_whitespace() || character == '(')
+                .unwrap_or(rest.len()),
+        };
+        let word = &rest[..end];
+        if ATTRIBUTES
+            .iter()
+            .any(|attribute| word.eq_ignore_ascii_case(attribute))
+        {
+            return Some(rest.to_string());
         }
+        if end == rest.len() {
+            return Some(String::new());
+        }
+        rest = &rest[end..];
     }
 }
 
@@ -284,6 +246,4 @@ enum AlterOperation {
     DropColumn(String),
     RenameColumn(String, String),
     ChangeColumnType(String, ColumnType),
-    AddIndex(IndexBuilder),
-    DropIndex(String),
 }

@@ -82,7 +82,11 @@ Relation helper fields such as `HasOne<T>`, `HasMany<T>`, and `BelongsTo<T>` are
 
 Runtime relation helpers operate on a single local or foreign key value per query. For composite-key models, define `local_key` explicitly when needed and use custom queries when the relation requires matching multiple columns.
 
+An owner whose key is NULL (a nullable `local_key` that is unset) has no related rows: `load()` returns none, `count()` zero, and `attach`, `detach` and `sync` refuse it, rather than matching every row whose foreign key is NULL. A model may hold several relations to one model, such as an `author` and an `editor` that are both `BelongsTo<User>`; each loads by its own keys, eagerly too. `query_with(db).with(..)` reads the relations from `db` as well.
+
 For `has_many_through`, TideORM requires all three relation options to be declared explicitly: `pivot`, `foreign_key`, and `related_key`. Missing any of them is now a compile-time error.
+
+The field's wrapper type decides the relation kind. The `has_one`/`has_many`/`belongs_to`/`has_many_through` attribute may be omitted, but when present it must name the same kind as the wrapper, and `HasOne`, `HasMany` and `BelongsTo` fields must declare `foreign_key`; either mistake is a compile-time error.
 
 ```rust
 // Load a HasOne relation
@@ -131,6 +135,16 @@ let users = User::eager()
 ```
 
 Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
+
+After `with()`, the eager builder forwards the common filters (`where_eq`, `where_in`, `where_raw`, `order_by`, `limit`, `offset`); `query(|q| ..)` reaches every other query method:
+
+```rust
+let users = User::query()
+    .with("posts")
+    .query(|q| q.where_gt("age", 18).where_null("banned_at").order_desc("id"))
+    .get()
+    .await?;
+```
 
 #### Hidden Attributes in Eager-Loaded Payloads
 
@@ -226,6 +240,12 @@ user.roles.sync(vec![
 ]).await?;
 ```
 
+When the pivot model has soft delete, a trashed pivot row no longer links its pair: `load()`, `load_with()`, eager loading and `count()` leave it out, `attach()` restores it, and `sync()` deletes it with the live rows.
+
+`attach()` of a pair already linked succeeds without a second row, even when two calls race. When another unique key of the pivot keeps the pair out, such as one on `role_id` alone, `attach()` and `sync()` return an error rather than report a link they did not make.
+
+`load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
+
 ### Polymorphic Relations
 
 ```rust
@@ -256,6 +276,10 @@ pub struct Post {
 // On the child side, use #[tideorm(morph_name = "imageable")] on MorphTo<T> too.
 ```
 
+An owner that keys its children by another column names it with `local_key`, as `#[tideorm(morph_name = "imageable", local_key = "uuid")]`; `MorphTo::load_as::<Owner>()` then looks the owner up by that column, and by the primary key otherwise.
+
+Eager loading (`with("images")`, and every other relation) matches keys by value, as the database does, so an `i64` key finds the rows of an `i32` foreign key or a text `*_id` column holding it.
+
 ---
 
 
@@ -269,30 +293,45 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "attachments"] }
+tideorm = { version = "0.12.0", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(has_one_files = "thumbnail")]
-#[tideorm(has_many_files = "images,documents")]
+#[tideorm::model(
+    table = "products",
+    has_one_files = "thumbnail",
+    has_many_files = "images,documents"
+)]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
     pub name: String,
     pub files: Option<JsonValue>,  // JSONB column storing attachments
 }
+
+impl HasAttachments for Product {
+    fn has_one_files() -> Vec<&'static str> {
+        vec!["thumbnail"]
+    }
+
+    fn has_many_files() -> Vec<&'static str> {
+        vec!["images", "documents"]
+    }
+
+    fn get_files_data(&self) -> Result<FilesData, AttachmentError> {
+        Ok(self.files.as_ref().map(FilesData::from_json).unwrap_or_default())
+    }
+
+    fn set_files_data(&mut self, data: FilesData) -> Result<(), AttachmentError> {
+        self.files = Some(data.to_json());
+        Ok(())
+    }
+}
 ```
 
-The `files` column is **required**. The derive generates the `HasAttachments` impl
-against it, so declaring `has_one_files` or `has_many_files` without a `files`
-field is a compile error naming the missing column. Nothing else has to be
-written by hand — `attach()`, `detach()` and `sync()` are available on `Product`
-as soon as the attribute is declared, provided the `attachments` feature is
-enabled and `tideorm::prelude::*` (or `tideorm::attachments::HasAttachments`) is
-in scope.
+Every option goes inside the one `#[tideorm::model(..)]` attribute — combining it with a separate `#[tideorm(..)]` on the struct is a compile error. The attribute records the slot names on the model; the `HasAttachments` impl is yours to write, because only you know which column holds the payload. Once it exists, `attach()`, `detach()` and `sync()` are available on `Product` with the `attachments` feature enabled and `tideorm::prelude::*` in scope.
 
 ### Relation Types
 
@@ -334,6 +373,8 @@ let attachment = FileAttachment::new("uploads/photo.jpg")
     .add_metadata("height", 1080)
     .add_metadata("photographer", "John Doe");
 product.attach_with_metadata("images", attachment)?;
+// Metadata sits beside the attachment's own fields in its JSON. An entry named
+// like one of them (`size`, `key`) is kept only while that field is unset.
 
 // Save to persist changes
 product.update().await?;
@@ -344,6 +385,9 @@ product.update().await?;
 ```rust
 // Remove thumbnail (hasOne)
 product.detach("thumbnail", None)?;
+
+// Remove the thumbnail only while it is this file (hasOne)
+product.detach("thumbnail", Some("uploads/old-thumb.jpg"))?;
 
 // Remove specific file (hasMany)
 product.detach("images", Some("uploads/img1.jpg"))?;
@@ -612,14 +656,13 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "translations"] }
+tideorm = { version = "0.12.0", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(translatable = "name,description")]
+#[tideorm::model(table = "products", translatable = "name,description")]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,
@@ -635,14 +678,12 @@ pub struct Product {
 }
 ```
 
-The `translations` column is **required**. The derive generates the
-`HasTranslations` impl against it, so declaring `translatable` without a
-`translations` field is a compile error naming the missing column. Nothing else
-has to be written by hand — `set_translation()` and `get_translated()` are
-available on `Product` as soon as the attribute is declared, provided the
-`translations` feature is enabled and `tideorm::prelude::*` (or
-`tideorm::translations::HasTranslations`) is in scope. The fallback value behind
-`get_translated()` is read from the model's own field of the same name.
+The attribute records which fields are translatable; the `HasTranslations` impl
+that reads and writes the `translations` column is yours to write, as shown in
+[Translation Configuration](#translation-configuration) below. Once it exists,
+`set_translation()` and `get_translated()` are available on `Product` with the
+`translations` feature enabled and `tideorm::prelude::*` in scope. The fallback
+value behind `get_translated()` is what your `get_default_value()` returns.
 
 ### Setting Translations
 
@@ -742,12 +783,18 @@ let json = product.to_translated_json(Some(opts));
 
 // Get JSON including all translations (for admin interfaces)
 let json = product.to_json_with_all_translations();
+
+// A model whose serde derive renames fields (`rename_all = "camelCase"`) says
+// where each field lands, so the translation replaces it there:
+// fn serialized_key(field: &'static str) -> &'static str {
+//     <Self as ModelMeta>::serialized_name(field)
+// }
 // Result includes raw translations field
 ```
 
 ### Translation Configuration
 
-When implementing `HasTranslations` manually:
+The impl the translation methods need:
 
 ```rust
 impl HasTranslations for Product {
@@ -806,13 +853,15 @@ Translations are stored in JSONB with this structure:
 
 ### Combining Attachments and Translations
 
-Models can use both features together:
+Models can use both features together, each with its impl from above:
 
 ```rust
-#[tideorm::model(table = "products")]
-#[tideorm(translatable = "name,description")]
-#[tideorm(has_one_files = "thumbnail")]
-#[tideorm(has_many_files = "images")]
+#[tideorm::model(
+    table = "products",
+    translatable = "name,description",
+    has_one_files = "thumbnail",
+    has_many_files = "images"
+)]
 pub struct Product {
     #[tideorm(primary_key, auto_increment)]
     pub id: i64,

@@ -14,7 +14,9 @@ The current benchmark targets fall into three categories:
 
 ## Prerequisites
 
-For PostgreSQL-backed benches, TideORM uses the same fallback URL as the test suite unless you override it:
+PostgreSQL-backed benches are opt-in, like the PostgreSQL tests: they run when `TEST_DATABASE_URL`,
+`POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS` is set, and otherwise print a note and measure nothing.
+Point them at a server with:
 
 ```bash
 POSTGRESQL_DATABASE_URL=postgres://postgres:postgres@localhost:5432/test_tide_orm

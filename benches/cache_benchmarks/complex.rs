@@ -151,17 +151,20 @@ pub(super) fn benchmark_cache_with_serialization(c: &mut Criterion) {
     group.finish();
 }
 
-pub(super) fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let db = rt
-        .block_on(Database::connect("sqlite::memory:"))
-        .expect("failed to connect to benchmark sqlite database");
-
+/// Connect to `url`, recreate `bench_cache_users`, and seed it with `rows` rows
+/// whose emails are `user_{i}@example.com`.
+fn seeded_users_db(rt: &Runtime, url: &str, rows: usize) -> Database {
     rt.block_on(async {
+        let db = Database::connect(url)
+            .await
+            .expect("failed to connect to benchmark sqlite database");
         let conn = db
             .__internal_connection()
             .expect("benchmark sqlite connection should be available");
 
+        conn.execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
+            .await
+            .expect("failed to drop benchmark table");
         conn.execute_unprepared(
             r#"
                 CREATE TABLE bench_cache_users (
@@ -175,7 +178,7 @@ pub(super) fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
         .await
         .expect("failed to create benchmark table");
 
-        for i in 0..100 {
+        for i in 0..rows {
             BenchCacheUser {
                 id: 0,
                 email: format!("user_{i}@example.com"),
@@ -187,7 +190,14 @@ pub(super) fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
             .await
             .expect("failed to seed benchmark row");
         }
-    });
+
+        db
+    })
+}
+
+pub(super) fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
+    let rt = Runtime::new().expect("failed to create tokio runtime");
+    let db = seeded_users_db(&rt, "sqlite::memory:", 100);
 
     let cache = QueryCache::global();
     cache.disable();
@@ -244,122 +254,59 @@ pub(super) fn benchmark_end_to_end_query_cache_paths(c: &mut Criterion) {
 }
 
 pub(super) fn benchmark_uncached_query_concurrency(c: &mut Criterion) {
-    let db_url = "sqlite://target/bench_cache_concurrency.db?mode=rwc";
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let db = rt
-        .block_on(Database::connect(db_url))
-        .expect("failed to connect to concurrency benchmark sqlite database");
+    const TASKS: usize = 4;
+    const QUERIES_PER_TASK: usize = 50;
+    const ROWS: usize = 200;
 
-    rt.block_on(async {
-        let conn = db
-            .__internal_connection()
-            .expect("benchmark sqlite connection should be available");
-
-        conn.execute_unprepared("DROP TABLE IF EXISTS bench_cache_users")
-            .await
-            .expect("failed to drop benchmark table");
-        conn.execute_unprepared(
-            r#"
-                CREATE TABLE bench_cache_users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    email TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1
-                )
-            "#,
-        )
-        .await
-        .expect("failed to create benchmark table");
-
-        for i in 0..200 {
-            BenchCacheUser {
-                id: 0,
-                email: format!("concurrent_{i}@example.com"),
-                name: format!("Concurrent User {i}"),
-                active: i % 2 == 0,
-            }
-            .into_active_model()
-            .insert(&conn)
-            .await
-            .expect("failed to seed concurrency benchmark row");
-        }
-    });
-
-    let db = Arc::new(db);
+    let rt = Runtime::new().expect("failed to create tokio runtime");
+    // A file database: every pooled connection to `sqlite::memory:` would be a
+    // separate, empty database.
+    let db = Arc::new(seeded_users_db(
+        &rt,
+        "sqlite://target/bench_cache_concurrency.db?mode=rwc",
+        ROWS,
+    ));
     let cache = QueryCache::global();
     let mut group = c.benchmark_group("uncached_query_concurrency");
-    let threads = 4;
-    let queries_per_thread = 50;
-    let total_queries = (threads * queries_per_thread) as u64;
-    group.throughput(Throughput::Elements(total_queries));
+    group.throughput(Throughput::Elements((TASKS * QUERIES_PER_TASK) as u64));
 
-    cache.disable();
-    cache.clear();
-    cache.reset_stats();
+    // A query that never opts into caching must cost the same either way.
+    for (name, cache_enabled) in [("cache_disabled", false), ("cache_enabled_opt_out", true)] {
+        if cache_enabled {
+            cache.enable();
+        } else {
+            cache.disable();
+        }
+        cache.clear();
+        cache.reset_stats();
 
-    group.bench_function("cache_disabled", |b| {
-        b.iter(|| {
-            let handles: Vec<_> = (0..threads)
-                .map(|thread_id| {
-                    let db = Arc::clone(&db);
-                    thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new()
-                            .expect("failed to create per-thread runtime");
-                        rt.block_on(async move {
-                            for query_id in 0..queries_per_thread {
-                                let user_index = (thread_id * queries_per_thread + query_id) % 200;
-                                let email = format!("concurrent_{user_index}@example.com");
-                                let results = BenchCacheUser::query_with(db.as_ref())
-                                    .where_eq("email", email)
-                                    .get()
-                                    .await
-                                    .expect("uncached concurrent query should succeed");
-                                black_box(results);
-                            }
-                        });
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().expect("benchmark thread should join");
-            }
+        group.bench_function(name, |b| {
+            b.to_async(&rt).iter(|| {
+                let db = Arc::clone(&db);
+                async move {
+                    let tasks: Vec<_> = (0..TASKS)
+                        .map(|task_id| {
+                            let db = Arc::clone(&db);
+                            tokio::spawn(async move {
+                                for query_id in 0..QUERIES_PER_TASK {
+                                    let user_index = (task_id * QUERIES_PER_TASK + query_id) % ROWS;
+                                    let results = BenchCacheUser::query_with(db.as_ref())
+                                        .where_eq("email", format!("user_{user_index}@example.com"))
+                                        .get()
+                                        .await
+                                        .expect("uncached concurrent query should succeed");
+                                    black_box(results);
+                                }
+                            })
+                        })
+                        .collect();
+                    for task in tasks {
+                        task.await.expect("benchmark task should finish");
+                    }
+                }
+            });
         });
-    });
-
-    cache.enable();
-    cache.clear();
-    cache.reset_stats();
-
-    group.bench_function("cache_enabled_opt_out", |b| {
-        b.iter(|| {
-            let handles: Vec<_> = (0..threads)
-                .map(|thread_id| {
-                    let db = Arc::clone(&db);
-                    thread::spawn(move || {
-                        let rt = tokio::runtime::Runtime::new()
-                            .expect("failed to create per-thread runtime");
-                        rt.block_on(async move {
-                            for query_id in 0..queries_per_thread {
-                                let user_index = (thread_id * queries_per_thread + query_id) % 200;
-                                let email = format!("concurrent_{user_index}@example.com");
-                                let results = BenchCacheUser::query_with(db.as_ref())
-                                    .where_eq("email", email)
-                                    .get()
-                                    .await
-                                    .expect("uncached concurrent query should succeed");
-                                black_box(results);
-                            }
-                        });
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                handle.join().expect("benchmark thread should join");
-            }
-        });
-    });
+    }
 
     cache.disable();
     cache.clear();

@@ -1,22 +1,61 @@
 use parking_lot::RwLock;
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
 
 use super::entry::{LogLevel, QueryLogEntry, QueryStats};
-use super::format::{format_debug, format_error, format_slow};
+use super::format::{format_debug, format_error, format_slow, format_summary};
 
-/// Global query logger configuration
-static LOGGER_ENABLED: AtomicBool = AtomicBool::new(false);
-static LOGGER_TIMING: AtomicBool = AtomicBool::new(true);
-static SLOW_QUERY_THRESHOLD_MS: AtomicU64 = AtomicU64::new(100);
-static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
-static SLOW_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
-static TOTAL_QUERY_TIME_MS: AtomicU64 = AtomicU64::new(0);
+/// The slow-query threshold the logger and the profiler both start from.
+pub(crate) const DEFAULT_SLOW_QUERY_THRESHOLD_MS: u64 = 100;
 
-static LOG_LEVEL: RwLock<LogLevel> = RwLock::new(LogLevel::Off);
-static QUERY_HISTORY: RwLock<VecDeque<QueryLogEntry>> = RwLock::new(VecDeque::new());
-static HISTORY_LIMIT: RwLock<usize> = RwLock::new(100);
+/// Process-wide logger state, built from the environment on first use so that
+/// `TIDE_LOG_*` applies before anything else and settings made in code land on
+/// top of it.
+static STATE: LazyLock<LoggerState> = LazyLock::new(LoggerState::from_env);
+
+struct LoggerState {
+    enabled: AtomicBool,
+    timing: AtomicBool,
+    slow_threshold_ms: AtomicU64,
+    query_count: AtomicU64,
+    slow_query_count: AtomicU64,
+    total_time_ns: AtomicU64,
+    /// `None` until a level is set in code or through `TIDE_LOG_LEVEL`.
+    level: RwLock<Option<LogLevel>>,
+    history: RwLock<VecDeque<QueryLogEntry>>,
+    history_limit: RwLock<usize>,
+}
+
+impl LoggerState {
+    /// Read `TIDE_LOG_QUERIES`, `TIDE_LOG_LEVEL`, and `TIDE_SLOW_QUERY_MS`.
+    fn from_env() -> Self {
+        Self::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// Build the state from `TIDE_LOG_LEVEL` and `TIDE_SLOW_QUERY_MS` as
+    /// `var` reads them, and `TIDE_LOG_QUERIES` from the environment.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+        let level = var("TIDE_LOG_LEVEL").map(|value| LogLevel::parse_str(&value));
+        let enabled =
+            super::query_logging_enabled() || level.is_some_and(|level| level != LogLevel::Off);
+        let slow_threshold_ms = var("TIDE_SLOW_QUERY_MS")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DEFAULT_SLOW_QUERY_THRESHOLD_MS);
+
+        Self {
+            enabled: AtomicBool::new(enabled),
+            timing: AtomicBool::new(true),
+            slow_threshold_ms: AtomicU64::new(slow_threshold_ms),
+            query_count: AtomicU64::new(0),
+            slow_query_count: AtomicU64::new(0),
+            total_time_ns: AtomicU64::new(0),
+            level: RwLock::new(level),
+            history: RwLock::new(VecDeque::new()),
+            history_limit: RwLock::new(100),
+        }
+    }
+}
 
 /// Query logger for debugging and performance monitoring
 pub struct QueryLogger;
@@ -29,31 +68,36 @@ impl QueryLogger {
 
     /// Enable logging with the current global settings.
     pub fn enable() {
-        LOGGER_ENABLED.store(true, Ordering::SeqCst);
+        STATE.enabled.store(true, Ordering::SeqCst);
     }
 
     /// Disable logging without clearing counters or history.
     pub fn disable() {
-        LOGGER_ENABLED.store(false, Ordering::SeqCst);
+        STATE.enabled.store(false, Ordering::SeqCst);
     }
 
     /// Return whether global logging is currently active.
     pub fn is_enabled() -> bool {
-        LOGGER_ENABLED.load(Ordering::SeqCst)
+        STATE.enabled.load(Ordering::SeqCst)
     }
 
     pub(super) fn timing_enabled() -> bool {
-        LOGGER_TIMING.load(Ordering::SeqCst)
+        STATE.timing.load(Ordering::SeqCst)
     }
 
-    /// Return the current global log level.
+    /// Return the current global log level; `Off` until one is set.
     pub fn level() -> LogLevel {
-        *LOG_LEVEL.read()
+        Self::configured_level().unwrap_or_default()
+    }
+
+    /// The level set in code or through `TIDE_LOG_LEVEL`, if any.
+    pub(super) fn configured_level() -> Option<LogLevel> {
+        *STATE.level.read()
     }
 
     /// Replace the current global log level.
     pub fn set_level(level: LogLevel) {
-        *LOG_LEVEL.write() = level;
+        *STATE.level.write() = Some(level);
     }
 
     /// Record one query entry, update counters, and emit output if the level allows it.
@@ -67,20 +111,22 @@ impl QueryLogger {
             return;
         }
 
-        QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
+        STATE.query_count.fetch_add(1, Ordering::SeqCst);
         if let Some(duration) = entry.duration {
-            TOTAL_QUERY_TIME_MS.fetch_add(duration.as_millis() as u64, Ordering::SeqCst);
+            STATE
+                .total_time_ns
+                .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
         }
 
-        let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
+        let threshold = STATE.slow_threshold_ms.load(Ordering::SeqCst);
         let is_slow = entry.is_slow(threshold);
         if is_slow {
-            SLOW_QUERY_COUNT.fetch_add(1, Ordering::SeqCst);
+            STATE.slow_query_count.fetch_add(1, Ordering::SeqCst);
         }
 
         {
-            let mut history = QUERY_HISTORY.write();
-            let limit = *HISTORY_LIMIT.read();
+            let mut history = STATE.history.write();
+            let limit = *STATE.history_limit.read();
             if limit == 0 {
                 history.clear();
             } else {
@@ -91,116 +137,72 @@ impl QueryLogger {
             }
         }
 
-        let should_log = match level {
-            LogLevel::Off => false,
-            LogLevel::Error => !entry.success,
-            LogLevel::Warn => !entry.success || is_slow,
-            LogLevel::Info => !entry.success || is_slow,
-            LogLevel::Debug => true,
-            LogLevel::Trace => true,
-        };
-
-        if should_log {
-            let output_entry = if Self::timing_enabled() {
-                entry.clone()
-            } else {
-                let mut output_entry = entry.clone();
-                output_entry.duration = None;
-                output_entry
-            };
-
-            let output = if level == LogLevel::Trace {
-                output_entry.format_console()
-            } else if level >= LogLevel::Debug {
-                format_debug(&output_entry)
-            } else if is_slow {
-                format_slow(&output_entry, threshold)
-            } else {
-                format_error(&output_entry)
-            };
-
+        let mut entry = entry;
+        if !Self::timing_enabled() {
+            entry.duration = None;
+        }
+        if let Some(output) = render(level, &entry, is_slow, threshold) {
             eprintln!("{}", output);
         }
-    }
-
-    /// Log a successful query using just SQL and duration.
-    pub fn log_timed(sql: impl Into<String>, duration: Duration) {
-        if !Self::is_enabled() {
-            return;
-        }
-        let entry = QueryLogEntry::new(sql).with_duration(duration);
-        Self::log(entry);
-    }
-
-    /// Log a failed query using just SQL and an error message.
-    pub fn log_error(sql: impl Into<String>, error: impl Into<String>) {
-        if !Self::is_enabled() {
-            return;
-        }
-        let entry = QueryLogEntry::new(sql).with_error(error);
-        Self::log(entry);
     }
 
     /// Snapshot the current aggregate query counters.
     pub fn stats() -> QueryStats {
         QueryStats {
-            total_queries: QUERY_COUNT.load(Ordering::SeqCst),
-            slow_queries: SLOW_QUERY_COUNT.load(Ordering::SeqCst),
-            total_time_ms: TOTAL_QUERY_TIME_MS.load(Ordering::SeqCst),
-            threshold_ms: SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst),
+            total_queries: STATE.query_count.load(Ordering::SeqCst),
+            slow_queries: STATE.slow_query_count.load(Ordering::SeqCst),
+            total_time_ns: STATE.total_time_ns.load(Ordering::SeqCst),
+            slow_threshold_ms: STATE.slow_threshold_ms.load(Ordering::SeqCst),
         }
     }
 
     /// Clear the aggregate query counters.
     pub fn reset_stats() {
-        QUERY_COUNT.store(0, Ordering::SeqCst);
-        SLOW_QUERY_COUNT.store(0, Ordering::SeqCst);
-        TOTAL_QUERY_TIME_MS.store(0, Ordering::SeqCst);
+        STATE.query_count.store(0, Ordering::SeqCst);
+        STATE.slow_query_count.store(0, Ordering::SeqCst);
+        STATE.total_time_ns.store(0, Ordering::SeqCst);
     }
 
     /// Return the stored query history as a new vector.
     pub fn history() -> Vec<QueryLogEntry> {
-        QUERY_HISTORY.read().iter().cloned().collect()
+        STATE.history.read().iter().cloned().collect()
     }
 
     /// Drop all stored history entries.
     pub fn clear_history() {
-        QUERY_HISTORY.write().clear();
+        STATE.history.write().clear();
     }
 
     /// Return history entries that meet the current slow-query threshold.
     pub fn slow_queries() -> Vec<QueryLogEntry> {
-        let threshold = SLOW_QUERY_THRESHOLD_MS.load(Ordering::SeqCst);
-        QUERY_HISTORY
+        let threshold = STATE.slow_threshold_ms.load(Ordering::SeqCst);
+        STATE
+            .history
             .read()
             .iter()
             .filter(|entry| entry.is_slow(threshold))
             .cloned()
             .collect()
     }
+}
 
-    /// Load logger settings from TIDE_LOG_QUERIES, TIDE_LOG_LEVEL, and TIDE_SLOW_QUERY_MS.
-    pub fn init_from_env() {
-        if let Ok(val) = std::env::var("TIDE_LOG_QUERIES")
-            && (val == "1" || val.to_lowercase() == "true")
-        {
-            LOGGER_ENABLED.store(true, Ordering::SeqCst);
-        }
-
-        if let Ok(val) = std::env::var("TIDE_LOG_LEVEL") {
-            let level = LogLevel::parse_str(&val);
-            *LOG_LEVEL.write() = level;
-            if level != LogLevel::Off {
-                LOGGER_ENABLED.store(true, Ordering::SeqCst);
-            }
-        }
-
-        if let Ok(val) = std::env::var("TIDE_SLOW_QUERY_MS")
-            && let Ok(ms) = val.parse::<u64>()
-        {
-            SLOW_QUERY_THRESHOLD_MS.store(ms, Ordering::SeqCst);
-        }
-    }
+/// The output `QueryLogger::log` prints for `entry` at `level`, if any.
+///
+/// `is_slow` is decided before timing is stripped from `entry`, so a slow
+/// query is still reported as slow when durations are hidden.
+fn render(level: LogLevel, entry: &QueryLogEntry, is_slow: bool, threshold: u64) -> Option<String> {
+    let output = match level {
+        LogLevel::Off => return None,
+        LogLevel::Error if entry.success => return None,
+        LogLevel::Warn if entry.success && !is_slow => return None,
+        LogLevel::Trace => entry.format_console(),
+        // A failure reads as one at every level, slow or not.
+        _ if !entry.success => format_error(entry),
+        LogLevel::Debug => format_debug(entry),
+        _ if is_slow => format_slow(entry, threshold),
+        _ => format_summary(entry),
+    };
+    Some(output)
 }
 
 /// Builder for configuring the query logger
@@ -221,7 +223,7 @@ impl QueryLoggerBuilder {
         }
     }
 
-    /// Set the log level that will be applied on enable.
+    /// Set the log level to apply.
     pub fn set_level(mut self, level: LogLevel) -> Self {
         self.level = Some(level);
         self
@@ -247,23 +249,32 @@ impl QueryLoggerBuilder {
 
     /// Apply the builder settings and enable global logging.
     pub fn enable(self) {
-        if let Some(level) = self.level {
-            *LOG_LEVEL.write() = level;
-        }
-        if let Some(timing) = self.timing {
-            LOGGER_TIMING.store(timing, Ordering::SeqCst);
-        }
-        if let Some(ms) = self.threshold_ms {
-            SLOW_QUERY_THRESHOLD_MS.store(ms, Ordering::SeqCst);
-        }
-        if let Some(limit) = self.history_limit {
-            *HISTORY_LIMIT.write() = limit;
-        }
-        LOGGER_ENABLED.store(true, Ordering::SeqCst);
+        self.apply();
+        QueryLogger::enable();
     }
 
-    /// Disable global logging.
+    /// Apply the builder settings and disable global logging.
     pub fn disable(self) {
-        LOGGER_ENABLED.store(false, Ordering::SeqCst);
+        self.apply();
+        QueryLogger::disable();
+    }
+
+    fn apply(self) {
+        if let Some(level) = self.level {
+            QueryLogger::set_level(level);
+        }
+        if let Some(timing) = self.timing {
+            STATE.timing.store(timing, Ordering::SeqCst);
+        }
+        if let Some(ms) = self.threshold_ms {
+            STATE.slow_threshold_ms.store(ms, Ordering::SeqCst);
+        }
+        if let Some(limit) = self.history_limit {
+            *STATE.history_limit.write() = limit;
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/logging_logger_tests.rs"]
+mod tests;

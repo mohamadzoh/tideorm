@@ -1,12 +1,13 @@
 //! Non-database TideORM stability benchmarks.
 //!
 //! These benches cover stable internal workloads that are useful to keep clean:
-//! query debugging, schema generation, and Rust-to-SQL type mapping.
+//! query debugging, OR-clause construction, schema generation, and Rust-to-SQL
+//! type mapping.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use tideorm::prelude::*;
-use tideorm::schema::rust_type_to_sql;
+use tideorm::schema::rust_type_to_column_type;
 
 #[derive(Model, PartialEq)]
 #[tideorm(table = "audit_events")]
@@ -19,6 +20,20 @@ struct AuditEvent {
     severity: String,
     attempts: i32,
     archived: bool,
+}
+
+#[derive(Model, PartialEq)]
+#[tideorm(table = "members")]
+struct Member {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    email: String,
+    status: String,
+    role: String,
+    department: String,
+    age: i32,
+    active: bool,
 }
 
 fn build_simple_debug_info() -> QueryDebugInfo {
@@ -113,6 +128,117 @@ fn bench_query_debug_rendering(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_or_group_construction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("or_group_construction");
+
+    group.bench_function("simple_or_group", |b| {
+        b.iter(|| {
+            OrGroup::new()
+                .where_eq("role", "admin")
+                .where_eq("role", "moderator")
+        })
+    });
+    group.bench_function("complex_or_group", |b| {
+        b.iter(|| {
+            OrGroup::new()
+                .where_eq("status", "active")
+                .where_eq("status", "pending")
+                .where_gt("age", 21)
+                .where_like("email", "%@company.com")
+                .where_in("role", vec!["admin", "moderator", "editor"])
+        })
+    });
+    group.bench_function("nested_or_groups", |b| {
+        b.iter(|| {
+            OrGroup::new()
+                .where_eq("status", "active")
+                .nested_and(|inner| inner.where_eq("role", "admin").where_gt("age", 25))
+                .nested_or(|inner| {
+                    inner
+                        .where_eq("department", "Engineering")
+                        .where_eq("department", "Marketing")
+                })
+        })
+    });
+    group.bench_function("or_group_all_condition_types", |b| {
+        b.iter(|| {
+            OrGroup::new()
+                .where_eq("a", 1)
+                .where_not("b", 2)
+                .where_gt("c", 3)
+                .where_gte("d", 4)
+                .where_lt("e", 5)
+                .where_lte("f", 6)
+                .where_like("g", "%test%")
+                .where_not_like("h", "%bad%")
+                .where_in("i", vec![1, 2, 3])
+                .where_not_in("j", vec![4, 5])
+                .where_null("k")
+                .where_not_null("l")
+                .where_between("m", 10, 20)
+                .where_raw("n = 'test'")
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_or_query_construction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("or_query_construction");
+
+    group.bench_function("callback_or_where", |b| {
+        b.iter(|| {
+            Member::query()
+                .where_eq("active", true)
+                .or_where(|q| q.where_eq("status", "active").where_eq("status", "pending"))
+                .or_where(|q| q.where_in("department", vec!["Engineering", "Marketing"]))
+        })
+    });
+    group.bench_function("or_where_eq_shorthand", |b| {
+        b.iter(|| {
+            Member::query()
+                .where_eq("active", true)
+                .or_where_eq("role", "admin")
+                .or_where_eq("role", "moderator")
+                .or_where_eq("role", "editor")
+        })
+    });
+    group.bench_function("fluent_multi_branch", |b| {
+        b.iter(|| {
+            Member::query()
+                .where_eq("active", true)
+                .begin_or()
+                .or_where_eq("role", "admin")
+                .and_where_eq("department", "Engineering")
+                .and_where_gt("age", 25)
+                .or_where_eq("role", "moderator")
+                .and_where_like("email", "%@company.com")
+                .or_where_eq("role", "superuser")
+                .end_or()
+        })
+    });
+    group.bench_function("fluent_complex_scenario", |b| {
+        b.iter(|| {
+            Member::query()
+                .where_eq("active", true)
+                .begin_or()
+                .or_where_eq("role", "admin")
+                .and_where_not_null("email")
+                .and_where_gt("age", 21)
+                .or_where_eq("role", "moderator")
+                .and_where_in("department", vec!["Engineering", "Marketing"])
+                .and_where_between("age", 25, 45)
+                .or_where_eq("role", "editor")
+                .and_where_like("email", "%@example.com")
+                .or_where_eq("status", "vip")
+                .end_or()
+                .where_not("status", "banned")
+        })
+    });
+
+    group.finish();
+}
+
 fn bench_schema_generation(c: &mut Criterion) {
     let table = audit_event_schema();
     let mut group = c.benchmark_group("schema_generation");
@@ -147,7 +273,7 @@ fn bench_rust_type_mapping(c: &mut Criterion) {
         "Option<Vec<String>>",
         "serde_json::Value",
     ];
-    let mut group = c.benchmark_group("rust_type_to_sql");
+    let mut group = c.benchmark_group("rust_type_to_column_type");
 
     for db_type in [
         DatabaseType::Postgres,
@@ -162,7 +288,10 @@ fn bench_rust_type_mapping(c: &mut Criterion) {
                     black_box(
                         rust_types
                             .iter()
-                            .map(|rust_type| rust_type_to_sql(black_box(rust_type), *db_type))
+                            .map(|rust_type| {
+                                rust_type_to_column_type(black_box(rust_type))
+                                    .map(|column_type| column_type.to_sql(*db_type))
+                            })
                             .collect::<Vec<_>>(),
                     )
                 })
@@ -177,6 +306,8 @@ criterion_group!(
     benches,
     bench_query_debug_snapshot,
     bench_query_debug_rendering,
+    bench_or_group_construction,
+    bench_or_query_construction,
     bench_schema_generation,
     bench_rust_type_mapping,
 );

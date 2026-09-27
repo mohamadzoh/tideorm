@@ -1,6 +1,167 @@
 use super::*;
 
+use crate::internal::push_param;
+
+/// `value` as the JSON text a statement reads back with a JSON function.
+fn json_text(value: &serde_json::Value) -> crate::internal::Value {
+    crate::internal::Value::String(Some(value.to_string()))
+}
+
+/// `factor` as the decimal it is written as (`0.1`, not the binary fraction
+/// nearest to it), when a `Decimal` holds it.
+fn exact_decimal(factor: f64) -> Option<rust_decimal::Decimal> {
+    use std::str::FromStr;
+
+    rust_decimal::Decimal::from_str(&factor.to_string())
+        .ok()
+        .map(|exact| exact.normalize())
+}
+
+/// `col` scaled by `factor` in SQLite's integer arithmetic: multiplied by the
+/// factor's numerator and divided by its denominator (the other way round to
+/// divide), with the quotient rounded half away from zero, as `ROUND` does.
+/// `None` when a term does not fit an `i64`.
+fn sqlite_integer_scale(
+    col: &str,
+    factor: rust_decimal::Decimal,
+    divide: bool,
+    db_type: crate::config::DatabaseType,
+    params: &mut Vec<crate::internal::Value>,
+) -> Option<String> {
+    let numerator = i64::try_from(factor.mantissa()).ok()?;
+    let denominator = 10_i64.checked_pow(factor.scale())?;
+    let common = i64::try_from(gcd(numerator.unsigned_abs(), denominator.unsigned_abs())).ok()?;
+    let (numerator, denominator) = (numerator / common, denominator / common);
+    let (times, over) = if divide {
+        (denominator, numerator)
+    } else {
+        (numerator, denominator)
+    };
+    // The divisor stays positive, so its half rounds away from zero.
+    let (times, over) = if over < 0 {
+        (times.checked_neg()?, over.checked_neg()?)
+    } else {
+        (times, over)
+    };
+
+    let product = |params: &mut Vec<crate::internal::Value>| {
+        if times == 1 {
+            col.to_string()
+        } else {
+            let placeholder =
+                push_param(db_type, params, crate::internal::Value::BigInt(Some(times)));
+            format!("{col} * {placeholder}")
+        }
+    };
+    if over == 1 {
+        return Some(product(params));
+    }
+    let first = product(params);
+    let second = product(params);
+    let half = push_param(
+        db_type,
+        params,
+        crate::internal::Value::BigInt(Some(over / 2)),
+    );
+    let half_again = push_param(
+        db_type,
+        params,
+        crate::internal::Value::BigInt(Some(over / 2)),
+    );
+    let divisor = push_param(db_type, params, crate::internal::Value::BigInt(Some(over)));
+    Some(format!(
+        "(({first}) + CASE WHEN ({second}) < 0 THEN -{half} ELSE {half_again} END) / {divisor}"
+    ))
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
 impl<M: Model> BatchUpdateBuilder<M> {
+    /// Bind `value` with the type of the column it is assigned to.
+    fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
+        crate::internal::json_to_assignment_value(
+            value,
+            crate::internal::column_type_of::<M>(column).as_ref(),
+        )
+    }
+
+    /// `col` multiplied, or with `divide` divided, by `factor`.
+    ///
+    /// An integer column is scaled exactly and rounded half away from zero,
+    /// since an `f64` holds integers exactly only up to 2^53: PostgreSQL,
+    /// MySQL and MariaDB take the factor as a decimal, and SQLite, which has
+    /// no decimal arithmetic, as a fraction of two integers. SQLite would
+    /// otherwise store the REAL product, after which the model cannot read
+    /// the row. A decimal column takes the factor as a decimal too, where the
+    /// backend has one, and any other column as an `f64`.
+    fn scaled(
+        column: &str,
+        col: &str,
+        db_type: crate::config::DatabaseType,
+        params: &mut Vec<crate::internal::Value>,
+        factor: f64,
+        divide: bool,
+    ) -> String {
+        use crate::config::DatabaseType;
+        use crate::orm::ColumnType;
+
+        let column_type = crate::internal::column_type_of::<M>(column);
+        let integral = matches!(
+            column_type,
+            Some(
+                ColumnType::TinyInteger
+                    | ColumnType::SmallInteger
+                    | ColumnType::Integer
+                    | ColumnType::BigInteger
+                    | ColumnType::TinyUnsigned
+                    | ColumnType::SmallUnsigned
+                    | ColumnType::Unsigned
+                    | ColumnType::BigUnsigned
+            )
+        );
+        let decimal = matches!(
+            column_type,
+            Some(ColumnType::Decimal(_) | ColumnType::Money(_))
+        );
+        let operator = if divide { "/" } else { "*" };
+
+        match (db_type, exact_decimal(factor)) {
+            (DatabaseType::SQLite, Some(exact)) if integral => {
+                if let Some(scaled) = sqlite_integer_scale(col, exact, divide, db_type, params) {
+                    return format!("CAST({scaled} AS INTEGER)");
+                }
+            }
+            (DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB, Some(exact))
+                if integral || decimal =>
+            {
+                let placeholder = push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::Decimal(Some(exact)),
+                );
+                return format!("{col} {operator} {placeholder}");
+            }
+            _ => {}
+        }
+
+        let placeholder = push_param(
+            db_type,
+            params,
+            crate::internal::Value::Double(Some(factor)),
+        );
+        let scaled = format!("{col} {operator} {placeholder}");
+        if integral && db_type == DatabaseType::SQLite {
+            format!("CAST(ROUND({scaled}) AS INTEGER)")
+        } else {
+            scaled
+        }
+    }
+
     fn build_assignment_sql(
         column: &str,
         value: &UpdateValue,
@@ -11,108 +172,112 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         match value {
             UpdateValue::Value(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
+                let placeholder = push_param(db_type, params, Self::column_value(column, value));
                 Ok(format!("{} = {}", col, placeholder))
             }
             UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
             UpdateValue::Increment(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::BigInt(Some(*by)),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
                 Ok(format!("{} = {} + {}", col, col, placeholder))
             }
             UpdateValue::Decrement(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::BigInt(Some(*by)),
-                );
+                let placeholder =
+                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
                 Ok(format!("{} = {} - {}", col, col, placeholder))
             }
-            UpdateValue::Multiply(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::Double(Some(*by)),
-                );
-                Ok(format!("{} = {} * {}", col, col, placeholder))
-            }
-            UpdateValue::Divide(by) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::Double(Some(*by)),
-                );
-                Ok(format!("{} = {} / {}", col, col, placeholder))
-            }
-            UpdateValue::ArrayAppend(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
-                Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        format!("{} = array_append({}, {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        format!("{} = JSON_ARRAY_APPEND({}, '$', {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::SQLite => {
-                        format!("{} = json_insert({}, '$[#]', {})", col, col, placeholder)
-                    }
-                })
-            }
-            UpdateValue::ArrayRemove(value) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(value),
-                );
-                Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        format!("{} = array_remove({}, {})", col, col, placeholder)
-                    }
-                    crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        format!(
-                            "{} = JSON_REMOVE({}, JSON_UNQUOTE(JSON_SEARCH({}, 'one', {})))",
-                            col, col, col, placeholder
-                        )
-                    }
-                    crate::config::DatabaseType::SQLite => {
-                        format!(
-                            "{} = (SELECT json_group_array(value) FROM json_each({}) WHERE value != {})",
-                            col, col, placeholder
-                        )
-                    }
-                })
-            }
+            UpdateValue::Multiply(by) => Ok(format!(
+                "{col} = {}",
+                Self::scaled(column, &col, db_type, params, *by, false)
+            )),
+            UpdateValue::Divide(by) => Ok(format!(
+                "{col} = {}",
+                Self::scaled(column, &col, db_type, params, *by, true)
+            )),
+            UpdateValue::ArrayAppend(value) => Ok(match db_type {
+                crate::config::DatabaseType::Postgres => {
+                    let placeholder =
+                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    format!("{} = array_append({}, {})", col, col, placeholder)
+                }
+                // The element is bound as its JSON text and read back as JSON,
+                // so an object stays an object rather than becoming a string,
+                // and a NULL column starts a new array.
+                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                    let placeholder = push_param(db_type, params, json_text(value));
+                    format!(
+                        "{} = JSON_ARRAY_APPEND(COALESCE({}, JSON_ARRAY()), '$', JSON_EXTRACT({}, '$'))",
+                        col, col, placeholder
+                    )
+                }
+                crate::config::DatabaseType::SQLite => {
+                    let placeholder = push_param(db_type, params, json_text(value));
+                    format!(
+                        "{} = json_insert(COALESCE({}, '[]'), '$[#]', json({}))",
+                        col, col, placeholder
+                    )
+                }
+            }),
+            UpdateValue::ArrayRemove(value) => Ok(match db_type {
+                crate::config::DatabaseType::Postgres => {
+                    let placeholder =
+                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    format!("{} = array_remove({}, {})", col, col, placeholder)
+                }
+                // Every element equal to the value goes, compared as JSON as
+                // `where_eq` compares a document (`1`, `"1"` and `true` differ,
+                // an object's key order does not, an array's order does), and
+                // the rest keep their order and types; a NULL column stays
+                // NULL. JSON_TABLE reads a JSON null as SQL NULL on MySQL,
+                // hence the extra test when null is what is removed.
+                crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
+                    let equal = crate::query::db_sql::json_equals_bound(
+                        db_type,
+                        "tideorm_element.v",
+                        value,
+                        false,
+                    );
+                    params.extend(equal.values);
+                    let null_guard = if value.is_null() {
+                        "tideorm_element.v IS NOT NULL AND "
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
+                        equal.sql
+                    )
+                }
+                // Each kept element is rebuilt as the JSON it was: `json_each`
+                // reports true and false as 1 and 0 and null as NULL.
+                crate::config::DatabaseType::SQLite => {
+                    let equal =
+                        crate::query::db_sql::sqlite_json_element_equals("tideorm_element", value);
+                    params.extend(equal.values);
+                    let element = "CASE tideorm_element.type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') WHEN 'null' THEN json('null') WHEN 'object' THEN json(tideorm_element.value) WHEN 'array' THEN json(tideorm_element.value) ELSE json_quote(tideorm_element.value) END";
+                    format!(
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({col}) AS tideorm_element WHERE NOT {}) END",
+                        equal.sql
+                    )
+                }
+            }),
             UpdateValue::JsonSet(path, value) => {
                 let segments = Self::validate_json_path(path)?;
-                let path_placeholder = match db_type {
-                    crate::config::DatabaseType::Postgres => crate::internal::push_param(
-                        db_type,
-                        params,
-                        crate::internal::Value::String(Some(Self::postgres_json_path_literal(
-                            &segments,
-                        ))),
-                    ),
+                let bound_path = match db_type {
+                    crate::config::DatabaseType::Postgres => {
+                        Self::postgres_json_path_literal(&segments)
+                    }
                     crate::config::DatabaseType::MySQL
                     | crate::config::DatabaseType::MariaDB
-                    | crate::config::DatabaseType::SQLite => crate::internal::push_param(
-                        db_type,
-                        params,
-                        crate::internal::Value::String(Some(path.clone())),
-                    ),
+                    | crate::config::DatabaseType::SQLite => path.clone(),
                 };
+                let path_placeholder = push_param(
+                    db_type,
+                    params,
+                    crate::internal::Value::String(Some(bound_path)),
+                );
                 let json_text = serde_json::to_string(value)?;
-                let value_placeholder = crate::internal::push_param(
+                let value_placeholder = push_param(
                     db_type,
                     params,
                     crate::internal::Value::String(Some(json_text)),
@@ -121,11 +286,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 Ok(match db_type {
                     crate::config::DatabaseType::Postgres => format!(
                         "{} = jsonb_set({}, {}::text[], CAST({} AS jsonb))",
-                        col, col, path_placeholder, value_placeholder
+                        col,
+                        crate::query::db_sql::postgres_jsonb(&col),
+                        path_placeholder,
+                        value_placeholder
                     ),
+                    // `JSON_EXTRACT(?, '$')` reads the text as JSON on both
+                    // servers; MariaDB has no `CAST(.. AS JSON)`.
                     crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
                         format!(
-                            "{} = JSON_SET({}, {}, CAST({} AS JSON))",
+                            "{} = JSON_SET({}, {}, JSON_EXTRACT({}, '$'))",
                             col, col, path_placeholder, value_placeholder
                         )
                     }
@@ -138,11 +308,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 })
             }
             UpdateValue::Coalesce(default) => {
-                let placeholder = crate::internal::push_param(
-                    db_type,
-                    params,
-                    crate::internal::json_to_db_value(default),
-                );
+                let placeholder = push_param(db_type, params, Self::column_value(column, default));
                 Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
             }
         }
@@ -180,45 +346,80 @@ impl<M: Model> BatchUpdateBuilder<M> {
         db_type: crate::config::DatabaseType,
     ) -> Result<()> {
         if !db_type.supports_returning() {
-            return Err(Error::query(format!(
-                "{} does not support RETURNING clause",
-                db_type
-            )));
+            return Err(Error::backend_not_supported(
+                format!(
+                    "execute_returning() is not supported on {}: it needs UPDATE .. RETURNING",
+                    db_type
+                ),
+                db_type.to_string(),
+            ));
         }
 
         Ok(())
     }
 
     fn build_where_query(&self) -> QueryBuilder<M> {
-        // Batch updates keep soft-deleted rows in scope by default so a bulk
-        // restore can reach them; `without_trashed()` opts back into the normal
-        // active-only scope.
-        let mut query = if self.include_trashed {
-            QueryBuilder::new().with_trashed()
-        } else {
-            QueryBuilder::new()
-        };
-        let mut or_conditions = Vec::new();
-
-        for condition in &self.conditions {
-            if let Some(column) = condition.column.strip_prefix("__OR__") {
-                let mut or_condition = condition.clone();
-                or_condition.column = column.to_string();
-                or_conditions.push(or_condition);
-            } else {
-                query.conditions.push(condition.clone());
-            }
+        // Live rows, as a query reads them, unless the update chose otherwise;
+        // an update started from a query keeps that query's scope.
+        let mut query = self.base.clone().unwrap_or_default();
+        match self.include_trashed {
+            Some(true) => query = query.with_trashed(),
+            Some(false) => query = query.live_rows_only(),
+            None => {}
         }
 
-        if !or_conditions.is_empty() {
-            query.or_groups.push(OrGroup {
-                conditions: or_conditions,
-                nested_groups: Vec::new(),
-                combine_with: LogicalOp::Or,
-            });
+        query.conditions.extend(self.conditions.iter().cloned());
+        // The update's `or_where_*` calls join the query's own OR group.
+        for condition in &self.or_group.conditions {
+            query = query.push_or_condition(condition.clone());
         }
 
         query
+    }
+
+    /// Report a value a setter refused, such as a NaN float; its assignment
+    /// was never staged, so the update would otherwise run without it.
+    fn ensure_values_are_bindable(&self) -> Result<()> {
+        match &self.invalid_reason {
+            Some(reason) => Err(Error::invalid_query(format!(
+                "update of {}: {}",
+                M::table_name(),
+                reason
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Refuse the parts of a query an `UPDATE` cannot keep: it takes the
+    /// query's filters, scope and database, and nothing that reshapes rows.
+    fn ensure_base_is_updatable(&self) -> Result<()> {
+        match self.base.as_ref().and_then(QueryBuilder::update_blocker) {
+            Some(part) => Err(Error::invalid_query(format!(
+                "update_all() of a {} query keeps its filters and scope only; {} cannot be part of an UPDATE",
+                M::table_name(),
+                part
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// The database the update runs on: the one its query named, else the
+    /// scope's.
+    fn database(&self) -> Result<crate::database::Database> {
+        match self.base.as_ref().and_then(QueryBuilder::named_database) {
+            Some(database) => Ok(database),
+            None => crate::database::__current_db(),
+        }
+    }
+
+    /// A batch update's filters must pass the query builder's validation, and
+    /// at least one of them must be able to exclude a row; these are the same
+    /// guards the `QueryBuilder` mutation terminals use.
+    pub(crate) fn ensure_explicit_filters(&self, operation: &str) -> Result<()> {
+        self.ensure_base_is_updatable()?;
+        let query = self.build_where_query();
+        query.ensure_query_is_executable()?;
+        query.ensure_mutation_has_explicit_filters(operation)
     }
 
     /// Whether the backend accepts `LIMIT` directly on an `UPDATE` statement.
@@ -233,7 +434,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// cannot take `LIMIT` directly.
     fn limit_scope_primary_key(db_type: crate::config::DatabaseType) -> Result<String> {
         match M::primary_key_names() {
-            [column] => Ok(Self::quote_identifier(column, db_type)),
+            [column] => Ok(quote_ident(db_type, column)),
             columns => Err(Error::invalid_query(format!(
                 "limit() is not supported for '{}' on {}: that backend cannot cap an UPDATE \
                  directly, so the row limit has to be scoped through a primary-key subquery, \
@@ -243,19 +444,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 columns.len()
             ))),
         }
-    }
-
-    /// `returning()` only has a terminal that can hand rows back:
-    /// `execute_returning()`. Refuse rather than silently discard the request.
-    fn ensure_returning_terminal(&self) -> Result<()> {
-        if self.returning {
-            return Err(Error::invalid_query(
-                "returning() requires execute_returning(); execute() only reports the number of \
-                 affected rows",
-            ));
-        }
-
-        Ok(())
     }
 
     /// Render the `UPDATE` statement (without any `RETURNING` clause) and its
@@ -270,11 +458,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let (mut where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
 
         if matches!(db_type, crate::config::DatabaseType::Postgres) {
-            where_sql = Self::offset_postgres_placeholders(&where_sql, params.len());
+            where_sql =
+                crate::query::db_sql::offset_postgres_placeholders(&where_sql, params.len());
         }
         params.extend(where_params);
 
-        let table = Self::quote_identifier(M::table_name(), db_type);
+        let table = crate::query::db_sql::quote_table::<M>(db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
 
         match self.limit_value {
@@ -317,259 +506,79 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// own lifecycle matters.
     ///
     /// Returns `Ok(0)` without touching the database when no assignment was
-    /// staged. Errors when the builder carries no explicit filter, or when
-    /// [`returning()`](Self::returning) was requested — that flag needs
-    /// [`execute_returning`](Self::execute_returning), and silently dropping it
-    /// would hide the caller's intent.
+    /// staged, and errors when the builder carries no explicit filter. Use
+    /// [`execute_returning`](Self::execute_returning) for the rows.
     ///
     /// On success the query cache for this table is invalidated.
     pub async fn execute(self) -> Result<u64> {
+        self.ensure_values_are_bindable()?;
         if self.updates.is_empty() {
             return Ok(0);
         }
 
         self.ensure_explicit_filters("update")?;
-        self.ensure_returning_terminal()?;
 
         // Resolve the dialect from the very handle that will run the statement.
         // `require_db()` only ever sees the global connection, so a batch update
         // inside `some_db.transaction(..)` with no global connection used to
         // fail before it rendered any SQL — and could pick the wrong dialect
         // when the scoped handle spoke a different backend.
-        let db = crate::database::__current_db()?;
-        let db_type = db.backend();
+        let db = self.database()?;
+        let db_type = db.execution_backend();
 
         let (sql, params) = self.build_update_statement(db_type)?;
 
         let rows_affected = db.__execute_with_params(&sql, params).await?;
-        if rows_affected > 0 {
-            crate::QueryCache::global().invalidate_model(M::table_name());
-            #[cfg(feature = "dirty-tracking")]
-            crate::model::__invalidate_dirty_snapshots::<M>();
-        }
+        QueryBuilder::<M>::invalidate_model_state(rows_affected);
         Ok(rows_affected)
     }
 
     /// Run the update and return the rows it wrote.
     ///
-    /// Appends `RETURNING *`, so it needs a backend that supports it:
-    /// PostgreSQL, MariaDB, and SQLite do, plain MySQL does not and is rejected
-    /// with an error before anything runs. Calling
-    /// [`returning()`](Self::returning) first is optional here — this terminal
-    /// always returns rows.
+    /// Appends `RETURNING`, so it needs a backend whose `UPDATE` takes one:
+    /// PostgreSQL and SQLite. MySQL has no `RETURNING`, and MariaDB has
+    /// `UPDATE .. RETURNING` only from 13.0, so both are refused with an error
+    /// before anything runs, whatever the server's version.
     ///
     /// Returns an empty vector without touching the database when no assignment
     /// was staged, and errors when the builder carries no explicit filter. Like
     /// [`execute`](Self::execute), no callbacks or validations run.
+    ///
+    /// The update and the decoding of the rows it returns are not one unit: if
+    /// a row does not decode into the model, the error comes back but the rows
+    /// are already written, and retrying repeats a non-idempotent change such
+    /// as `increment`. Run it inside `Database::transaction` when that matters.
     pub async fn execute_returning(self) -> Result<Vec<M>> {
+        self.ensure_values_are_bindable()?;
         if self.updates.is_empty() {
             return Ok(vec![]);
         }
 
         self.ensure_explicit_filters("update")?;
 
-        let db = crate::database::__current_db()?;
-        let db_type = db.backend();
+        let db = self.database()?;
+        let db_type = db.execution_backend();
         Self::ensure_backend_supports_returning(db_type)?;
+        // The rows are written before they are decoded, as with `update()`.
+        crate::internal::ensure_fields_storable::<M, _>(&db.__get_connection()?.executor())?;
 
         let (mut sql, params) = self.build_update_statement(db_type)?;
-        sql.push_str(" RETURNING *");
+        sql.push_str(" RETURNING ");
+        sql.push_str(&crate::query::db_sql::model_columns_sql::<M>(db_type, None));
 
-        let models = db.__raw_with_params::<M>(&sql, params).await?;
-        if !models.is_empty() {
-            crate::QueryCache::global().invalidate_model(M::table_name());
-            #[cfg(feature = "dirty-tracking")]
-            {
-                crate::model::__invalidate_dirty_snapshots::<M>();
-                let _ = crate::model::__remember_dirty_snapshots(&models);
-            }
-        }
+        let models = db.__raw_with_params::<M>(&sql, params).await;
+        // A row that fails to decode was still written, so the table's cached
+        // reads are dropped whether or not the decoding succeeds.
+        QueryBuilder::<M>::invalidate_model_state(
+            models.as_ref().map_or(1, |models| models.len() as u64),
+        );
+        let models = models?;
+        #[cfg(feature = "dirty-tracking")]
+        crate::model::__remember_dirty_snapshots(&models);
         Ok(models)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    // The macro-generated entity module emits `Result<_, DbErr>`, so it must not see
-    // tideorm's own one-parameter `Result<T>` alias that `use super::*` brings in here.
-    use std::result::Result;
-
-    #[tideorm::model(table = "batch_sql_execution_users")]
-    struct BatchSqlUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-        age: i32,
-    }
-
-    #[tideorm::model(table = "batch_sql_execution_soft_delete_users", soft_delete)]
-    struct BatchSqlSoftDeleteUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-        deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    #[test]
-    fn empty_negative_list_does_not_count_as_an_explicit_filter() {
-        // Same hazard as the QueryBuilder mutation terminals: an empty candidate
-        // set for a negative membership test renders constant-true, so counting
-        // conditions would let a caller whose filter list came back empty rewrite
-        // every row in the table.
-        let err = BatchUpdateBuilder::<BatchSqlUser>::new()
-            .set("name", "updated")
-            .where_not_in("id", Vec::<i64>::new())
-            .ensure_explicit_filters("update")
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unfiltered bulk mutations are blocked"),
-            "vacuous filter was accepted: {err}"
-        );
-
-        // One real predicate alongside it is still enough.
-        assert!(
-            BatchUpdateBuilder::<BatchSqlUser>::new()
-                .set("name", "updated")
-                .where_eq("name", "alice")
-                .where_not_in("id", Vec::<i64>::new())
-                .ensure_explicit_filters("update")
-                .is_ok()
-        );
-    }
-
-    fn filtered_builder() -> BatchUpdateBuilder<BatchSqlUser> {
-        BatchUpdateBuilder::<BatchSqlUser>::new()
-            .set("name", "updated")
-            .set("age", 30)
-            .where_eq("id", 1)
-    }
-
-    fn filtered_soft_delete_builder() -> BatchUpdateBuilder<BatchSqlSoftDeleteUser> {
-        BatchUpdateBuilder::<BatchSqlSoftDeleteUser>::new()
-            .set("name", "updated")
-            .where_eq("id", 1)
-    }
-
-    #[test]
-    fn batch_update_includes_trashed_rows_by_default() {
-        let (sql, _) = filtered_soft_delete_builder()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            !sql.contains("deleted_at"),
-            "the default scope must not filter soft-deleted rows: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_without_trashed_restores_the_active_only_scope() {
-        let (sql, _) = filtered_soft_delete_builder()
-            .without_trashed()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(r#""deleted_at" IS NULL"#),
-            "without_trashed() must scope out soft-deleted rows: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_with_trashed_is_the_default_scope() {
-        let (default_sql, _) = filtered_soft_delete_builder()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-        let (explicit_sql, _) = filtered_soft_delete_builder()
-            .without_trashed()
-            .with_trashed()
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert_eq!(default_sql, explicit_sql);
-    }
-
-    #[test]
-    fn batch_update_set_clause_order_is_deterministic() {
-        for _ in 0..16 {
-            let (sql, _) = filtered_builder()
-                .build_update_statement(crate::config::DatabaseType::SQLite)
-                .expect("statement should build");
-
-            assert!(
-                sql.starts_with(r#"UPDATE "batch_sql_execution_users" SET "age" = ?, "name" = ?"#),
-                "unexpected sql: {sql}"
-            );
-        }
-    }
-
-    #[test]
-    fn batch_update_limit_is_scoped_by_primary_key_subquery_on_postgres() {
-        let (sql, params) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::Postgres)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(
-                r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = $3 LIMIT 5)"#
-            ),
-            "unexpected sql: {sql}"
-        );
-        assert_eq!(params.len(), 3);
-    }
-
-    #[test]
-    fn batch_update_limit_is_scoped_by_primary_key_subquery_on_sqlite() {
-        let (sql, _) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::SQLite)
-            .expect("statement should build");
-
-        assert!(
-            sql.contains(
-                r#"WHERE "id" IN (SELECT "id" FROM "batch_sql_execution_users" WHERE "id" = ? LIMIT 5)"#
-            ),
-            "unexpected sql: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_limit_uses_the_native_clause_on_mysql() {
-        let (sql, _) = filtered_builder()
-            .limit(5)
-            .build_update_statement(crate::config::DatabaseType::MySQL)
-            .expect("statement should build");
-
-        assert!(sql.ends_with(" LIMIT 5"), "unexpected sql: {sql}");
-        assert!(!sql.contains("SELECT"), "unexpected sql: {sql}");
-    }
-
-    #[test]
-    fn batch_update_without_limit_keeps_a_plain_where_clause() {
-        let (sql, _) = filtered_builder()
-            .build_update_statement(crate::config::DatabaseType::Postgres)
-            .expect("statement should build");
-
-        assert!(
-            sql.ends_with(r#" WHERE "id" = $3"#),
-            "unexpected sql: {sql}"
-        );
-    }
-
-    #[test]
-    fn batch_update_execute_rejects_a_returning_flag_it_cannot_honour() {
-        let err = filtered_builder()
-            .returning()
-            .ensure_returning_terminal()
-            .unwrap_err();
-
-        assert!(
-            err.to_string().contains("requires execute_returning()"),
-            "unexpected error: {err}"
-        );
-        assert!(filtered_builder().ensure_returning_terminal().is_ok());
-    }
-}
+#[path = "../../../tests/unit/model_batch_sql_execution_tests.rs"]
+mod tests;

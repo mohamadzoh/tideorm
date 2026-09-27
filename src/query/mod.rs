@@ -19,22 +19,25 @@ use crate::model::Model;
 
 mod advanced;
 mod builder;
-mod conditions;
-mod db_sql;
+pub(crate) mod db_sql;
 mod filters;
-#[allow(missing_docs)]
 mod or_clauses;
 mod predicates;
 mod sql;
 mod structure;
 
-pub(crate) use filters::condition_is_vacuous;
+pub(crate) use advanced::page_offset;
+pub use advanced::{Aggregate, AggregateCondition, HavingCondition};
 pub use filters::{
-    ConditionValue, LogicalOp, Operator, OrBranch, OrBranchBuilder, OrGroup, Order, WhereCondition,
+    ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
+pub(crate) use filters::{
+    checked_filter_value, condition_is_vacuous, condition_methods, filter_value,
+};
+pub use sql::execution::Paginated;
 pub use structure::{
-    AggregateFunction, CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType,
-    QueryFragment, UnionClause, UnionType, WindowFunction, WindowFunctionType,
+    CTE, FrameBound, FrameType, JoinClause, JoinResultConsolidator, JoinType, QueryFragment,
+    UnionClause, UnionType, WindowFunction, WindowFunctionType,
 };
 
 /// Fluent query builder for TideORM models.
@@ -46,24 +49,38 @@ pub struct QueryBuilder<M: Model> {
     pub conditions: Vec<WhereCondition>,
     /// OR groups for complex boolean expressions.
     pub or_groups: Vec<OrGroup>,
+    /// Index into `or_groups` of the group the `or_where_*` calls share.
+    simple_or_group: Option<usize>,
     order_by: Vec<(String, Order)>,
     limit_value: Option<u64>,
     offset_value: Option<u64>,
     select_columns: Option<Vec<String>>,
     raw_select_expressions: Vec<String>,
-    subquery_select_expressions: Vec<(String, String)>,
+    subquery_select_expressions: Vec<structure::SubquerySelect>,
     include_trashed: bool,
     only_trashed: bool,
+    lock_for_update: bool,
     joins: Vec<JoinClause>,
     invalid_query_reason: Option<String>,
+    /// A page number or size `page()` refused, as the field it names and why:
+    /// reported as the validation error `Model::paginate` gives the same input.
+    invalid_page: Option<(&'static str, String)>,
     group_by: Vec<String>,
     having_conditions: Vec<String>,
-    having_bindings: Vec<Vec<serde_json::Value>>,
+    having_bindings: Vec<Vec<crate::internal::Value>>,
     unions: Vec<UnionClause>,
     window_functions: Vec<WindowFunction>,
     ctes: Vec<CTE>,
     cache_options: Option<crate::cache::CacheOptions>,
     cache_key: Option<String>,
+    /// Column-type lookups for models whose tables the query joins, consulted
+    /// after `M`'s own when a filter value is bound.
+    joined_column_types: Vec<fn(&str) -> Option<crate::orm::ColumnType>>,
+    /// How many `where_has` subqueries over this query's own table enclose it.
+    /// Above zero the query reads its table under an alias of its own, so a
+    /// qualified column or a nested correlation names this query's row and
+    /// not an enclosing one's.
+    self_join_depth: usize,
 }
 
 impl<M: Model> QueryBuilder<M> {

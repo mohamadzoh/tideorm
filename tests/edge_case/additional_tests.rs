@@ -6,6 +6,3 @@ mod logging_tests;
 
 #[path = "additional_tests/error_tests.rs"]
 mod error_tests;
-
-#[path = "additional_tests/misc_tests.rs"]
-mod misc_tests;

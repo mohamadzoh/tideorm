@@ -4,14 +4,11 @@ use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
 use crate::postgres_test_config::test_database_url;
 use serde_json::json;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 const POST_TABLE: &str = "many_to_many_entity_manager_test_posts";
 const TAG_TABLE: &str = "many_to_many_entity_manager_test_tags";
 const PIVOT_TABLE: &str = "many_to_many_entity_manager_test_post_tags";
-
-static MANY_TO_MANY_ENTITY_MANAGER_TEST_MUTEX: OnceLock<Arc<tokio::sync::Mutex<()>>> =
-    OnceLock::new();
 
 #[tideorm::model(table = "many_to_many_entity_manager_test_posts")]
 struct ManyToManyEntityManagerPost {
@@ -45,13 +42,11 @@ struct ManyToManyEntityManagerPostTag {
     tag_id: i64,
 }
 
-fn test_lock() -> Arc<tokio::sync::Mutex<()>> {
-    MANY_TO_MANY_ENTITY_MANAGER_TEST_MUTEX
-        .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-}
-
-async fn setup_database() -> crate::error::Result<Arc<Database>> {
+async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
+    if !crate::postgres_test_config::should_run_postgres_tests() {
+        println!("{}", crate::postgres_test_config::SKIPPED);
+        return Ok(None);
+    }
     let db = Arc::new(Database::connect(test_database_url()).await?);
 
     __in_db_scope(db.as_ref(), async {
@@ -76,7 +71,7 @@ async fn setup_database() -> crate::error::Result<Arc<Database>> {
     })
     .await?;
 
-    Ok(db)
+    Ok(Some(db))
 }
 
 async fn seed_relations(
@@ -115,29 +110,28 @@ async fn seed_relations(
     .await
 }
 
+fn tags_relation(
+    post_id: i64,
+) -> HasManyThrough<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag> {
+    HasManyThrough::new("post_id", "tag_id", "id", "id", PIVOT_TABLE)
+        .with_metadata("tags", POST_TABLE)
+        .with_owner_key(post_id.to_string())
+        .with_parent_pk(json!(post_id))
+}
+
 #[tokio::test]
-async fn has_many_through_load_queries_with_attached_entity_manager_without_global_db()
+async fn has_many_through_load_queries_through_the_attached_database_without_global_db()
 -> crate::error::Result<()> {
-    let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 
-    let db = setup_database().await?;
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
     let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let relation = HasManyThrough::<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag> {
-        foreign_key: "post_id",
-        related_key: "tag_id",
-        local_key: "id",
-        related_local_key: "id",
-        pivot_table: PIVOT_TABLE,
-        relation_name: "tags",
-        owner_table: POST_TABLE,
-        related_table: TAG_TABLE,
-        parent_pk: Some(json!(post.id)),
-        entity_manager: Some(entity_manager.clone()),
-        ..Default::default()
-    };
+    let mut relation = tags_relation(post.id);
+    relation.attach_query_database(entity_manager.database());
 
     let loaded = relation.load().await?;
 
@@ -151,10 +145,11 @@ async fn has_many_through_load_queries_with_attached_entity_manager_without_glob
 #[tokio::test]
 async fn has_many_through_helpers_query_via_parent_entity_manager_database_without_global_db()
 -> crate::error::Result<()> {
-    let _guard = test_lock().lock_owned().await;
     Database::reset_global();
 
-    let db = setup_database().await?;
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
     let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
@@ -169,6 +164,79 @@ async fn has_many_through_helpers_query_via_parent_entity_manager_database_witho
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, tag.id);
     assert_eq!(loaded[0].name, tag.name);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn has_many_through_entity_manager_load_collapses_duplicate_pivot_rows()
+-> crate::error::Result<()> {
+    Database::reset_global();
+
+    let Some(db) = setup_database().await? else {
+        return Ok(());
+    };
+    let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
+    __in_db_scope(db.as_ref(), async {
+        ManyToManyEntityManagerPostTag {
+            id: 0,
+            post_id: post.id,
+            tag_id: tag.id,
+        }
+        .save()
+        .await
+    })
+    .await?;
+    let entity_manager = EntityManager::new(db.clone());
+
+    let mut post = ManyToManyEntityManagerPost::find_in_entity_manager(post.id, &entity_manager)
+        .await?
+        .expect("entity-manager post should exist");
+
+    let plain: Vec<i64> = post.tags.load().await?.iter().map(|tag| tag.id).collect();
+    let tracked: Vec<i64> = entity_manager
+        .load(&mut post.tags)
+        .await?
+        .iter()
+        .map(|tag| tag.id)
+        .collect();
+
+    assert_eq!(plain, vec![tag.id]);
+    assert_eq!(
+        tracked, plain,
+        "loading through the entity manager must not repeat a tag per duplicate pivot row"
+    );
+
+    Ok(())
+}
+
+// An eagerly loaded copy can predate edits the manager already tracks for the
+// same row; loading the relation into the manager must keep the tracked
+// instance rather than overwrite it with that copy.
+#[tokio::test]
+async fn has_many_through_cached_load_keeps_the_tracked_instance() -> crate::error::Result<()> {
+    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
+    entity_manager
+        .register(ManyToManyEntityManagerTag {
+            id: 7,
+            name: "edited-in-memory".to_string(),
+        })
+        .await;
+
+    let mut relation = tags_relation(1);
+    relation.set_cached(vec![ManyToManyEntityManagerTag {
+        id: 7,
+        name: "stale-eager-copy".to_string(),
+    }]);
+
+    let loaded = relation.load_in_entity_manager(&entity_manager).await?;
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].name, "edited-in-memory");
+
+    let tracked = entity_manager
+        .get::<ManyToManyEntityManagerTag>(&7)?
+        .expect("the identity map should still hold the tracked tag");
+    assert_eq!(tracked.name, "edited-in-memory");
 
     Ok(())
 }

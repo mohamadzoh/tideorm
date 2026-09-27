@@ -56,7 +56,6 @@ mod logging_operation_detection {
             QueryOperation::Insert,
             QueryOperation::Update,
             QueryOperation::Delete,
-            QueryOperation::Raw,
             QueryOperation::Transaction,
             QueryOperation::Unknown,
         ] {
@@ -95,7 +94,7 @@ mod logging_entry_formatting {
             .with_params(vec!["1".to_string()]);
 
         let output = entry.format_console();
-        assert!(output.contains("[TIDE]"));
+        assert!(output.contains("[TideORM]"));
         assert!(output.contains("SELECT"));
         assert!(output.contains("users"));
         assert!(output.contains("42ms"));
@@ -115,6 +114,7 @@ mod logging_entry_formatting {
 }
 
 mod logging_stats {
+    use std::time::Duration;
     use tideorm::logging::QueryLogger;
 
     #[test]
@@ -133,8 +133,8 @@ mod logging_stats {
     fn test_query_stats_zero_queries_no_division_by_zero() {
         QueryLogger::reset_stats();
         let stats = QueryLogger::stats();
-        assert_eq!(stats.avg_query_time_ms(), 0.0);
-        assert_eq!(stats.slow_query_percentage(), 0.0);
+        assert_eq!(stats.avg_query_time(), Duration::ZERO);
+        assert_eq!(stats.slow_percentage(), 0.0);
     }
 }
 
@@ -182,11 +182,15 @@ mod logging_query_timer {
     use tideorm::logging::QueryTimer;
 
     #[test]
-    fn test_query_timer_stop_returns_duration() {
+    fn test_query_timer_finish_measures_elapsed_time() {
         let timer = QueryTimer::start("SELECT 1");
         std::thread::sleep(Duration::from_millis(10));
-        let duration = timer.stop();
-        assert!(duration >= Duration::from_millis(5));
+        let entry = timer.finish();
+        assert!(
+            entry
+                .duration
+                .is_some_and(|duration| duration >= Duration::from_millis(5))
+        );
     }
 
     #[test]

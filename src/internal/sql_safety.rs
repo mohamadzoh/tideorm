@@ -6,16 +6,14 @@ mod fulltext;
 
 #[cfg(feature = "fulltext")]
 pub(crate) use fulltext::{
-    escape_fts5_query_literal_terms, sanitize_postgres_proximity_tsquery_literals,
-    sanitize_postgres_tsquery_literals,
+    escape_fts5_query_literal_terms, fts5_boolean_query, fts5_near_query, fts5_phrase_query,
+    fts5_prefix_query, sanitize_mysql_fulltext_query, sanitize_postgres_boolean_tsquery,
+    sanitize_postgres_proximity_tsquery_literals, sanitize_postgres_tsquery_literals,
 };
 
-pub(crate) fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
+/// Escape `value` for use inside a single-quoted SQL literal on `db_type`.
 pub(crate) fn escape_sql_literal_for_db(db_type: DatabaseType, value: &str) -> String {
-    let escaped = escape_sql_literal(value);
+    let escaped = value.replace('\'', "''");
     match db_type {
         DatabaseType::MySQL | DatabaseType::MariaDB => escaped.replace('\\', "\\\\"),
         DatabaseType::Postgres | DatabaseType::SQLite => escaped,
@@ -198,11 +196,33 @@ fn consume_numeric_literal(chars: &[char], index: &mut usize) {
     }
 }
 
-fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Vec<String>, String> {
+/// One top-level lexical unit of a raw fragment.
+enum SqlToken {
+    /// A bare word — keyword or identifier — at the given parenthesis depth;
+    /// `called` when a `(` follows it, as it does a function's name.
+    Word {
+        text: String,
+        depth: usize,
+        called: bool,
+    },
+    /// Any other character outside a literal, a number or a parenthesis.
+    Symbol(char),
+}
+
+/// Hand every bare word and symbol of `sql` to `visit`.
+///
+/// Quoted literals and identifiers, numbers, whitespace and parentheses are
+/// consumed here — parentheses only to track depth and to reject an imbalance.
+/// Callers run after `validate_raw_sql_fragment`, which already rejects
+/// `QuotedRun::AmbiguousEscape`.
+fn scan_sql_tokens(
+    sql: &str,
+    kind: &str,
+    mut visit: impl FnMut(SqlToken) -> std::result::Result<(), String>,
+) -> std::result::Result<(), String> {
     let chars: Vec<char> = sql.chars().collect();
     let mut index = 0;
     let mut paren_depth = 0usize;
-    let mut tokens = Vec::new();
 
     while index < chars.len() {
         let ch = chars[index];
@@ -210,8 +230,6 @@ fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Ve
             _ if ch.is_whitespace() => {
                 index += 1;
             }
-            // Both arms below run after `validate_raw_sql_fragment`, which
-            // already rejects `QuotedRun::AmbiguousEscape`.
             '\'' => {
                 if consume_quoted_run(&chars, &mut index, '\'') != QuotedRun::Closed {
                     return Err(format!("unsafe {}: unterminated string literal", kind));
@@ -245,12 +263,18 @@ fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Ve
                     index += 1;
                 }
 
-                if paren_depth == 0 {
-                    let token: String = chars[start..index].iter().collect();
-                    tokens.push(token.to_ascii_lowercase());
+                let mut next = index;
+                while next < chars.len() && chars[next].is_whitespace() {
+                    next += 1;
                 }
+                visit(SqlToken::Word {
+                    text: chars[start..index].iter().collect(),
+                    depth: paren_depth,
+                    called: chars.get(next) == Some(&'('),
+                })?;
             }
             _ => {
+                visit(SqlToken::Symbol(ch))?;
                 index += 1;
             }
         }
@@ -260,7 +284,37 @@ fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Ve
         return Err(format!("unsafe {}: unbalanced parentheses", kind));
     }
 
-    Ok(tokens)
+    Ok(())
+}
+
+/// The lowercased words of `sql` outside any parentheses.
+fn collect_top_level_sql_tokens(sql: &str, kind: &str) -> std::result::Result<Vec<String>, String> {
+    Ok(collect_top_level_sql_words(sql, kind)?
+        .into_iter()
+        .map(|(word, _)| word)
+        .collect())
+}
+
+/// The lowercased words of `sql` outside any parentheses, each with whether a
+/// `(` follows it.
+fn collect_top_level_sql_words(
+    sql: &str,
+    kind: &str,
+) -> std::result::Result<Vec<(String, bool)>, String> {
+    let mut words = Vec::new();
+    scan_sql_tokens(sql, kind, |token| {
+        if let SqlToken::Word {
+            text,
+            depth: 0,
+            called,
+        } = token
+        {
+            words.push((text.to_ascii_lowercase(), called));
+        }
+        Ok(())
+    })?;
+
+    Ok(words)
 }
 
 fn is_forbidden_top_level_subquery_keyword(token: &str) -> bool {
@@ -312,9 +366,11 @@ fn validate_subquery_sql_with_mode(
         );
     }
 
-    if let Some(token) = top_level_tokens
-        .iter()
-        .find(|token| is_forbidden_top_level_subquery_keyword(token))
+    // A forbidden word followed by `(` names a function — `REPLACE(name, ..)`
+    // — not the statement.
+    if let Some((token, _)) = collect_top_level_sql_words(sql, "subquery")?
+        .into_iter()
+        .find(|(token, called)| !called && is_forbidden_top_level_subquery_keyword(token))
     {
         return Err(format!(
             "unsafe subquery: keyword '{}' is not allowed in raw subquery fragments",
@@ -372,88 +428,31 @@ pub(crate) fn validate_having_sql_fragment(
 ) -> std::result::Result<(), String> {
     validate_raw_sql_fragment(kind, sql)?;
 
-    let chars: Vec<char> = sql.chars().collect();
-    let mut index = 0;
-    let mut paren_depth = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        match ch {
-            _ if ch.is_whitespace() => {
-                index += 1;
-            }
-            // Both arms below run after `validate_raw_sql_fragment`, which
-            // already rejects `QuotedRun::AmbiguousEscape`.
-            '\'' => {
-                if consume_quoted_run(&chars, &mut index, '\'') != QuotedRun::Closed {
-                    return Err(format!("unsafe {}: unterminated string literal", kind));
-                }
-            }
-            '"' | '`' => {
-                if consume_quoted_run(&chars, &mut index, ch) != QuotedRun::Closed {
-                    return Err(format!("unsafe {}: unterminated quoted identifier", kind));
-                }
-            }
-            '(' => {
-                paren_depth += 1;
-                index += 1;
-            }
-            ')' => {
-                if paren_depth == 0 {
-                    return Err(format!("unsafe {}: unbalanced closing parenthesis", kind));
-                }
-                paren_depth -= 1;
-                index += 1;
-            }
-            _ if ch.is_ascii_digit() => {
-                consume_numeric_literal(&chars, &mut index);
-            }
-            _ if ch == '_' || ch.is_ascii_alphabetic() => {
-                let start = index;
-                index += 1;
-                while index < chars.len()
-                    && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
-                {
-                    index += 1;
-                }
-
-                let token: String = chars[start..index].iter().collect();
-                let lowered = token.to_ascii_lowercase();
-
-                if is_forbidden_having_keyword(&lowered) {
-                    return Err(format!(
-                        "unsafe {}: keyword '{}' is not allowed in raw HAVING clauses",
-                        kind, token
-                    ));
-                }
-
-                if !is_safe_identifier_segment(&token) {
-                    return Err(format!(
-                        "unsafe {}: token '{}' is not allowed in raw HAVING clauses",
-                        kind, token
-                    ));
-                }
-            }
-            // `#` is deliberately absent: it introduces a line comment on
-            // MySQL/MariaDB and is rejected by `validate_raw_sql_fragment` above.
-            '.' | ',' | '*' | '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!' | '|' | '&' | '@'
-            | '?' | ':' => {
-                index += 1;
-            }
-            _ => {
-                return Err(format!(
-                    "unsafe {}: unexpected character '{}' in raw HAVING clause",
-                    kind, ch
-                ));
-            }
+    scan_sql_tokens(sql, kind, |token| match token {
+        // `LEFT(name, 1)` and `RIGHT(..)` are string functions, not joins.
+        SqlToken::Word {
+            ref text,
+            called: true,
+            ..
+        } if matches!(text.to_ascii_lowercase().as_str(), "left" | "right") => Ok(()),
+        SqlToken::Word { text, .. } if is_forbidden_having_keyword(&text.to_ascii_lowercase()) => {
+            Err(format!(
+                "unsafe {}: keyword '{}' is not allowed in raw HAVING clauses",
+                kind, text
+            ))
         }
-    }
-
-    if paren_depth != 0 {
-        return Err(format!("unsafe {}: unbalanced parentheses", kind));
-    }
-
-    Ok(())
+        SqlToken::Word { .. } => Ok(()),
+        // `#` is deliberately absent: it introduces a line comment on
+        // MySQL/MariaDB and is rejected by `validate_raw_sql_fragment` above.
+        SqlToken::Symbol(
+            '.' | ',' | '*' | '+' | '-' | '/' | '%' | '=' | '<' | '>' | '!' | '|' | '&' | '@' | '?'
+            | ':',
+        ) => Ok(()),
+        SqlToken::Symbol(ch) => Err(format!(
+            "unsafe {}: unexpected character '{}' in raw HAVING clause",
+            kind, ch
+        )),
+    })
 }
 
 pub(crate) fn validate_subquery_sql(sql: &str) -> std::result::Result<(), String> {
@@ -470,7 +469,7 @@ pub(crate) fn validate_identifier(kind: &str, value: &str) -> std::result::Resul
     }
 
     Err(format!(
-        "unsafe {} '{}': JOIN identifiers may only contain ASCII letters, numbers, and underscores, and must not start with a number",
+        "unsafe {} '{}': identifiers may only contain ASCII letters, numbers, and underscores, and must not start with a number",
         kind, value
     ))
 }
@@ -507,17 +506,26 @@ pub(crate) fn validate_join_column(value: &str) -> std::result::Result<(), Strin
     ))
 }
 
-pub(crate) fn quote_char(db_type: DatabaseType) -> char {
-    match db_type {
-        DatabaseType::Postgres | DatabaseType::SQLite => '"',
-        DatabaseType::MySQL | DatabaseType::MariaDB => '`',
-    }
+pub(crate) fn quote_ident(db_type: DatabaseType, name: &str) -> String {
+    let mut quoted = String::with_capacity(name.len() + 2);
+    push_quoted_ident(&mut quoted, db_type, name);
+    quoted
 }
 
-pub(crate) fn quote_ident(db_type: DatabaseType, name: &str) -> String {
-    let q = quote_char(db_type);
-    let escaped = name.replace(q, &format!("{q}{q}"));
-    format!("{}{}{}", q, escaped, q)
+/// Append `name` to `out` as a quoted identifier, doubling any quote inside it.
+///
+/// Every statement quotes each column it names, so this builds in place
+/// rather than allocating per identifier.
+pub(crate) fn push_quoted_ident(out: &mut String, db_type: DatabaseType, name: &str) {
+    let q = db_type.quote_char();
+    out.push(q);
+    for ch in name.chars() {
+        if ch == q {
+            out.push(q);
+        }
+        out.push(ch);
+    }
+    out.push(q);
 }
 
 pub(crate) fn quote_ident_for_backend(backend: Backend, name: &str) -> String {
@@ -539,127 +547,20 @@ pub(crate) fn format_identifier_reference(db_type: DatabaseType, value: &str) ->
         return None;
     }
 
-    let parts: Vec<&str> = trimmed.split('.').collect();
-    if parts.iter().any(|part| part.is_empty()) {
+    if trimmed.split('.').any(str::is_empty) {
         return None;
     }
 
-    Some(
-        parts
-            .into_iter()
-            .map(|part| quote_ident(db_type, part))
-            .collect::<Vec<_>>()
-            .join("."),
-    )
+    let mut reference = String::with_capacity(trimmed.len() + 4);
+    for (index, part) in trimmed.split('.').enumerate() {
+        if index > 0 {
+            reference.push('.');
+        }
+        push_quoted_ident(&mut reference, db_type, part);
+    }
+    Some(reference)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_mysql_backslash_escaped_quote_cannot_smuggle_a_trailing_comment() {
-        // MySQL and MariaDB read `\'` as an escaped quote under the default
-        // `sql_mode`, so the literal closes at the *doubled* quote and the
-        // trailing `--` comments out the soft-delete scoping, later `AND`
-        // predicates, `ORDER BY`, and `LIMIT` that the builder appends.
-        let error = validate_raw_sql_fragment("WHERE raw SQL", r"name = 'a\'' -- '").unwrap_err();
-
-        assert!(error.contains("unsafe WHERE raw SQL"), "{error}");
-        assert!(error.contains("backslash-escaped quotes"), "{error}");
-    }
-
-    #[test]
-    fn a_postgres_backslash_before_a_closing_quote_cannot_smuggle_a_trailing_comment() {
-        // The mirror image: with `standard_conforming_strings=on` PostgreSQL
-        // (and SQLite always) reads the backslash as data and closes the
-        // literal at the very next quote, leaving ` AND 1=1 --` as live SQL.
-        let error =
-            validate_raw_sql_fragment("WHERE raw SQL", r"name = 'a\' AND 1=1 --'").unwrap_err();
-
-        assert!(error.contains("unsafe WHERE raw SQL"), "{error}");
-        assert!(error.contains("backslash-escaped quotes"), "{error}");
-    }
-
-    #[test]
-    fn a_backslash_before_a_closing_quoted_identifier_is_rejected() {
-        let error = validate_raw_sql_fragment("WHERE raw SQL", r#""na\" -- " = 1"#).unwrap_err();
-
-        assert!(error.contains("unsafe WHERE raw SQL"), "{error}");
-        assert!(
-            error.contains("backslash-escaped quotes inside quoted identifiers"),
-            "{error}"
-        );
-
-        let backtick_error =
-            validate_raw_sql_fragment("WHERE raw SQL", "`na\\` -- ` = 1").unwrap_err();
-        assert!(
-            backtick_error.contains("backslash-escaped quotes inside quoted identifiers"),
-            "{backtick_error}"
-        );
-    }
-
-    #[test]
-    fn backslash_ambiguity_is_rejected_in_having_and_subquery_fragments_too() {
-        let having_error =
-            validate_having_sql_fragment("HAVING raw SQL", r"COUNT(*) > 1 AND x = 'a\'' -- '")
-                .unwrap_err();
-        assert!(
-            having_error.contains("backslash-escaped quotes"),
-            "{having_error}"
-        );
-
-        let subquery_error =
-            validate_subquery_sql(r"SELECT id FROM users WHERE name = 'a\'' -- '").unwrap_err();
-        assert!(
-            subquery_error.contains("backslash-escaped quotes"),
-            "{subquery_error}"
-        );
-    }
-
-    #[test]
-    fn a_trailing_backslash_does_not_swallow_the_rest_of_the_fragment() {
-        // `'oops\` is unterminated on every backend; the scan must not walk off
-        // the end silently and report the fragment as clean.
-        let error = validate_raw_sql_fragment("WHERE raw SQL", r"note = 'oops\").unwrap_err();
-
-        assert!(error.contains("unsafe WHERE raw SQL"), "{error}");
-
-        let unterminated = validate_raw_sql_fragment("WHERE raw SQL", "note = 'oops").unwrap_err();
-        assert!(
-            unterminated.contains("unterminated string literals"),
-            "{unterminated}"
-        );
-    }
-
-    #[test]
-    fn comment_introducers_inside_a_literal_are_still_accepted() {
-        // The whole point of the literal-aware scan: a value that merely looks
-        // like a comment must not be rejected, and a bound value never reaches
-        // the scanner at all.
-        validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = 'buy 2 -- get 1 free'")
-            .expect("a comment introducer inside a literal is just data");
-        validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = $1")
-            .expect("a bound placeholder carries no literal at all");
-        validate_raw_sql_fragment("WHERE raw SQL", "\"note\" = ?")
-            .expect("a bound placeholder carries no literal at all");
-    }
-
-    #[test]
-    fn backslashes_that_are_not_adjacent_to_a_quote_stay_accepted() {
-        validate_raw_sql_fragment("WHERE raw SQL", r"path = 'C:\temp'")
-            .expect("a backslash in the middle of a literal ends it in no dialect");
-        validate_raw_sql_fragment("WHERE raw SQL", r"path = 'C:\\'")
-            .expect("an escaped backslash ends the literal at the same quote everywhere");
-        validate_raw_sql_fragment("WHERE raw SQL", r"note = 'a\nb'")
-            .expect("a newline escape does not move the closing quote");
-    }
-
-    #[test]
-    fn an_escaped_backslash_does_not_hide_a_following_comment() {
-        // `'C:\\'` closes on both readings, so the trailing `--` is live SQL.
-        let error = validate_raw_sql_fragment("WHERE raw SQL", r"path = 'C:\\' -- ").unwrap_err();
-
-        assert!(error.contains("SQL comments"), "{error}");
-    }
-}
+#[path = "../../tests/unit/sql_safety_tests.rs"]
+mod tests;

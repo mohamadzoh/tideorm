@@ -1,29 +1,35 @@
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::Ident;
 
 use crate::context::BuildContext;
-use crate::parse::{ModelField, relation_generic_types, relation_wrapper_name};
+use crate::parse::{ModelField, RelationKind};
 
-pub(crate) fn build_relation_field_inits(
-    ctx: &BuildContext,
-    relation_fields: &[ModelField],
-) -> syn::Result<Vec<TokenStream2>> {
-    relation_fields
+pub(crate) fn build_relation_field_inits(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
+    ctx.relation_fields
         .iter()
-        .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
-        .map(|(field, ident)| build_relation_field_init(ctx, field, ident))
+        .map(|field| {
+            let ident = field.ident();
+            let assignment = build_relation_assignment(ctx, field)?;
+            Ok(quote! {
+                let previous = self.#ident.clone();
+                #assignment
+                self.#ident.preserve_runtime_state_from(&previous);
+            })
+        })
         .collect()
 }
 
-pub(crate) fn build_relation_state_refreshes(
-    ctx: &BuildContext,
-    relation_fields: &[ModelField],
-) -> syn::Result<Vec<TokenStream2>> {
-    relation_fields
+pub(crate) fn build_relation_state_refreshes(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
+    ctx.relation_fields
         .iter()
-        .filter_map(|field| field.ident.as_ref().map(|ident| (field, ident)))
-        .map(|(field, ident)| build_relation_state_refresh(ctx, field, ident))
+        .map(|field| {
+            let ident = field.ident();
+            let assignment = build_relation_assignment(ctx, field)?;
+            Ok(quote! {
+                #assignment
+                self.#ident.preserve_runtime_state_from(&previous.#ident);
+            })
+        })
         .collect()
 }
 
@@ -57,245 +63,126 @@ pub(crate) fn generate_with_relations_method(ctx: &BuildContext) -> TokenStream2
     let relation_field_inits = &ctx.relation_field_inits;
     quote! {
         pub fn with_relations(mut self) -> Self {
-            #(#relation_field_inits;)*
+            #(#relation_field_inits)*
             self
         }
     }
 }
 
-fn build_relation_field_init(
-    ctx: &BuildContext,
-    field: &ModelField,
-    ident: &Ident,
-) -> syn::Result<TokenStream2> {
-    match build_relation_assignment(ctx, field, ident)? {
-        Some(assignment) => Ok(quote! {
-            let previous = self.#ident.clone();
-            #assignment
-            self.#ident.preserve_runtime_state_from(&previous)
-        }),
-        None => Ok(quote! {
-            self.#ident = Default::default()
-        }),
-    }
-}
+/// Emit the statements that rebuild a relation wrapper from the model's own
+/// fields and assign it to `self.#ident`. Both `with_relations` (fresh init)
+/// and `refresh_runtime_relations_from` (post-serde refresh) reuse them and
+/// differ only in how they preserve prior runtime state.
+fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Result<TokenStream2> {
+    let ident = field.ident();
+    let kind = field
+        .relation_kind()
+        .expect("relation fields have a relation wrapper type");
+    let foreign_key = field.foreign_key.as_deref();
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
 
-fn build_relation_state_refresh(
-    ctx: &BuildContext,
-    field: &ModelField,
-    ident: &Ident,
-) -> syn::Result<TokenStream2> {
-    match build_relation_assignment(ctx, field, ident)? {
-        Some(assignment) => Ok(quote! {
-            #assignment
-            self.#ident.preserve_runtime_state_from(&previous.#ident);
-        }),
-        None => Ok(quote! {
-            self.#ident = previous.#ident.clone();
-        }),
-    }
-}
-
-/// Emit the `self.#ident = <constructor>;` assignment that rebuilds a relation
-/// wrapper from the model's own fields. Both `with_relations` (fresh init) and
-/// `refresh_runtime_relations_from` (post-serde refresh) reuse it verbatim and
-/// differ only in how they preserve prior runtime state. Returns `None` for a
-/// field that declares no relation, so each caller can supply its own fallback.
-fn build_relation_assignment(
-    ctx: &BuildContext,
-    field: &ModelField,
-    ident: &Ident,
-) -> syn::Result<Option<TokenStream2>> {
-    let relation_wrapper = relation_wrapper_name(&field.ty);
-    let owner_key = entity_manager_identity_key_expr(quote!(&self));
-
-    if field.has_one.is_some() {
-        let fk = field.foreign_key.as_deref().unwrap_or("id");
-        let lk = field.local_key.as_deref().unwrap_or("id");
-        let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
-        let related_ty = relation_generic_types(&field.ty)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                syn::Error::new_spanned(&field.ty, "has_one relation requires a related model type")
-            })?;
-        return Ok(Some(quote! {
-            self.#ident = {
-                #[cfg(feature = "entity-manager")]
-                {
-                    ::tideorm::relations::HasOne::new(#fk, #lk)
-                        .with_metadata(
-                            stringify!(#ident),
-                            <Self as ::tideorm::model::ModelMeta>::table_name(),
-                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
-                        )
-                        .with_owner_key(#owner_key)
-                        .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
+    let relation = match kind {
+        RelationKind::HasOne | RelationKind::HasMany | RelationKind::HasManyThrough => {
+            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            let foreign_key = foreign_key.expect("validated relation foreign_key");
+            let constructor = match kind {
+                RelationKind::HasOne => {
+                    quote!(::tideorm::relations::HasOne::new(#foreign_key, #local_key))
                 }
-                #[cfg(not(feature = "entity-manager"))]
-                {
-                    ::tideorm::relations::HasOne::new(#fk, #lk)
-                        .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
+                RelationKind::HasMany => {
+                    quote!(::tideorm::relations::HasMany::new(#foreign_key, #local_key))
                 }
-            };
-        }));
-    }
-
-    if field.has_many.is_some() {
-        let fk = field.foreign_key.as_deref().unwrap_or("id");
-        let lk = field.local_key.as_deref().unwrap_or("id");
-        let lk_ident = ctx.resolve_local_key_ident(lk, ident)?;
-        let related_ty = relation_generic_types(&field.ty)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                syn::Error::new_spanned(
-                    &field.ty,
-                    "has_many relation requires a related model type",
-                )
-            })?;
-        return Ok(Some(quote! {
-            self.#ident = {
-                #[cfg(feature = "entity-manager")]
-                {
-                    ::tideorm::relations::HasMany::new(#fk, #lk)
-                        .with_metadata(
-                            stringify!(#ident),
-                            <Self as ::tideorm::model::ModelMeta>::table_name(),
-                            <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
-                        )
-                        .with_owner_key(#owner_key)
-                        .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
-                }
-                #[cfg(not(feature = "entity-manager"))]
-                {
-                    ::tideorm::relations::HasMany::new(#fk, #lk)
-                        .with_parent_pk(::tideorm::prelude::json!(self.#lk_ident.clone()))
-                }
-            };
-        }));
-    }
-
-    if field.belongs_to.is_some() {
-        let fk = field.foreign_key.as_deref().unwrap_or("id");
-        let ok = field.owner_key.as_deref().unwrap_or("id");
-        let fk_ident = ctx.resolve_required_db_field_ident(fk, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::BelongsTo::new(#fk, #ok)
-                .with_fk_value(::tideorm::prelude::json!(self.#fk_ident.clone()));
-        }));
-    }
-
-    if field.has_many_through.is_some() {
-        let fk = field.foreign_key.as_deref().unwrap_or("id");
-        let related_key = field.related_key.as_deref().unwrap_or("id");
-        let local_key = field.local_key.as_deref().unwrap_or("id");
-        let related_local_key = field.owner_key.as_deref().unwrap_or("id");
-        let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
-        let pivot_table = field.pivot.as_deref().unwrap_or("");
-        let related_ty = relation_generic_types(&field.ty)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                syn::Error::new_spanned(
-                    &field.ty,
-                    "has_many_through relation requires a related model type",
-                )
-            })?;
-        return Ok(Some(quote! {
-            self.#ident = {
-                #[cfg(feature = "entity-manager")]
-                {
-                    ::tideorm::relations::HasManyThrough::new(
-                        #fk,
+                _ => {
+                    let related_key = field.related_key.as_deref().expect("validated related_key");
+                    let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+                    let pivot_table = field.pivot.as_deref().expect("validated pivot");
+                    quote!(::tideorm::relations::HasManyThrough::new(
+                        #foreign_key,
                         #related_key,
                         #local_key,
                         #related_local_key,
                         #pivot_table,
-                    )
-                    .with_metadata(
-                        stringify!(#ident),
-                        <Self as ::tideorm::model::ModelMeta>::table_name(),
-                        <#related_ty as ::tideorm::model::ModelMeta>::table_name(),
-                    )
-                    .with_owner_key(#owner_key)
-                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()))
-                }
-                #[cfg(not(feature = "entity-manager"))]
-                {
-                    ::tideorm::relations::HasManyThrough::new(
-                        #fk,
-                        #related_key,
-                        #local_key,
-                        #related_local_key,
-                        #pivot_table,
-                    )
-                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()))
+                    ))
                 }
             };
-        }));
-    }
+            let relation_name = field.name();
+            let owner_key = entity_manager_identity_key_expr(quote!(&self));
+            quote! {
+                let relation = #constructor
+                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
+                ::tideorm::__if_entity_manager! {
+                    let relation = relation
+                        .with_metadata(#relation_name, <Self as ::tideorm::model::ModelMeta>::table_name())
+                        .with_owner_key(#owner_key);
+                }
+            }
+        }
+        RelationKind::BelongsTo => {
+            let foreign_key = foreign_key.expect("validated relation foreign_key");
+            let owner_key = field.owner_key.as_deref().unwrap_or("id");
+            let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
+            quote! {
+                let relation = ::tideorm::relations::BelongsTo::new(#foreign_key, #owner_key)
+                    .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
+            }
+        }
+        RelationKind::MorphOne | RelationKind::MorphMany => {
+            let morph_name = field.morph_name.as_deref().expect("validated morph_name");
+            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            let wrapper = if kind == RelationKind::MorphOne {
+                quote!(MorphOne)
+            } else {
+                quote!(MorphMany)
+            };
+            quote! {
+                let relation = ::tideorm::relations::#wrapper::new(#morph_name, #local_key)
+                    .with_parent(
+                        ::tideorm::prelude::json!(self.#local_key_ident.clone()),
+                        <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
+                    );
+            }
+        }
+        RelationKind::MorphTo => {
+            let morph_name = field.morph_name.as_deref().expect("validated morph_name");
+            let type_column = format!("{}_type", morph_name);
+            let id_column = format!("{}_id", morph_name);
+            let type_ident = ctx.resolve_required_db_field_ident(&type_column, ident)?;
+            let id_ident = ctx.resolve_required_db_field_ident(&id_column, ident)?;
+            quote! {
+                let relation = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
+                    .__on::<Self>()
+                    .with_values(
+                        self.#type_ident.clone(),
+                        ::tideorm::prelude::json!(self.#id_ident.clone()),
+                    );
+            }
+        }
+        RelationKind::SelfRef => {
+            let foreign_key = foreign_key.unwrap_or("parent_id");
+            let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
+            // The parent is looked up by this column, so a typo is caught here
+            // rather than as an unknown column at the first load.
+            ctx.resolve_local_key_ident(local_key, ident)?;
+            quote! {
+                let relation = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
+                    .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
+            }
+        }
+        RelationKind::SelfRefMany => {
+            let foreign_key = foreign_key.unwrap_or("parent_id");
+            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            quote! {
+                let relation = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)
+                    .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
+            }
+        }
+    };
 
-    if relation_wrapper == Some("MorphOne") {
-        let morph_name = field.morph_name.as_deref().expect("validated morph_name");
-        let local_key = field.local_key.as_deref().unwrap_or("id");
-        let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::MorphOne::new(#morph_name, #local_key)
-                .with_parent(
-                    ::tideorm::prelude::json!(self.#local_key_ident.clone()),
-                    <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
-                );
-        }));
-    }
-
-    if relation_wrapper == Some("MorphMany") {
-        let morph_name = field.morph_name.as_deref().expect("validated morph_name");
-        let local_key = field.local_key.as_deref().unwrap_or("id");
-        let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::MorphMany::new(#morph_name, #local_key)
-                .with_parent(
-                    ::tideorm::prelude::json!(self.#local_key_ident.clone()),
-                    <Self as ::tideorm::model::ModelMeta>::table_name().to_string(),
-                );
-        }));
-    }
-
-    if relation_wrapper == Some("MorphTo") {
-        let morph_name = field.morph_name.as_deref().expect("validated morph_name");
-        let type_column = format!("{}_type", morph_name);
-        let id_column = format!("{}_id", morph_name);
-        let type_ident = ctx.resolve_required_db_field_ident(&type_column, ident)?;
-        let id_ident = ctx.resolve_required_db_field_ident(&id_column, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
-                .with_values(
-                    self.#type_ident.clone(),
-                    ::tideorm::prelude::json!(self.#id_ident.clone()),
-                );
-        }));
-    }
-
-    if relation_wrapper == Some("SelfRef") {
-        let foreign_key = field.foreign_key.as_deref().unwrap_or("parent_id");
-        let local_key = field.local_key.as_deref().unwrap_or("id");
-        let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
-                .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
-        }));
-    }
-
-    if relation_wrapper == Some("SelfRefMany") {
-        let foreign_key = field.foreign_key.as_deref().unwrap_or("parent_id");
-        let local_key = field.local_key.as_deref().unwrap_or("id");
-        let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
-        return Ok(Some(quote! {
-            self.#ident = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)
-                .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
-        }));
-    }
-
-    Ok(None)
+    Ok(quote! {
+        #relation
+        self.#ident = relation;
+    })
 }

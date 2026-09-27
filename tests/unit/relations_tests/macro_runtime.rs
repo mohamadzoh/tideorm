@@ -146,6 +146,26 @@ async fn morph_to_load_as_returns_none_for_another_target_type() {
 }
 
 #[test]
+fn morph_to_rebuild_keeps_the_values_its_columns_now_hold() {
+    let mut image = RelationTestImage {
+        id: 9,
+        imageable_type: "relation_test_nodes".to_string(),
+        imageable_id: 4,
+        owner: Default::default(),
+    }
+    .with_relations();
+
+    image.imageable_type = "relation_test_pivots".to_string();
+    image.imageable_id = 5;
+    let image = image.with_relations();
+
+    // Rebuilding used to copy the previous wrapper's values back over the ones
+    // just read from the columns, so the relation kept pointing at the old owner.
+    assert_eq!(image.owner.type_value(), Some("relation_test_pivots"));
+    assert_eq!(image.owner.id_value(), Some(&serde_json::json!(5)));
+}
+
+#[test]
 fn with_relations_round_trips_its_own_serialization() {
     use crate::relations::WithRelations;
 

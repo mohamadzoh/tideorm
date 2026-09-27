@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -22,27 +22,29 @@ rust-version = "1.94"
 # blanket `tests/**` exclusion makes `cargo test --lib` fail inside an extracted
 # `.crate`. Keep those two trees and drop only the standalone integration
 # targets, which need live databases and cannot run from a published tarball.
+# `.cargo/config.toml` ships too: it runs those tests on one thread, as they
+# need, and cargo reads it only inside the extracted crate, never for a build
+# that depends on it.
 exclude = [
-    ".cargo/**",
     ".github/**",
     ".env.example",
     "book.toml",
     "docs/CNAME",
     "tests/*.rs",
     "tests/edge_case/**",
-    "tests/entity_manager_tests/**",
-    "tests/mysql_integration_tests/**",
     "tests/or_clause/**",
     "tests/postgres_advanced_tests/**",
-    "tests/postgres_integration_tests/**",
-    "tests/query_builder_tests/**",
-    "tests/seaorm2_features_tests/**",
     "tests/sqlite_ci_smoke_test/**",
-    "tests/sqlite_integration_tests/**",
     "tests/tokenization_tests/**",
+    "tests/typed_columns_and_join_tests/**",
     "tests/ui/**",
     "tests/public_api_tests/**",
 ]
+
+# docs.rs builds the default features only, which would leave every API behind a
+# module flag undocumented. The backend features gate no public items.
+[package.metadata.docs.rs]
+features = ["attachments", "translations", "fulltext", "entity-manager", "dirty-tracking", "encrypted-fields"]
 
 [workspace]
 members = [".", "tideorm-macros"]
@@ -52,7 +54,9 @@ resolver = "3"
 default = ["postgres", "runtime-tokio"]
 postgres = ["sea-orm/sqlx-postgres"]
 mysql = ["sea-orm/sqlx-mysql"]
-sqlite = ["sea-orm/sqlx-sqlite"]
+# sqlx builds its bundled SQLite (3.46 or later), which has `RETURNING`, so an
+# insert or update needs one statement instead of the write plus a `SELECT` of the row.
+sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/sqlite-use-returning-for-3_35"]
 runtime-tokio = ["sea-orm/runtime-tokio-rustls"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
@@ -74,7 +78,7 @@ encrypted-fields = []
 # This crate's MSRV is downstream of this line: sea-orm 2.x declares
 # `rust-version = "1.94.0"`, and `resolver = "3"` enforces it. Raising this range
 # can therefore raise the toolchain floor without any of our own code changing.
-sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid", "schema-sync"] }
+sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "with-chrono", "with-json", "with-rust_decimal", "with-uuid"] }
 
 # Async runtime
 async-trait = "0.1.89"
@@ -92,16 +96,14 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.11.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.12.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
-arc-swap = "1.9.1"
 inventory = "0.3.21"
 regex = "1.12.3"
 url = "2.5.7"
 chacha20poly1305 = { version = "0.10.1", features = ["std"] }
-rand = "0.10.0"
 argon2 = { version = "0.5.3", features = ["std"] }
 
 [dev-dependencies]
@@ -185,14 +187,14 @@ name = "mysql_integration_tests"
 path = "tests/mysql_integration_tests.rs"
 required-features = ["mysql", "runtime-tokio"]
 
+[[test]]
+name = "mariadb_integration_tests"
+path = "tests/mariadb_integration_tests.rs"
+required-features = ["mysql", "runtime-tokio"]
+
 # The entity-manager suites carry an inner `#![cfg(...)]`. Without these
 # stanzas cargo always builds them and they report a green "0 passed" instead
 # of being skipped; `required-features` makes the skip visible.
-[[test]]
-name = "entity_manager_tests"
-path = "tests/entity_manager_tests.rs"
-required-features = ["entity-manager"]
-
 [[test]]
 name = "postgres_entity_manager_tests"
 path = "tests/postgres_entity_manager_tests.rs"
@@ -206,4 +208,9 @@ required-features = ["sqlite", "runtime-tokio", "entity-manager"]
 [[test]]
 name = "mysql_entity_manager_tests"
 path = "tests/mysql_entity_manager_tests.rs"
+required-features = ["mysql", "runtime-tokio", "entity-manager"]
+
+[[test]]
+name = "mariadb_entity_manager_tests"
+path = "tests/mariadb_entity_manager_tests.rs"
 required-features = ["mysql", "runtime-tokio", "entity-manager"]

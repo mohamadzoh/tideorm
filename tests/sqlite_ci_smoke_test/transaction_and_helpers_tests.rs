@@ -1,29 +1,15 @@
+use std::sync::{Mutex, OnceLock};
+
 use super::*;
+
+fn leaked_transaction_db_slot() -> &'static Mutex<Option<Database>> {
+    static LEAKED_TRANSACTION_DB: OnceLock<Mutex<Option<Database>>> = OnceLock::new();
+    LEAKED_TRANSACTION_DB.get_or_init(|| Mutex::new(None))
+}
 
 #[tokio::test]
 async fn sqlite_direct_crud_helpers_remain_unchanged_for_regular_models() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     for (email, name) in [
         ("first@example.com", "First"),
@@ -76,28 +62,7 @@ async fn sqlite_direct_crud_helpers_remain_unchanged_for_regular_models() {
 
 #[tokio::test]
 async fn sqlite_paginate_rejects_zero_page_number() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     CiUser {
         id: 0,
@@ -112,7 +77,7 @@ async fn sqlite_paginate_rejects_zero_page_number() {
     let paginate_err = CiUser::paginate(0, 10)
         .await
         .expect_err("paginate should reject page 0");
-    assert!(paginate_err.is_validation_error());
+    assert!(matches!(paginate_err, Error::Validation { .. }));
     assert!(paginate_err.to_string().contains("page"));
     assert!(paginate_err.to_string().contains("at least 1"));
 
@@ -121,35 +86,16 @@ async fn sqlite_paginate_rejects_zero_page_number() {
         .get()
         .await
         .expect_err("query builder should reject page 0");
-    assert!(query_err.is_query_error());
+    // Both refuse the same numbers with the same error.
+    assert!(matches!(query_err, Error::Validation { .. }));
+    assert_eq!(query_err.to_string(), paginate_err.to_string());
     assert!(query_err.to_string().contains("page"));
     assert!(query_err.to_string().contains("at least 1"));
 }
 
 #[tokio::test]
 async fn sqlite_transaction_model_methods_use_transaction_connection() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
-
-    let _ = Database::execute("DROP TABLE IF EXISTS ci_users").await;
-
-    Database::execute(
-        r#"
-        CREATE TABLE ci_users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT NOT NULL,
-            name TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    "#,
-    )
-    .await
-    .expect("failed to create ci_users table");
+    fresh_table(CI_USERS_DDL).await;
 
     let baseline = CiUser {
         id: 0,
@@ -235,13 +181,7 @@ async fn sqlite_transaction_model_methods_use_transaction_connection() {
 
 #[tokio::test]
 async fn sqlite_transaction_leak_on_error_returns_transaction_error() {
-    TideConfig::init()
-        .database_type(DatabaseType::SQLite)
-        .database("sqlite::memory:")
-        .max_connections(1)
-        .connect()
-        .await
-        .expect("failed to connect to SQLite");
+    connect_global().await;
 
     leaked_transaction_db_slot()
         .lock()

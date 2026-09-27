@@ -19,6 +19,7 @@ A Rust ORM with field-declared relations and a fluent query builder.
 - **Auto Schema Sync** - Automatic table management during development
 - **Multi-Database** - PostgreSQL, MySQL, and SQLite support
 - **Query Builder** - Fluent filtering, OR groups, joins, unions, CTEs, and window functions
+- **Typed Results** - Aggregates read as the type you ask for (`sum::<Decimal>`, `min::<DateTime<Utc>>`), `pluck`/`value` read one column, `get_as::<T>()` reads rows into your own struct, and `paginate()` returns a page with its total
 - **Profiling & Logging** - Built-in query logging plus execution counters and slow-query stats
 - **Data Lifecycle Tools** - Migrations, seeding, validation, callbacks, soft deletes, and transactions
 - **Entity Manager** - Optional persistence context for aggregate workflows and managed entity lifecycles
@@ -123,7 +124,7 @@ Relation helper fields like `HasOne<T>` and `HasMany<T>` are runtime-only wrappe
 
 Composite primary keys are supported by marking multiple fields with `#[tideorm(primary_key)]`. Composite keys are used as tuples in CRUD APIs, for example `UserRole::find((user_id, role_id))`. `auto_increment` and tokenization remain single-primary-key features.
 
-For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-insert API and returns the inserted models with database-generated values populated when the active backend supports or emulates that behavior.
+For batch inserts, use `Model::insert_all(...)`. It is TideORM's single bulk-insert API and returns the inserted models with database-generated values populated when the active backend supports or emulates that behavior. Every model is validated before any is written, and a batch too large for one statement's bind parameters is split across several inside a transaction.
 
 For tests and reconfiguration-heavy workflows, TideORM's global state is resettable. Use `Database::reset_global()`, `TideConfig::reset()`, and `TokenConfig::reset()` before applying a fresh setup.
 
@@ -137,7 +138,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust
@@ -183,61 +184,42 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.10.0", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.10.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
 
 ### What else your crate needs
 
-`#[tideorm::model]` expands into your crate, so a few things have to be reachable
-from *there* rather than from TideORM. `tideorm init` writes all of them into a
-scaffolded project; add them by hand if you are wiring TideORM into an existing one.
-
-```toml
-[dependencies]
-tideorm = { version = "0.10.0", default-features = false, features = ["postgres", "runtime-tokio"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = "0.4"          # only if you use date/time columns
-
-# Declare locally every TideORM feature you enable. A derive's `#[cfg(feature = ..)]`
-# is evaluated against YOUR crate's features, not TideORM's, so without this the
-# generated code silently takes the feature-off branch and rustc warns
-# `unexpected cfg condition value`.
-[features]
-entity-manager = ["tideorm/entity-manager"]
-```
-
-`serde` and `serde_json` are not optional: the derive emits `::serde` and
-`::serde_json` paths, so a model will not compile without both as direct
-dependencies. `chrono` is only needed if you spell a column type with an explicit
-`chrono::` path — the `DateTime<Utc>` re-exported from `tideorm::prelude` works
-without it.
+Nothing, for the models themselves: the code `#[tideorm::model]` generates reaches
+`serde`, `serde_json` and `chrono` through TideORM. Add `serde` if your own code
+derives `Serialize`/`Deserialize`, and `chrono` if you spell a column type with an
+explicit `chrono::` path — the `DateTime<Utc>` re-exported from `tideorm::prelude`
+works without it.
 
 ### Feature Flags
 
@@ -319,13 +301,13 @@ cargo test --all-features
 cargo test --test sqlite_ci_smoke_test --features "sqlite runtime-tokio" --no-default-features
 ```
 
-The backends do not share gate semantics: SQLite is opt-out (`SKIP_SQLITE_TESTS`), MySQL is opt-in (`RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`, with no skip flag), and the PostgreSQL suites always connect. See [CONTRIBUTING.md](CONTRIBUTING.md#test-database-environment-variables) for the full variable table.
+The backends do not share gate semantics: SQLite is opt-out (`SKIP_SQLITE_TESTS`), MySQL is opt-in (`RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL`, overridden by `SKIP_MYSQL_TESTS`), so is MariaDB (the same with `MARIADB`), and PostgreSQL is opt-in as well (`TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS`, overridden by `SKIP_POSTGRES_TESTS`). See [CONTRIBUTING.md](CONTRIBUTING.md#test-database-environment-variables) for the full variable table.
 
 See [docs/getting-started.md](docs/getting-started.md#testing) for more.
 
 ## Benchmarking
 
-Always run a single Criterion target; a bare `cargo bench` is not usable because several targets need a database. `query_benchmarks`, `crud_benchmarks`, and `or_clause_benchmarks` require a live PostgreSQL server and abort the run without one; they default to `postgres://postgres:postgres@localhost:5432/test_tide_orm` and respect `POSTGRESQL_DATABASE_URL`.
+Always run a single Criterion target; a bare `cargo bench` is not usable because several targets need a database. `query_benchmarks`, `crud_benchmarks`, and `or_clause_benchmarks` need a live PostgreSQL server and are opt-in like the PostgreSQL tests: they run nothing unless `TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS` is set, then connect to the first URL set, falling back to `postgres://postgres:postgres@localhost:5432/test_tide_orm`, and abort the run if it is unreachable.
 
 Common local commands:
 

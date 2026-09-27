@@ -1,69 +1,31 @@
 use super::*;
 
+use crate::parse::{ModelField, RelationKind};
+
 pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
-    let field_writer_arms: Vec<_> = ctx
-        .field_names
-        .iter()
-        .zip(ctx.field_types.iter())
-        .zip(ctx.column_names.iter())
-        .map(|((field_ident, field_ty), column_name)| {
-            let field_name = field_ident.to_string();
-            // Field and column name are identical unless `#[tideorm(column = ..)]`
-            // renames the column, so emitting both unconditionally would repeat the
-            // same literal in one `|` pattern. Match the sibling generator and emit
-            // the alternative only when it really is an alternative.
-            let pattern = if field_name == *column_name {
-                quote!(#field_name)
-            } else {
-                quote!(#field_name | #column_name)
-            };
-            quote! {
-                #pattern => {
-                    self.#field_ident = ::serde_json::from_value::<#field_ty>(value.clone())
-                        .map_err(|error| ::tideorm::Error::invalid_query(format!(
-                            "failed to assign entity manager value for field '{}' on {}: {}",
-                            field,
-                            stringify!(#struct_name),
-                            error
-                        )))?;
-                    Ok(())
-                }
-            }
-        })
-        .collect();
-    let relation_field_names: Vec<_> = ctx
-        .relation_fields
-        .iter()
-        .filter_map(|field| field.ident.as_ref())
-        .map(|ident| ident.to_string())
-        .collect();
-    let merge_persisted_assignments: Vec<_> = ctx
-        .field_names
-        .iter()
-        .filter(|field_ident| {
-            let field_name = field_ident.to_string();
-            !relation_field_names
-                .iter()
-                .any(|relation_name| relation_name == &field_name)
-        })
-        .map(|field_ident| {
-            quote! {
-                self.#field_ident = persisted.#field_ident;
-            }
-        })
-        .collect();
+    let field_idents = &ctx.field_idents;
+    let field_types = &ctx.field_types;
+    let name_patterns = build_name_patterns(ctx);
 
     let field_writer_impl = quote! {
-        #[cfg(feature = "entity-manager")]
         impl ::tideorm::entity_manager::TideEntityManagerFieldWriter for #struct_name {
             fn tide_set_field_value(
                 &mut self,
                 field: &str,
-                value: ::serde_json::Value,
+                value: ::tideorm::serde_json::Value,
             ) -> ::tideorm::Result<()> {
                 match field {
-                    #(#field_writer_arms,)*
+                    #(#name_patterns => {
+                        self.#field_idents = ::tideorm::serde_json::from_value::<#field_types>(value.clone())
+                            .map_err(|error| ::tideorm::Error::invalid_query(format!(
+                                "failed to assign entity manager value for field '{}' on {}: {}",
+                                field,
+                                stringify!(#struct_name),
+                                error
+                            )))?;
+                        Ok(())
+                    },)*
                     _ => Err(::tideorm::Error::invalid_query(format!(
                         "field '{}' on {} is not an entity-manager-writable column",
                         field,
@@ -75,277 +37,39 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
     };
 
     let merge_impl = quote! {
-        #[cfg(feature = "entity-manager")]
         impl ::tideorm::entity_manager::TideEntityManagerMergePersisted for #struct_name {
             fn tide_merge_persisted(&mut self, persisted: Self) {
-                #(#merge_persisted_assignments)*
+                #(self.#field_idents = persisted.#field_idents;)*
             }
         }
     };
-    let relation_database_attach_blocks: Vec<_> = ctx
+
+    let relation_database_attach_blocks = ctx
         .relation_fields
         .iter()
-        .filter_map(|field| {
-            let ident = field.ident.as_ref()?;
-            if field.has_one.is_some()
-                || field.has_many.is_some()
-                || field.belongs_to.is_some()
-                || field.has_many_through.is_some()
-            {
-                return Some(quote! {
-                    self.#ident.attach_query_database(database);
-                });
-            }
-
-            None
+        .filter(|field| {
+            field
+                .relation_kind()
+                .is_some_and(RelationKind::is_entity_relation)
         })
+        .map(|field| {
+            let ident = field.ident();
+            quote!(self.#ident.attach_query_database(database);)
+        });
+
+    let relation_sync_blocks: Vec<TokenStream2> = ctx
+        .relation_fields
+        .iter()
+        .filter_map(|field| build_relation_sync_block(ctx, field))
         .collect();
-    // Every relation-sync arm decides whether a loaded child differs from its
-    // entity-manager-cached copy the same way; emit that check from one place.
-    let should_persist_fragment = |related_ty: &syn::Type| {
+    // The owner's identity is the same for every relation, so it is computed once;
+    // a model with nothing to sync emits no unused bindings.
+    let sync_preamble = (!relation_sync_blocks.is_empty()).then(|| {
         quote! {
-            let existing_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?;
-            let should_persist = match existing_key.as_deref() {
-                Some(existing_key) => match entity_manager.get_by_entity_manager_key::<#related_ty>(existing_key) {
-                    Some(cached) => {
-                        ::serde_json::to_value(&*item)?
-                            != ::serde_json::to_value(&cached)?
-                    }
-                    None => true,
-                },
-                None => true,
-            };
+            let owner_table = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_table_name();
+            let owner_key = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_pk_key(self);
         }
-    };
-    let relation_sync_blocks: Vec<_> = ctx
-        .relation_fields
-        .iter()
-        .filter_map(|field| {
-            let ident = field.ident.as_ref()?;
-
-            if field.has_many.is_some() {
-                let related_ty = relation_generic_types(&field.ty).into_iter().next()?;
-                let foreign_key = field.foreign_key.as_deref().unwrap_or("id");
-                let local_key = field.local_key.as_deref().unwrap_or("id");
-                let local_key_ident = ctx
-                    .resolve_local_key_ident(local_key, ident)
-                    .expect("validated has_many local key should resolve");
-                let should_persist_check = should_persist_fragment(&related_ty);
-
-                return Some(quote! {
-                    if self.#ident.is_loaded() {
-                        let owner_table = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_table_name();
-                        let owner_key = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_pk_key(self);
-                        let relation_name = stringify!(#ident);
-                        let current_keys = self.#ident.current_keys()?;
-                        let to_delete = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &current_keys);
-
-                        if !to_delete.is_empty() {
-                            for deleted_key in &to_delete {
-                                if let Some(deleted) = entity_manager.get_by_entity_manager_key::<#related_ty>(deleted_key) {
-                                    ::tideorm::entity_manager::__with_entity_manager_db(
-                                        entity_manager,
-                                        <#related_ty as ::tideorm::model::Model>::delete(deleted),
-                                    )
-                                    .await?;
-                                }
-
-                                entity_manager.remove_by_entity_manager_key::<#related_ty>(deleted_key);
-                            }
-                        }
-
-                        let child_fk_value = ::serde_json::to_value(self.#local_key_ident.clone())?;
-                        let mut updated_keys = Vec::new();
-
-                        if let Some(items) = self.#ident.as_mut() {
-                            updated_keys.reserve(items.len());
-
-                            for item in items.iter_mut() {
-                                <#related_ty as ::tideorm::entity_manager::TideEntityManagerFieldWriter>::tide_set_field_value(
-                                    item,
-                                    #foreign_key,
-                                    child_fk_value.clone(),
-                                )?;
-
-                                #should_persist_check
-
-                                if !should_persist {
-                                    if let Some(existing_key) = existing_key {
-                                        updated_keys.push(existing_key);
-                                    }
-
-                                    <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;
-                                    entity_manager.put(item.clone());
-                                    continue;
-                                }
-
-                                let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
-
-                                if let Some(saved_key) = ::tideorm::entity_manager::__model_entity_manager_key(&saved)? {
-                                    updated_keys.push(saved_key);
-                                }
-
-                                *item = saved.clone();
-                                entity_manager.put(saved);
-                            }
-                        }
-
-                        entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-                    }
-                });
-            }
-
-            if field.has_one.is_some() {
-                let related_ty = relation_generic_types(&field.ty).into_iter().next()?;
-                let foreign_key = field.foreign_key.as_deref().unwrap_or("id");
-                let local_key = field.local_key.as_deref().unwrap_or("id");
-                let local_key_ident = ctx
-                    .resolve_local_key_ident(local_key, ident)
-                    .expect("validated has_one local key should resolve");
-                let should_persist_check = should_persist_fragment(&related_ty);
-
-                return Some(quote! {
-                    if self.#ident.is_loaded() {
-                        let owner_table = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_table_name();
-                        let owner_key = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_pk_key(self);
-                        let relation_name = stringify!(#ident);
-                        let child_fk_value = ::serde_json::to_value(self.#local_key_ident.clone())?;
-                        let mut updated_keys = Vec::new();
-
-                        if let Some(item) = self.#ident.as_mut() {
-                            <#related_ty as ::tideorm::entity_manager::TideEntityManagerFieldWriter>::tide_set_field_value(
-                                item,
-                                #foreign_key,
-                                child_fk_value,
-                            )?;
-
-                            #should_persist_check
-
-                            if !should_persist {
-                                if let Some(existing_key) = existing_key {
-                                    updated_keys.push(existing_key);
-                                }
-
-                                <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;
-                                entity_manager.put(item.clone());
-                            } else {
-                                let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
-
-                                if let Some(saved_key) = ::tideorm::entity_manager::__model_entity_manager_key(&saved)? {
-                                    updated_keys.push(saved_key);
-                                }
-
-                                *item = saved.clone();
-                                entity_manager.put(saved);
-                            }
-                        }
-
-                        let to_delete = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-
-                        if !to_delete.is_empty() {
-                            for deleted_key in &to_delete {
-                                if let Some(deleted) = entity_manager.get_by_entity_manager_key::<#related_ty>(deleted_key) {
-                                    ::tideorm::entity_manager::__with_entity_manager_db(
-                                        entity_manager,
-                                        <#related_ty as ::tideorm::model::Model>::delete(deleted),
-                                    )
-                                    .await?;
-                                }
-
-                                entity_manager.remove_by_entity_manager_key::<#related_ty>(deleted_key);
-                            }
-                        }
-
-                        entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-                    }
-                });
-            }
-
-            if field.has_many_through.is_some() {
-                let mut relation_types = relation_generic_types(&field.ty).into_iter();
-                let related_ty = relation_types.next()?;
-                let related_local_key = field.owner_key.as_deref().unwrap_or("id");
-                let should_persist_check = should_persist_fragment(&related_ty);
-
-                return Some(quote! {
-                    if self.#ident.is_loaded() {
-                        let owner_table = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_table_name();
-                        let owner_key = <Self as ::tideorm::entity_manager::TideEntityManagerMeta>::tide_pk_key(self);
-                        let relation_name = stringify!(#ident);
-                        let mut updated_keys = Vec::new();
-                        let mut related_values = ::std::collections::HashMap::<String, ::serde_json::Value>::new();
-
-                        if let Some(items) = self.#ident.as_mut() {
-                            updated_keys.reserve(items.len());
-
-                            for item in items.iter_mut() {
-                                #should_persist_check
-
-                                if !should_persist {
-                                    <#related_ty as ::tideorm::entity_manager::TideEntityManagerSync>::tide_sync_entity_manager_relations(item, entity_manager).await?;
-                                    entity_manager.put(item.clone());
-                                } else {
-                                    let saved = ::tideorm::entity_manager::__save_with_entity_manager_in_scope(item, entity_manager).await?;
-                                    *item = saved.clone();
-                                    entity_manager.put(saved);
-                                }
-
-                                let current_key = ::tideorm::entity_manager::__model_entity_manager_key(item)?
-                                    .ok_or_else(|| ::tideorm::Error::invalid_query(format!(
-                                        "{} relation '{}' requires persisted related keys after save",
-                                        stringify!(#struct_name),
-                                        relation_name,
-                                    )))?;
-                                let related_value = <#related_ty as ::tideorm::internal::InternalModel>::field_json_value(
-                                    item,
-                                    #related_local_key,
-                                )?
-                                .ok_or_else(|| ::tideorm::Error::invalid_query(format!(
-                                    "{} relation '{}' could not read related key '{}' from saved model",
-                                    stringify!(#struct_name),
-                                    relation_name,
-                                    #related_local_key,
-                                )))?;
-
-                                related_values.insert(current_key.clone(), related_value);
-                                updated_keys.push(current_key);
-                            }
-                        }
-
-                        let to_detach = entity_manager
-                            .deletions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-                        for deleted_key in &to_detach {
-                            if let Some(deleted) = entity_manager.get_by_entity_manager_key::<#related_ty>(deleted_key) {
-                                if let Some(related_value) = <#related_ty as ::tideorm::internal::InternalModel>::field_json_value(
-                                    &deleted,
-                                    #related_local_key,
-                                )? {
-                                    self.#ident.detach(related_value).await?;
-                                }
-                            }
-                        }
-
-                        let to_attach = entity_manager
-                            .additions::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-                        for attach_key in &to_attach {
-                            if let Some(related_value) = related_values.get(attach_key) {
-                                self.#ident.attach(related_value.clone()).await?;
-                            }
-                        }
-
-                        entity_manager
-                            .snapshot::<#related_ty>(owner_table, &owner_key, relation_name, &updated_keys);
-                    }
-                });
-            }
-
-            None
-        })
-        .collect();
+    });
 
     // Flush ordering is decided per table, so the only thing the entity manager
     // needs from a relation is which side of a foreign key each end sits on: a
@@ -357,22 +81,21 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
     let mut parent_tables: Vec<TokenStream2> = Vec::new();
     let mut child_tables: Vec<TokenStream2> = Vec::new();
     for field in &ctx.relation_fields {
-        let Some(related_ty) = relation_generic_types(&field.ty).into_iter().next() else {
+        let Some(related_ty) = field.related_types().into_iter().next() else {
             continue;
         };
         let table_name = quote!(<#related_ty as ::tideorm::model::ModelMeta>::table_name());
 
-        if field.belongs_to.is_some() {
-            parent_tables.push(table_name);
-        } else if field.has_one.is_some() || field.has_many.is_some() {
-            child_tables.push(table_name);
+        match field.relation_kind() {
+            Some(RelationKind::BelongsTo) => parent_tables.push(table_name),
+            Some(RelationKind::HasOne | RelationKind::HasMany) => child_tables.push(table_name),
+            _ => {}
         }
     }
 
     let identity_key_expr = crate::relation_gen::entity_manager_identity_key_expr(quote!(self));
 
     let entity_manager_impl = quote! {
-        #[cfg(feature = "entity-manager")]
         impl ::tideorm::entity_manager::TideEntityManagerMeta for #struct_name {
             fn tide_table_name() -> &'static str
             where
@@ -412,18 +135,17 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             }
         }
 
-        #[cfg(feature = "entity-manager")]
         impl ::tideorm::entity_manager::TideEntityManagerSync for #struct_name {
             async fn tide_sync_entity_manager_relations<'a>(
                 &'a mut self,
                 entity_manager: &'a ::std::sync::Arc<::tideorm::entity_manager::EntityManager>,
             ) -> ::tideorm::Result<()> {
+                #sync_preamble
                 #(#relation_sync_blocks)*
                 Ok(())
             }
         }
 
-        #[cfg(feature = "entity-manager")]
         impl #struct_name {
             pub async fn find_in_entity_manager(
                 pk: <Self as ::tideorm::model::ModelMeta>::PrimaryKey,
@@ -434,9 +156,162 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
         }
     };
 
+    // Gated by TideORM's own `entity-manager` feature, not a `cfg` the
+    // model's crate would evaluate against its own features.
     quote! {
-        #field_writer_impl
-        #merge_impl
-        #entity_manager_impl
+        ::tideorm::__if_entity_manager! {
+            #field_writer_impl
+            #merge_impl
+            #entity_manager_impl
+        }
     }
+}
+
+/// The flush-time sync of one loaded `has_many`/`has_one`/`has_many_through`
+/// relation: persist changed children, then delete (or detach) the ones the
+/// relation no longer holds and record what it holds now.
+fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<TokenStream2> {
+    let ident = field.ident();
+    let relation_name = field.name();
+    let related_ty = field.related_types().into_iter().next()?;
+    let local_key = field
+        .local_key
+        .as_deref()
+        .unwrap_or(ctx.default_local_key());
+    let struct_name = &ctx.struct_name;
+
+    let sync = match field.relation_kind()? {
+        RelationKind::HasMany => {
+            let foreign_key = field
+                .foreign_key
+                .as_deref()
+                .expect("validated relation foreign_key");
+            let local_key_ident = ctx
+                .resolve_local_key_ident(local_key, ident)
+                .expect("relation local keys resolve when the context is built");
+            quote! {
+                let current_keys = self.#ident.current_keys()?;
+                ::tideorm::entity_manager::__delete_detached_entities::<#related_ty>(
+                    entity_manager, owner_table, &owner_key, #relation_name, &current_keys,
+                )
+                .await?;
+
+                let child_fk_value = ::tideorm::serde_json::to_value(self.#local_key_ident.clone())?;
+                let mut updated_keys = Vec::new();
+                if let Some(items) = self.#ident.as_mut() {
+                    updated_keys.reserve(items.len());
+                    for item in items.iter_mut() {
+                        <#related_ty as ::tideorm::entity_manager::TideEntityManagerFieldWriter>::tide_set_field_value(
+                            item,
+                            #foreign_key,
+                            child_fk_value.clone(),
+                        )?;
+                        updated_keys.extend(
+                            ::tideorm::entity_manager::__sync_related_entity(item, entity_manager).await?,
+                        );
+                    }
+                }
+            }
+        }
+        RelationKind::HasOne => {
+            let foreign_key = field
+                .foreign_key
+                .as_deref()
+                .expect("validated relation foreign_key");
+            let local_key_ident = ctx
+                .resolve_local_key_ident(local_key, ident)
+                .expect("relation local keys resolve when the context is built");
+            quote! {
+                // The row the relation no longer holds goes first, as for a
+                // `has_many`: a unique foreign key refuses the new row beside it.
+                let current_keys: Vec<String> = match self.#ident.as_mut() {
+                    Some(item) => ::tideorm::entity_manager::__model_entity_manager_key(&*item)?
+                        .into_iter()
+                        .collect(),
+                    None => Vec::new(),
+                };
+                ::tideorm::entity_manager::__delete_detached_entities::<#related_ty>(
+                    entity_manager, owner_table, &owner_key, #relation_name, &current_keys,
+                )
+                .await?;
+
+                let child_fk_value = ::tideorm::serde_json::to_value(self.#local_key_ident.clone())?;
+                let mut updated_keys = Vec::new();
+                if let Some(item) = self.#ident.as_mut() {
+                    <#related_ty as ::tideorm::entity_manager::TideEntityManagerFieldWriter>::tide_set_field_value(
+                        item,
+                        #foreign_key,
+                        child_fk_value,
+                    )?;
+                    updated_keys.extend(
+                        ::tideorm::entity_manager::__sync_related_entity(item, entity_manager).await?,
+                    );
+                }
+            }
+        }
+        RelationKind::HasManyThrough => {
+            let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+            quote! {
+                let mut updated_keys = Vec::new();
+                let mut related_values = ::std::collections::HashMap::<String, ::tideorm::serde_json::Value>::new();
+
+                if let Some(items) = self.#ident.as_mut() {
+                    updated_keys.reserve(items.len());
+
+                    for item in items.iter_mut() {
+                        let current_key = ::tideorm::entity_manager::__sync_related_entity(item, entity_manager)
+                            .await?
+                            .ok_or_else(|| ::tideorm::Error::invalid_query(format!(
+                                "{} relation '{}' requires persisted related keys after save",
+                                stringify!(#struct_name),
+                                #relation_name,
+                            )))?;
+                        let related_value = <#related_ty as ::tideorm::internal::InternalModel>::field_json_value(
+                            item,
+                            #related_local_key,
+                        )?
+                        .ok_or_else(|| ::tideorm::Error::invalid_query(format!(
+                            "{} relation '{}' could not read related key '{}' from saved model",
+                            stringify!(#struct_name),
+                            #relation_name,
+                            #related_local_key,
+                        )))?;
+
+                        related_values.insert(current_key.clone(), related_value);
+                        updated_keys.push(current_key);
+                    }
+                }
+
+                let to_detach = entity_manager
+                    .deletions::<#related_ty>(owner_table, &owner_key, #relation_name, &updated_keys);
+                for deleted_key in &to_detach {
+                    if let Some(deleted) = entity_manager.get_by_entity_manager_key::<#related_ty>(deleted_key) {
+                        if let Some(related_value) = <#related_ty as ::tideorm::internal::InternalModel>::field_json_value(
+                            &deleted,
+                            #related_local_key,
+                        )? {
+                            self.#ident.detach(related_value).await?;
+                        }
+                    }
+                }
+
+                let to_attach = entity_manager
+                    .additions::<#related_ty>(owner_table, &owner_key, #relation_name, &updated_keys);
+                for attach_key in &to_attach {
+                    if let Some(related_value) = related_values.get(attach_key) {
+                        self.#ident.attach(related_value.clone()).await?;
+                    }
+                }
+            }
+        }
+        _ => return None,
+    };
+
+    Some(quote! {
+        if self.#ident.is_loaded() {
+            #sync
+            entity_manager
+                .snapshot::<#related_ty>(owner_table, &owner_key, #relation_name, &updated_keys);
+        }
+    })
 }

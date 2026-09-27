@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::OnceLock;
 
 static SQLITE_DATABASE_URL: OnceLock<String> = OnceLock::new();

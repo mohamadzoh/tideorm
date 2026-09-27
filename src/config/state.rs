@@ -3,13 +3,12 @@ use std::sync::OnceLock;
 
 #[cfg(feature = "attachments")]
 use super::FileUrlGenerator;
-use super::{Config, DatabaseType, PoolConfig};
+use super::{Config, DatabaseType};
 
 #[derive(Default)]
 struct GlobalConfigState {
     config: Config,
     db_type: Option<DatabaseType>,
-    pool_config: Option<PoolConfig>,
     schema_file_path: Option<String>,
     #[cfg(feature = "attachments")]
     file_url_generator: Option<FileUrlGenerator>,
@@ -39,12 +38,14 @@ pub(super) fn set_global_db_type(db_type: Option<DatabaseType>) {
     global_state().write().db_type = db_type;
 }
 
-pub(super) fn global_pool_config() -> Option<PoolConfig> {
-    global_state().read().pool_config.clone()
-}
-
-pub(super) fn set_global_pool_config(pool_config: Option<PoolConfig>) {
-    global_state().write().pool_config = pool_config;
+/// Record that the global connection reaches MariaDB, unless another backend
+/// was configured, so the statements of its transactions, which cannot ask
+/// the pool, render for MariaDB too.
+pub(crate) fn note_detected_mariadb() {
+    let mut state = global_state().write();
+    if matches!(state.db_type, None | Some(DatabaseType::MySQL)) {
+        state.db_type = Some(DatabaseType::MariaDB);
+    }
 }
 
 pub(super) fn global_schema_file_path() -> Option<String> {

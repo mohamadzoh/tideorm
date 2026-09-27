@@ -1,0 +1,5 @@
+error: another relation to Photo with morph_name = "imageable" keys it by `id`, and this one by `code`: a Photo row could not tell which it belongs to; give the two relations different morph names
+  --> tests/ui/invalid_relation_morph_ambiguous.rs:13:5
+   |
+13 |     covers: MorphMany<Photo>,
+   |     ^^^^^^

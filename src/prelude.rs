@@ -4,52 +4,23 @@
 //! Import this when you want the common model, query, migration, and relation
 //! types in scope without pulling each module in separately.
 
-// Core types
-pub use crate::database::{Database, DatabaseBuilder, Transaction};
-// Global database access functions
-pub use crate::database::{db, has_global_db, require_db, try_db};
-pub use crate::error::Error;
-// Note: We don't export Result here to avoid shadowing std::result::Result
-// Use `tideorm::Result` explicitly when needed
 pub use crate::callbacks::{CallbackRunner, Callbacks};
 #[cfg(feature = "attachments")]
 pub use crate::config::FileUrlGenerator;
-pub use crate::config::{
-    Config, DatabaseType, PoolConfig, RegisterMigrations, RegisterSeeds, TideConfig,
-};
+pub use crate::config::{Config, DatabaseType, PoolConfig, TideConfig};
+pub use crate::database::{Database, DatabaseBuilder, Transaction};
+pub use crate::database::{db, has_global_db, require_db, try_db};
 // Bound parameter values for `Database::raw_with_params` and friends. Exported
 // here so raw SQL never sends callers into the hidden `internal` module.
 pub use crate::internal::DbValue;
 pub use crate::model::{
-    BatchUpdateBuilder, CreateBuilder, IndexDefinition, Model, ModelMeta, NestedSave,
-    NestedSaveBuilder, OnConflictBuilder, UpdateBuilder, UpdateValue,
+    BatchUpdateBuilder, IndexDefinition, Model, ModelMeta, NestedSave, NestedSaveBuilder,
+    OnConflictBuilder, UpdateValue,
 };
 pub use crate::query::{
-    // Aggregate terminals
-    AggregateFunction,
-    // CTE types
-    CTE,
-    FrameBound,
-    FrameType,
-    // Joins
-    JoinClause,
-    // Join result consolidation
-    JoinResultConsolidator,
-    JoinType,
-    LogicalOp,
-    OrBranch,
-    OrBranchBuilder,
-    // OR clause types
-    OrGroup,
-    Order,
-    QueryBuilder,
-    // Query fragment for consolidate()
-    QueryFragment,
-    UnionClause,
-    // UNION types
-    UnionType,
-    // Window function types
-    WindowFunction,
+    Aggregate, AggregateCondition, CTE, FrameBound, FrameType, HavingCondition, JoinClause,
+    JoinResultConsolidator, JoinType, LogicalOp, OrBranchBuilder, OrGroup, Order, Paginated,
+    QueryBuilder, QueryFragment, SortOrder, UnionClause, UnionType, WindowFunction,
     WindowFunctionType,
 };
 pub use crate::schema::{
@@ -58,53 +29,21 @@ pub use crate::schema::{
 pub use crate::soft_delete::SoftDelete;
 pub use crate::sync::{RegisterModels, SyncModel};
 
+// `Result` is deliberately left out: it would shadow `std::result::Result` in
+// every module that glob-imports the prelude. Spell it `tideorm::Result`.
+pub use crate::error::Error;
+
 // Migrations
 pub use crate::migration::{
-    ColumnType,
-    CompositePrimaryKey,
-    DefaultValue,
-    Migration,
-    MigrationInfo,
-    MigrationResult,
-    MigrationStatus,
-    Migrator,
-    Schema,
-    // Multi-column constraint types
-    UniqueConstraint,
-    async_trait,
+    ColumnType, DefaultValue, Migration, MigrationInfo, MigrationResult, MigrationStatus, Migrator,
+    Schema, async_trait,
 };
 
-// Relations
+// Relations. `relations::EagerLoadModel` is left out on purpose: it is
+// `#[doc(hidden)]` machinery that generated code names by its full path.
 pub use crate::relations::{
-    // Basic relations
-    BelongsTo,
-    EagerLoadExt,
-    EagerQueryBuilder,
-    HasMany,
-    // Many-to-many relations
-    HasManyThrough,
-    HasOne,
-    MorphMany,
-    MorphOne,
-    MorphResult,
-    MorphResult3,
-    MorphResult4,
-    // Polymorphic relations
-    MorphTo,
-    // Constraints
-    RelationConstraints,
-    // Extension traits
-    RelationExt,
-    // Metadata
-    RelationInfo,
-    RelationPath,
-    RelationTree,
-    RelationType,
-    // Self-referencing relations
-    SelfRef,
-    SelfRefMany,
-    WithPivot,
-    // Eager loading
+    BelongsTo, EagerLoadExt, EagerQueryBuilder, HasMany, HasManyThrough, HasOne, MorphMany,
+    MorphOne, MorphTo, RelationExt, RelationPath, RelationTree, SelfRef, SelfRefMany,
     WithRelations,
 };
 
@@ -157,8 +96,8 @@ pub use crate::fulltext::{
 
 // Strongly-typed columns
 pub use crate::columns::{
-    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOperator,
-    ColumnOrd, IntoColumnName,
+    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd,
+    IntoColumnName,
 };
 
 // JPA-like entity manager / persistence context
@@ -186,59 +125,8 @@ pub use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 pub use rust_decimal::Decimal;
 pub use uuid::Uuid;
 
-// Type aliases and casting
+// Type aliases and field value types
 pub use crate::types::{
-    BigIntArray,
-    BoolArray,
-    CastType,
-    CastValue,
-    Castable,
-    FloatArray,
-    Hashed,
-    // Array types
-    IntArray,
-    Json,
-    JsonArray,
-    Jsonb,
-    Text,
-    TextArray,
-    // Unix timestamp types
-    UnixTimestamp,
-    UnixTimestampMillis,
+    BigIntArray, BoolArray, FloatArray, Hashed, IntArray, Json, JsonArray, Jsonb, Text, TextArray,
+    UnixTimestamp, UnixTimestampMillis,
 };
-
-#[cfg(test)]
-mod prelude_surface_tests {
-    //! Regression guard for crate-root/prelude drift.
-    //!
-    //! `AggregateFunction` and `JoinClause` were re-exported from the crate
-    //! root only. Naming each type through both paths fails to compile if one
-    //! surface loses an export.
-
-    #[test]
-    fn query_helpers_are_exported_from_both_surfaces() {
-        fn assert_exported<T>() {}
-
-        assert_exported::<crate::AggregateFunction>();
-        assert_exported::<crate::prelude::AggregateFunction>();
-        assert_exported::<crate::JoinClause>();
-        assert_exported::<crate::prelude::JoinClause>();
-        assert_exported::<crate::JoinType>();
-        assert_exported::<crate::prelude::JoinType>();
-        assert_exported::<crate::Order>();
-        assert_exported::<crate::prelude::Order>();
-    }
-
-    /// The raw-SQL `*_with_params` entry points are only callable if their
-    /// parameter type has a name outside the hidden `internal` module.
-    #[test]
-    fn raw_sql_parameters_are_nameable_without_touching_internal() {
-        let params: Vec<crate::DbValue> = vec![
-            crate::prelude::DbValue::BigInt(Some(7)),
-            true.into(),
-            "alice".into(),
-        ];
-
-        assert_eq!(params.len(), 3);
-    }
-}

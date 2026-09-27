@@ -48,29 +48,41 @@ Before contributing, please read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 | Variable | Read by | Effect |
 | --- | --- | --- |
-| `TEST_DATABASE_URL` | PostgreSQL test helper | Checked **first**, before `POSTGRESQL_DATABASE_URL` |
-| `POSTGRESQL_DATABASE_URL` | PostgreSQL test helper, benchmarks | Fallback for tests; the only variable the benches read |
+| `TEST_DATABASE_URL` | PostgreSQL test helper, benchmarks | Checked **first**, before `POSTGRESQL_DATABASE_URL`; setting either **enables** the PostgreSQL suites and benches |
+| `POSTGRESQL_DATABASE_URL` | PostgreSQL test helper, benchmarks | Fallback when `TEST_DATABASE_URL` is unset |
+| `RUN_POSTGRES_TESTS` | PostgreSQL test helper, benchmarks | Enables the PostgreSQL suites and benches on their own, against the default URL |
 | `MYSQL_DATABASE_URL` | MySQL test helper | Sets the URL **and enables** the MySQL suites |
 | `RUN_MYSQL_TESTS` | MySQL test helper | Enables the MySQL suites on their own |
-| `SQLITE_DATABASE_URL` | SQLite test helper | SQLite URL |
+| `SKIP_MYSQL_TESTS` | MySQL test helper | Skips the MySQL suites even when one of the two above is set |
+| `MARIADB_DATABASE_URL` | MariaDB test helper | Sets the URL **and enables** the MariaDB suites |
+| `RUN_MARIADB_TESTS` | MariaDB test helper | Enables the MariaDB suites on their own |
+| `SKIP_MARIADB_TESTS` | MariaDB test helper | Skips the MariaDB suites even when one of the two above is set |
+| `SQLITE_DATABASE_URL` | SQLite test helper | URL for `sqlite_entity_manager_tests`; the other SQLite suites run in memory |
 | `SKIP_SQLITE_TESTS` | SQLite test helper | Skips the SQLite integration and entity-manager suites |
-| `SKIP_POSTGRES_TESTS` | `postgres_entity_manager_tests` only | Does **not** gate `postgres_integration_tests` or `postgres_advanced_tests` |
+| `SKIP_POSTGRES_TESTS` | PostgreSQL test helper, benchmarks | Skips the PostgreSQL suites and benches even when one of the three above is set |
 
 Default fallbacks when nothing is set:
 
 - PostgreSQL: `postgres://postgres:postgres@localhost:5432/test_tide_orm`
-- MySQL: `mysql://root:@localhost:3306/test_tide_orm`
+- MySQL and MariaDB: `mysql://root:@localhost:3306/test_tide_orm`
 - SQLite: `sqlite://./test_tide_orm.db?mode=rwc`
 
 Gate semantics differ per backend, so read them literally:
 
 - **SQLite** is opt-**out** via `SKIP_SQLITE_TESTS`.
 - **MySQL** is opt-**in**: the suites run only when `RUN_MYSQL_TESTS` or `MYSQL_DATABASE_URL` is set.
-  There is **no `SKIP_MYSQL_TESTS`** — no code reads it. Because setting `MYSQL_DATABASE_URL` in your
-  `.env` is itself the opt-in, the way to turn MySQL tests off is to unset it.
-- **PostgreSQL** is always on. `postgres_integration_tests` and `postgres_advanced_tests` connect
-  unconditionally and hard-fail without a server; only `postgres_entity_manager_tests` honours
-  `SKIP_POSTGRES_TESTS`.
+  `SKIP_MYSQL_TESTS` overrides both, so a `MYSQL_DATABASE_URL` kept in `.env` can be muted per run.
+- **MariaDB** is opt-**in** the same way, through `RUN_MARIADB_TESTS`, `MARIADB_DATABASE_URL` and
+  `SKIP_MARIADB_TESTS`. `mariadb_integration_tests` and `mariadb_entity_manager_tests` run the same
+  scenarios as the MySQL suites, and check that `connect()` recognizes the server behind a
+  `mysql://` URL.
+- **PostgreSQL** is opt-**in** too: `postgres_integration_tests`, `postgres_advanced_tests`,
+  `postgres_entity_manager_tests`, the PostgreSQL scenario test in `or_clause_tests`, the entity-manager
+  relation unit tests under `--features entity-manager` and the PostgreSQL benches run only when
+  `TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS` is set.
+  `SKIP_POSTGRES_TESTS` overrides all three.
+
+A backend that is enabled but unreachable fails its suites; only the flags above skip them.
 
 **Run the backend suites one at a time.** They create and drop fixed-name tables in a shared
 database and take no isolation between runs, so two of them against the same server will interfere
@@ -127,6 +139,7 @@ cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --n
 cargo test --test postgres_integration_tests
 cargo test --test postgres_advanced_tests
 cargo test --test mysql_integration_tests --features mysql
+cargo test --test mariadb_integration_tests --features mysql
 ```
 
 Proc-macro and compile-fail coverage:
@@ -163,8 +176,9 @@ so they are skipped rather than panicking under the default feature set):
 cargo bench --bench cache_benchmarks --features sqlite
 ```
 
-Benches that need a **live PostgreSQL server**. They call `.expect()` on connect and abort the run if
-one is not reachable, so start a server first:
+Benches that need a **live PostgreSQL server**. They are opt-in like the PostgreSQL suites: without
+`TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS` they print a note and run
+nothing, and once enabled they abort the run if the server is not reachable:
 
 ```bash
 cargo bench --bench query_benchmarks
@@ -172,7 +186,7 @@ cargo bench --bench crud_benchmarks
 cargo bench --bench or_clause_benchmarks
 ```
 
-The PostgreSQL-backed benches read `POSTGRESQL_DATABASE_URL` only (not `TEST_DATABASE_URL`) and fall back to `postgres://postgres:postgres@localhost:5432/test_tide_orm` when it is unset.
+The PostgreSQL-backed benches use the test helper's lookup: `TEST_DATABASE_URL`, then `POSTGRESQL_DATABASE_URL`, then `postgres://postgres:postgres@localhost:5432/test_tide_orm`.
 
 To type-check every bench without running any of them:
 

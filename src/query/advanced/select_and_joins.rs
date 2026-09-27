@@ -10,7 +10,11 @@ impl<M: Model> QueryBuilder<M> {
     /// three compose: a query that calls `select()` and `select_raw()` renders
     /// the typed columns first, then the raw expressions, then the subqueries.
     /// Only when nothing at all was selected does the projection fall back to
-    /// the model's own `table.*`.
+    /// the model's own columns.
+    ///
+    /// Read a subset of the columns with [`get_json()`](Self::get_json):
+    /// [`get()`](Self::get) refuses a `select()` that leaves model columns out,
+    /// because the models it built would carry defaults in their place.
     #[must_use]
     pub fn select(mut self, columns: Vec<&str>) -> Self {
         self.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
@@ -44,6 +48,48 @@ impl<M: Model> QueryBuilder<M> {
             self.raw_select_expressions
                 .push(crate::query::builder::DISTINCT_SELECT_MARKER.to_string());
         }
+        self
+    }
+
+    /// Lock the rows this query reads until the transaction ends
+    /// (`SELECT ... FOR UPDATE`).
+    ///
+    /// Use it for a read-check-write inside
+    /// [`Database::transaction`](crate::database::Database::transaction): a
+    /// second transaction that locks the same rows waits until the first one
+    /// commits, then reads what it wrote. Without the lock both read the same
+    /// value and the last `update()` wins, silently undoing the other:
+    ///
+    /// ```rust,ignore
+    /// let shipped = Item::transaction(|_tx| Box::pin(async move {
+    ///     let mut item = Item::query()
+    ///         .where_eq("id", id)
+    ///         .lock_for_update()
+    ///         .first_or_fail()
+    ///         .await?;
+    ///     if item.stock < quantity {
+    ///         return Ok(false);
+    ///     }
+    ///     item.stock -= quantity;
+    ///     item.update().await?;
+    ///     Ok(true)
+    /// }))
+    /// .await?;
+    /// ```
+    ///
+    /// Outside a transaction the lock ends with the statement. `count()`,
+    /// `exists()` and the aggregates lock the rows they read too, and a locked
+    /// query never reads from the query cache.
+    ///
+    /// PostgreSQL rejects the lock on a query with `DISTINCT`, `GROUP BY` or a
+    /// `UNION`. SQLite has no row locks and renders nothing: the first write of
+    /// a transaction locks the whole database, so the second of two competing
+    /// read-check-write transactions fails with a retryable
+    /// [`LockNotAvailable`](crate::error::DbFailureKind::LockNotAvailable) error
+    /// instead of racing.
+    #[must_use]
+    pub fn lock_for_update(mut self) -> Self {
+        self.lock_for_update = true;
         self
     }
 
@@ -97,41 +143,30 @@ impl<M: Model> QueryBuilder<M> {
         remote_fk: &str,
         linked_columns: Vec<&str>,
     ) -> Self {
-        let table_name = M::table_name();
-
-        let mut all_columns: Vec<String> = M::column_names()
-            .iter()
-            .map(|c| format!("{}.{}", table_name, c))
-            .collect();
-
-        for col in linked_columns {
-            all_columns.push(format!("{}.{}", linked_table, col));
-        }
-
-        let mut query = self.join(
-            JoinType::Left,
+        self.select_with_linked(
+            M::column_names().to_vec(),
             linked_table,
-            None,
-            &format!("{}.{}", table_name, local_pk),
-            &format!("{}.{}", linked_table, remote_fk),
-        );
-        query.select_columns = Some(all_columns);
-        query
+            local_pk,
+            remote_fk,
+            linked_columns,
+        )
     }
-
-    // =========================================================================
-    // JOIN OPERATIONS
-    // =========================================================================
 
     /// Add an INNER JOIN clause
     ///
-    /// Returns only rows with matches in both tables.
+    /// Returns only rows with matches in both tables. Name both columns as
+    /// `table.column` (or `alias.column`), such as
+    /// `inner_join("posts", "users.id", "posts.user_id")`: a bare column name
+    /// invalidates the query, and the error surfaces when it runs.
     #[must_use]
     pub fn inner_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Inner, table, None, left_column, right_column)
     }
 
     /// Add an INNER JOIN clause with an alias
+    ///
+    /// The columns are `alias.column` or `table.column`, as for
+    /// [`inner_join`](Self::inner_join).
     #[must_use]
     pub fn inner_join_as(
         self,
@@ -152,12 +187,16 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a LEFT JOIN clause
     ///
     /// Returns all rows from the left table, and matched rows from the right.
+    /// The columns are `table.column`, as for [`inner_join`](Self::inner_join).
     #[must_use]
     pub fn left_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Left, table, None, left_column, right_column)
     }
 
     /// Add a LEFT JOIN clause with an alias
+    ///
+    /// The alias is what lets a table join itself. The columns are
+    /// `alias.column` or `table.column`, as for [`inner_join`](Self::inner_join).
     #[must_use]
     pub fn left_join_as(
         self,
@@ -178,12 +217,19 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a RIGHT JOIN clause
     ///
     /// Returns all rows from the right table, and matched rows from the left.
+    /// A right-table row with no match has `NULL` in every model column, which
+    /// `get()` cannot turn into a model, so read the query with
+    /// [`get_json()`](Self::get_json) and `select()` the columns you need. The
+    /// columns are `table.column`, as for [`inner_join`](Self::inner_join).
     #[must_use]
     pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Right, table, None, left_column, right_column)
     }
 
     /// Add a RIGHT JOIN clause with an alias
+    ///
+    /// The columns are `alias.column` or `table.column`, as for
+    /// [`inner_join`](Self::inner_join).
     #[must_use]
     pub fn right_join_as(
         self,
@@ -201,7 +247,8 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
-    /// Generic join method (internal)
+    /// Register a join, invalidating the query instead when any part of it is
+    /// not a plain identifier.
     fn join(
         mut self,
         join_type: JoinType,
@@ -227,136 +274,5 @@ impl<M: Model> QueryBuilder<M> {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::model::Model;
-
-    #[tideorm::model(table = "linked_select_users")]
-    struct LinkedSelectUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        profile_id: i64,
-    }
-
-    const UNSAFE_TABLE: &str = "profiles\" ON 1 = 1; DROP TABLE profiles; --";
-
-    #[test]
-    fn test_select_with_linked_validates_its_join_table() {
-        let query = LinkedSelectUser::query().select_with_linked(
-            vec!["id"],
-            UNSAFE_TABLE,
-            "profile_id",
-            "id",
-            vec!["bio"],
-        );
-
-        let err = query
-            .ensure_query_is_valid()
-            .expect_err("an unsafe linked table must invalidate the query");
-        assert!(err.to_string().contains("unsafe JOIN table"), "{err}");
-        assert!(
-            !query.known_qualifiers().iter().any(|q| q.contains("DROP")),
-            "a rejected join must not whitelist its qualifier"
-        );
-    }
-
-    #[test]
-    fn test_select_also_linked_validates_its_join_table() {
-        let query = LinkedSelectUser::query().select_also_linked(
-            UNSAFE_TABLE,
-            "id",
-            "user_id",
-            vec!["bio"],
-        );
-
-        let err = query
-            .ensure_query_is_valid()
-            .expect_err("an unsafe linked table must invalidate the query");
-        assert!(err.to_string().contains("unsafe JOIN table"), "{err}");
-        assert!(
-            !query.known_qualifiers().iter().any(|q| q.contains("DROP")),
-            "a rejected join must not whitelist its qualifier"
-        );
-    }
-
-    #[test]
-    fn test_distinct_is_idempotent() {
-        let sql = LinkedSelectUser::query()
-            .distinct()
-            .distinct()
-            .build_select_sql_for_db(crate::config::DatabaseType::Postgres);
-
-        assert_eq!(
-            sql,
-            "SELECT DISTINCT \"linked_select_users\".* FROM \"linked_select_users\""
-        );
-    }
-
-    #[test]
-    fn test_distinct_rejects_order_by_outside_the_projection() {
-        let err = LinkedSelectUser::query()
-            .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-            .distinct()
-            .order_desc("profiles.created_at")
-            .ensure_query_is_valid()
-            .expect_err("a SELECT DISTINCT cannot order by a column it does not select");
-
-        assert!(
-            err.to_string().contains("not part of the distinct()"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_distinct_allows_order_by_a_projected_column() {
-        let query = LinkedSelectUser::query()
-            .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-            .distinct()
-            .order_desc("linked_select_users.id");
-
-        assert!(query.ensure_query_is_valid().is_ok());
-    }
-
-    #[test]
-    fn test_distinct_narrows_the_allowed_order_by_to_an_explicit_select() {
-        let err = LinkedSelectUser::query()
-            .select(vec!["id"])
-            .distinct()
-            .order_desc("profile_id")
-            .ensure_query_is_valid()
-            .expect_err("an explicit select() narrows what a SELECT DISTINCT can order by");
-
-        assert!(
-            err.to_string().contains("not part of the distinct()"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn test_distinct_leaves_raw_order_by_and_raw_projections_to_the_caller() {
-        let raw_order = LinkedSelectUser::query()
-            .distinct()
-            .order_by_raw("profile_id", crate::query::Order::Desc);
-        assert!(raw_order.ensure_query_is_valid().is_ok());
-
-        let raw_projection = LinkedSelectUser::query()
-            .inner_join("profiles", "linked_select_users.profile_id", "profiles.id")
-            .select_raw("profiles.bio")
-            .distinct()
-            .order_desc("profiles.bio");
-        assert!(raw_projection.ensure_query_is_valid().is_ok());
-    }
-
-    #[test]
-    fn test_select_with_linked_still_registers_a_valid_join() {
-        let query = LinkedSelectUser::query().select_with_linked(
-            vec!["id"],
-            "profiles",
-            "profile_id",
-            "id",
-            vec!["bio"],
-        );
-
-        assert!(query.ensure_query_is_valid().is_ok());
-        assert!(query.known_qualifiers().contains("profiles"));
-    }
-}
+#[path = "../../../tests/unit/query_select_and_joins_tests.rs"]
+mod tests;

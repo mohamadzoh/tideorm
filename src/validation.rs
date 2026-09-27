@@ -1,18 +1,11 @@
-//! Model Validation System
+//! Model validation.
 //!
-//! This module validates model data before writes.
-//!
-//! Validation can come from field attributes, custom `Validate` logic, or both.
-//! If `save()` or `update()` returns a validation error, inspect the collected
-//! field messages here before looking at database-side constraints.
-//!
-//! Typical flow:
-//! - field attributes catch simple shape problems like missing values, invalid email, or range failures
-//! - `custom_validations()` handles business rules that need model-aware logic
-//! - `validate_all()` is the better entry point when the caller needs every field error instead of the first one
-//!
-//! If validation unexpectedly passes, check whether the value type implements `ValidatableValue`
-//! the way you expect and whether the rule actually runs in `Validator` versus model-level custom logic.
+//! `#[validate(..)]` field attributes compile to [`ValidationRule`]s. The
+//! derived [`Validate::validate`] checks every rule on every field and returns
+//! all failures together in one [`ValidationErrors`], before `create`,
+//! `update` or `save` reaches the database. [`Validator::validate_rule`]
+//! applies a single rule by hand, and [`ValidationBuilder`] assembles the rule
+//! list for one field.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -26,25 +19,30 @@ pub use values::ValidatableValue;
 use values::compiled_validation_regex;
 
 /// Collection of validation errors organized by field name
+///
+/// Fields come out in the order their first error was added, which for a
+/// derived model is the order the struct declares them, so [`first`](Self::first),
+/// [`messages`](Self::messages) and the error `create()` returns are the same
+/// on every run.
 #[derive(Debug, Clone, Default)]
 pub struct ValidationErrors {
     errors: HashMap<String, Vec<String>>,
+    order: Vec<String>,
 }
 
 impl ValidationErrors {
     /// Start an empty validation-error collection.
     pub fn new() -> Self {
-        Self {
-            errors: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Append one error message to a field.
     pub fn add(&mut self, field: impl Into<String>, message: impl Into<String>) {
-        self.errors
-            .entry(field.into())
-            .or_default()
-            .push(message.into());
+        let field = field.into();
+        if !self.errors.contains_key(&field) {
+            self.order.push(field.clone());
+        }
+        self.errors.entry(field).or_default().push(message.into());
     }
 
     /// True when no field errors have been collected.
@@ -77,23 +75,23 @@ impl ValidationErrors {
         &self.errors
     }
 
-    /// Iterate through all field-error pairs.
+    /// Iterate through all field-error pairs, in the order the fields failed.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
-        self.errors.iter()
+        self.order
+            .iter()
+            .filter_map(|field| self.errors.get_key_value(field))
     }
 
     /// Return the first field/message pair, if any.
     pub fn first(&self) -> Option<(&String, &String)> {
-        self.errors
-            .iter()
+        self.iter()
             .next()
             .and_then(|(field, messages)| messages.first().map(|msg| (field, msg)))
     }
 
     /// Flatten all field errors into display strings.
     pub fn messages(&self) -> Vec<String> {
-        self.errors
-            .iter()
+        self.iter()
             .flat_map(|(field, messages)| {
                 messages
                     .iter()
@@ -103,9 +101,9 @@ impl ValidationErrors {
     }
 
     /// Append all errors from another collection.
-    pub fn merge(&mut self, other: ValidationErrors) {
-        for (field, messages) in other.errors {
-            for message in messages {
+    pub fn merge(&mut self, mut other: ValidationErrors) {
+        for field in other.order {
+            for message in other.errors.remove(&field).unwrap_or_default() {
                 self.add(field.clone(), message);
             }
         }
@@ -118,21 +116,11 @@ impl ValidationErrors {
 
     /// Flatten all errors into `(field, message)` pairs.
     pub fn errors(&self) -> Vec<(String, String)> {
-        self.errors
-            .iter()
+        self.iter()
             .flat_map(|(field, messages)| {
                 messages.iter().map(move |msg| (field.clone(), msg.clone()))
             })
             .collect()
-    }
-
-    /// Convert the first collected message into the crate error type.
-    pub fn into_error(self) -> Option<crate::error::Error> {
-        self.first()
-            .map(|(field, message)| crate::error::Error::Validation {
-                field: field.clone(),
-                message: message.clone(),
-            })
     }
 }
 
@@ -196,13 +184,6 @@ pub enum ValidationRule {
     In(Vec<String>),
     /// Must not be in a list of disallowed values
     NotIn(Vec<String>),
-    /// Must match another field (for confirmations)
-    Confirmed(String),
-    /// Custom validation marker with message.
-    ///
-    /// This is not evaluated directly by `Validator::validate_rule`; macro-generated
-    /// model validation defers custom checks to `Validate::custom_validations()`.
-    Custom(String),
 }
 
 impl ValidationRule {
@@ -241,17 +222,10 @@ impl ValidationRule {
             ValidationRule::NotIn(values) => {
                 format!("The {} must not be one of: {}", field, values.join(", "))
             }
-            ValidationRule::Confirmed(other) => {
-                format!("The {} confirmation does not match {}", field, other)
-            }
-            ValidationRule::Custom(msg) => msg.clone(),
         }
     }
 
     /// Validate one value against this rule.
-    ///
-    /// `ValidationRule::Custom` is a no-op here because custom checks run
-    /// through `Validate::custom_validations()`.
     pub fn validate<T: ValidatableValue>(&self, value: &T) -> Result<(), String> {
         match Validator::validate_rule(value, self, "field") {
             Some(error) => Err(error),
@@ -312,29 +286,32 @@ impl Validator {
                 }
             }
             ValidationRule::Min(min) => {
-                if let Some(n) = value.as_f64_value()
-                    && n < *min
-                {
+                if below_bound(value, *min) == Some(true) {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Max(max) => {
-                if let Some(n) = value.as_f64_value()
-                    && n > *max
-                {
+                if above_bound(value, *max) == Some(true) {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Range(min, max) => {
-                if let Some(n) = value.as_f64_value()
-                    && (n < *min || n > *max)
+                if below_bound(value, *min) == Some(true) || above_bound(value, *max) == Some(true)
                 {
                     return Some(rule.message(field));
                 }
             }
             ValidationRule::Regex(pattern) => {
+                // A pattern that does not compile fails for every value: letting
+                // it pass would accept everything the rule exists to reject.
+                let Some(re) = compiled_validation_regex(pattern) else {
+                    return Some(format!(
+                        "The {} validation pattern `{}` is not a valid regular expression",
+                        field, pattern
+                    ));
+                };
+
                 if let Some(s) = value.as_str_value()
-                    && let Some(re) = compiled_validation_regex(pattern)
                     && !re.is_match(s)
                 {
                     return Some(rule.message(field));
@@ -355,8 +332,9 @@ impl Validator {
                 }
             }
             ValidationRule::Numeric => {
+                // `parse` also reads "NaN", "inf" and an overflowing "1e999".
                 if let Some(s) = value.as_str_value()
-                    && s.parse::<f64>().is_err()
+                    && !s.parse::<f64>().is_ok_and(f64::is_finite)
                 {
                     return Some(rule.message(field));
                 }
@@ -382,8 +360,6 @@ impl Validator {
                     return Some(rule.message(field));
                 }
             }
-            ValidationRule::Confirmed(_) => {}
-            ValidationRule::Custom(_) => {}
         }
         None
     }
@@ -391,17 +367,12 @@ impl Validator {
     /// Minimal email-shape check used by the built-in email rule.
     pub fn is_valid_email(s: &str) -> bool {
         static EMAIL_REGEX: OnceLock<regex::Regex> = OnceLock::new();
-        let email_regex = EMAIL_REGEX.get_or_init(|| {
-            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap_or_else(
-                |_| {
-                    // A hardcoded pattern should never fail to compile.
-                    // If it does, conservatively reject all emails with a pattern
-                    // that cannot match any input (`\b\B` is never satisfiable).
-                    regex::Regex::new(r"\b\B").unwrap()
-                },
-            )
-        });
-        email_regex.is_match(s)
+        EMAIL_REGEX
+            .get_or_init(|| {
+                regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+                    .expect("the built-in email pattern is a valid regex")
+            })
+            .is_match(s)
     }
 
     /// URL check used by the built-in URL rule.
@@ -415,27 +386,11 @@ impl Validator {
 
 /// Trait for models that can be validated
 ///
-/// This trait is automatically implemented by TideORM's model macros
-/// when validation attributes are present. You can also implement it manually
-/// for custom validation logic.
+/// The model derive implements this for every model from its `#[validate(..)]`
+/// field attributes. Implement it by hand for types that are not TideORM models.
 pub trait Validate {
-    /// Return the static field-to-rules mapping for this model.
-    fn validation_rules() -> Vec<(&'static str, Vec<ValidationRule>)> {
-        vec![]
-    }
-
-    /// Validate and stop at the first reported error.
+    /// Check every rule and return all failures together.
     fn validate(&self) -> Result<(), ValidationErrors>;
-
-    /// Validate and collect all reported field errors.
-    fn validate_all(&self) -> Result<(), ValidationErrors> {
-        self.validate()
-    }
-
-    /// Hook for model-specific business-rule validation.
-    fn custom_validations(&self) -> Result<(), ValidationErrors> {
-        Ok(())
-    }
 
     /// Validate and return `self` for builder-style call chains.
     fn validated(self) -> Result<Self, ValidationErrors>
@@ -445,6 +400,41 @@ pub trait Validate {
         self.validate()?;
         Ok(self)
     }
+}
+
+/// Whether a numeric `value` lies below `bound`; `None` for a value that is
+/// not a number. An integer is compared exactly: past 2^53 it has no exact
+/// `f64`, and rounding it would let a value one past the bound through. NaN
+/// lies outside every bound.
+fn below_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bool> {
+    if let Some(integer) = value.as_i128_value() {
+        return Some(if bound > i128::MAX as f64 {
+            true
+        } else if bound <= i128::MIN as f64 {
+            false
+        } else {
+            integer < bound.ceil() as i128
+        });
+    }
+    value
+        .as_f64_value()
+        .map(|n| n.is_nan() || n < value.numeric_bound(bound))
+}
+
+/// Whether a numeric `value` lies above `bound`, as [`below_bound`] compares.
+fn above_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bool> {
+    if let Some(integer) = value.as_i128_value() {
+        return Some(if bound >= i128::MAX as f64 {
+            false
+        } else if bound < i128::MIN as f64 {
+            true
+        } else {
+            integer > bound.floor() as i128
+        });
+    }
+    value
+        .as_f64_value()
+        .map(|n| n.is_nan() || n > value.numeric_bound(bound))
 }
 
 #[cfg(test)]

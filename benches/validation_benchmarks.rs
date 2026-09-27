@@ -7,10 +7,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tideorm::validation::{ValidationBuilder, ValidationErrors, ValidationRule, Validator};
 
-// =============================================================================
-// SINGLE RULE BENCHMARKS
-// =============================================================================
-
 fn bench_validation_rules(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_rules");
 
@@ -140,10 +136,6 @@ fn bench_validation_rules(c: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// VALIDATOR BENCHMARKS
-// =============================================================================
-
 fn bench_validator(c: &mut Criterion) {
     let mut group = c.benchmark_group("validator");
 
@@ -221,10 +213,6 @@ fn bench_validator(c: &mut Criterion) {
     group.finish();
 }
 
-// =============================================================================
-// VALIDATION BUILDER BENCHMARKS
-// =============================================================================
-
 fn bench_validation_builder(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_builder");
 
@@ -255,10 +243,6 @@ fn bench_validation_builder(c: &mut Criterion) {
 
     group.finish();
 }
-
-// =============================================================================
-// VALIDATION ERRORS BENCHMARKS
-// =============================================================================
 
 fn bench_validation_errors(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_errors");
@@ -308,10 +292,6 @@ fn bench_validation_errors(c: &mut Criterion) {
 
     group.finish();
 }
-
-// =============================================================================
-// THROUGHPUT BENCHMARKS
-// =============================================================================
 
 fn bench_validation_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_throughput");

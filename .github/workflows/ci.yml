@@ -94,10 +94,9 @@ jobs:
 
     # `cargo test --lib` is otherwise database-free, but the entity-manager
     # relation tests under `tests/unit/` are `#[path]`-included into it and speak
-    # real PostgreSQL (`BIGSERIAL`, `... CASCADE`). Without a server they do not
-    # skip — they wait out the pool acquisition timeout and fail, 30s apiece.
-    # They only compile under `entity-manager`, which is why this is the one job
-    # that needs a database.
+    # real PostgreSQL (`BIGSERIAL`, `... CASCADE`). They run only when a
+    # PostgreSQL URL is set, and only compile under `entity-manager`, which is
+    # why this job sets one and has a database.
     services:
       postgres:
         image: postgres:16
@@ -130,6 +129,14 @@ jobs:
 
       - name: Test with module features
         run: cargo test --lib --features "$MODULE_FEATURES"
+
+      # Unit tests that need both the SQLite driver and a module feature, and
+      # the public API's feature-gated tests, which no other job builds.
+      - name: Test with module features on SQLite
+        run: cargo test --lib --features "sqlite,$MODULE_FEATURES"
+
+      - name: Test the public API with module features
+        run: cargo test --test public_api_tests --features "$MODULE_FEATURES"
 
       - name: Check async-std runtime
         run: cargo check --no-default-features --features sqlite,runtime-async-std
@@ -192,9 +199,17 @@ jobs:
       - name: Run SQLite integration test
         run: cargo test --package tideorm --test sqlite_ci_smoke_test --no-default-features --features sqlite,runtime-tokio
 
+      # The shared scenarios in tests/support/*_parity.rs, run on SQLite; the
+      # PostgreSQL, MySQL and MariaDB jobs below run the same bodies against a
+      # server.
+      - name: Run SQLite integration and entity-manager suites
+        run: |
+          cargo test --package tideorm --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio
+          cargo test --package tideorm --test sqlite_entity_manager_tests --no-default-features --features sqlite,runtime-tokio,entity-manager
+
   # Integration targets that never touch a database. Targets are named
-  # explicitly rather than using `--tests`, because postgres_integration_tests,
-  # postgres_advanced_tests and mysql_integration_tests all need a live server.
+  # explicitly rather than using `--tests`, because the postgres, mysql and
+  # mariadb integration targets all need a live server.
   tests-no-db:
     runs-on: ubuntu-latest
 
@@ -213,8 +228,7 @@ jobs:
           cargo test --package tideorm \
             --test public_api_tests \
             --test edge_case_tests \
-            --test query_builder_tests \
-            --test seaorm2_features_tests \
+            --test typed_columns_and_join_tests \
             --test tokenization_tests \
             --test tokenization_missing_key_test \
             --test relation_serde_tests
@@ -228,10 +242,28 @@ jobs:
       - name: Run compile-fail tests
         run: cargo test --package tideorm --test relation_compile_fail --test encrypted_fields_feature_compile_fail
 
-  # These targets need a live database to run, but compile rot is still worth
-  # catching, so build them without executing.
-  integration-compile:
+  # The live-database suites: the shared scenarios, PostgreSQL's advanced and
+  # fluent-OR tests, and the entity-manager suite, against a real server. They
+  # are opt-in, and the URL is what turns them on.
+  integration-postgres:
     runs-on: ubuntu-latest
+    env:
+      POSTGRESQL_DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_tide_orm
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_tide_orm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout
@@ -243,11 +275,87 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Compile SQLite integration tests
-        run: cargo test --package tideorm --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio --no-run
+      - name: Run PostgreSQL suites
+        run: |
+          cargo test --package tideorm --test postgres_integration_tests
+          cargo test --package tideorm --test postgres_advanced_tests
+          cargo test --package tideorm --test or_clause_tests
+          cargo test --package tideorm --test postgres_entity_manager_tests --features entity-manager
 
-      - name: Compile MySQL integration tests
-        run: cargo test --package tideorm --test mysql_integration_tests --no-default-features --features mysql,runtime-tokio --no-run
+  integration-mysql:
+    runs-on: ubuntu-latest
+    env:
+      MYSQL_DATABASE_URL: mysql://root@127.0.0.1:3306/test_tide_orm
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: test_tide_orm
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run MySQL suites
+        run: |
+          cargo test --package tideorm --test mysql_integration_tests --no-default-features --features mysql,runtime-tokio
+          cargo test --package tideorm --test mysql_entity_manager_tests --no-default-features --features mysql,runtime-tokio,entity-manager
+
+  # MariaDB speaks MySQL's protocol but differs under it: no `CAST(.. AS JSON)`
+  # or `LAG` default, JSON columns declared as text, `TIMESTAMP` parameters
+  # checked against that type's range. The oldest and newest supported LTS lines.
+  integration-mariadb:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mariadb: ["10.11", "12.3"]
+    env:
+      MARIADB_DATABASE_URL: mysql://root@127.0.0.1:3306/test_tide_orm
+
+    services:
+      mariadb:
+        image: mariadb:${{ matrix.mariadb }}
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+          MARIADB_DATABASE: test_tide_orm
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run MariaDB suites
+        run: |
+          cargo test --package tideorm --test mariadb_integration_tests --no-default-features --features mysql,runtime-tokio
+          cargo test --package tideorm --test mariadb_entity_manager_tests --no-default-features --features mysql,runtime-tokio,entity-manager
 
   docs:
     runs-on: ubuntu-latest

@@ -1,8 +1,7 @@
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use crate::context::BuildContext;
-use crate::parse::relation_generic_types;
 use crate::relation_gen::generate_with_relations_method;
 
 mod builders;

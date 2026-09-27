@@ -23,16 +23,29 @@ The `#[tideorm::model]` macro automatically implements:
 - `Serialize` - for JSON serialization
 - `Deserialize` - for JSON deserialization
 
-User-defined `#[derive(...)]` attributes are preserved. TideORM only adds the generated derives that are still missing unless you opt out with the `skip_*` attributes.
+You can derive any of these yourself, and TideORM then skips its own, as long as your derive is a separate `#[derive(...)]` attribute **below** `#[tideorm::model(...)]` (or below `#[derive(Model)]`). A derive above it, or in the same list as `Model` (`#[derive(Model, Debug)]`), is never shown to TideORM, and the two implementations fail with "conflicting implementations" (E0119): move it below, or opt out of TideORM's with the `skip_*` attributes.
+
+```rust
+#[tideorm::model(table = "users")]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct User {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub display_name: String, // serialized as "displayName"
+}
+```
+
+Your derive then decides the JSON: `to_json()` and hidden attributes follow its renames, but relation fields serialize as `null` until loaded, and a body that leaves out a relation or a managed timestamp only deserializes if the field is `#[serde(default)]`.
 
 ### Reserved Attribute Names
 
-`params` is reserved for presenter payloads.
+`params` is reserved.
 
 When TideORM builds `to_hash_map()` output and the serialized `params` value is
 an object or array, it is omitted from the resulting map. Avoid using `params`
-for presenter-facing structured model attributes if you need that data to appear
-in `to_hash_map()` output.
+for structured model attributes if you need that data to appear in
+`to_hash_map()` output.
 
 ### Custom Implementations (When Needed)
 
@@ -68,11 +81,20 @@ impl Clone for Product { /* custom impl */ }
 
 #### Struct-Level Attributes
 
-Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(...)]` attribute.
+Use these inline in `#[tideorm::model(...)]`, or in a `#[tideorm(...)]` attribute on a `#[derive(Model)]` struct — not both on one struct.
 
 | Attribute | Description |
 |-----------|-------------|
 | `#[tideorm(table = "name")]` | Custom table name |
+| `#[tideorm(schema = "name")]` | The schema the table lives in — a database, on MySQL. Every statement names the table as `schema.table`, and joins accept `"schema.table"` too |
+| `#[tideorm(soft_delete)]` | Soft deletes through a `deleted_at` column (see [Soft Deletes](#soft-deletes)) |
+| `#[tideorm(deleted_at_column = "name")]` | The soft-delete column, when it is not `deleted_at` |
+| `#[tideorm(timestamps)]` | Mark the model as timestamped; `created_at`/`updated_at` fields are managed either way |
+| `#[tideorm(hidden = "field_a,field_b")]` | Leave these fields out of `to_json()`: fields, columns (which hide their field) or attachment relations; any other name is a compile error. Without it the soft-delete field is hidden. Plain `serde` serialization and `query().get_json()` still include them |
+| `#[tideorm(tokenize)]` | Enable [record tokenization](#record-tokenization) |
+| `#[tideorm(translatable = "..", languages = "..", fallback_language = "..")]` | Translated fields; requires the `translations` feature and a manual `HasTranslations` impl (see [Relations](relations.md)) |
+| `#[tideorm(has_one_files = "..", has_many_files = "..")]` | File attachment slots; requires the `attachments` feature and a manual `HasAttachments` impl |
+| `#[tideorm(searchable = "..")]` | Columns for full-text search |
 | `#[tideorm(skip_derives)]` | Skip auto-generated Debug, Clone, Default, Serialize, Deserialize |
 | `#[tideorm(skip_debug)]` | Skip auto-generated Debug impl only |
 | `#[tideorm(skip_clone)]` | Skip auto-generated Clone impl only |
@@ -83,6 +105,7 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | `#[index("col")]` | Create an index |
 | `#[unique_index("col")]` | Create a unique index |
 | `#[index(name = "idx", columns = "a,b")]` | Named composite index |
+| `#[index]` / `#[unique_index]` on a field | Index that field's column |
 
 #### Field-Level Attributes
 
@@ -92,8 +115,10 @@ Use these either inline in `#[tideorm::model(...)]` or in a separate `#[tideorm(
 | `#[tideorm(auto_increment)]` | Auto-increment field for a single-column primary key |
 | `#[tideorm(nullable)]` | Optional/nullable field |
 | `#[tideorm(column = "name")]` | Custom column name |
-| `#[tideorm(default = "value")]` | Default value |
-| `#[tideorm(skip)]` | Skip field in queries |
+| `#[tideorm(default = "value")]` | The column's `DEFAULT` in the tables schema sync creates. Inserts send every field's value, so a model built with `..Default::default()` stores the field's Rust default, not this one |
+| `#[tideorm(skip)]` | Not a column: never read or written, so it holds its `Default` on every model a query or write returns, and deserializing may leave it out |
+
+A `Uuid` primary key still at the nil UUID when the row is inserted gets a random (v4) key, whether through `save()`, `create()`, `insert_all()` or an upsert. Set the key yourself, in `before_create` for instance, to use another UUID version.
 
 ---
 
@@ -103,7 +128,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.10.0", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.12.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -132,7 +157,9 @@ Encrypted field behavior:
 - Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
 - Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
-- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`.
+- Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`. A batch `set()` of an encrypted field takes a string or `None`.
+- `pluck`, `value`, `get_json` and `get_as` return an encrypted column decrypted when they read it under its own name.
+- A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
 
 ---
 
@@ -238,7 +265,9 @@ match user.changed_fields()? {
 
 `changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
 
-Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+
+Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row.
 
 ### Delete
 
@@ -257,6 +286,8 @@ User::query()
     .await?;
 ```
 
+On a soft-delete model `delete()`, `destroy()` and `query().delete()` mark the row deleted instead of removing it; `force_delete()` removes it for good.
+
 ---
 
 ## Schema Synchronization (Development Only)
@@ -274,6 +305,8 @@ TideConfig::init()
 
 `models_matching(...)` filters compiled `#[tideorm::model]` types by their source file path, so patterns like `src/models/*`, `src/models/*.model.rs`, and `src/models/**/*.rs` work as long as those modules are still included through normal Rust `mod` declarations.
 
+Sync also creates the indexes a model declares with `#[index]` and `#[unique_index]`. On an existing table it adds the ones that are missing, and a failure there is logged as a warning rather than stopping startup.
+
 Or export schema to a file:
 
 ```rust
@@ -285,6 +318,8 @@ TideConfig::init()
 ```
 
 > ⚠️ **Warning**: Do NOT use `sync(true)` in production! Use proper migrations instead.
+
+`force_sync(true)` goes further: on every connect it drops and recreates the table of each registered model, deleting all of its rows. It is for throwaway development and test databases only.
 
 ---
 
@@ -334,12 +369,20 @@ let trashed_posts = Post::query()
     .await?;
 ```
 
+The scope applies everywhere: `find(id)`, `exists(id)`, every query terminal, `update_all()`, relation loads and full-text search leave trashed rows out. To reach them:
+
+- `Post::query().with_trashed().find(id)` reads a trashed row by key; `reload()` refreshes the record in hand even when it is trashed.
+- `Post::update_all().with_trashed()` updates the trash too; `Post::query().only_trashed().restore()` restores it.
+
+Deleting marks: `delete()`, `destroy(id)`, `query().delete()` and `delete_all()` set `deleted_at` instead of removing the row. `force_delete()` — on a model, or on a query such as `only_trashed().force_delete()`, which empties the trash — removes rows for good. Deleting `only_trashed()` rows with `delete()` is an error, since they are deleted already.
+
 ### Soft Delete Operations
 
 ```rust
 use tideorm::SoftDelete;
 
-// Soft delete (sets deleted_at to now)
+// Soft delete (sets deleted_at to now). This is `delete()`: the delete
+// callbacks run, and a row already deleted keeps its stamp.
 let post = post.soft_delete().await?;
 
 // Restore a soft-deleted record
@@ -378,6 +421,8 @@ let users = User::query()
     .get()
     .await?;
 ```
+
+A model takes one `#[tideorm::scopes]` block, which generates its `UserQueryScopes` trait; put every scope in it. A scope's parameters after the query can be `mut` and can name the model as `Self`.
 
 If you call a model's named scopes from a different module than the `#[tideorm::scopes]` block, bring the generated extension trait into scope first:
 
@@ -450,6 +495,32 @@ db.transaction(|tx| Box::pin(async move {
 If the closure returns `Ok`, the transaction is committed.
 If it returns `Err` or panics, the transaction is rolled back.
 
+### Concurrent Updates
+
+A transaction does not stop two requests from reading the same row at the same time. `update()` writes every column of the model it was given, so in a read-check-write the last writer wins and silently undoes the other: two orders of 3 against a stock of 4 both pass the check, and both ship.
+
+Lock the rows you are about to change with `lock_for_update()` (`SELECT ... FOR UPDATE`). A second transaction that locks the same row waits until the first commits, then reads what it wrote:
+
+```rust
+let shipped = Item::transaction(|_tx| Box::pin(async move {
+    let mut item = Item::query()
+        .where_eq("id", id)
+        .lock_for_update()
+        .first_or_fail()
+        .await?;
+    if item.stock < quantity {
+        return Ok(false);
+    }
+    item.stock -= quantity;
+    item.update().await?;
+    Ok(true)
+})).await?;
+```
+
+For a plain counter, a single conditional statement needs no lock: `Item::update_all().decrement("stock", quantity).where_eq("id", id).where_gte("stock", quantity).execute()` returns `0` when the stock ran out.
+
+SQLite has no row locks, so `lock_for_update()` adds nothing there: the first write of a transaction locks the whole database, and the second of two competing transactions fails with a retryable `LockNotAvailable` error instead.
+
 ---
 
 ## Auto-Timestamps
@@ -473,13 +544,17 @@ let post = Post {
     content: "World".into(),
     ..Default::default()
 };
-let post = post.save().await?;
+let mut post = post.save().await?;
 // created_at and updated_at are now set to the current time
 
 post.title = "Updated Title".into();
 let post = post.update().await?;
 // updated_at is refreshed, created_at remains unchanged
 ```
+
+A field named — or mapped with `column = ".."` to — `created_at` or `updated_at` is managed when it holds a `DateTime<Utc>` or a `NaiveDateTime` (set to the current UTC time, matching `timestamps_naive()` columns), optional or not. The value you set on such a field is replaced; a field of any other type keeps it.
+
+Every write keeps the creation time: `update()` never writes `created_at`, and an upsert that finds the row already there refreshes `updated_at` but leaves `created_at` alone unless you name it in `update_columns`. A request body can leave both fields out, so a model deserialized from `{"email": ".."}` saves with fresh timestamps, and a body that sends `created_at` cannot rewrite it. `update_all()` writes only what it is told to, so set `updated_at` there yourself if you need it.
 
 ---
 
@@ -514,7 +589,7 @@ impl Callbacks for User {
     fn before_delete(&self) -> tideorm::Result<()> {
         // Prevent deletion of important accounts
         if self.email == "admin@example.com" {
-            return Err(tideorm::Error::validation("Cannot delete admin account"));
+            return Err(tideorm::Error::validation("email", "Cannot delete admin account"));
         }
         Ok(())
     }
@@ -536,6 +611,8 @@ impl Callbacks for User {
 | `before_delete` | Before deleting record |
 | `after_delete` | After deleting record |
 
+An `Err` from a `before_*` hook stops the operation before anything is written. An `after_*` hook runs once the statement has succeeded: its `Err` is returned from `save()`, `update()` or `delete()`, but the row is already written. Inside `Database::transaction`, propagating that error with `?` rolls the write back with the rest of the transaction; outside one, it stays. Callbacks run for single-model writes only — `insert_all()`, `update_all()`, upserts and `query().delete()` skip them.
+
 ---
 
 ## Batch Operations
@@ -550,6 +627,7 @@ let users = vec![
     User { name: "Bob".into(), email: "bob@example.com".into(), ..Default::default() },
 ];
 let inserted = User::insert_all(users).await?;
+// Every model is validated before any is written; callbacks do not run.
 
 // Bulk update with conditions
 let affected = User::update_all()
@@ -558,90 +636,80 @@ let affected = User::update_all()
     .where_eq("last_login_before", "2024-01-01")
     .execute()
     .await?;
+
+// Or update the rows a query already selects, scopes included
+let affected = User::query()
+    .inactive()
+    .update_all()
+    .set("status", "dormant")
+    .execute()
+    .await?;
 ```
+
+Like a query, `update_all()` leaves soft-deleted rows out; `.with_trashed()` reaches them. `query().update_all()` keeps the query's own scope, filters and the database `query_with` names. A query that joins, groups, pages or unions cannot become an `UPDATE`, and running one fails.
 
 ---
 
 ## Model Validation
 
-TideORM includes built-in validation rules and validation helpers for model data.
-
-### Built-in Validation Rules
+Declare rules on fields with `#[validate(..)]`. `create()`, `update()`, `save()`, `insert_all()` and upserts check every rule before anything reaches the database and fail with a validation error — for `insert_all()`, naming the failing model's position in the batch. Call `validate()` yourself to collect all failures at once:
 
 ```rust
-use tideorm::validation::{ValidationRule, Validator, ValidationBuilder};
+use tideorm::validation::Validate;
 
-// Available validation rules
-ValidationRule::Required           // Field must not be empty
-ValidationRule::Email              // Valid email format
-ValidationRule::Url                // Valid URL format
-ValidationRule::MinLength(n)       // Minimum string length
-ValidationRule::MaxLength(n)       // Maximum string length
-ValidationRule::Min(n)             // Minimum numeric value
-ValidationRule::Max(n)             // Maximum numeric value
-ValidationRule::Range(min, max)    // Numeric range
-ValidationRule::Regex(pattern)     // Custom regex pattern
-ValidationRule::Alpha              // Only alphabetic characters
-ValidationRule::Alphanumeric       // Only alphanumeric characters
-ValidationRule::Numeric            // Only numeric characters
-ValidationRule::Uuid               // Valid UUID format
-ValidationRule::In(values)         // Value must be in list
-ValidationRule::NotIn(values)      // Value must not be in list
-```
+#[tideorm::model(table = "users")]
+pub struct User {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    #[validate(required, email)]
+    pub email: String,
+    #[validate(min_length = 3, max_length = 20, alphanumeric)]
+    pub username: String,
+    #[validate(range(18, 120))]
+    pub age: i32,
+}
 
-### Using the Validator
+let user = User {
+    email: "not-an-email".into(),
+    username: "x".into(),
+    age: 12,
+    ..Default::default()
+};
 
-```rust
-use tideorm::validation::{Validator, ValidationRule};
-use std::collections::HashMap;
-
-// Create a validator with rules
-let validator = Validator::new()
-    .field("email", vec![ValidationRule::Required, ValidationRule::Email])
-    .field("username", vec![
-        ValidationRule::Required,
-        ValidationRule::MinLength(3),
-        ValidationRule::MaxLength(20),
-        ValidationRule::Alphanumeric,
-    ])
-    .field("age", vec![ValidationRule::Range(18.0, 120.0)]);
-
-// Validate data
-let mut data = HashMap::new();
-data.insert("email".to_string(), "user@example.com".to_string());
-data.insert("username".to_string(), "johndoe123".to_string());
-data.insert("age".to_string(), "25".to_string());
-
-match validator.validate_map(&data) {
-    Ok(_) => println!("Validation passed!"),
-    Err(errors) => {
-        for (field, message) in errors.errors() {
-            println!("{}: {}", field, message);
-        }
+if let Err(errors) = user.validate() {
+    for (field, message) in errors.errors() {
+        println!("{}: {}", field, message);
     }
 }
 ```
 
-### ValidationBuilder with Custom Rules
+Supported rules: `required`, `email`, `url`, `alpha`, `alphanumeric`, `numeric`, `uuid`, `min_length = n`, `max_length = n`, `length = n`, `min = n`, `max = n`, `range(min, max)` (or `range(min..=max)`, or `range = "min..max"`, all including `max`), and `regex = "pattern"`. The string rules apply to `String` and `Text` fields, `min`, `max` and `range` to numbers, `Decimal` and numeric strings, and `required` to an `Option` of any common type (a `Uuid`, a date, a `bool`, JSON, a `Vec`). Lengths count characters, not bytes. `min`, `max` and `range` reject `NaN`, compare an `f32` at its own precision (so `min = 0.7` takes `0.7_f32`), and take finite bounds only; `numeric` refuses `NaN`, `inf` and a value past `f64`. Errors come out in the order the struct declares its fields. A `regex` pattern that does not compile fails validation for every value, with an error naming the pattern.
+
+Rules on a `#[tideorm(skip)]` field run too, for a value that is checked but never stored, such as a password confirmation. A skip field holds its `Default` on every model a query returns, so make it an `Option`: `None` passes every rule except `required`. `#[validate]` on a relation field is a compile error; the rules belong on the related model's fields.
+
+### Applying Rules by Hand
+
+`Validator::validate_rule` checks one value against one `ValidationRule` and returns the failure message, and `ValidationBuilder::new(field)` collects the rules for one field. `ValidationRule` also has `In` and `NotIn` for allow/deny lists:
 
 ```rust
-use tideorm::validation::ValidationBuilder;
+use tideorm::validation::{ValidationBuilder, ValidationRule, Validator};
 
-let validator = ValidationBuilder::new()
-    .add("email", ValidationRule::Required)
-    .add("email", ValidationRule::Email)
-    .add("username", ValidationRule::Required)
-    .add("username", ValidationRule::MinLength(3))
-    // Add custom validation logic
-    .custom("username", |value| {
-        let reserved = ["admin", "root", "system"];
-        if reserved.contains(&value.to_lowercase().as_str()) {
-            Err(format!("Username '{}' is reserved", value))
-        } else {
-            Ok(())
-        }
-    })
+let email = "user@example.com".to_string();
+assert!(Validator::validate_rule(&email, &ValidationRule::Email, "email").is_none());
+
+let (field, rules) = ValidationBuilder::new("username")
+    .required()
+    .min_length(3)
+    .max_length(20)
+    .alphanumeric()
     .build();
+
+let username = "ab".to_string();
+for rule in &rules {
+    if let Some(message) = Validator::validate_rule(&username, rule, &field) {
+        println!("{}", message);
+    }
+}
 ```
 
 ### Handling Validation Errors
@@ -754,13 +822,22 @@ assert!(User::detokenize(&product_token).is_err());  // Error!
 
 ### Using Tokens in APIs
 
-Tokens are URL-safe and perfect for REST APIs:
+Tokens are URL-safe and perfect for REST APIs. The model itself still carries its primary key, so returning it as it is (`Json(user)`, or `to_json()` without hiding the key) puts the raw id back into the response. Hide the key and send the token in its place:
 
 ```rust
+#[tideorm::model(table = "users", tokenize, hidden = "id")]
+pub struct User {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+}
+
 // In your API handler
-async fn get_user(token: String) -> Result<Json<User>> {
+async fn get_user(token: String) -> tideorm::Result<Json<serde_json::Value>> {
     let user = User::from_token(&token).await?;
-    Ok(Json(user))
+    let mut body = user.to_json(None);          // `hidden` drops the raw id
+    body["token"] = serde_json::json!(user.tokenize()?);
+    Ok(Json(body))
 }
 
 // Example URLs:
@@ -832,7 +909,7 @@ Calling `TokenConfig::set_encryption_key`, `TokenConfig::set_encoder`, or `Token
 
 **Features:**
 - **Authenticated encryption**: Default tokens use XChaCha20-Poly1305
-- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse
+- **Model binding**: Model name is authenticated as associated data, preventing cross-model reuse. The name is the struct's, so two tokenized models of one struct name in different modules accept each other's tokens; name them apart
 - **Tamper detection**: Modified tokens fail authentication and are rejected
 - **Randomized output**: The default encoder uses a fresh nonce, so the same record can produce different valid tokens
 - **URL-safe**: Base64-URL encoding (A-Za-z0-9-_), no escaping needed
@@ -909,7 +986,7 @@ User::query().where_lt(User::columns.age, 65)                    // <
 User::query().where_lte(User::columns.age, 65)                   // <=
 User::query().where_like(User::columns.email, "%@test.com")      // LIKE
 User::query().where_not_like(User::columns.email, "%spam%")      // NOT LIKE
-User::query().where_in(User::columns.role, vec!["admin", "mod"]) // IN
+User::query().where_in(User::columns.role, ["admin", "mod"])     // IN, from any list
 User::query().where_not_in(User::columns.status, vec!["banned"]) // NOT IN
 User::query().where_null(User::columns.deleted_at)               // IS NULL
 User::query().where_not_null(User::columns.email)                // IS NOT NULL
@@ -923,12 +1000,13 @@ User::query()
     .get()
     .await?;
 
-// Aggregations with typed columns:
-let total = Order::query().sum(Order::columns.amount).await?;
-let average = Product::query().avg(Product::columns.price).await?;
-let max_age = User::query().max(User::columns.age).await?;
+// Aggregations with typed columns, read as the type you ask for:
+let total: Decimal = Order::query().sum(Order::columns.amount).await?;
+let average: Option<f64> = Product::query().avg(Product::columns.price).await?;
+let max_age: Option<i32> = User::query().max(User::columns.age).await?;
 
-// OR conditions with typed columns:
+// OR conditions with typed columns. All or_where_* calls are combined into one
+// OR group, ANDed with the rest of the query:
 User::query()
     .or_where_eq(User::columns.role, "admin")
     .or_where_eq(User::columns.role, "moderator")
@@ -966,7 +1044,7 @@ All these methods accept both `"column_name"` (string) and `Model::columns.field
 | Category | Methods |
 |----------|---------|
 | **WHERE** | `where_eq`, `where_not`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_like`, `where_not_like`, `where_in`, `where_not_in`, `where_null`, `where_not_null`, `where_between` |
-| **OR WHERE** | `or_where_eq`, `or_where_not`, `or_where_gt`, `or_where_gte`, `or_where_lt`, `or_where_lte`, `or_where_like`, `or_where_in`, `or_where_not_in`, `or_where_null`, `or_where_not_null`, `or_where_between` |
+| **OR WHERE** | `or_where_eq`, `or_where_not`, `or_where_gt`, `or_where_gte`, `or_where_lt`, `or_where_lte`, `or_where_like`, `or_where_not_like`, `or_where_in`, `or_where_not_in`, `or_where_null`, `or_where_not_null`, `or_where_between` |
 | **ORDER BY** | `order_by`, `order_asc`, `order_desc` |
 | **GROUP BY** | `group_by` |
 | **Aggregations** | `sum`, `avg`, `min`, `max`, `count_distinct` |
@@ -1010,7 +1088,7 @@ let count = reports_rel.count().await?;
 let tree = reports_rel.load_tree(3).await?;  // 3 levels deep
 ```
 
-`SelfRef` and `SelfRefMany` fields are wired automatically when you provide the self-referencing `foreign_key`. `local_key` defaults to `id` and can be overridden explicitly when needed.
+`SelfRef` and `SelfRefMany` fields are wired automatically when you provide the self-referencing `foreign_key`. `local_key` defaults to the primary key, whatever its column is called, and can be overridden explicitly when needed.
 
 `SelfRefMany::load_tree()` respects the configured `local_key` and fetches the
 tree in one query, which avoids one SELECT per node on large hierarchies.
@@ -1027,7 +1105,8 @@ let (user, profile) = user.save_with_one(profile, "user_id").await?;
 // Save parent with multiple related models
 let posts = vec![post1, post2, post3];
 let (user, posts) = user.save_with_many(posts, "user_id").await?;
-// All posts have user_id set to user.id
+// All posts have user_id set to user.id; a new one is inserted and a
+// stored one updated, as `save()` does
 
 // Cascade updates
 let (user, profile) = user.update_with_one(profile).await?;
@@ -1037,30 +1116,31 @@ let (user, posts) = user.update_with_many(posts).await?;
 let deleted_count = user.delete_with_many(posts).await?;
 
 // Builder API for complex nested saves
-let (user, related_json) = NestedSaveBuilder::new(user)
+let (user, saved) = NestedSaveBuilder::new(user)
     .with_one(profile, "user_id")
     .with_many(posts, "user_id")
     .with_many(comments, "author_id")
     .save()
     .await?;
+let profile: Profile = saved[0].clone().into_one()?;
+let posts: Vec<Post> = saved[1].clone().into_many()?;
 ```
 
-`save_with_many` batches related inserts through TideORM's bulk insert path, and `delete_with_many` removes related rows with a single `WHERE IN` delete. `update_with_many` batches existing related rows through an upsert-style write and then reloads them once. If any related model still looks new, `update_with_many` falls back to per-row updates so create-vs-update semantics stay unchanged.
+`save()` returns one `SavedRelation` per `with_one`/`with_many`, in the order they were added, holding the children as they were stored.
+
+Each nested operation runs in one transaction — a savepoint when you are already inside one — so a child that fails also rolls back the parent's write. Related rows are written one at a time through each model's own `create`, `update`, or `delete`, so their callbacks and validation run as usual. The foreign key may be given as the Rust field name or the database column name.
 
 `NestedSaveBuilder` is `Send`, so you can hold it across await points or move it into task executors such as `tokio::spawn` before calling `.save()`.
 
 ### Join Result Consolidation
 
-Transform flat JOIN results into nested structures:
+`JoinResultConsolidator` turns flat pairs — such as rows of a join read into `(Order, LineItem)` tuples — into nested structures:
 
 ```rust
 use tideorm::prelude::JoinResultConsolidator;
 
-// Flat JOIN results: Vec<(Order, LineItem)>
-let flat = Order::query()
-    .find_also_related::<LineItem>()
-    .get()
-    .await?;
+// Flat pairs: Vec<(Order, LineItem)>
+let flat: Vec<(Order, LineItem)> = orders_with_items;
 // [(order1, item1), (order1, item2), (order2, item3)]
 
 // Consolidate into nested: Vec<(Order, Vec<LineItem>)>
@@ -1078,41 +1158,65 @@ let nested3 = JoinResultConsolidator::consolidate_three(flat3, |o| o.id, |i| i.i
 
 ### Linked Partial Select
 
-Select specific columns from related tables with automatic JOINs:
+`select_with_linked` left-joins another table and selects columns from both; `select_also_linked` selects every model column plus the linked ones. Read the rows into a struct of your own with `get_as()`, whose fields are the column names:
 
 ```rust
-// Select specific columns from both tables
-let results = User::query()
-    .select_with_linked::<Profile>(
-        &["id", "name"],           // Local columns
-        &["bio", "avatar_url"],    // Linked columns
-        "user_id"                  // Foreign key for join
-    )
-    .get::<(i64, String, String, Option<String>)>()
+#[derive(serde::Deserialize)]
+struct UserBio {
+    id: i64,
+    name: String,
+    bio: Option<String>,
+}
+
+// users.id = profiles.user_id
+let rows: Vec<UserBio> = User::query()
+    .select_with_linked(vec!["id", "name"], "profiles", "id", "user_id", vec!["bio"])
+    .get_as()
     .await?;
 
-// All local columns + specific linked columns
-let results = User::query()
-    .select_also_linked::<Profile>(
-        &["bio"],                  // Just the linked columns
-        "user_id"
-    )
-    .get::<(User, String)>()
+// Every user column, plus the profile's bio
+let rows: Vec<serde_json::Value> = User::query()
+    .select_also_linked("profiles", "id", "user_id", vec!["bio"])
+    .get_json()
     .await?;
 ```
+
+A linked column that shares a name with a selected one must be aliased: two outputs cannot share a name.
 
 ### Additional Advanced Features
 
 ```rust
-// has_related() - EXISTS subqueries
+// where_has() - the related model's own query: its scope, types and any filter
+let authors = User::query()
+    .where_has::<Post>(Post::columns.user_id, User::columns.id, |posts| {
+        posts.where_eq(Post::columns.published, true)
+    })
+    .get().await?;
+
+// where_doesnt_have() - no related row passes the closure
+let idle = User::query()
+    .where_doesnt_have::<Post>(Post::columns.user_id, User::columns.id, |posts| posts)
+    .get().await?;
+
+// has_related() - EXISTS subqueries over a table, soft-deleted rows included
 let cakes = Cake::query()
     .has_related("fruits", "cake_id", "id", "name", "Mango")
     .get().await?;
 
-// eq_any() / ne_all() - PostgreSQL array optimizations
+// has_no_related() - no related row matches; a cake with no fruits at all passes too
+let cakes = Cake::query()
+    .has_no_related("fruits", "cake_id", "id", "name", "Mango")
+    .get().await?;
+
+// where_exists() with a model query applies that model's soft-delete scope
+let cakes = Cake::query()
+    .where_exists(Fruit::query().where_raw("fruits.cake_id = cakes.id"))
+    .get().await?;
+
+// eq_any() / ne_all() - array membership, rendered as IN / NOT IN on every backend
 let users = User::query()
-    .eq_any("id", vec![1, 2, 3, 4, 5])    // "id" = ANY(ARRAY[...])
-    .ne_all("role", vec!["banned"])        // "role" <> ALL(ARRAY[...])
+    .eq_any("id", vec![1, 2, 3, 4, 5])    // "id" IN (1, 2, 3, 4, 5)
+    .ne_all("role", vec!["banned"])        // "role" NOT IN ('banned')
     .get().await?;
 
 // Unix timestamps

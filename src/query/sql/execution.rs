@@ -1,17 +1,14 @@
 use super::*;
 
-use crate::internal::InternalConnection;
-use parking_lot::Mutex;
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, Weak};
+use std::future::Future;
 
 mod hash_helpers;
 mod mutation_safety;
+mod shaped_reads;
 
-use hash_helpers::{
-    hash_bound_values, hash_having_clause, hash_or_group, hash_where_condition,
-    hash_window_function,
-};
+pub use shaped_reads::Paginated;
+
+use hash_helpers::{hash_bound_values, hash_having_clause, hash_or_group, hash_where_condition};
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
@@ -44,6 +41,19 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// Cache this query's models for `ttl` in the global [`QueryCache`](crate::QueryCache).
+    ///
+    /// The cache starts disabled: until `QueryCache::global().enable()` or
+    /// `QueryCache::init_global(..)` turns it on, nothing is cached, and the
+    /// first such query logs a warning saying so.
+    ///
+    /// A TideORM write drops the cached reads of its table. Inside a
+    /// transaction it drops them again once the transaction commits, since
+    /// other requests read, and may cache, the replaced rows until then, and a
+    /// read that a write overtook is not cached at all. Reads inside a
+    /// transaction, and locked reads, bypass the cache. Writes TideORM does not
+    /// make, from another process or straight through the driver, are only
+    /// seen once the TTL expires.
     #[must_use]
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {
         self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
@@ -54,12 +64,6 @@ impl<M: Model> QueryBuilder<M> {
     pub fn cache_with_key(mut self, key: &str, ttl: std::time::Duration) -> Self {
         self.cache_key = Some(key.to_string());
         self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
-        self
-    }
-
-    #[must_use]
-    pub fn cache_with_options(mut self, options: crate::cache::CacheOptions) -> Self {
-        self.cache_options = Some(options);
         self
     }
 
@@ -75,28 +79,108 @@ impl<M: Model> QueryBuilder<M> {
     /// `ensure_query_is_valid` only checks fragment syntax. A condition whose
     /// operator and value do not pair up renders to nothing at all, so it is
     /// rejected here instead of being silently dropped from the WHERE clause.
-    fn ensure_query_is_executable(&self) -> Result<()> {
+    pub(crate) fn ensure_query_is_executable(&self) -> Result<()> {
         self.ensure_query_is_valid()?;
         self.ensure_conditions_are_representable()
     }
 
-    /// Mix the identity of an explicitly attached connection into the cache key.
+    /// Run `statement` with query logging, attaching this query's error context
+    /// to a failure.
+    async fn logged<T>(
+        &self,
+        sql: &str,
+        statement: impl Future<Output = Result<T>>,
+        row_count: impl FnOnce(&T) -> u64,
+    ) -> Result<T> {
+        let timer = self.start_query_log(sql);
+        let result = crate::logging::logged_by_caller(statement)
+            .await
+            .map_err(|err| err.with_context(self.build_query_error_context(Some(sql))));
+        Self::finish_query_log(timer, &result, row_count);
+        result
+    }
+
+    /// Run a row-returning statement and hand the rows back as JSON objects,
+    /// with `M`'s own columns decoded as `M` reads them.
+    ///
+    /// A column the projection reads from a joined table is decoded by its own
+    /// declared type, even when one of `M`'s columns has the same name.
+    pub(in crate::query) async fn fetch_json(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.fetch_json_with_types(sql, params, &[]).await
+    }
+
+    /// [`fetch_json`](Self::fetch_json), decoding each named output of
+    /// `output_types` as its type: an aggregate of a joined model's column
+    /// comes back as that column does.
+    pub(in crate::query) async fn fetch_json_with_types(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        output_types: &[(String, crate::orm::ColumnType)],
+    ) -> Result<Vec<serde_json::Value>> {
+        let db = self.current_db()?;
+        let outputs = self.projection_outputs();
+        let joined_names: Vec<String> = outputs
+            .iter()
+            .filter(|(_, source)| {
+                source
+                    .as_ref()
+                    .is_some_and(|(table, _)| table != M::table_name())
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let model_type = |name: &str| {
+            if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
+                Some(column_type.clone())
+            } else if joined_names.iter().any(|joined| joined == name) {
+                None
+            } else {
+                crate::internal::column_type_of::<M>(name)
+            }
+        };
+        let rows = db.__raw_json_typed(sql, params, &model_type);
+        let mut rows = self.logged(sql, rows, |rows| rows.len() as u64).await?;
+        crate::model::decrypt_json_rows::<M>(&mut rows, &outputs)?;
+        Ok(rows)
+    }
+
+    /// Run a mutation and drop every cached result it may have made stale.
+    async fn run_mutation(&self, sql: &str, params: Vec<Value>) -> Result<u64> {
+        let db = self.current_db()?;
+        let rows_affected = self
+            .logged(sql, db.__execute_with_params(sql, params), |rows| *rows)
+            .await?;
+        Self::invalidate_model_state(rows_affected);
+        Ok(rows_affected)
+    }
+
+    /// Mix the identity of the connection this query runs on into the cache key.
     ///
     /// Without this, `query_with(&tenant_a).cache()` and `query_with(&tenant_b)`
-    /// hash identically and one tenant's rows get served to the other. What is
-    /// mixed in is the pooled connection's [`connection_identity`], never its
-    /// address: an allocator reuses an address as soon as the connection at it is
-    /// dropped, so tenant A's closed connection and tenant B's freshly opened one
-    /// can hash the same and B would be served A's rows for the rest of the TTL.
+    /// hash identically and one tenant's rows get served to the other, and so
+    /// would a query cached before `Database::set_global()` switched databases.
+    /// What is mixed in is the pooled connection's [`connection_identity`], never
+    /// its address: an allocator reuses an address as soon as the connection at
+    /// it is dropped, so tenant A's closed connection and tenant B's freshly
+    /// opened one can hash the same and B would be served A's rows for the rest
+    /// of the TTL.
     fn hash_database_identity<H: std::hash::Hasher>(&self, hasher: &mut H) {
         use std::hash::Hash;
 
-        let Some(database) = &self.database else {
-            return;
+        let database = match self.current_db() {
+            Ok(database) => database,
+            Err(_) => {
+                "tideorm::no-connection".hash(hasher);
+                return;
+            }
         };
 
         match database.current_inner() {
-            Ok(connection) => connection_identity(&connection).hash(hasher),
+            Ok(connection) => crate::database::connection_identity(&connection).hash(hasher),
             // A transaction handle carries no pooled identity of its own; keep it
             // out of the ambient-connection keyspace rather than sharing it.
             Err(_) => "tideorm::unresolved-connection".hash(hasher),
@@ -114,7 +198,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         matches!(
-            crate::database::Connection::__get_connection(&database),
+            database.__get_connection(),
             Ok(crate::database::ConnectionRef::Transaction(_))
         )
     }
@@ -147,8 +231,22 @@ impl<M: Model> QueryBuilder<M> {
             collect_tables_from_sql(&cte.query_sql, &mut tables);
         }
 
-        for (query_sql, _) in &self.subquery_select_expressions {
-            collect_tables_from_sql(query_sql, &mut tables);
+        for subquery in &self.subquery_select_expressions {
+            collect_tables_from_sql(&subquery.query_sql, &mut tables);
+        }
+
+        // Raw SQL in the projection, HAVING and ORDER BY can read other
+        // tables through subqueries of its own.
+        for expression in &self.raw_select_expressions {
+            collect_tables_from_sql(expression, &mut tables);
+        }
+        for (having, _) in self.having_clauses() {
+            collect_tables_from_sql(having, &mut tables);
+        }
+        for (column, _) in &self.order_by {
+            if let Some(expression) = crate::query::builder::raw_order_by_expression(column) {
+                collect_tables_from_sql(expression, &mut tables);
+            }
         }
 
         for condition in &self.conditions {
@@ -167,6 +265,10 @@ impl<M: Model> QueryBuilder<M> {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
+        // Two models can read one table (a full model and a narrower one), and
+        // two schemas can hold tables of one name.
+        std::any::type_name::<M>().hash(&mut hasher);
+        M::schema_name().hash(&mut hasher);
         M::table_name().hash(&mut hasher);
         self.hash_database_identity(&mut hasher);
 
@@ -188,53 +290,34 @@ impl<M: Model> QueryBuilder<M> {
             hash_or_group(group, &mut hasher);
         }
 
-        for (column, direction) in &self.order_by {
-            column.hash(&mut hasher);
-            direction.as_str().hash(&mut hasher);
-        }
-
+        self.order_by.hash(&mut hasher);
         self.limit_value.hash(&mut hasher);
         self.offset_value.hash(&mut hasher);
         self.include_trashed.hash(&mut hasher);
         self.only_trashed.hash(&mut hasher);
         self.select_columns.hash(&mut hasher);
+        self.raw_select_expressions.hash(&mut hasher);
 
-        for raw_select in &self.raw_select_expressions {
-            raw_select.hash(&mut hasher);
-        }
-        for (query_sql, alias) in &self.subquery_select_expressions {
-            query_sql.hash(&mut hasher);
-            alias.hash(&mut hasher);
-        }
-
-        for join in &self.joins {
-            join.join_type.as_sql().hash(&mut hasher);
-            join.table.hash(&mut hasher);
-            join.alias.hash(&mut hasher);
-            join.left_column.hash(&mut hasher);
-            join.right_column.hash(&mut hasher);
+        // `select_subquery()`, `union()` and `with_query()` render their operand
+        // as *parameterized* SQL, so two operands differing only in a bound value
+        // are byte-identical strings: the values have to be hashed alongside the
+        // text or the two queries share one cache entry.
+        for subquery in &self.subquery_select_expressions {
+            subquery.query_sql.hash(&mut hasher);
+            subquery.alias.hash(&mut hasher);
+            hash_bound_values(&subquery.params, &mut hasher);
         }
 
-        for column in &self.group_by {
-            column.hash(&mut hasher);
-        }
+        self.joins.hash(&mut hasher);
+        self.group_by.hash(&mut hasher);
 
-        for (index, having) in self.having_conditions.iter().enumerate() {
-            let bindings = self
-                .having_bindings
-                .get(index)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
+        for (having, bindings) in self.having_clauses() {
             hash_having_clause(having, bindings, &mut hasher);
         }
 
-        // `union()` and `with_query()` render their operand as *parameterized*
-        // SQL, so two operands differing only in a bound value are byte-identical
-        // strings: the values have to be hashed alongside the text or the two
-        // queries share one cache entry.
         for union in &self.unions {
             union.query_sql.hash(&mut hasher);
-            union.union_type.as_sql().hash(&mut hasher);
+            union.union_type.hash(&mut hasher);
             hash_bound_values(&union.params, &mut hasher);
         }
 
@@ -246,9 +329,7 @@ impl<M: Model> QueryBuilder<M> {
             hash_bound_values(&cte.params, &mut hasher);
         }
 
-        for window_function in &self.window_functions {
-            hash_window_function(window_function, &mut hasher);
-        }
+        self.window_functions.hash(&mut hasher);
 
         let hash = hasher.finish();
         crate::cache::QueryCache::global().generate_key(M::table_name(), hash)
@@ -256,35 +337,45 @@ impl<M: Model> QueryBuilder<M> {
 
     pub async fn get(self) -> Result<Vec<M>> {
         self.ensure_query_is_executable()?;
+        self.ensure_projection_covers_model()?;
 
         // A read performed inside a transaction never touches the process-global
         // cache: the payload would outlive a rollback for the rest of its TTL, and
         // a hit would hide rows the transaction itself has already written.
-        let cache_key = if self.cache_options.is_some() && !self.runs_in_transaction() {
+        // A model whose own serde skips or converts a stored field is not
+        // cached: the copy read back would lack those values.
+        let cache_fill = if self.cache_options.is_some()
+            && M::__serde_round_trips()
+            && !self.lock_for_update
+            && !self.runs_in_transaction()
+        {
+            let cache = crate::cache::QueryCache::global();
+            cache.warn_once_if_disabled();
             let key = self.generate_cache_key();
-            if let Some(cached) = crate::cache::QueryCache::global().get::<Vec<M>>(&key) {
+            if let Some(cached) = cache.get::<Vec<M>>(&key) {
+                let cached: Vec<M> = cached.into_iter().map(M::__rebuild_relations).collect();
                 #[cfg(feature = "dirty-tracking")]
-                let _ = crate::model::__remember_dirty_snapshots(&cached);
+                crate::model::__remember_dirty_snapshots(&cached);
                 return Ok(cached);
             }
-            Some(key)
+            // Taken before the read: a write that lands while it runs may
+            // replace the rows it returns.
+            Some((key, cache.fill_point()))
         } else {
             None
         };
 
         let (sql, params) = self.build_select_sql_with_params();
         let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let results = db
-            .__raw_with_params::<M>(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &results, |rows| rows.len() as u64);
-        let results = results?;
+        let results = self
+            .logged(&sql, db.__raw_with_params::<M>(&sql, params), |rows| {
+                rows.len() as u64
+            })
+            .await?;
 
-        if let (Some(key), Some(options)) = (cache_key, &self.cache_options) {
-            let _ = crate::cache::QueryCache::global().set_tagged(
+        if let (Some((key, fill_point)), Some(options)) = (cache_fill, &self.cache_options) {
+            let _ = crate::cache::QueryCache::global().fill_tagged(
+                fill_point,
                 &key,
                 &results,
                 Some(options.ttl),
@@ -295,12 +386,16 @@ impl<M: Model> QueryBuilder<M> {
         Ok(results)
     }
 
+    /// Return the first matching row, or `None` when nothing matches.
+    ///
+    /// Without an order, which row comes first is up to the database; order
+    /// the query when the choice matters.
     pub async fn first(self) -> Result<Option<M>> {
-        self.ensure_query_is_executable()?;
         let results = self.limit(1).get().await?;
         Ok(results.into_iter().next())
     }
 
+    /// [`first()`](Self::first), with a not-found error when nothing matches.
     pub async fn first_or_fail(self) -> Result<M> {
         self.first()
             .await?
@@ -313,6 +408,10 @@ impl<M: Model> QueryBuilder<M> {
     /// safely update or delete already-processed rows without causing later batches to skip.
     /// Existing filters, caching, and any pre-applied `limit()` remain in effect. When you need
     /// descending traversal, order explicitly by the primary key before calling `chunk()`.
+    ///
+    /// A join can repeat a primary key: the rows sharing one key are always handed to the
+    /// callback in the same batch, so a key that repeats more often than `chunk_size` fails the
+    /// call. A `union()` is refused, since its other branches do not follow the cursor.
     pub async fn chunk<F, Fut>(self, chunk_size: u64, mut callback: F) -> Result<()>
     where
         F: FnMut(Vec<M>) -> Fut,
@@ -332,6 +431,12 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
+        if !self.unions.is_empty() {
+            return Err(Error::invalid_query(
+                "chunk() pages by the model's primary key, which the other branches of a union() do not follow; read a union with get(), or page() it",
+            ));
+        }
+
         let primary_key = self.chunk_primary_key_column()?;
         let order = self.chunk_order(primary_key)?;
         let mut remaining = self.limit_value;
@@ -343,7 +448,13 @@ impl<M: Model> QueryBuilder<M> {
             base_query = base_query.order_by(format!("{}.{}", M::table_name(), primary_key), order);
         }
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
-        let mut last_seen_primary_key: Option<serde_json::Value> = None;
+        // A join can repeat a row's primary key. A full batch that ends inside
+        // such a run hands its tail to the next batch, which starts at that key.
+        let joins_repeat_keys = !base_query.joins.is_empty();
+        let key_of = |model: &M| serde_json::to_value(model.primary_key()).map_err(Error::from);
+        // The last key handed to the callback, and whether the next batch
+        // starts at it rather than after it.
+        let mut cursor: Option<(serde_json::Value, bool)> = None;
 
         loop {
             let batch_limit =
@@ -353,19 +464,22 @@ impl<M: Model> QueryBuilder<M> {
             }
 
             let mut batch_query = base_query.clone().limit(batch_limit);
-            if let Some(cursor) = &last_seen_primary_key {
-                batch_query = match order {
-                    crate::query::Order::Asc => {
-                        batch_query.where_gt(&cursor_column, cursor.clone())
-                    }
-                    crate::query::Order::Desc => {
-                        batch_query.where_lt(&cursor_column, cursor.clone())
-                    }
+            if let Some((key, inclusive)) = &cursor {
+                let key = key.clone();
+                batch_query = match (order, inclusive) {
+                    (crate::query::Order::Asc, false) => batch_query.where_gt(&cursor_column, key),
+                    (crate::query::Order::Asc, true) => batch_query.where_gte(&cursor_column, key),
+                    (crate::query::Order::Desc, false) => batch_query.where_lt(&cursor_column, key),
+                    (crate::query::Order::Desc, true) => batch_query.where_lte(&cursor_column, key),
                 };
             }
             if let Some(cache_key) = &explicit_cache_key {
-                let cursor_marker = match &last_seen_primary_key {
-                    Some(cursor) => serde_json::to_string(cursor).map_err(Error::from)?,
+                let cursor_marker = match &cursor {
+                    Some((key, inclusive)) => format!(
+                        "{}{}",
+                        if *inclusive { "=" } else { "" },
+                        serde_json::to_string(key).map_err(Error::from)?
+                    ),
                     None => "null".to_string(),
                 };
                 batch_query.cache_key = Some(format!(
@@ -374,28 +488,64 @@ impl<M: Model> QueryBuilder<M> {
                 ));
             }
 
-            let batch = batch_query.get().await?;
-            if batch.is_empty() {
+            let mut batch = batch_query.get().await?;
+            let Some(last) = batch.last() else {
                 break;
+            };
+            let last_key = key_of(last)?;
+            let fetched = batch.len() as u64;
+
+            let mut starts_at_last_key = false;
+            // Rows may follow a full batch unless the limit ends with it.
+            let more_may_follow = remaining.is_none_or(|limit| limit > batch_limit);
+            if joins_repeat_keys && fetched == batch_limit && more_may_follow {
+                let mut tail = 0;
+                for model in batch.iter().rev() {
+                    if key_of(model)? != last_key {
+                        break;
+                    }
+                    tail += 1;
+                }
+                if tail == batch.len() {
+                    // Every row shares one key: read that key's whole run,
+                    // which fails only when a batch cannot hold it.
+                    let mut run_query = base_query
+                        .clone()
+                        .where_eq(&cursor_column, last_key.clone())
+                        .limit(chunk_size.saturating_add(1));
+                    if let Some(cache_key) = &explicit_cache_key {
+                        run_query.cache_key = Some(format!(
+                            "{}::chunk(run={})",
+                            cache_key,
+                            serde_json::to_string(&last_key).map_err(Error::from)?
+                        ));
+                    }
+                    let run = run_query.get().await?;
+                    if run.len() as u64 > chunk_size {
+                        return Err(Error::invalid_query(format!(
+                            "chunk({}) found more rows with the key {} than a batch holds: the join repeats it, so pass a larger chunk size",
+                            chunk_size, last_key
+                        )));
+                    }
+                    batch = run;
+                } else {
+                    batch.truncate(batch.len() - tail);
+                    starts_at_last_key = true;
+                }
             }
 
-            let batch_len = batch.len() as u64;
-            let last_primary_key = batch
-                .last()
-                .map(Model::primary_key)
-                .ok_or_else(|| Error::internal("chunk() fetched an empty batch unexpectedly"))?;
-            let next_cursor = serde_json::to_value(last_primary_key).map_err(Error::from)?;
+            let processed = batch.len() as u64;
             callback(batch).await?;
-            last_seen_primary_key = Some(next_cursor);
+            cursor = Some((last_key, starts_at_last_key));
 
             if let Some(limit) = &mut remaining {
-                *limit = limit.saturating_sub(batch_len);
+                *limit = limit.saturating_sub(processed);
                 if *limit == 0 {
                     break;
                 }
             }
 
-            if batch_len < batch_limit {
+            if fetched < batch_limit {
                 break;
             }
         }
@@ -403,62 +553,55 @@ impl<M: Model> QueryBuilder<M> {
         Ok(())
     }
 
+    /// Count the rows the query matches.
+    ///
+    /// Ordering, `limit()` and `offset()` are ignored, so a paged query counts
+    /// its total across every page. The aggregates honour them.
     pub async fn count(self) -> Result<u64> {
-        self.ensure_query_is_executable()?;
+        let query = self.without_distinct_ordering();
+        query.ensure_query_is_executable()?;
 
-        let (sql, params) = self.build_count_sql_with_params();
-
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows = db
-            .__raw_json_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows, |rows| rows.len() as u64);
-        let rows = rows?;
-        Self::decode_count_value(rows.first().and_then(|row| row.get("count")))
+        let (sql, params) = query.build_count_sql_with_params();
+        let rows = query.fetch_json(&sql, params).await?;
+        Self::decode_count_value(rows.first().and_then(|row| row.get("count")), "count")
     }
 
-    /// Decode the `count` column of a rendered COUNT projection.
+    /// Decode the `column` of a rendered COUNT projection.
     ///
-    /// `build_count_sql_with_params` always projects exactly one `count` column
-    /// over exactly one row, so a missing or non-numeric value is a decode
-    /// failure and not an empty result. Reporting zero for it would turn a
-    /// broken read into a plausible-looking answer.
-    fn decode_count_value(value: Option<&serde_json::Value>) -> Result<u64> {
+    /// A COUNT projection always returns exactly one row, so a missing or
+    /// non-numeric value is a decode failure and not an empty result. Reporting
+    /// zero for it would turn a broken read into a plausible-looking answer.
+    pub(in crate::query) fn decode_count_value(
+        value: Option<&serde_json::Value>,
+        column: &str,
+    ) -> Result<u64> {
         let Some(value) = value else {
-            return Err(Error::query(
-                "Database returned no 'count' column for the query count",
-            ));
+            return Err(Error::query(format!(
+                "Database returned no '{}' column for the query count",
+                column
+            )));
         };
 
         if let Some(count) = value.as_u64() {
             Ok(count)
         } else if let Some(count) = value.as_i64() {
-            crate::internal::count_to_u64(count, "query count")
+            crate::internal::count_to_u64(count, column)
         } else {
             Err(Error::query(format!(
-                "Unable to decode the query count as an integer (got {})",
-                value
+                "Unable to decode the '{}' count as an integer (got {})",
+                column, value
             )))
         }
     }
 
+    /// Whether any row matches the query; its ordering, limit and offset are
+    /// ignored.
     pub async fn exists(self) -> Result<bool> {
-        self.ensure_query_is_executable()?;
+        let query = self.without_distinct_ordering();
+        query.ensure_query_is_executable()?;
 
-        let (sql, params) = self.build_exists_sql_with_params();
-
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows = db
-            .__raw_json_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows, |rows| rows.len() as u64);
-        let rows = rows?;
+        let (sql, params) = query.build_exists_sql_with_params();
+        let rows = query.fetch_json(&sql, params).await?;
 
         // `build_exists_sql_with_params` renders one of two shapes. The
         // `SELECT EXISTS(..) AS "exists_result"` shape always returns a single
@@ -496,7 +639,9 @@ impl<M: Model> QueryBuilder<M> {
         )))
     }
 
-    fn invalidate_model_state(rows_affected: u64) {
+    /// Drop the cached reads and dirty-tracking snapshots a write to this
+    /// model's table has made stale.
+    pub(crate) fn invalidate_model_state(rows_affected: u64) {
         if rows_affected > 0 {
             crate::QueryCache::global().invalidate_model(M::table_name());
             #[cfg(feature = "dirty-tracking")]
@@ -504,54 +649,85 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// Render `DELETE FROM <table> WHERE ..` for this query's filters.
+    fn build_delete_sql(&self, operation: &str) -> Result<(String, Vec<Value>)> {
+        let db_type = self.db_type_for_sql();
+        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
+        Self::ensure_rendered_filter_is_restrictive(operation, &where_sql)?;
+        let sql = format!(
+            "DELETE FROM {} WHERE {}",
+            db_sql::quote_table::<M>(db_type),
+            where_sql
+        );
+
+        Ok((sql, params))
+    }
+
+    /// Delete the rows this query matches. On a soft-delete model they are
+    /// marked deleted, as [`soft_delete()`](Self::soft_delete) marks them;
+    /// [`force_delete()`](Self::force_delete) removes them for good. At least
+    /// one explicit filter is required.
     pub async fn delete(self) -> Result<u64> {
+        if M::soft_delete_enabled() {
+            self.ensure_not_only_trashed("delete")?;
+            return self.soft_delete().await;
+        }
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("delete")?;
         self.ensure_mutation_has_explicit_filters("delete")?;
 
-        let db_type = self.db_type_for_sql();
-        let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
-        Self::ensure_rendered_filter_is_restrictive("delete", &where_sql)?;
-        let sql = format!("DELETE FROM {} WHERE {}", table, where_sql);
-
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows_affected = db
-            .__execute_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows_affected, |rows| *rows);
-        let rows_affected = rows_affected?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+        let (sql, params) = self.build_delete_sql("delete")?;
+        self.run_mutation(&sql, params).await
     }
 
     /// Delete every row in the table represented by this query.
     ///
     /// This is an explicit opt-in escape hatch for full-table deletion and is kept
     /// separate from `delete()` so accidental unfiltered bulk deletes remain blocked.
+    ///
+    /// On a soft-delete model the live rows are marked deleted, as `delete()`
+    /// marks them; `only_trashed().force_delete()` empties the trash.
     pub async fn delete_all(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("delete_all")?;
         self.ensure_mutation_has_no_explicit_filters("delete_all")?;
 
         let db_type = self.db_type_for_sql();
-        let table = db_sql::quote_ident(db_type, M::table_name());
-        let sql = format!("DELETE FROM {}", table);
+        if M::soft_delete_enabled() {
+            self.ensure_not_only_trashed("delete_all")?;
+            // The live rows: marking a trashed row again would change nothing
+            // but its stamp.
+            let query = self.live_rows_only();
+            let (scope_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
+            let sql = format!(
+                "UPDATE {} SET {} = {} WHERE {}",
+                db_sql::quote_table::<M>(db_type),
+                db_sql::quote_ident(db_type, M::deleted_at_column()),
+                Self::current_timestamp_sql(db_type),
+                scope_sql
+            );
+            return query.run_mutation(&sql, params).await;
+        }
+        let (scope_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
+        let mut sql = format!("DELETE FROM {}", db_sql::quote_table::<M>(db_type));
+        if !scope_sql.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&scope_sql);
+        }
+        self.run_mutation(&sql, params).await
+    }
 
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows_affected = db
-            .__execute_with_params(&sql, Vec::new())
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows_affected, |rows| *rows);
-        let rows_affected = rows_affected?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+    /// Refuse to soft-delete the trash: its rows are deleted already, and a
+    /// caller asking for it means to remove them.
+    fn ensure_not_only_trashed(&self, operation: &str) -> Result<()> {
+        if self.only_trashed {
+            return Err(Error::invalid_query(format!(
+                "{}() on only_trashed() rows of {} would mark rows that are already deleted; force_delete() removes them for good",
+                operation,
+                M::table_name()
+            )));
+        }
+        Ok(())
     }
 
     /// Render the soft-delete UPDATE and the values its WHERE clause binds.
@@ -561,7 +737,7 @@ impl<M: Model> QueryBuilder<M> {
     /// shape differs per backend, so a statement bound for MySQL that carried
     /// the PostgreSQL rendering would be rejected by the server.
     fn build_soft_delete_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
-        let table = db_sql::quote_ident(db_type, M::table_name());
+        let table = db_sql::quote_table::<M>(db_type);
         let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
         let now = Self::current_timestamp_sql(db_type);
         let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
@@ -574,6 +750,9 @@ impl<M: Model> QueryBuilder<M> {
         Ok((sql, params))
     }
 
+    /// Mark the live rows this query matches deleted, stamping `deleted_at`;
+    /// a trashed row keeps the stamp it has, even under `with_trashed()`. At
+    /// least one explicit filter is required.
     pub async fn soft_delete(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("soft_delete")?;
@@ -585,20 +764,13 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         self.ensure_mutation_has_explicit_filters("soft_delete")?;
+        self.ensure_not_only_trashed("soft_delete")?;
 
-        let (sql, params) = self.build_soft_delete_sql(self.db_type_for_sql())?;
-
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows_affected = db
-            .__execute_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows_affected, |rows| *rows);
-        let rows_affected = rows_affected?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+        // Marking a trashed row again would change nothing but its stamp,
+        // which a retention purge reads.
+        let query = self.live_rows_only();
+        let (sql, params) = query.build_soft_delete_sql(query.db_type_for_sql())?;
+        query.run_mutation(&sql, params).await
     }
 
     pub async fn restore(self) -> Result<u64> {
@@ -611,7 +783,7 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
-        self.ensure_mutation_has_explicit_filters("restore")?;
+        self.ensure_trash_mutation_has_filters("restore")?;
 
         // `restore()` only ever targets trashed rows, so the scope is forced here
         // instead of relying on the caller remembering `with_trashed()`: under the
@@ -625,124 +797,40 @@ impl<M: Model> QueryBuilder<M> {
         query.include_trashed = false;
 
         let db_type = query.db_type_for_sql();
-        let table = db_sql::quote_ident(db_type, M::table_name());
-        let deleted_at = db_sql::quote_ident(db_type, M::deleted_at_column());
         let (where_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
         Self::ensure_rendered_filter_is_restrictive("restore", &where_sql)?;
         let sql = format!(
             "UPDATE {} SET {} = NULL WHERE {}",
-            table, deleted_at, where_sql
+            db_sql::quote_table::<M>(db_type),
+            db_sql::quote_ident(db_type, M::deleted_at_column()),
+            where_sql
         );
 
-        let db = query.current_db()?;
-        let timer = query.start_query_log(&sql);
-        let error_context = query.build_query_error_context(Some(&sql));
-        let rows_affected = db
-            .__execute_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows_affected, |rows| *rows);
-        let rows_affected = rows_affected?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+        query.run_mutation(&sql, params).await
     }
 
     pub async fn force_delete(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("force_delete")?;
-        self.ensure_mutation_has_explicit_filters("force_delete")?;
+        self.ensure_trash_mutation_has_filters("force_delete")?;
 
         // `force_delete()` exists precisely to reach rows the default active-only
-        // scope hides, so trashed rows are put back in scope regardless of what
-        // the caller asked for.
+        // scope hides, so trashed rows are put back in scope — unless the caller
+        // asked for trashed rows only, which must not widen to live ones.
         let mut query = self;
-        query.include_trashed = true;
-        query.only_trashed = false;
+        if !query.only_trashed {
+            query.include_trashed = true;
+        }
 
-        let db_type = query.db_type_for_sql();
-        let table = db_sql::quote_ident(db_type, M::table_name());
-        let (where_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
-        Self::ensure_rendered_filter_is_restrictive("force_delete", &where_sql)?;
-        let sql = format!("DELETE FROM {} WHERE {}", table, where_sql);
-
-        let db = query.current_db()?;
-        let timer = query.start_query_log(&sql);
-        let error_context = query.build_query_error_context(Some(&sql));
-        let rows_affected = db
-            .__execute_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows_affected, |rows| *rows);
-        let rows_affected = rows_affected?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+        let (sql, params) = query.build_delete_sql("force_delete")?;
+        query.run_mutation(&sql, params).await
     }
 
     pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {
         self.ensure_query_is_executable()?;
         let (sql, params) = self.build_select_sql_with_params();
-        let db = self.current_db()?;
-        let timer = self.start_query_log(&sql);
-        let error_context = self.build_query_error_context(Some(&sql));
-        let rows = db
-            .__raw_json_with_params(&sql, params)
-            .await
-            .map_err(|err| err.with_context(error_context));
-        Self::finish_query_log(timer, &rows, |rows| rows.len() as u64);
-        rows
+        self.fetch_json(&sql, params).await
     }
-}
-
-/// The process-wide identities handed out by [`connection_identity`].
-static CONNECTION_IDENTITIES: OnceLock<Mutex<ConnectionIdentities>> = OnceLock::new();
-
-/// The identity assigned to every pooled connection a cache key has named.
-#[derive(Default)]
-struct ConnectionIdentities {
-    /// The last identity handed out. Identities are never reused within a
-    /// process, so a stale cache entry can never be mistaken for a live one.
-    last_id: u64,
-    /// Address of the connection's `Arc` allocation to its identity, alongside a
-    /// `Weak` to that allocation.
-    assigned: HashMap<usize, (Weak<InternalConnection>, u64)>,
-}
-
-impl ConnectionIdentities {
-    /// The identity of `connection`, assigning one if it has none yet.
-    ///
-    /// The map is keyed by address, which is only trustworthy because of the
-    /// `Weak` stored beside it: a `Weak` keeps its `Arc` allocation reserved even
-    /// after the connection itself is dropped, so no second connection can ever
-    /// be allocated at the address of an entry that is still on record. Dead
-    /// entries are dropped before a new identity is handed out — that releases
-    /// the address *and* the mapping together, so a connection that later lands
-    /// there misses this map and is issued a fresh identity rather than
-    /// inheriting the dropped connection's cached rows.
-    fn identify(&mut self, connection: &Arc<InternalConnection>) -> u64 {
-        let address = Arc::as_ptr(connection) as usize;
-        if let Some((_, id)) = self.assigned.get(&address) {
-            return *id;
-        }
-
-        self.assigned
-            .retain(|_, (tracked, _)| tracked.strong_count() > 0);
-        self.last_id += 1;
-        self.assigned
-            .insert(address, (Arc::downgrade(connection), self.last_id));
-        self.last_id
-    }
-}
-
-/// A process-unique identity for a pooled connection.
-///
-/// Stable for as long as the connection lives and never handed to another
-/// connection afterwards, which is what a cache key needs: the address the
-/// connection happens to occupy is neither.
-fn connection_identity(connection: &Arc<InternalConnection>) -> u64 {
-    CONNECTION_IDENTITIES
-        .get_or_init(|| Mutex::new(ConnectionIdentities::default()))
-        .lock()
-        .identify(connection)
 }
 
 /// Record `table` as a cache tag, ignoring duplicates and unusable names.
@@ -782,8 +870,8 @@ fn normalize_table_name(token: &str) -> Option<String> {
     Some(name.to_string())
 }
 
-/// Pull table names out of rendered SQL by reading the identifier that follows
-/// each `FROM`/`JOIN` keyword.
+/// Pull table names out of rendered SQL: the identifier after each `JOIN`, and
+/// every table of a `FROM` list, `FROM a, b` naming two.
 ///
 /// This is a fallback, not the intended mechanism: joins report their table
 /// directly off `JoinClause`, but union, CTE, and subquery operands only survive
@@ -792,47 +880,133 @@ fn normalize_table_name(token: &str) -> Option<String> {
 /// under-collecting would keep serving stale rows, so every identifier-shaped
 /// token is kept.
 fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
-    const NOT_A_TABLE: [&str; 5] = ["select", "lateral", "only", "unnest", "values"];
+    const NOT_A_TABLE: [&str; 3] = ["select", "unnest", "values"];
+    // Words a table may follow: `FROM ONLY posts` reads `posts`.
+    const BEFORE_A_TABLE: [&str; 2] = ["only", "lateral"];
+    // The keywords that end a `FROM` list.
+    const LIST_END: [&str; 20] = [
+        "where",
+        "group",
+        "order",
+        "limit",
+        "offset",
+        "having",
+        "union",
+        "intersect",
+        "except",
+        "window",
+        "for",
+        "on",
+        "using",
+        "returning",
+        "fetch",
+        "inner",
+        "left",
+        "right",
+        "full",
+        "cross",
+    ];
 
-    let is_separator =
-        |character: char| character.is_whitespace() || matches!(character, ',' | '(' | ')');
-
+    let mut depth = 0usize;
+    // The parenthesis depth of each `FROM` list being read, innermost last.
+    let mut lists: Vec<usize> = Vec::new();
     let mut expect_table = false;
-    for token in sql.split(is_separator) {
-        if token.is_empty() {
-            continue;
+    for token in sql_tokens(sql) {
+        match token {
+            "(" => {
+                depth += 1;
+                expect_table = false;
+            }
+            ")" => {
+                depth = depth.saturating_sub(1);
+                lists.retain(|&list| list <= depth);
+            }
+            "," => expect_table = lists.last() == Some(&depth),
+            word if word.eq_ignore_ascii_case("from") => {
+                lists.push(depth);
+                expect_table = true;
+            }
+            word if word.eq_ignore_ascii_case("join") => {
+                if lists.last() == Some(&depth) {
+                    lists.pop();
+                }
+                expect_table = true;
+            }
+            word => {
+                if lists.last() == Some(&depth)
+                    && LIST_END.iter().any(|end| word.eq_ignore_ascii_case(end))
+                {
+                    lists.pop();
+                }
+                if std::mem::take(&mut expect_table) {
+                    if BEFORE_A_TABLE
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
+                        expect_table = true;
+                    } else if !NOT_A_TABLE
+                        .iter()
+                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    {
+                        push_table_tag(tables, word);
+                    }
+                }
+            }
         }
-
-        if token.eq_ignore_ascii_case("from") || token.eq_ignore_ascii_case("join") {
-            expect_table = true;
-            continue;
-        }
-
-        if !expect_table {
-            continue;
-        }
-        expect_table = false;
-
-        if NOT_A_TABLE
-            .into_iter()
-            .any(|keyword| token.eq_ignore_ascii_case(keyword))
-        {
-            continue;
-        }
-
-        push_table_tag(tables, token);
     }
+}
+
+/// Split SQL into words and the `(`, `)` and `,` between them, leaving out
+/// whitespace and single-quoted literals.
+fn sql_tokens(sql: &str) -> impl Iterator<Item = &str> {
+    let mut rest = sql;
+    std::iter::from_fn(move || {
+        loop {
+            rest = rest.trim_start();
+            let first = rest.chars().next()?;
+            if first == '\'' {
+                // A literal ends at a quote that is not doubled.
+                let mut end = rest.len();
+                let mut chars = rest.char_indices().skip(1).peekable();
+                while let Some((index, character)) = chars.next() {
+                    if character == '\'' {
+                        if chars.peek().is_some_and(|&(_, next)| next == '\'') {
+                            chars.next();
+                        } else {
+                            end = index + 1;
+                            break;
+                        }
+                    }
+                }
+                rest = &rest[end..];
+                continue;
+            }
+            if matches!(first, '(' | ')' | ',') {
+                let (token, tail) = rest.split_at(1);
+                rest = tail;
+                return Some(token);
+            }
+            let end = rest
+                .find(|character: char| {
+                    character.is_whitespace() || matches!(character, '(' | ')' | ',' | '\'')
+                })
+                .unwrap_or(rest.len());
+            let (token, tail) = rest.split_at(end);
+            rest = tail;
+            return Some(token);
+        }
+    })
 }
 
 /// Collect the tables named inside a condition's SQL-carrying operands.
 fn collect_condition_tables(condition: &crate::query::WhereCondition, tables: &mut Vec<String>) {
     match &condition.value {
-        crate::query::ConditionValue::Subquery(query_sql)
-        | crate::query::ConditionValue::RawExpr(query_sql) => {
+        crate::query::ConditionValue::RawExpr(query_sql) => {
             collect_tables_from_sql(query_sql, tables);
         }
-        crate::query::ConditionValue::RawExprWithValues { preview_sql, .. } => {
-            collect_tables_from_sql(preview_sql, tables);
+        crate::query::ConditionValue::RawExprWithValues { sql, .. }
+        | crate::query::ConditionValue::RawTemplate { sql, .. } => {
+            collect_tables_from_sql(sql, tables);
         }
         _ => {}
     }
@@ -850,457 +1024,5 @@ fn collect_or_group_tables(group: &crate::query::OrGroup, tables: &mut Vec<Strin
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::config::DatabaseType;
-    use crate::internal::InternalConnection;
-    use crate::model::Model;
-    use crate::query::{
-        ConditionValue, FrameBound, FrameType, Operator, Order, QueryBuilder, WhereCondition,
-        WindowFunction, WindowFunctionType,
-    };
-    use std::sync::Arc;
-
-    #[tideorm::model(table = "cache_key_test_users")]
-    struct CacheKeyTestUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-    }
-
-    #[tideorm::model(table = "cache_key_test_posts")]
-    struct CacheKeyTestPost {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        title: String,
-    }
-
-    #[tideorm::model(table = "cache_key_test_soft_delete_users", soft_delete)]
-    struct CacheKeyTestSoftDeleteUser {
-        #[tideorm(primary_key, auto_increment)]
-        id: i64,
-        name: String,
-        deleted_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-
-    #[test]
-    fn test_generate_cache_key_is_stable_for_equivalent_structured_queries() {
-        let query_one = CacheKeyTestUser::query()
-            .where_in("status", vec!["active", "pending"])
-            .or_where(|group| {
-                group
-                    .where_eq("role", "admin")
-                    .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
-            })
-            .window(
-                WindowFunction::new(
-                    WindowFunctionType::Lag("score".to_string(), Some(1), Some("0".to_string())),
-                    "previous_score",
-                )
-                .partition_by("team")
-                .order_by("score", Order::Desc)
-                .frame(
-                    FrameType::Rows,
-                    FrameBound::UnboundedPreceding,
-                    FrameBound::CurrentRow,
-                ),
-            )
-            .limit(10);
-
-        let query_two = CacheKeyTestUser::query()
-            .where_in("status", vec!["active", "pending"])
-            .or_where(|group| {
-                group
-                    .where_eq("role", "admin")
-                    .nested_and(|inner| inner.where_gt("score", 10).where_lt("score", 20))
-            })
-            .window(
-                WindowFunction::new(
-                    WindowFunctionType::Lag("score".to_string(), Some(1), Some("0".to_string())),
-                    "previous_score",
-                )
-                .partition_by("team")
-                .order_by("score", Order::Desc)
-                .frame(
-                    FrameType::Rows,
-                    FrameBound::UnboundedPreceding,
-                    FrameBound::CurrentRow,
-                ),
-            )
-            .limit(10);
-
-        assert_eq!(
-            query_one.generate_cache_key(),
-            query_two.generate_cache_key()
-        );
-    }
-
-    #[test]
-    fn test_generate_cache_key_changes_when_window_definition_changes() {
-        let baseline = CacheKeyTestUser::query().window(
-            WindowFunction::new(WindowFunctionType::Rank, "rank_alias")
-                .order_by("score", Order::Desc),
-        );
-        let changed = CacheKeyTestUser::query().window(
-            WindowFunction::new(WindowFunctionType::DenseRank, "rank_alias")
-                .order_by("score", Order::Desc),
-        );
-
-        assert_ne!(baseline.generate_cache_key(), changed.generate_cache_key());
-    }
-
-    #[test]
-    fn test_explicit_cache_key_is_namespaced_per_model() {
-        let ttl = std::time::Duration::from_secs(60);
-        let user_query = CacheKeyTestUser::query().cache_with_key("recent", ttl);
-        let post_query = CacheKeyTestPost::query().cache_with_key("recent", ttl);
-
-        assert_ne!(
-            user_query.generate_cache_key(),
-            post_query.generate_cache_key()
-        );
-    }
-
-    #[test]
-    fn test_rendered_filter_guard_rejects_constant_true_bodies() {
-        type Guard = QueryBuilder<CacheKeyTestUser>;
-
-        for body in ["", "TRUE", "true", "1 = 1", "(TRUE)"] {
-            let err = Guard::ensure_rendered_filter_is_restrictive("delete", body).unwrap_err();
-            let message = err.to_string();
-            assert!(
-                message.contains("unfiltered bulk mutations are blocked"),
-                "body: {body}"
-            );
-        }
-
-        let restrictive = Guard::ensure_rendered_filter_is_restrictive("delete", "\"id\" = $1");
-        assert!(restrictive.is_ok());
-    }
-
-    #[test]
-    fn test_empty_negative_list_does_not_count_as_an_explicit_filter() {
-        // An empty candidate set for a negative membership test renders
-        // constant-true, so it must not satisfy the explicit-filter requirement.
-        // Reaching this by accident is easy -- a filter list that came back empty
-        // from a form -- and the rendered-SQL check cannot catch it: sea-query
-        // emits an empty `NOT IN` as the bound pair `? = ?`, and a soft-delete
-        // model appends `deleted_at IS NULL` to whatever the caller declared.
-        for query in [
-            CacheKeyTestUser::query().where_not_in("id", Vec::<i64>::new()),
-            CacheKeyTestUser::query().ne_all("name", Vec::<&str>::new()),
-            CacheKeyTestUser::query()
-                .ne_all("name", Vec::<&str>::new())
-                .where_not_in("id", Vec::<i64>::new()),
-        ] {
-            let err = query
-                .ensure_mutation_has_explicit_filters("delete")
-                .unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("unfiltered bulk mutations are blocked"),
-                "vacuous filter was accepted: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_a_real_filter_still_counts_alongside_a_vacuous_one() {
-        // The guard rejects only queries where *every* declared filter is
-        // vacuous; one real predicate is enough, and it still applies.
-        assert!(
-            CacheKeyTestUser::query()
-                .where_eq("name", "alice")
-                .where_not_in("id", Vec::<i64>::new())
-                .ensure_mutation_has_explicit_filters("delete")
-                .is_ok()
-        );
-
-        // A non-empty candidate set is a real filter on its own.
-        assert!(
-            CacheKeyTestUser::query()
-                .where_not_in("id", vec![1i64])
-                .ensure_mutation_has_explicit_filters("delete")
-                .is_ok()
-        );
-
-        // The positive duals render constant-FALSE, which matches nothing and is
-        // safe for a mutation, so they are deliberately still accepted.
-        assert!(
-            CacheKeyTestUser::query()
-                .where_in("id", Vec::<i64>::new())
-                .ensure_mutation_has_explicit_filters("delete")
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_cache_tags_cover_joined_tables() {
-        let tables = CacheKeyTestPost::query()
-            .inner_join(
-                "cache_key_test_users",
-                "cache_key_test_posts.id",
-                "cache_key_test_users.id",
-            )
-            .cache_tables();
-
-        assert_eq!(
-            tables,
-            vec![
-                "cache_key_test_posts".to_string(),
-                "cache_key_test_users".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn test_write_to_joined_table_evicts_cached_join_result() {
-        let cache = crate::cache::QueryCache::new();
-        cache.enable();
-
-        let joined = CacheKeyTestPost::query().inner_join(
-            "cache_key_test_users",
-            "cache_key_test_posts.id",
-            "cache_key_test_users.id",
-        );
-        let joined_key = joined.generate_cache_key();
-        cache
-            .set_tagged(&joined_key, &["row"], None, &joined.cache_tables())
-            .unwrap();
-
-        let posts_only = CacheKeyTestPost::query();
-        let posts_only_key = posts_only.generate_cache_key();
-        cache
-            .set_tagged(&posts_only_key, &["row"], None, &posts_only.cache_tables())
-            .unwrap();
-
-        assert!(cache.contains(&joined_key));
-        assert!(cache.contains(&posts_only_key));
-
-        cache.invalidate_model("cache_key_test_users");
-
-        assert!(
-            !cache.contains(&joined_key),
-            "a write to a joined table must evict the cached join result"
-        );
-        assert!(
-            cache.contains(&posts_only_key),
-            "invalidation must stay targeted at the tables a query actually reads"
-        );
-    }
-
-    #[test]
-    fn test_cache_tags_cover_union_operand_tables() {
-        let tables = CacheKeyTestPost::query()
-            .union(CacheKeyTestUser::query())
-            .cache_tables();
-
-        assert!(
-            tables.contains(&"cache_key_test_users".to_string()),
-            "a union operand's table must be tagged for invalidation: {tables:?}"
-        );
-    }
-
-    #[test]
-    fn test_collect_tables_from_sql_reads_from_and_join_targets() {
-        let mut tables = Vec::new();
-        super::collect_tables_from_sql(
-            "SELECT * FROM \"orders\" INNER JOIN `line_items` ON a = b \
-             WHERE id IN (SELECT id FROM public.archived_orders)",
-            &mut tables,
-        );
-
-        assert_eq!(
-            tables,
-            vec![
-                "orders".to_string(),
-                "line_items".to_string(),
-                "archived_orders".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn test_collect_tables_from_sql_skips_derived_table_keywords() {
-        let mut tables = Vec::new();
-        super::collect_tables_from_sql("SELECT * FROM (SELECT * FROM \"users\") t", &mut tables);
-
-        assert_eq!(tables, vec!["users".to_string()]);
-    }
-
-    #[test]
-    fn test_exists_flag_decoding_reports_undecodable_values() {
-        type Decoder = QueryBuilder<CacheKeyTestUser>;
-
-        assert!(Decoder::decode_exists_flag(&serde_json::json!(true)).unwrap());
-        assert!(!Decoder::decode_exists_flag(&serde_json::json!(false)).unwrap());
-        assert!(Decoder::decode_exists_flag(&serde_json::json!(1)).unwrap());
-        assert!(!Decoder::decode_exists_flag(&serde_json::json!(0)).unwrap());
-
-        // An EXISTS query always returns one row, so guessing `true` from "a row
-        // came back" would make every undecodable result a false positive.
-        let err = Decoder::decode_exists_flag(&serde_json::json!(null)).unwrap_err();
-        assert!(
-            err.to_string().contains("Unable to decode"),
-            "an undecodable EXISTS result must be reported: {err}"
-        );
-    }
-
-    #[test]
-    fn test_count_decoding_reports_missing_and_undecodable_values() {
-        type Decoder = QueryBuilder<CacheKeyTestUser>;
-
-        let seven = serde_json::json!(7);
-        assert_eq!(Decoder::decode_count_value(Some(&seven)).unwrap(), 7);
-
-        let missing = Decoder::decode_count_value(None).unwrap_err();
-        assert!(
-            missing.to_string().contains("no 'count' column"),
-            "{missing}"
-        );
-
-        let text = serde_json::json!("many");
-        let undecodable = Decoder::decode_count_value(Some(&text)).unwrap_err();
-        assert!(
-            undecodable.to_string().contains("Unable to decode"),
-            "{undecodable}"
-        );
-
-        let negative_value = serde_json::json!(-1);
-        let negative = Decoder::decode_count_value(Some(&negative_value)).unwrap_err();
-        assert!(
-            negative.to_string().contains("negative count"),
-            "{negative}"
-        );
-    }
-
-    #[test]
-    fn test_union_bound_values_participate_in_the_cache_key() {
-        let tenant_one =
-            CacheKeyTestPost::query().union(CacheKeyTestUser::query().where_eq("id", 1));
-        let tenant_two =
-            CacheKeyTestPost::query().union(CacheKeyTestUser::query().where_eq("id", 2));
-
-        assert_eq!(
-            tenant_one.unions[0].query_sql, tenant_two.unions[0].query_sql,
-            "a parameterized union operand renders the same SQL for either bound value"
-        );
-        assert_ne!(
-            tenant_one.generate_cache_key(),
-            tenant_two.generate_cache_key(),
-            "two unions differing only in a bound value must not share a cache entry"
-        );
-    }
-
-    #[test]
-    fn test_cte_bound_values_participate_in_the_cache_key() {
-        let tenant_one = CacheKeyTestPost::query()
-            .with_query("tenant_users", CacheKeyTestUser::query().where_eq("id", 1));
-        let tenant_two = CacheKeyTestPost::query()
-            .with_query("tenant_users", CacheKeyTestUser::query().where_eq("id", 2));
-
-        assert_eq!(
-            tenant_one.ctes[0].query_sql, tenant_two.ctes[0].query_sql,
-            "a parameterized CTE body renders the same SQL for either bound value"
-        );
-        assert_ne!(
-            tenant_one.generate_cache_key(),
-            tenant_two.generate_cache_key(),
-            "two CTE bodies differing only in a bound value must not share a cache entry"
-        );
-    }
-
-    /// A connection that never dialled anything, for identity bookkeeping only.
-    fn disconnected_connection() -> Arc<InternalConnection> {
-        Arc::new(InternalConnection {
-            conn: Default::default(),
-        })
-    }
-
-    #[test]
-    fn test_connection_identity_is_stable_for_one_connection() {
-        let connection = disconnected_connection();
-        let same_connection = Arc::clone(&connection);
-
-        assert_eq!(
-            super::connection_identity(&connection),
-            super::connection_identity(&same_connection),
-            "one connection must keep one identity, or its own cache entries never hit"
-        );
-    }
-
-    #[test]
-    fn test_connection_identity_is_never_inherited_from_a_recycled_address() {
-        let first = disconnected_connection();
-        let first_address = Arc::as_ptr(&first) as usize;
-        let first_identity = super::connection_identity(&first);
-        drop(first);
-
-        // A batch of identically-sized allocations is exactly what lands on a
-        // just-freed block, which is how hashing `Arc::as_ptr` served one
-        // tenant's cached rows to the next tenant to connect.
-        let reopened: Vec<_> = (0..16).map(|_| disconnected_connection()).collect();
-
-        for connection in &reopened {
-            assert_ne!(
-                Arc::as_ptr(connection) as usize,
-                first_address,
-                "an identity on record must keep its connection's address reserved"
-            );
-            assert_ne!(
-                super::connection_identity(connection),
-                first_identity,
-                "a new connection must never inherit a dropped connection's cache identity"
-            );
-        }
-    }
-
-    /// The soft-delete stamp is a literal, so it has to be spelled the way the
-    /// backend the statement is heading for spells it. Rendering it for the
-    /// ambient backend instead put an RFC3339 literal — `T` separator, UTC
-    /// offset — into statements bound for MySQL, which rejects both.
-    #[test]
-    fn test_soft_delete_stamp_renders_for_the_statement_backend() {
-        // The stamp is the only quoted token in the statement: every filter
-        // value travels beside it as a bound parameter.
-        fn stamp_of(sql: &str) -> &str {
-            sql.split('\'')
-                .nth(1)
-                .expect("the soft-delete statement embeds a quoted timestamp literal")
-        }
-
-        let query = CacheKeyTestSoftDeleteUser::query().where_eq("id", 1);
-
-        let (mysql_sql, _) = query
-            .build_soft_delete_sql(DatabaseType::MySQL)
-            .expect("a filtered soft delete renders");
-        let mysql_stamp = stamp_of(&mysql_sql);
-        assert!(!mysql_stamp.contains('T'), "mysql stamp: {mysql_stamp}");
-        assert!(!mysql_stamp.contains('+'), "mysql stamp: {mysql_stamp}");
-
-        let (postgres_sql, _) = query
-            .build_soft_delete_sql(DatabaseType::Postgres)
-            .expect("a filtered soft delete renders");
-        let postgres_stamp = stamp_of(&postgres_sql);
-        assert!(
-            postgres_stamp.contains('T'),
-            "postgres stamp: {postgres_stamp}"
-        );
-        assert!(
-            postgres_stamp.ends_with("+00:00"),
-            "postgres stamp: {postgres_stamp}"
-        );
-    }
-
-    #[test]
-    fn test_unrepresentable_condition_is_rejected_instead_of_dropped() {
-        let mut query = CacheKeyTestUser::query();
-        query.conditions.push(WhereCondition {
-            column: "id".to_string(),
-            operator: Operator::Between,
-            value: ConditionValue::Single(serde_json::json!(1)),
-        });
-
-        let err = query.ensure_conditions_are_representable().unwrap_err();
-        assert!(err.to_string().contains("cannot be rendered as SQL"));
-    }
-}
+#[path = "../../../tests/unit/query_execution_tests.rs"]
+mod tests;

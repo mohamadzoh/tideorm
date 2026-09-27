@@ -115,15 +115,6 @@ impl ValidationBuilder {
         self
     }
 
-    /// Add a custom validation marker.
-    ///
-    /// The message is surfaced when your model's `custom_validations()` adds an
-    /// error for the field; it is not evaluated directly by `ValidationBuilder`.
-    pub fn custom(mut self, message: impl Into<String>) -> Self {
-        self.rules.push(ValidationRule::Custom(message.into()));
-        self
-    }
-
     /// Finish the builder and return the field plus its rules.
     pub fn build(self) -> (String, Vec<ValidationRule>) {
         (self.field, self.rules)

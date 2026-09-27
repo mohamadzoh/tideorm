@@ -12,9 +12,7 @@ use parking_lot::Mutex;
 use crate::error::Result;
 use crate::model::Model;
 
-use super::{
-    EntityManager, TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync,
-};
+use super::{EntityManager, TideEntityManagerMergePersisted, TideEntityManagerSync};
 
 pub(super) type IdentityRollbackLog = HashMap<super::IdentityKey, Box<dyn IdentityMapRollback>>;
 pub(super) type ManagedCheckpoints = Vec<Box<dyn super::managed::ManagedCheckpoint>>;
@@ -212,73 +210,121 @@ pub(super) fn rollback_entity_manager_state(
     *entity_manager.snapshots.write() = rollback_state.snapshots;
 }
 
+/// The entity manager's state before a unit of work, restored unless the work
+/// commits: when it fails, when its future is dropped part way (which rolls
+/// its transaction back as well), and when a transaction enclosing it rolls
+/// back later. Otherwise the manager would keep ids and clean snapshots for
+/// rows that were never committed.
+pub(super) struct PendingRollback {
+    entity_manager: Arc<EntityManager>,
+    checkpoints: Arc<Mutex<ManagedCheckpoints>>,
+    identity_rollback: Arc<Mutex<IdentityRollbackLog>>,
+    state: Option<EntityManagerRollbackState>,
+}
+
+impl PendingRollback {
+    /// Capture the state to restore, with `checkpoints` taken so far; a flush
+    /// adds the rest through [`checkpoints`](Self::checkpoints) as it goes.
+    pub(super) fn new(
+        entity_manager: &Arc<EntityManager>,
+        checkpoints: ManagedCheckpoints,
+    ) -> Self {
+        Self {
+            state: Some(capture_entity_manager_rollback_state(entity_manager)),
+            entity_manager: entity_manager.clone(),
+            checkpoints: Arc::new(Mutex::new(checkpoints)),
+            identity_rollback: new_identity_rollback_log(),
+        }
+    }
+
+    pub(super) fn checkpoints(&self) -> Arc<Mutex<ManagedCheckpoints>> {
+        self.checkpoints.clone()
+    }
+
+    pub(super) fn identity_rollback(&self) -> Arc<Mutex<IdentityRollbackLog>> {
+        self.identity_rollback.clone()
+    }
+
+    /// The work's transaction committed: keep what it did, unless a
+    /// transaction around it rolls back.
+    pub(super) fn committed(mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        let entity_manager = self.entity_manager.clone();
+        let checkpoints = self.checkpoints.clone();
+        let identity_rollback = self.identity_rollback.clone();
+        crate::cache::undo_on_rollback(move || {
+            restore_entity_manager_state(&entity_manager, &checkpoints, state, &identity_rollback);
+        });
+    }
+}
+
+impl Drop for PendingRollback {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.take() {
+            restore_entity_manager_state(
+                &self.entity_manager,
+                &self.checkpoints,
+                state,
+                &self.identity_rollback,
+            );
+        }
+    }
+}
+
+fn restore_entity_manager_state(
+    entity_manager: &EntityManager,
+    checkpoints: &Mutex<ManagedCheckpoints>,
+    state: EntityManagerRollbackState,
+    identity_rollback: &Arc<Mutex<IdentityRollbackLog>>,
+) {
+    let checkpoints = std::mem::take(&mut *checkpoints.lock());
+    rollback_entity_manager_state(entity_manager, checkpoints, state, identity_rollback);
+}
+
 pub async fn save_with_entity_manager<T>(
     entity: &T,
     entity_manager: &Arc<EntityManager>,
 ) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     if in_entity_manager_transaction_scope() {
-        return save_with_entity_manager_impl(entity, entity_manager).await;
+        return save_in_scope(entity, entity_manager).await;
     }
 
-    let rollback_state = capture_entity_manager_rollback_state(entity_manager.as_ref());
-    let checkpoints = capture_managed_checkpoints(entity_manager.as_ref());
-    let identity_rollback = new_identity_rollback_log();
+    let rollback = PendingRollback::new(
+        entity_manager,
+        capture_managed_checkpoints(entity_manager.as_ref()),
+    );
     let db = entity_manager.db.clone();
     let entity_manager_for_txn = entity_manager.clone();
-    let identity_rollback_for_txn = identity_rollback.clone();
+    let identity_rollback_for_txn = rollback.identity_rollback();
     let entity = entity.clone();
-    let result = db
+    let saved = db
         .transaction(move |_| {
             Box::pin(async move {
                 with_entity_manager_transaction_scope(
                     identity_rollback_for_txn,
-                    save_with_entity_manager_impl(&entity, &entity_manager_for_txn),
+                    save_in_scope(&entity, &entity_manager_for_txn),
                 )
                 .await
             })
         })
-        .await;
-
-    match result {
-        Ok(saved) => Ok(saved),
-        Err(error) => {
-            rollback_entity_manager_state(
-                entity_manager.as_ref(),
-                checkpoints,
-                rollback_state,
-                &identity_rollback,
-            );
-            Err(error)
-        }
-    }
+        .await?;
+    rollback.committed();
+    Ok(saved)
 }
 
-pub(crate) async fn save_with_entity_manager_impl<T>(
-    entity: &T,
-    entity_manager: &Arc<EntityManager>,
-) -> Result<T>
+/// Save `entity` and sync its loaded relations inside the unit of work the caller
+/// already opened.
+pub(super) async fn save_in_scope<T>(entity: &T, entity_manager: &Arc<EntityManager>) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     let mut aggregate = entity.clone();
-    let persisted = __with_entity_manager_db(
+    let persisted = with_entity_manager_db(
         entity_manager,
         <T as crate::model::Model>::save(entity.clone()),
     )
@@ -289,6 +335,11 @@ where
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;
     entity_manager.put(aggregate.clone());
+    // A managed handle to the same row now loaded older values; one flushed
+    // later would write them back over what was just stored.
+    if let Some(managed) = entity_manager.get_managed_by_key::<T>(&aggregate.tide_pk_key()) {
+        managed.entry.rebase(&aggregate)?;
+    }
     Ok(aggregate)
 }
 
@@ -297,14 +348,7 @@ pub(crate) async fn sync_entity_manager_relations_only_impl<T>(
     entity_manager: &Arc<EntityManager>,
 ) -> Result<T>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
     let mut aggregate = entity.clone();
     <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
@@ -315,26 +359,71 @@ where
     Ok(aggregate)
 }
 
+/// Persists one entity held by a loaded relation during a relation sync — or,
+/// when the identity map already holds an identical copy, only syncs that
+/// entity's own relations — and returns its identity key afterwards.
+///
+/// The copies are compared column by column, as a managed flush compares an
+/// entity with its snapshot: their JSON leaves out a field the model's own
+/// serde derive skips, so an edit to one would never be written.
 #[doc(hidden)]
-pub async fn __save_with_entity_manager_in_scope<T>(
-    entity: &T,
+pub async fn __sync_related_entity<T>(
+    entity: &mut T,
     entity_manager: &Arc<EntityManager>,
-) -> Result<T>
+) -> Result<Option<String>>
 where
-    T: TideEntityManagerMeta
-        + TideEntityManagerMergePersisted
-        + TideEntityManagerSync
-        + Model
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
 {
-    save_with_entity_manager_impl(entity, entity_manager).await
+    let existing_key = super::meta::model_entity_manager_key(entity)?;
+    let unchanged = match existing_key.as_deref() {
+        Some(key) => match entity_manager.get_by_entity_manager_key::<T>(key) {
+            Some(cached) => entity.to_entity_model() == cached.to_entity_model(),
+            None => false,
+        },
+        None => false,
+    };
+
+    if unchanged {
+        entity
+            .tide_sync_entity_manager_relations(entity_manager)
+            .await?;
+        entity_manager.put(entity.clone());
+        return Ok(existing_key);
+    }
+
+    let saved = save_in_scope(entity, entity_manager).await?;
+    let saved_key = super::meta::model_entity_manager_key(&saved)?;
+    *entity = saved.clone();
+    entity_manager.put(saved);
+    Ok(saved_key)
 }
 
+/// Deletes the entities an owner's relation held at its last snapshot but no
+/// longer lists in `current_keys`, and drops them from the identity map.
 #[doc(hidden)]
-pub async fn __with_entity_manager_db<F, T>(
+pub async fn __delete_detached_entities<T>(
+    entity_manager: &Arc<EntityManager>,
+    owner_table: &'static str,
+    owner_key: &str,
+    relation: &'static str,
+    current_keys: &[String],
+) -> Result<()>
+where
+    T: Model + Clone + Send + Sync + 'static,
+{
+    for key in entity_manager.deletions::<T>(owner_table, owner_key, relation, current_keys) {
+        if let Some(deleted) = entity_manager.get_by_entity_manager_key::<T>(&key) {
+            with_entity_manager_db(entity_manager, deleted.delete()).await?;
+        }
+        entity_manager.remove_by_entity_manager_key::<T>(&key);
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn with_entity_manager_db<F, T>(
     entity_manager: &Arc<EntityManager>,
     future: F,
 ) -> Result<T>

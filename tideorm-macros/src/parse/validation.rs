@@ -5,17 +5,22 @@ use syn::{Expr, ExprLit, Lit, Meta, Token, UnOp};
 
 /// Rule names accepted inside `#[validate(..)]`, reported in diagnostics.
 const SUPPORTED_RULES: &str = "required, email, url, alpha, alphanumeric, numeric, uuid, \
-     min_length, max_length, length, min, max, range, regex, custom";
+     min_length, max_length, length, min, max, range, regex";
 
-pub(crate) fn parse_validation_attributes(
-    field_name: &str,
-    field: &ModelField,
-) -> syn::Result<Vec<TokenStream2>> {
+pub(crate) fn parse_validation_attributes(field: &ModelField) -> syn::Result<Vec<TokenStream2>> {
     let mut rules = Vec::new();
 
     for attr in &field.attrs {
         if !attr.path().is_ident("validate") {
             continue;
+        }
+
+        if field.relation_kind().is_some() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "#[validate(..)] does not apply to a relation field; declare the rules on the \
+                 related model's fields",
+            ));
         }
 
         if !matches!(&attr.meta, Meta::List(_)) {
@@ -27,14 +32,13 @@ pub(crate) fn parse_validation_attributes(
             ));
         }
 
-        attr.parse_nested_meta(|meta| parse_rule(field_name, field, &meta, &mut rules))?;
+        attr.parse_nested_meta(|meta| parse_rule(field, &meta, &mut rules))?;
     }
 
     Ok(rules)
 }
 
 fn parse_rule(
-    field_name: &str,
     field: &ModelField,
     meta: &ParseNestedMeta,
     rules: &mut Vec<TokenStream2>,
@@ -46,7 +50,7 @@ fn parse_rule(
         )
     })?;
     let rule = unraw_ident(&rule_ident);
-    ensure_validation_compatibility(field_name, field, &rule_ident, &rule)?;
+    ensure_validation_compatibility(field, &rule_ident, &rule)?;
 
     let tokens = match rule.as_str() {
         "required" => {
@@ -105,9 +109,15 @@ fn parse_rule(
             let pattern = parse_string_rule(meta, &rule_ident)?;
             quote!(::tideorm::validation::ValidationRule::Regex(#pattern.to_string()))
         }
+        // A field rule cannot run model code, so `custom` used to compile to a
+        // marker nothing evaluated and silently accepted every value.
         "custom" => {
-            let message = parse_string_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Custom(#message.to_string()))
+            return Err(syn::Error::new_spanned(
+                &rule_ident,
+                "`#[validate(custom = ..)]` is not supported: implement \
+                 `tideorm::Callbacks::after_validation` (or `before_validation`) on the model \
+                 and return `Err(tideorm::Error::validation(field, message))` from it",
+            ));
         }
         unknown => {
             return Err(syn::Error::new_spanned(
@@ -122,7 +132,6 @@ fn parse_rule(
 }
 
 fn ensure_validation_compatibility(
-    field_name: &str,
     field: &ModelField,
     rule_ident: &Ident,
     rule: &str,
@@ -167,8 +176,8 @@ fn ensure_validation_compatibility(
         format!(
             "validation rule '{}' is incompatible with field '{}' of type '{}'; expected {}",
             rule,
-            field_name,
-            field.validation_base_type(),
+            field.name(),
+            type_string(field.validation_base_type()),
             expected
         ),
     ))
@@ -241,7 +250,9 @@ fn parse_f64_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<f64
     expr_to_f64(value).ok_or_else(|| {
         syn::Error::new_spanned(
             value,
-            format!("validation rule '{rule_ident}' expects a number, e.g. `{rule_ident} = 18`"),
+            format!(
+                "validation rule '{rule_ident}' expects a finite number, e.g. `{rule_ident} = 18`"
+            ),
         )
     })
 }
@@ -273,8 +284,19 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
 
     let value = single_value(&values, rule_ident)?;
 
-    // `range(min..max)`
+    // `range(min..=max)`. The rule includes its upper bound, which `min..max`
+    // leaves out in Rust, so that spelling is refused rather than read as
+    // including it.
     if let Expr::Range(range) = value {
+        if matches!(range.limits, syn::RangeLimits::HalfOpen(_)) {
+            return Err(syn::Error::new_spanned(
+                value,
+                format!(
+                    "validation rule '{rule_ident}' includes its upper bound; write \
+                     `{rule_ident}(min..=max)` or `{rule_ident}(min, max)`"
+                ),
+            ));
+        }
         let min = range.start.as_deref().and_then(expr_to_f64);
         let max = range.end.as_deref().and_then(expr_to_f64);
         return match (min, max) {
@@ -293,8 +315,17 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
 
 fn parse_range_text(text: &str) -> Option<(f64, f64)> {
     let (min, max) = text.split_once("..")?;
-    let min = min.trim().parse::<f64>().ok()?;
-    let max = max.trim().parse::<f64>().ok()?;
+    let max = max.strip_prefix('=').unwrap_or(max);
+    let min = min
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|min| min.is_finite())?;
+    let max = max
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|max| max.is_finite())?;
     Some((min, max))
 }
 
@@ -302,7 +333,7 @@ fn range_error(value: &Expr, rule_ident: &Ident) -> syn::Error {
     syn::Error::new_spanned(
         value,
         format!(
-            "validation rule '{rule_ident}' expects `{rule_ident} = \"min..max\"` or `{rule_ident}(min, max)`"
+            "validation rule '{rule_ident}' expects `{rule_ident} = \"min..max\"` or `{rule_ident}(min, max)` with finite bounds"
         ),
     )
 }
@@ -341,7 +372,9 @@ fn expr_to_f64(expr: &Expr) -> Option<f64> {
         _ => return None,
     };
 
-    Some(if negated { -value } else { value })
+    // A non-finite bound has no literal to emit, and every value fails
+    // `min = inf` or passes `max = inf`.
+    Some(if negated { -value } else { value }).filter(|value| value.is_finite())
 }
 
 fn expr_to_string(expr: &Expr) -> Option<String> {

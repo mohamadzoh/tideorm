@@ -33,7 +33,7 @@ fn init_test_env() {
 }
 
 #[path = "tokenization_tests/unit_tests.rs"]
-mod unit_test_cases;
+mod codec_test_cases;
 
 #[path = "tokenization_tests/tokenizable_trait_tests.rs"]
 mod tokenizable_trait_test_cases;
