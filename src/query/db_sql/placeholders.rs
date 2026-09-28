@@ -353,7 +353,7 @@ pub(crate) fn render_template(db_type: DatabaseType, template: &str, first: usiz
 fn dollar_quoted_len(text: &str) -> Option<usize> {
     let tag_body = text[1..]
         .find(|ch: char| !(ch == '_' || ch.is_alphanumeric()))
-        .map_or(text.len() - 1, |end| end);
+        .unwrap_or(text.len() - 1);
     let tag_end = 1 + tag_body;
     if !text[tag_end..].starts_with('$') || text[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
         return None;
