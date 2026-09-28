@@ -3,14 +3,13 @@
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::model::Model;
+use crate::relations::{HasMany, HasManyThrough, HasOne};
 
 use super::{EntityManager, TideEntityManagerMergePersisted, TideEntityManagerSync};
 
@@ -50,7 +49,8 @@ where
 }
 
 thread_local! {
-    static ENTITY_MANAGER_TRANSACTION_SCOPE: Cell<bool> = const { Cell::new(false) };
+    /// The manager whose unit of work is running here, by address; `0` for none.
+    static ENTITY_MANAGER_TRANSACTION_SCOPE: Cell<usize> = const { Cell::new(0) };
     static ENTITY_MANAGER_IDENTITY_ROLLBACK: RefCell<Option<Arc<Mutex<IdentityRollbackLog>>>> = const { RefCell::new(None) };
 }
 
@@ -62,8 +62,17 @@ fn current_identity_rollback_log() -> Option<Arc<Mutex<IdentityRollbackLog>>> {
     ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| log.borrow().clone())
 }
 
-pub(super) fn in_entity_manager_transaction_scope() -> bool {
-    ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.get())
+/// The scope identity of `entity_manager`.
+fn scope_owner(entity_manager: &EntityManager) -> usize {
+    std::ptr::from_ref(entity_manager) as usize
+}
+
+/// Whether `entity_manager`'s own unit of work is running here. Another
+/// manager's does not count: joining it would run this manager's statements
+/// in that transaction, on that manager's database, without this one's
+/// rollback checkpoints.
+pub(super) fn in_entity_manager_transaction_scope(entity_manager: &EntityManager) -> bool {
+    ENTITY_MANAGER_TRANSACTION_SCOPE.with(|owner| owner.get()) == scope_owner(entity_manager)
 }
 
 /// Restores the transaction-scope thread-locals when the guard is dropped.
@@ -71,11 +80,11 @@ pub(super) fn in_entity_manager_transaction_scope() -> bool {
 /// The restore has to happen in `Drop` rather than in plain statements after
 /// `poll`: a panic inside the wrapped future unwinds straight past those
 /// statements and would leave `ENTITY_MANAGER_TRANSACTION_SCOPE` stuck at
-/// `true` on that worker thread forever, so every later flush/save polled there
+/// set on that worker thread forever, so every later flush/save polled there
 /// would take the "already in scope" path and run with no transaction at all.
 struct ResetEntityManagerTransactionScope {
-    /// Scope flag observed before the scope was installed.
-    scope: bool,
+    /// Scope owner observed before the scope was installed.
+    scope: usize,
     /// Identity rollback log observed before the scope was installed.
     log: Option<Arc<Mutex<IdentityRollbackLog>>>,
 }
@@ -90,42 +99,26 @@ impl Drop for ResetEntityManagerTransactionScope {
 }
 
 fn install_entity_manager_transaction_scope(
+    owner: usize,
     rollback_log: &Arc<Mutex<IdentityRollbackLog>>,
 ) -> ResetEntityManagerTransactionScope {
-    let scope = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.replace(true));
+    let scope = ENTITY_MANAGER_TRANSACTION_SCOPE.with(|active| active.replace(owner));
     let log = ENTITY_MANAGER_IDENTITY_ROLLBACK.with(|log| log.replace(Some(rollback_log.clone())));
     ResetEntityManagerTransactionScope { scope, log }
 }
 
 pub(super) fn with_entity_manager_transaction_scope<F>(
+    entity_manager: &EntityManager,
     rollback_log: Arc<Mutex<IdentityRollbackLog>>,
     future: F,
-) -> impl std::future::Future<Output = F::Output>
+) -> impl std::future::Future<Output = F::Output> + use<F>
 where
     F: std::future::Future,
 {
-    struct ScopedEntityManagerTransactionFuture<F> {
-        future: Pin<Box<F>>,
-        rollback_log: Arc<Mutex<IdentityRollbackLog>>,
-    }
-
-    impl<F> std::future::Future for ScopedEntityManagerTransactionFuture<F>
-    where
-        F: std::future::Future,
-    {
-        type Output = F::Output;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-            let _guard = install_entity_manager_transaction_scope(&this.rollback_log);
-            this.future.as_mut().poll(cx)
-        }
-    }
-
-    ScopedEntityManagerTransactionFuture {
-        future: Box::pin(future),
-        rollback_log,
-    }
+    let owner = scope_owner(entity_manager);
+    crate::internal::per_poll(future, move || {
+        install_entity_manager_transaction_scope(owner, &rollback_log)
+    })
 }
 
 pub(super) fn record_identity_map_rollback<T>(
@@ -134,7 +127,7 @@ pub(super) fn record_identity_map_rollback<T>(
 ) where
     T: Clone + Send + Sync + 'static,
 {
-    if !in_entity_manager_transaction_scope() {
+    if !in_entity_manager_transaction_scope(entity_manager) {
         return;
     }
 
@@ -283,38 +276,58 @@ fn restore_entity_manager_state(
     rollback_entity_manager_state(entity_manager, checkpoints, state, identity_rollback);
 }
 
-pub async fn save_with_entity_manager<T>(
+pub(super) async fn save_with_entity_manager<T>(
     entity: &T,
     entity_manager: &Arc<EntityManager>,
 ) -> Result<T>
 where
     T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
-    if in_entity_manager_transaction_scope() {
+    if in_entity_manager_transaction_scope(entity_manager) {
         return save_in_scope(entity, entity_manager).await;
     }
 
-    let rollback = PendingRollback::new(
-        entity_manager,
-        capture_managed_checkpoints(entity_manager.as_ref()),
-    );
-    let db = entity_manager.db.clone();
-    let entity_manager_for_txn = entity_manager.clone();
-    let identity_rollback_for_txn = rollback.identity_rollback();
+    let entity_manager_for_work = entity_manager.clone();
     let entity = entity.clone();
-    let saved = db
+    in_unit_of_work(
+        entity_manager,
+        || capture_managed_checkpoints(entity_manager.as_ref()),
+        move |_| async move { save_in_scope(&entity, &entity_manager_for_work).await },
+    )
+    .await
+}
+
+/// Run `work` as a unit of work of `entity_manager`: after any the manager is
+/// running already, in one transaction, with the context put back if that
+/// does not commit. `checkpoints` captures the managed entries to restore, once
+/// the manager is this unit's; `work` adds to them through the handle it is
+/// given.
+pub(super) async fn in_unit_of_work<T, Fut>(
+    entity_manager: &Arc<EntityManager>,
+    checkpoints: impl FnOnce() -> ManagedCheckpoints,
+    work: impl FnOnce(Arc<Mutex<ManagedCheckpoints>>) -> Fut + Send + 'static,
+) -> Result<T>
+where
+    Fut: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let _running = entity_manager.unit_of_work.lock().await;
+    let rollback = PendingRollback::new(entity_manager, checkpoints());
+    let transaction_checkpoints = rollback.checkpoints();
+    let identity_rollback = rollback.identity_rollback();
+    let owner = entity_manager.clone();
+    let result = entity_manager
+        .db
         .transaction(move |_| {
-            Box::pin(async move {
-                with_entity_manager_transaction_scope(
-                    identity_rollback_for_txn,
-                    save_in_scope(&entity, &entity_manager_for_txn),
-                )
-                .await
-            })
+            Box::pin(with_entity_manager_transaction_scope(
+                owner.as_ref(),
+                identity_rollback,
+                work(transaction_checkpoints),
+            ))
         })
         .await?;
     rollback.committed();
-    Ok(saved)
+    Ok(result)
 }
 
 /// Save `entity` and sync its loaded relations inside the unit of work the caller
@@ -330,11 +343,7 @@ where
     )
     .await?;
     aggregate.tide_merge_persisted(persisted);
-    <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
-    aggregate
-        .tide_sync_entity_manager_relations(entity_manager)
-        .await?;
-    entity_manager.put(aggregate.clone());
+    let aggregate = sync_aggregate(aggregate, entity, entity_manager).await?;
     // A managed handle to the same row now loaded older values; one flushed
     // later would write them back over what was just stored.
     if let Some(managed) = entity_manager.get_managed_by_key::<T>(&aggregate.tide_pk_key()) {
@@ -350,7 +359,19 @@ pub(crate) async fn sync_entity_manager_relations_only_impl<T>(
 where
     T: TideEntityManagerMergePersisted + TideEntityManagerSync,
 {
-    let mut aggregate = entity.clone();
+    sync_aggregate(entity.clone(), entity, entity_manager).await
+}
+
+/// `aggregate`, `entity` as written, with its relation wrappers rebuilt from
+/// `entity`'s and its loaded relations synced, filed in the identity map.
+async fn sync_aggregate<T>(
+    mut aggregate: T,
+    entity: &T,
+    entity_manager: &Arc<EntityManager>,
+) -> Result<T>
+where
+    T: TideEntityManagerMergePersisted + TideEntityManagerSync,
+{
     <T as crate::internal::InternalModel>::refresh_runtime_relations_from(&mut aggregate, entity);
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
@@ -395,8 +416,7 @@ where
 
     let saved = save_in_scope(entity, entity_manager).await?;
     let saved_key = super::meta::model_entity_manager_key(&saved)?;
-    *entity = saved.clone();
-    entity_manager.put(saved);
+    *entity = saved;
     Ok(saved_key)
 }
 
@@ -430,9 +450,170 @@ pub(crate) async fn with_entity_manager_db<F, T>(
 where
     F: std::future::Future<Output = Result<T>>,
 {
-    if in_entity_manager_transaction_scope() {
+    if in_entity_manager_transaction_scope(entity_manager) {
         return future.await;
     }
 
     crate::database::__in_db_scope(entity_manager.db.as_ref(), future).await
+}
+
+/// The owner an aggregate's relation belongs to, for the relation syncs a
+/// generated `tide_sync_entity_manager_relations` runs.
+#[doc(hidden)]
+pub struct __SyncOwner<'a> {
+    pub entity_manager: &'a Arc<EntityManager>,
+    pub table: &'static str,
+    pub key: &'a str,
+}
+
+/// Sync the children a loaded `has_many` or `has_one` holds: delete the
+/// ones it no longer holds (first, as a unique foreign key refuses the new
+/// row beside the old), point every child at the owner and save it, then
+/// record what the relation holds now.
+async fn sync_owned_children<R>(
+    owner: &__SyncOwner<'_>,
+    relation: &'static str,
+    children: Vec<&mut R>,
+    foreign_key: &str,
+    owner_value: serde_json::Value,
+) -> Result<()>
+where
+    R: Model + TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
+{
+    let current_keys = children
+        .iter()
+        .filter_map(|child| super::meta::model_entity_manager_key(&**child).transpose())
+        .collect::<Result<Vec<String>>>()?;
+    __delete_detached_entities::<R>(
+        owner.entity_manager,
+        owner.table,
+        owner.key,
+        relation,
+        &current_keys,
+    )
+    .await?;
+
+    let mut updated_keys = Vec::with_capacity(children.len());
+    for child in children {
+        if !child.set_field_json(foreign_key, owner_value.clone())? {
+            return Err(crate::Error::query(format!(
+                "{} has no field '{}' to hold its owner's key",
+                R::table_name(),
+                foreign_key
+            )));
+        }
+        updated_keys.extend(__sync_related_entity(child, owner.entity_manager).await?);
+    }
+    owner
+        .entity_manager
+        .snapshot::<R>(owner.table, owner.key, relation, &updated_keys);
+    Ok(())
+}
+
+/// Sync a `has_many` relation of an aggregate, if it is loaded.
+#[doc(hidden)]
+pub async fn __sync_has_many<R>(
+    owner: &__SyncOwner<'_>,
+    relation: &mut HasMany<R>,
+    owner_value: serde_json::Value,
+) -> Result<()>
+where
+    R: Model + TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
+{
+    if !relation.is_loaded() {
+        return Ok(());
+    }
+    let (name, foreign_key) = (relation.relation_name, relation.foreign_key);
+    let children = relation
+        .as_mut()
+        .map(|items| items.iter_mut().collect())
+        .unwrap_or_default();
+    sync_owned_children(owner, name, children, foreign_key, owner_value).await
+}
+
+/// Sync a `has_one` relation of an aggregate, if it is loaded.
+#[doc(hidden)]
+pub async fn __sync_has_one<R>(
+    owner: &__SyncOwner<'_>,
+    relation: &mut HasOne<R>,
+    owner_value: serde_json::Value,
+) -> Result<()>
+where
+    R: Model + TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
+{
+    if !relation.is_loaded() {
+        return Ok(());
+    }
+    let (name, foreign_key) = (relation.relation_name, relation.foreign_key);
+    let children = relation.as_mut().into_iter().collect();
+    sync_owned_children(owner, name, children, foreign_key, owner_value).await
+}
+
+/// Sync a loaded `has_many_through` relation of an aggregate: save every
+/// related model, then detach the ones it no longer holds and attach the new
+/// ones through the pivot.
+#[doc(hidden)]
+pub async fn __sync_has_many_through<R, P>(
+    owner: &__SyncOwner<'_>,
+    relation: &mut HasManyThrough<R, P>,
+) -> Result<()>
+where
+    R: Model + TideEntityManagerMergePersisted + TideEntityManagerSync,
+    <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+        PartialEq,
+    P: Model,
+{
+    if !relation.is_loaded() {
+        return Ok(());
+    }
+    let name = relation.relation_name;
+    let related_key = relation.related_local_key;
+    let related_value = |model: &R| {
+        model.field_json_value(related_key)?.ok_or_else(|| {
+            crate::Error::query(format!(
+                "{} relation '{}' could not read related key '{}' from saved model",
+                owner.table, name, related_key
+            ))
+        })
+    };
+
+    let mut updated_keys = Vec::new();
+    let mut related_values = HashMap::<String, serde_json::Value>::new();
+    if let Some(items) = relation.as_mut() {
+        updated_keys.reserve(items.len());
+        for item in items.iter_mut() {
+            let key = __sync_related_entity(item, owner.entity_manager)
+                .await?
+                .ok_or_else(|| {
+                    crate::Error::query(format!(
+                        "{} relation '{}' requires persisted related keys after save",
+                        owner.table, name
+                    ))
+                })?;
+            related_values.insert(key.clone(), related_value(item)?);
+            updated_keys.push(key);
+        }
+    }
+
+    let entity_manager = owner.entity_manager;
+    for key in entity_manager.deletions::<R>(owner.table, owner.key, name, &updated_keys) {
+        if let Some(deleted) = entity_manager.get_by_entity_manager_key::<R>(&key)
+            && let Some(value) = deleted.field_json_value(related_key)?
+        {
+            relation.detach(value).await?;
+        }
+    }
+    for key in entity_manager.additions::<R>(owner.table, owner.key, name, &updated_keys) {
+        if let Some(value) = related_values.get(&key) {
+            relation.attach(value.clone()).await?;
+        }
+    }
+    entity_manager.snapshot::<R>(owner.table, owner.key, name, &updated_keys);
+    Ok(())
 }

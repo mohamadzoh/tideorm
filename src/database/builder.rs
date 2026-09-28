@@ -106,6 +106,16 @@ impl DatabaseBuilder {
         self
     }
 
+    /// Take every pool setting from `TideConfig`'s, defaults included.
+    pub(crate) fn pool(self, pool: &crate::config::PoolConfig) -> Self {
+        self.max_connections(pool.max_connections)
+            .min_connections(pool.min_connections)
+            .connect_timeout(pool.connect_timeout)
+            .idle_timeout(pool.idle_timeout)
+            .max_lifetime(pool.max_lifetime)
+            .acquire_timeout(pool.acquire_timeout)
+    }
+
     /// Connect using the configured URL and pool settings.
     ///
     /// Returns a configuration error if no URL was provided.

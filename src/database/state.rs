@@ -2,10 +2,8 @@ use parking_lot::{Mutex, RwLock};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Weak;
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
 
 use crate::cache::{PendingInvalidations, install_pending_invalidations};
 use crate::error::{Error, Result};
@@ -56,7 +54,7 @@ pub(super) fn global_connection() -> Result<ConnectionRef> {
 pub fn db() -> &'static Database {
     let db = global_db_handle();
     if !db.is_connected() {
-        panic!("{NOT_INITIALIZED} Use try_db() for a non-panicking alternative.");
+        panic!("{NOT_INITIALIZED} Use require_db() for a non-panicking alternative.");
     }
     db
 }
@@ -64,11 +62,6 @@ pub fn db() -> &'static Database {
 /// Get the global database handle, returning an error if not initialized.
 pub fn require_db() -> Result<Database> {
     global_connection().map(Database::from_handle)
-}
-
-/// Try to get the global database handle.
-pub fn try_db() -> Option<Database> {
-    require_db().ok()
 }
 
 /// Check whether a global database connection has been initialized.
@@ -147,52 +140,12 @@ pub(crate) fn with_connection_override<F>(
 where
     F: Future,
 {
-    struct ScopedOverrideFuture<F> {
-        connection: Option<ConnectionRef>,
-        origin: Option<u64>,
-        pending: Option<Arc<Mutex<PendingInvalidations>>>,
-        future: Pin<Box<F>>,
-    }
-
-    impl<F> Future for ScopedOverrideFuture<F>
-    where
-        F: Future,
-    {
-        type Output = F::Output;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-            let result = match this.connection.as_ref() {
-                Some(connection) => {
-                    let guard = install_db_override(connection, this.origin);
-                    let pending = this.pending.as_ref().map(install_pending_invalidations);
-                    let result = this.future.as_mut().poll(cx);
-                    drop(pending);
-                    drop(guard);
-                    result
-                }
-                None => this.future.as_mut().poll(cx),
-            };
-            // Release the scoped connection as soon as the wrapped future
-            // completes — while we are still being polled inside the async
-            // runtime — instead of retaining it until this wrapper future is
-            // dropped. The wrapper may be dropped outside any runtime context
-            // (e.g. after a cross-thread move), and dropping a pooled database
-            // connection there panics with "requires a Tokio context".
-            if result.is_ready() {
-                this.connection = None;
-                this.pending = None;
-            }
-            result
-        }
-    }
-
-    ScopedOverrideFuture {
-        origin,
-        connection: Some(connection),
-        pending,
-        future: Box::pin(future),
-    }
+    crate::internal::per_poll(future, move || {
+        let guard = install_db_override(&connection, origin);
+        let pending = pending.as_ref().map(install_pending_invalidations);
+        // A tuple drops its fields in order: the invalidations first.
+        (pending, guard)
+    })
 }
 
 /// The process-wide identities handed out by [`connection_identity`].

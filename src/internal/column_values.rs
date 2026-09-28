@@ -13,20 +13,13 @@ use rust_decimal::Decimal;
 
 use super::{Value, json_to_db_value};
 use crate::model::Model;
-use crate::orm::{ColumnTrait, ColumnType, EntityTrait, IdenStatic, Iterable};
+use crate::orm::{ColumnTrait, ColumnType};
 
 /// The ORM column type of `column` when it names one of `M`'s own columns,
 /// given as the field or column name, optionally qualified with `M`'s table.
 pub(crate) fn column_type_of<M: Model>(column: &str) -> Option<ColumnType> {
-    let name = match column.split_once('.') {
-        Some((table, name)) if table == M::table_name() => name,
-        Some(_) => return None,
-        None => column,
-    };
-    let name = M::canonical_column_name(name)?;
-    <<M as crate::internal::InternalModel>::Entity as EntityTrait>::Column::iter()
-        .find(|candidate| candidate.as_str() == name)
-        .map(|candidate| candidate.def().get_column_type().clone())
+    let column = M::column_from_str(M::own_column_name(column)?)?;
+    Some(column.def().get_column_type().clone())
 }
 
 /// [`column_type_of`] for the model registration a generated model submits.
@@ -155,7 +148,8 @@ fn typed_null(column_type: &ColumnType) -> Value {
     }
 }
 
-fn is_integer(column_type: &ColumnType) -> bool {
+/// Whether `column_type` holds integers, signed or not.
+pub(crate) fn is_integer(column_type: &ColumnType) -> bool {
     matches!(
         column_type,
         ColumnType::TinyInteger

@@ -314,15 +314,25 @@ impl DbFailure {
     }
 }
 
-impl fmt::Display for DbFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.kind)?;
+impl DbFailure {
+    /// The SQLSTATE and constraint the driver reported, for appending to a
+    /// description; empty when it exposed neither, the normal case on backends
+    /// that only report a message.
+    pub(crate) fn detail(&self) -> String {
+        let mut detail = String::new();
         if let Some(ref code) = self.code {
-            write!(f, " (SQLSTATE {})", code)?;
+            detail.push_str(&format!(" (SQLSTATE {code})"));
         }
         if let Some(ref constraint) = self.constraint {
-            write!(f, " on constraint `{}`", constraint)?;
+            detail.push_str(&format!(" on constraint `{constraint}`"));
         }
+        detail
+    }
+}
+
+impl fmt::Display for DbFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.kind, self.detail())?;
         if let Some(ref table) = self.table {
             write!(f, " in table `{}`", table)?;
         }
@@ -502,15 +512,6 @@ impl Error {
         }
     }
 
-    /// Construct a query error and attach rendered SQL context.
-    pub fn query_with_context(message: impl Into<String>, context: ErrorContext) -> Self {
-        Self::Query {
-            message: message.into(),
-            context: Some(Box::new(context)),
-            source: None,
-        }
-    }
-
     /// Construct a validation error for one field.
     pub fn validation(field: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Validation {
@@ -591,11 +592,6 @@ impl Error {
         Self::InvalidToken {
             message: message.into(),
         }
-    }
-
-    /// Construct a query-builder misuse error before any SQL runs.
-    pub fn invalid_query(message: impl Into<String>) -> Self {
-        Self::query(message)
     }
 
     /// Return attached context for `NotFound` and `Query` errors.

@@ -1739,9 +1739,7 @@ async fn scopes_and_conditional_filters() {
         q.where_gte("age", 27)
     }
 
-    let users = TestUser::query()
-        .scope(active_scope)
-        .scope(adult_scope)
+    let users = adult_scope(active_scope(TestUser::query()))
         .order_by("age", Order::Asc)
         .get()
         .await
@@ -1828,6 +1826,54 @@ where
         .create_table(name, build)
         .await
         .expect("failed to create scenario table");
+}
+
+/// The `eager_owners` and `eager_pets` tables, empty.
+async fn fresh_eager_tables() {
+    fresh_table("eager_owners", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+    fresh_table("eager_pets", |t| {
+        t.id();
+        t.integer("owner_id").not_null();
+        t.string("name").not_null();
+    })
+    .await;
+}
+
+/// The `linked_articles` and `linked_labels` tables, empty; each scenario
+/// declares its own pivot table.
+async fn fresh_linked_tables() {
+    fresh_table("linked_articles", |t| {
+        t.id();
+        t.string("title").not_null();
+    })
+    .await;
+    fresh_table("linked_labels", |t| {
+        t.id();
+        t.string("name").not_null();
+    })
+    .await;
+}
+
+/// The `tagged_rows` table, empty.
+async fn fresh_tagged_rows() {
+    fresh_table("tagged_rows", |t| {
+        t.id();
+        t.json("tags").not_null();
+    })
+    .await;
+}
+
+/// The `plain_json_docs` table, empty.
+async fn fresh_plain_json_docs() {
+    fresh_table("plain_json_docs", |t| {
+        t.id();
+        t.json("body").not_null();
+    })
+    .await;
 }
 
 #[tideorm::model(table = "typed_value_rows")]
@@ -2542,11 +2588,7 @@ async fn equality_filters_compare_json_documents() {
     if !setup().await {
         return;
     }
-    fresh_table("plain_json_docs", |t| {
-        t.id();
-        t.json("body").not_null();
-    })
-    .await;
+    fresh_plain_json_docs().await;
     for body in [json!({"a": 1, "b": [1, 2]}), json!({"a": 2}), json!([1, 2])] {
         PlainJsonDoc { id: 0, body }
             .save()
@@ -2615,11 +2657,7 @@ async fn json_operators_work_on_a_plain_json_column() {
         return;
     }
 
-    fresh_table("plain_json_docs", |t| {
-        t.id();
-        t.json("body").not_null();
-    })
-    .await;
+    fresh_plain_json_docs().await;
     for body in [
         json!({"a": 1}),
         json!({"a": 1, "b": 2}),
@@ -2970,16 +3008,7 @@ async fn attach_stores_one_pivot_row_even_when_calls_race() {
         return;
     }
 
-    fresh_table("linked_articles", |t| {
-        t.id();
-        t.string("title").not_null();
-    })
-    .await;
-    fresh_table("linked_labels", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_linked_tables().await;
     fresh_table("linked_article_labels", |t| {
         t.id();
         t.big_integer("article_id").not_null();
@@ -3062,16 +3091,7 @@ async fn attach_fails_when_another_unique_key_refuses_the_pair() {
     if !setup().await {
         return;
     }
-    fresh_table("linked_articles", |t| {
-        t.id();
-        t.string("title").not_null();
-    })
-    .await;
-    fresh_table("linked_labels", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_linked_tables().await;
     fresh_table("linked_article_labels", |t| {
         t.id();
         t.big_integer("article_id").not_null();
@@ -4099,11 +4119,7 @@ async fn array_append_and_remove_keep_the_rest_of_a_json_array() {
         return;
     }
 
-    fresh_table("tagged_rows", |t| {
-        t.id();
-        t.json("tags").not_null();
-    })
-    .await;
+    fresh_tagged_rows().await;
     for tags in [json!(["a", 1, true, null, "b", "a", "1"]), json!(["keep"])] {
         TaggedRow { id: 0, tags }.save().await.expect("save failed");
     }
@@ -4151,11 +4167,7 @@ async fn array_remove_compares_elements_as_json_values() {
         return;
     }
 
-    fresh_table("tagged_rows", |t| {
-        t.id();
-        t.json("tags").not_null();
-    })
-    .await;
+    fresh_tagged_rows().await;
     // Written as text, so the stored object keeps its keys in this order.
     Database::execute(
         r#"INSERT INTO tagged_rows (tags) VALUES ('[{"b": 2, "a": 1}, {"a": 1}, [1, 2], [2, 1], [1, 2, 2], [[1, 2]], 1.0, 1, "1"]')"#,
@@ -4195,11 +4207,7 @@ async fn array_filters_compare_elements_with_their_json_type() {
         return;
     }
 
-    fresh_table("tagged_rows", |t| {
-        t.id();
-        t.json("tags").not_null();
-    })
-    .await;
+    fresh_tagged_rows().await;
     for tags in [
         json!([1]),
         json!([true]),
@@ -4263,7 +4271,8 @@ async fn multiply_and_divide_scale_an_integer_column_exactly() {
     .await;
 
     let past_f64 = 9_007_199_254_740_993_i64;
-    let cases: [(i64, bool, f64, i64); 7] = [
+    // The last three overflow an `i64` if multiplied before they are divided.
+    let cases: [(i64, bool, f64, i64); 10] = [
         (past_f64, false, 1.0, past_f64),
         (past_f64, true, 1.0, past_f64),
         (past_f64, false, 2.0, 18_014_398_509_481_986),
@@ -4271,6 +4280,24 @@ async fn multiply_and_divide_scale_an_integer_column_exactly() {
         (-5, true, 2.0, -3),
         (7, false, 1.5, 11),
         (7, true, 2.5, 3),
+        (
+            4_000_000_000_000_000_001,
+            false,
+            1.5,
+            6_000_000_000_000_000_002,
+        ),
+        (
+            -4_000_000_000_000_000_001,
+            false,
+            1.5,
+            -6_000_000_000_000_000_002,
+        ),
+        (
+            9_000_000_000_000_000_001,
+            true,
+            1.5,
+            6_000_000_000_000_000_001,
+        ),
     ];
     for (start, divide, factor, expected) in cases {
         let row = ScaledAmount {
@@ -4574,8 +4601,8 @@ async fn eager_loads_match_keys_under_the_columns_collation() {
     .expect("saving an item failed");
 
     let eager = CasedOwner::query()
-        .with("items")
         .order_by("code", Order::Asc)
+        .with("items")
         .get()
         .await
         .expect("eager load failed");
@@ -4607,17 +4634,7 @@ async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
     if !setup().await {
         return;
     }
-    fresh_table("eager_owners", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
-    fresh_table("eager_pets", |t| {
-        t.id();
-        t.integer("owner_id").not_null();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_eager_tables().await;
     let mut owners = Vec::new();
     for name in ["ada", "bob"] {
         owners.push(
@@ -4640,8 +4657,8 @@ async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
     }
 
     let loaded = EagerOwner::query()
-        .with("pets")
         .order_by("id", Order::Asc)
+        .with("pets")
         .get()
         .await
         .expect("eager load failed");
@@ -4652,8 +4669,8 @@ async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
     assert_eq!(counts, [2, 1]);
 
     let pets = EagerPet::query()
-        .with("owner")
         .order_by("id", Order::Asc)
+        .with("owner")
         .get()
         .await
         .expect("eager load failed");
@@ -4734,16 +4751,7 @@ async fn eager_loads_match_keys_by_value_and_morph_owners_by_their_key() {
         .expect("the owner is missing");
     assert_eq!(owner.code, "doc-a");
 
-    fresh_table("linked_articles", |t| {
-        t.id();
-        t.string("title").not_null();
-    })
-    .await;
-    fresh_table("linked_labels", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_linked_tables().await;
     fresh_table("linked_article_labels", |t| {
         t.id();
         t.big_integer("article_id").not_null();
@@ -5888,17 +5896,7 @@ async fn save_with_many_updates_stored_children() {
     if !setup().await {
         return;
     }
-    fresh_table("eager_owners", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
-    fresh_table("eager_pets", |t| {
-        t.id();
-        t.integer("owner_id").not_null();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_eager_tables().await;
     let owner = EagerOwner::create(EagerOwner {
         name: "o".into(),
         ..Default::default()
@@ -6131,17 +6129,7 @@ async fn query_with_reads_eager_relations_from_its_database() {
     ] {
         tenant.exec_raw(sql).await.expect("tenant setup failed");
     }
-    fresh_table("eager_owners", |t| {
-        t.id();
-        t.string("name").not_null();
-    })
-    .await;
-    fresh_table("eager_pets", |t| {
-        t.id();
-        t.integer("owner_id").not_null();
-        t.string("name").not_null();
-    })
-    .await;
+    fresh_eager_tables().await;
     let owner = EagerOwner::create(EagerOwner {
         name: "global".into(),
         ..Default::default()
@@ -6169,4 +6157,353 @@ async fn query_with_reads_eager_relations_from_its_database() {
         .map(|pet| pet.name.clone())
         .collect();
     assert_eq!(pets, vec!["tenant pet".to_string()]);
+}
+
+/// A `get_json()` output is typed by where it comes from: an expression
+/// named like a model field is read as what it is, and a model column under
+/// an alias by the column's type. `COUNT(*) AS active` came back `true` on
+/// SQLite, read as the model's boolean `active`.
+#[tokio::test]
+async fn projected_outputs_are_typed_by_their_source_not_their_name() {
+    if !setup().await {
+        return;
+    }
+    seed_users(3).await;
+
+    let counted = TestUser::query()
+        .select_raw("COUNT(*) AS active")
+        .get_json()
+        .await
+        .expect("count failed");
+    assert_eq!(counted, vec![json!({ "active": 3 })]);
+
+    let aliased = TestUser::query()
+        .select(vec!["active AS enabled"])
+        .where_eq("id", 2)
+        .get_json()
+        .await
+        .expect("read failed");
+    assert_eq!(aliased, vec![json!({ "enabled": true })]);
+}
+
+#[tideorm::model(table = "optional_email_contacts")]
+pub struct OptionalEmailContact {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: Option<String>,
+    pub name: String,
+}
+
+/// An upsert on a unique column holding NULL inserts, since NULL matches no
+/// stored row, and returns the row it inserted. It read the row back by
+/// `email = NULL`, which finds none, and reported a failure after writing.
+#[tokio::test]
+async fn an_upsert_on_a_null_conflict_value_returns_the_row_it_inserted() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("optional_email_contacts", |t| {
+        t.id();
+        t.string("email").unique();
+        t.string("name").not_null();
+    })
+    .await;
+    let contact = |email: Option<&str>, name: &str| OptionalEmailContact {
+        id: 0,
+        email: email.map(str::to_string),
+        name: name.to_string(),
+    };
+
+    let first = OptionalEmailContact::insert_or_update(contact(None, "first"), vec!["email"])
+        .await
+        .expect("the first upsert failed");
+    let second = OptionalEmailContact::insert_or_update(contact(None, "second"), vec!["email"])
+        .await
+        .expect("the second upsert failed");
+    assert_ne!(first.id, second.id);
+    assert_eq!(
+        (first.name.as_str(), second.name.as_str()),
+        ("first", "second")
+    );
+    assert_eq!(
+        OptionalEmailContact::count().await.expect("count failed"),
+        2
+    );
+
+    // A value still finds its row.
+    let set =
+        OptionalEmailContact::insert_or_update(contact(Some("a@x.test"), "set"), vec!["email"])
+            .await
+            .expect("upsert failed");
+    let reset =
+        OptionalEmailContact::insert_or_update(contact(Some("a@x.test"), "reset"), vec!["email"])
+            .await
+            .expect("upsert failed");
+    assert_eq!((set.id, reset.name.as_str()), (reset.id, "reset"));
+}
+
+#[tideorm::model(table = "distinct_amounts")]
+pub struct DistinctAmount {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub amount: i64,
+}
+
+/// An aggregate over a `distinct()` or `union()` query reads a column by the
+/// name the projection gives it. `sum("amount")` over `amount AS total` read
+/// a column the derived table does not have, which SQLite took for the text
+/// `'amount'` and summed to 0.
+#[tokio::test]
+async fn aggregates_over_a_fixed_projection_read_its_aliases() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("distinct_amounts", |t| {
+        t.id();
+        t.big_integer("amount").not_null();
+    })
+    .await;
+    for amount in [10, 20, 20] {
+        DistinctAmount { id: 0, amount }
+            .save()
+            .await
+            .expect("save failed");
+    }
+    let totals = || {
+        DistinctAmount::query()
+            .select(vec!["amount AS total"])
+            .distinct()
+    };
+
+    let sum: i64 = totals().sum("amount").await.expect("sum failed");
+    assert_eq!(sum, 30);
+    let largest: Option<i64> = totals().max("amount").await.expect("max failed");
+    assert_eq!(largest, Some(20));
+
+    let error = totals()
+        .sum::<i64>("id")
+        .await
+        .expect_err("a column the projection leaves out is refused");
+    assert!(
+        error.to_string().contains("'id' is not one of them"),
+        "{error}"
+    );
+
+    let unioned: Vec<i64> = DistinctAmount::query()
+        .select(vec!["amount AS total"])
+        .where_eq("amount", 10)
+        .union(
+            DistinctAmount::query()
+                .select(vec!["amount AS total"])
+                .where_eq("amount", 20),
+        )
+        .order_by("amount", Order::Asc)
+        .pluck("amount")
+        .await
+        .expect("pluck failed");
+    assert_eq!(unioned, vec![10, 20]);
+}
+
+/// On PostgreSQL, MySQL and MariaDB the schema file keeps what makes rows
+/// valid: foreign keys, `CHECK` constraints, generated columns, a unique
+/// index's `INCLUDE` columns, and a text default that merely starts like
+/// `CURRENT_TIMESTAMP`. Restored from the file, the tables refuse what the
+/// originals refused.
+#[tokio::test]
+async fn write_schema_keeps_constraints_and_generated_columns() {
+    if !setup().await || backend::DATABASE_TYPE == DatabaseType::SQLite {
+        return;
+    }
+    let create = if backend::DATABASE_TYPE == DatabaseType::Postgres {
+        [
+            "CREATE TABLE exported_parents (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, \
+             label TEXT NOT NULL DEFAULT 'CURRENT_TIMESTAMP is text')",
+            "CREATE UNIQUE INDEX exported_parents_email ON exported_parents (email) \
+             INCLUDE (label)",
+            "CREATE TABLE exported_children (id BIGSERIAL PRIMARY KEY, \
+             parent_id BIGINT NOT NULL REFERENCES exported_parents (id) ON DELETE CASCADE, \
+             price NUMERIC(10,2) NOT NULL, quantity INTEGER NOT NULL, \
+             total NUMERIC GENERATED ALWAYS AS (price * quantity) STORED, \
+             status TEXT NOT NULL DEFAULT 'new', \
+             CONSTRAINT exported_children_quantity CHECK (quantity >= 0), \
+             CONSTRAINT exported_children_status CHECK (status IN ('new', 'done')))",
+        ]
+    } else {
+        [
+            "CREATE TABLE exported_parents (id BIGINT AUTO_INCREMENT PRIMARY KEY, \
+             email VARCHAR(100) NOT NULL, \
+             label VARCHAR(100) NOT NULL DEFAULT 'CURRENT_TIMESTAMP is text') ENGINE=InnoDB",
+            "CREATE UNIQUE INDEX exported_parents_email ON exported_parents (email)",
+            "CREATE TABLE exported_children (id BIGINT AUTO_INCREMENT PRIMARY KEY, \
+             parent_id BIGINT NOT NULL, price DECIMAL(10,2) NOT NULL, quantity INT NOT NULL, \
+             total DECIMAL(20,2) GENERATED ALWAYS AS (price * quantity) STORED, \
+             status VARCHAR(10) NOT NULL DEFAULT 'new', \
+             CONSTRAINT exported_children_parent FOREIGN KEY (parent_id) \
+             REFERENCES exported_parents (id) ON DELETE CASCADE, \
+             CONSTRAINT exported_children_quantity CHECK (quantity >= 0), \
+             CONSTRAINT exported_children_status CHECK (status IN ('new', 'done'))) \
+             ENGINE=InnoDB",
+        ]
+    };
+    let drop = || async {
+        for table in ["exported_children", "exported_parents"] {
+            Database::execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await
+                .expect("drop failed");
+        }
+    };
+    drop().await;
+    for statement in create {
+        Database::execute(statement).await.expect("setup failed");
+    }
+
+    let path =
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("tideorm_schema_constraints.sql");
+    SchemaWriter::write_schema(&path)
+        .await
+        .expect("write_schema failed");
+    let file = std::fs::read_to_string(&path).expect("schema file missing");
+    let _ = std::fs::remove_file(&path);
+
+    drop().await;
+    for statement in file.split(";\n").filter(|statement| {
+        statement.contains("exported_parents") || statement.contains("exported_children")
+    }) {
+        Database::execute(statement.trim())
+            .await
+            .unwrap_or_else(|error| panic!("{error}\n{statement}\nin:\n{file}"));
+    }
+
+    let refuses = |sql: String| {
+        let file = file.clone();
+        async move {
+            assert!(
+                Database::execute(&sql).await.is_err(),
+                "the restored schema took {sql}\n{file}"
+            );
+        }
+    };
+    Database::execute("INSERT INTO exported_parents (email) VALUES ('a@x.test')")
+        .await
+        .unwrap_or_else(|error| panic!("{error}\n{file}"));
+    let parents = Database::raw_json("SELECT id, label FROM exported_parents")
+        .await
+        .expect("read failed");
+    assert_eq!(
+        parents[0]["label"],
+        json!("CURRENT_TIMESTAMP is text"),
+        "{file}"
+    );
+    let parent = parents[0]["id"].as_i64().expect("an id");
+
+    refuses("INSERT INTO exported_parents (email, label) VALUES ('a@x.test', 'other')".into())
+        .await;
+    refuses(
+        "INSERT INTO exported_children (parent_id, price, quantity) VALUES (999999, 1, 1)".into(),
+    )
+    .await;
+    refuses(format!(
+        "INSERT INTO exported_children (parent_id, price, quantity) VALUES ({parent}, 1, -1)"
+    ))
+    .await;
+    refuses(format!(
+        "INSERT INTO exported_children (parent_id, price, quantity, status) \
+         VALUES ({parent}, 1, 1, 'bogus')"
+    ))
+    .await;
+
+    Database::execute(&format!(
+        "INSERT INTO exported_children (parent_id, price, quantity) VALUES ({parent}, 2.50, 4)"
+    ))
+    .await
+    .unwrap_or_else(|error| panic!("{error}\n{file}"));
+    let children = Database::raw_json("SELECT total FROM exported_children")
+        .await
+        .expect("read failed");
+    let total = match &children[0]["total"] {
+        serde_json::Value::String(text) => text.parse::<f64>().ok(),
+        other => other.as_f64(),
+    };
+    assert_eq!(total, Some(10.0), "{file}");
+
+    // The foreign key kept its action.
+    Database::execute("DELETE FROM exported_parents")
+        .await
+        .expect("delete failed");
+    let left = Database::raw_json("SELECT COUNT(*) AS n FROM exported_children")
+        .await
+        .expect("count failed");
+    assert_eq!(left[0]["n"], json!(0), "{file}");
+    drop().await;
+}
+
+#[tideorm::model(table = "upsert_handles")]
+pub struct UpsertHandle {
+    #[tideorm(primary_key, auto_increment)]
+    pub id: i64,
+    pub email: String,
+    pub username: String,
+    pub name: String,
+}
+
+/// An upsert writes only the row its conflict columns name. MySQL's `ON
+/// DUPLICATE KEY UPDATE` fires on any unique key, so an upsert on `email`
+/// used to update the row a taken `username` matched, and then fail after
+/// writing it, as no row held the new email.
+#[tokio::test]
+async fn an_upsert_writes_only_the_row_its_conflict_columns_name() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("upsert_handles", |t| {
+        t.id();
+        t.string("email").not_null().unique();
+        t.string("username").not_null().unique();
+        t.string("name").not_null();
+    })
+    .await;
+    let handle = |email: &str, username: &str, name: &str| UpsertHandle {
+        id: 0,
+        email: email.into(),
+        username: username.into(),
+        name: name.into(),
+    };
+    for (email, username, name) in [("a@x", "alice", "A"), ("b@x", "bob", "B")] {
+        handle(email, username, name)
+            .save()
+            .await
+            .expect("save failed");
+    }
+    let rows = || async {
+        UpsertHandle::query()
+            .order_by("id", Order::Asc)
+            .get()
+            .await
+            .expect("read failed")
+            .into_iter()
+            .map(|row| format!("{} {} {}", row.email, row.username, row.name))
+            .collect::<Vec<_>>()
+    };
+
+    // A new email beside a taken username is a duplicate, not an update of
+    // the username's row.
+    let refused = UpsertHandle::on_conflict(vec!["email"])
+        .update_columns(vec!["name"])
+        .insert(handle("c@x", "alice", "Z"))
+        .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(rows().await, ["a@x alice A", "b@x bob B"]);
+
+    // An email that exists updates its own row, whichever row the other key
+    // would match.
+    let updated = UpsertHandle::on_conflict(vec!["email"])
+        .update_columns(vec!["name"])
+        .insert(handle("a@x", "bob", "Z"))
+        .await
+        .expect("upsert failed");
+    assert_eq!(
+        format!("{} {} {}", updated.email, updated.username, updated.name),
+        "a@x alice Z"
+    );
+    assert_eq!(rows().await, ["a@x alice Z", "b@x bob B"]);
 }

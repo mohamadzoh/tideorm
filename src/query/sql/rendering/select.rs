@@ -19,12 +19,22 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         identifier: &'a str,
     ) -> std::borrow::Cow<'a, str> {
+        self.model_identifier(identifier, !self.clauses.joins.is_empty())
+    }
+
+    /// [`canonical_model_identifier`](Self::canonical_model_identifier), with
+    /// an unqualified model column qualified whenever `qualify_own` is set.
+    pub(in crate::query) fn model_identifier<'a>(
+        &self,
+        identifier: &'a str,
+        qualify_own: bool,
+    ) -> std::borrow::Cow<'a, str> {
         match M::canonical_column_parts(identifier) {
             (Some(table), column) if table == M::table_name() => {
                 std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
             }
             (Some(table), column) => std::borrow::Cow::Owned(format!("{}.{}", table, column)),
-            (None, column) if self.qualifies_model_column(column) => {
+            (None, column) if qualify_own && M::column_names().contains(&column) => {
                 std::borrow::Cow::Owned(format!("{}.{}", self.own_table_ref(), column))
             }
             (None, column) => std::borrow::Cow::Borrowed(column),
@@ -44,41 +54,21 @@ impl<M: Model> QueryBuilder<M> {
     /// is written with the model's table: when it is one of the model's
     /// columns and the query joins another table.
     pub(in crate::query) fn qualifies_model_column(&self, column: &str) -> bool {
-        !self.joins.is_empty() && M::column_names().contains(&column)
+        !self.clauses.joins.is_empty() && M::column_names().contains(&column)
     }
 
+    /// Render a column reference a condition, a join or an ordering names:
+    /// canonicalized and quoted part by part. Validation leaves nothing else
+    /// in these slots, so anything else is written as it is.
     pub(crate) fn format_column_for_db(&self, db_type: DatabaseType, column: &str) -> String {
         let trimmed = column.trim();
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-
-        match parts.as_slice() {
-            [identifier] => db_sql::format_column_or_trusted_expression(
-                db_type,
-                self.canonical_model_identifier(identifier).as_ref(),
-            ),
-            [identifier, direction]
-                if direction.eq_ignore_ascii_case("asc")
-                    || direction.eq_ignore_ascii_case("desc") =>
-            {
-                db_sql::format_identifier_reference(
-                    db_type,
-                    self.canonical_model_identifier(identifier).as_ref(),
-                )
-                .map(|identifier| format!("{} {}", identifier, direction.to_ascii_uppercase()))
-                .unwrap_or_else(|| trimmed.to_string())
-            }
-            [identifier, as_keyword, alias] if as_keyword.eq_ignore_ascii_case("as") => {
-                let identifier = self.canonical_model_identifier(identifier);
-                match (
-                    db_sql::format_identifier_reference(db_type, identifier.as_ref()),
-                    db_sql::format_identifier_reference(db_type, alias),
-                ) {
-                    (Some(identifier), Some(alias)) => format!("{} AS {}", identifier, alias),
-                    _ => trimmed.to_string(),
-                }
-            }
-            _ => trimmed.to_string(),
+        if trimmed.contains(char::is_whitespace) {
+            return trimmed.to_string();
         }
+        db_sql::format_column_or_trusted_expression(
+            db_type,
+            self.canonical_model_identifier(trimmed).as_ref(),
+        )
     }
 
     /// Render a projected column reference; an unqualified one is qualified
@@ -96,10 +86,7 @@ impl<M: Model> QueryBuilder<M> {
         format!(
             "{}.{}",
             db_sql::quote_ident(db_type, table),
-            db_sql::quote_ident(
-                db_type,
-                M::canonical_column_name(identifier).unwrap_or(identifier)
-            )
+            db_sql::quote_ident(db_type, M::column_named(identifier))
         )
     }
 
@@ -109,27 +96,21 @@ impl<M: Model> QueryBuilder<M> {
         table: &str,
         column: &str,
     ) -> String {
-        let trimmed = column.trim();
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
         let is_reference =
             |value: &str| db_sql::format_identifier_reference(db_type, value).is_some();
 
-        match parts.as_slice() {
-            [identifier] if is_reference(identifier) => {
+        match Self::split_alias(column) {
+            (identifier, None) if is_reference(identifier) => {
                 self.format_projection_column(db_type, table, identifier)
             }
-            [identifier, as_keyword, alias]
-                if as_keyword.eq_ignore_ascii_case("as")
-                    && is_reference(identifier)
-                    && is_reference(alias) =>
-            {
+            (identifier, Some(alias)) if is_reference(identifier) && is_reference(alias) => {
                 format!(
                     "{} AS {}",
                     self.format_projection_column(db_type, table, identifier),
                     db_sql::quote_ident(db_type, alias)
                 )
             }
-            _ => trimmed.to_string(),
+            _ => column.trim().to_string(),
         }
     }
 
@@ -155,24 +136,16 @@ impl<M: Model> QueryBuilder<M> {
         let table = M::table_name();
         let mut expressions: Vec<String> = Vec::new();
 
-        if let Some(columns) = &self.select_columns {
+        if let Some(columns) = &self.clauses.select_columns {
             for column in columns {
                 expressions.push(self.format_select_column_for_db(db_type, table, column));
             }
         }
 
-        expressions.extend(
-            self.raw_select_expressions
-                .iter()
-                .filter(|expression| {
-                    expression.as_str() != crate::query::builder::DISTINCT_SELECT_MARKER
-                })
-                .cloned(),
-        );
+        expressions.extend(self.raw_projection().cloned());
 
-        for subquery in &self.subquery_select_expressions {
-            let query_sql =
-                Self::rebase_operand_placeholders(db_type, &subquery.query_sql, params.len());
+        for subquery in &self.clauses.subquery_select_expressions {
+            let query_sql = db_sql::rebase_placeholders(db_type, &subquery.query_sql, params.len());
             params.extend(subquery.params.iter().cloned());
             expressions.push(format!(
                 "({}) AS {}",
@@ -186,7 +159,7 @@ impl<M: Model> QueryBuilder<M> {
         // statement. A raw UNION arm's shape is unknown, typically `SELECT *`,
         // so a query with one keeps `table.*` to stay aligned with it.
         if expressions.is_empty() {
-            if self.unions.iter().any(|union| union.raw) {
+            if self.clauses.unions.iter().any(|union| union.raw) {
                 expressions.push(format!("{}.*", db_sql::quote_ident(db_type, table)));
             } else {
                 expressions.push(db_sql::model_columns_sql::<M>(db_type, Some(table)));
@@ -196,7 +169,7 @@ impl<M: Model> QueryBuilder<M> {
         // Window columns are Rust field names or database columns, as in every
         // other slot, so they are rendered the way the query renders those.
         let canonical = |column: &str| self.canonical_model_identifier(column).into_owned();
-        for window_function in &self.window_functions {
+        for window_function in &self.clauses.window_functions {
             expressions.push(
                 window_function
                     .map_columns(&canonical)
@@ -218,10 +191,9 @@ impl<M: Model> QueryBuilder<M> {
         db_sql::push_quoted_table::<M>(sql, db_type);
         sql.push(' ');
 
-        for join in &self.joins {
+        for join in &self.clauses.joins {
             // Validated as `table` or `schema.table`, so each part is quoted.
-            let table = db_sql::format_identifier_reference(db_type, &join.table)
-                .unwrap_or_else(|| db_sql::quote_ident(db_type, &join.table));
+            let table = db_sql::format_column(db_type, &join.table);
             let join_table = if let Some(alias) = &join.alias {
                 format!("{} AS {}", table, db_sql::quote_ident(db_type, alias))
             } else {
@@ -238,36 +210,15 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    /// Replace each `?` of a HAVING template with the backend's own marker,
-    /// numbering from `next_index`.
-    ///
-    /// Validation guarantees the template carries one `?` per bound value, so a
-    /// template without values is emitted as written.
-    fn render_having_placeholders(
-        template: &str,
-        bound: usize,
-        db_type: DatabaseType,
-        next_index: &mut usize,
-    ) -> String {
-        if bound == 0 {
-            return template.to_string();
-        }
-
-        db_sql::map_template_placeholders(template, || {
-            let placeholder = db_sql::placeholder(db_type, *next_index);
-            *next_index += 1;
-            placeholder
-        })
-    }
-
     fn append_group_by_and_having_sql(
         &self,
         sql: &mut String,
         db_type: DatabaseType,
         params: &mut Vec<Value>,
     ) {
-        if !self.group_by.is_empty() {
+        if !self.clauses.group_by.is_empty() {
             let columns: Vec<String> = self
+                .clauses
                 .group_by
                 .iter()
                 .map(|column| self.format_column_for_db(db_type, column))
@@ -275,17 +226,12 @@ impl<M: Model> QueryBuilder<M> {
             sql.push_str(&format!("GROUP BY {} ", columns.join(", ")));
         }
 
-        if !self.having_conditions.is_empty() {
-            let mut next_index = params.len() + 1;
+        if !self.clauses.having_conditions.is_empty() {
+            // Validation has matched each template's placeholders to its values.
             let clauses: Vec<String> = self
                 .having_clauses()
                 .map(|(template, bindings)| {
-                    let clause = Self::render_having_placeholders(
-                        template,
-                        bindings.len(),
-                        db_type,
-                        &mut next_index,
-                    );
+                    let clause = db_sql::render_template(db_type, template, params.len() + 1);
                     params.extend(bindings.iter().cloned());
                     clause
                 })
@@ -296,7 +242,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn cte_keyword(&self) -> &'static str {
-        if self.ctes.iter().any(|cte| cte.recursive) {
+        if self.clauses.ctes.iter().any(|cte| cte.recursive) {
             "WITH RECURSIVE "
         } else {
             "WITH "
@@ -313,32 +259,16 @@ impl<M: Model> QueryBuilder<M> {
         !matches!(db_type, DatabaseType::SQLite)
     }
 
-    /// Renumber a separately rendered operand's placeholders for its position in
-    /// the assembled statement.
-    ///
-    /// Statements are assembled by concatenating SQL strings rather than through
-    /// sea-query, so nothing renumbers placeholders here. Each operand was
-    /// rendered on its own starting at `$1`; on Postgres it has to be shifted
-    /// past every value already bound ahead of it. MySQL and SQLite use bare `?`
-    /// markers that only depend on the order values are pushed, so their SQL is
-    /// spliced in unchanged.
-    fn rebase_operand_placeholders(db_type: DatabaseType, sql: &str, offset: usize) -> String {
-        match db_type {
-            DatabaseType::Postgres => db_sql::offset_postgres_placeholders(sql, offset),
-            DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => sql.to_string(),
-        }
-    }
-
     fn append_cte_sql(&self, sql: &mut String, db_type: DatabaseType, params: &mut Vec<Value>) {
-        if self.ctes.is_empty() {
+        if self.clauses.ctes.is_empty() {
             return;
         }
 
         sql.push_str(self.cte_keyword());
 
-        let mut cte_parts = Vec::with_capacity(self.ctes.len());
-        for cte in &self.ctes {
-            let body_sql = Self::rebase_operand_placeholders(db_type, &cte.query_sql, params.len());
+        let mut cte_parts = Vec::with_capacity(self.clauses.ctes.len());
+        for cte in &self.clauses.ctes {
+            let body_sql = db_sql::rebase_placeholders(db_type, &cte.query_sql, params.len());
             cte_parts.push(cte.to_sql_with_body_for_db(db_type, &body_sql));
             params.extend(cte.params.iter().cloned());
         }
@@ -348,9 +278,8 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn append_union_sql(&self, sql: &mut String, db_type: DatabaseType, params: &mut Vec<Value>) {
-        for union in &self.unions {
-            let operand_sql =
-                Self::rebase_operand_placeholders(db_type, &union.query_sql, params.len());
+        for union in &self.clauses.unions {
+            let operand_sql = db_sql::rebase_placeholders(db_type, &union.query_sql, params.len());
 
             if Self::wraps_compound_operand(db_type) {
                 sql.push_str(&format!(" {} ({})", union.union_type.as_sql(), operand_sql));
@@ -380,46 +309,28 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let trimmed = column.trim();
+        let (reference, direction) =
+            crate::query::builder::split_direction(trimmed).unwrap_or((trimmed, direction));
         // A union's ORDER BY sorts its result rows, which name a column by its
         // output name alone: `ORDER BY "users"."name"` is refused there.
-        if !self.unions.is_empty() {
-            let (reference, direction_sql) = match trimmed.split_once(char::is_whitespace) {
-                Some((reference, suffix))
-                    if suffix.trim().eq_ignore_ascii_case("asc")
-                        || suffix.trim().eq_ignore_ascii_case("desc") =>
-                {
-                    (reference, suffix.trim().to_ascii_uppercase())
-                }
-                _ => (trimmed, direction.as_str().to_string()),
-            };
-            if reference
+        if !self.clauses.unions.is_empty()
+            && reference
                 .split('.')
                 .all(crate::internal::sql_safety::is_safe_identifier_segment)
-            {
-                return format!(
-                    "{} {}",
-                    db_sql::quote_ident(db_type, &self.derived_output_name(reference)),
-                    direction_sql
-                );
-            }
-        }
-        if let Some((reference, suffix)) = trimmed.split_once(char::is_whitespace) {
-            let suffix = suffix.trim();
-            if suffix.eq_ignore_ascii_case("asc") || suffix.eq_ignore_ascii_case("desc") {
-                return format!(
-                    "{} {}",
-                    db_sql::format_column(
-                        db_type,
-                        self.canonical_model_identifier(reference).as_ref()
-                    ),
-                    suffix.to_ascii_uppercase()
-                );
-            }
+        {
+            let output = self
+                .derived_output_name(reference)
+                .unwrap_or_else(|| M::canonical_column_parts(reference).1.to_string());
+            return format!(
+                "{} {}",
+                db_sql::quote_ident(db_type, &output),
+                direction.as_str()
+            );
         }
 
         format!(
             "{} {}",
-            self.format_column_for_db(db_type, trimmed),
+            self.format_column_for_db(db_type, reference),
             direction.as_str()
         )
     }
@@ -436,8 +347,9 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
         params: &mut Vec<Value>,
     ) {
-        if !self.order_by.is_empty() {
+        if !self.clauses.order_by.is_empty() {
             let order_parts: Vec<String> = self
+                .clauses
                 .order_by
                 .iter()
                 .map(|(column, direction)| self.format_order_by_for_db(db_type, column, *direction))
@@ -445,29 +357,13 @@ impl<M: Model> QueryBuilder<M> {
             sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
         }
 
-        match (self.limit_value, self.offset_value) {
-            (Some(limit), _) => sql.push_str(&format!(" LIMIT {}", limit)),
-            // MySQL, MariaDB, and SQLite have no bare-OFFSET syntax: `OFFSET n`
-            // without a preceding LIMIT is a parse error. Supply the dialect's
-            // open-ended limit so a standalone `offset()` stays portable.
-            (None, Some(_)) => match db_type {
-                DatabaseType::Postgres => {}
-                DatabaseType::SQLite => sql.push_str(" LIMIT -1"),
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    sql.push_str(&format!(" LIMIT {}", u64::MAX))
-                }
-            },
-            (None, None) => {}
-        }
-        if let Some(offset) = self.offset_value {
-            let offset = match i64::try_from(offset) {
-                Ok(offset) => {
-                    crate::internal::push_param(db_type, params, Value::BigInt(Some(offset)))
-                }
-                Err(_) => offset.to_string(),
-            };
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
+        db_sql::append_limit_offset(
+            sql,
+            db_type,
+            self.clauses.limit_value,
+            self.clauses.offset_value,
+            params,
+        );
     }
 
     /// The select core: projection, FROM/JOIN, WHERE, GROUP BY and HAVING, with
@@ -484,7 +380,7 @@ impl<M: Model> QueryBuilder<M> {
         if !where_sql.is_empty() {
             sql.push_str(&format!(
                 "WHERE {} ",
-                Self::rebase_operand_placeholders(db_type, &where_sql, params.len())
+                db_sql::rebase_placeholders(db_type, &where_sql, params.len())
             ));
         }
         params.extend(where_params);
@@ -503,29 +399,24 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
-        if !self.unions.is_empty() || !self.ctes.is_empty() {
+        if !self.clauses.unions.is_empty() || !self.clauses.ctes.is_empty() {
             let (sql, params) = self.build_select_sql_with_params_for_db(db_type);
             return (
-                format!(
-                    "SELECT * FROM ({}) AS {}",
-                    sql,
-                    db_sql::quote_ident(db_type, "tideorm_union_operand")
-                ),
+                db_sql::select_from_derived(db_type, "*", &sql, "tideorm_union_operand"),
                 params,
             );
         }
 
         let (mut sql, mut params) = self.build_base_select_sql_with_params_for_db(db_type);
-        if self.order_by.is_empty() && self.limit_value.is_none() && self.offset_value.is_none() {
+        if self.clauses.order_by.is_empty()
+            && self.clauses.limit_value.is_none()
+            && self.clauses.offset_value.is_none()
+        {
             return (sql, params);
         }
         self.append_order_limit_offset_sql(&mut sql, db_type, &mut params);
         if !Self::wraps_compound_operand(db_type) {
-            sql = format!(
-                "SELECT * FROM ({}) AS {}",
-                sql,
-                db_sql::quote_ident(db_type, "tideorm_union_operand")
-            );
+            sql = db_sql::select_from_derived(db_type, "*", &sql, "tideorm_union_operand");
         }
         (sql, params)
     }
@@ -548,7 +439,7 @@ impl<M: Model> QueryBuilder<M> {
         let mut params: Vec<Value> = Vec::new();
 
         self.append_cte_sql(&mut sql, db_type, &mut params);
-        sql.push_str(&Self::rebase_operand_placeholders(
+        sql.push_str(&db_sql::rebase_placeholders(
             db_type,
             &base_sql,
             params.len(),
@@ -558,7 +449,7 @@ impl<M: Model> QueryBuilder<M> {
         self.append_order_limit_offset_sql(&mut sql, db_type, &mut params);
         // SQLite has no row locks: a transaction's first write locks the whole
         // database, so a competing read-check-write fails instead of racing.
-        if self.lock_for_update && db_type != DatabaseType::SQLite {
+        if self.clauses.lock_for_update && db_type != DatabaseType::SQLite {
             sql.push_str(" FOR UPDATE");
         }
 

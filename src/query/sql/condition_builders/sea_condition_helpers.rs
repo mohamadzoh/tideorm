@@ -4,20 +4,12 @@ use chrono::{DateTime, SecondsFormat, Utc};
 
 impl<M: Model> QueryBuilder<M> {
     pub(crate) fn build_sea_condition_for_db(&self, db_type: DatabaseType) -> Condition {
-        let mut condition = Condition::all();
-
-        for filter in &self.conditions {
-            if let Some(expression) = self.build_condition_expression(filter, db_type) {
-                condition = condition.add(expression);
-            }
-        }
-
-        for group in &self.or_groups {
-            if !group.is_empty() {
-                condition = condition.add(self.build_or_group_condition(group, db_type));
-            }
-        }
-
+        let mut condition = self.add_filters(
+            Condition::all(),
+            &self.clauses.conditions,
+            &self.clauses.or_groups,
+            db_type,
+        );
         if let Some(soft_delete_expression) = self.build_soft_delete_expression(db_type) {
             condition = condition.add(soft_delete_expression);
         }
@@ -92,8 +84,7 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Bind `value` with the type of `column` when it is one of `M`'s columns,
-    /// or a table-qualified column of a model registered with
-    /// [`bind_columns_of`](Self::bind_columns_of).
+    /// or a column of a joined model's table.
     pub(crate) fn column_value(&self, column: &str, value: &serde_json::Value) -> Value {
         crate::internal::json_to_column_value(value, self.column_type(column).as_ref())
     }
@@ -102,11 +93,6 @@ impl<M: Model> QueryBuilder<M> {
     /// model's, else a joined model's.
     pub(in crate::query) fn column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
         crate::internal::column_type_of::<M>(column)
-            .or_else(|| {
-                self.joined_column_types
-                    .iter()
-                    .find_map(|column_type_of| column_type_of(column))
-            })
             .or_else(|| self.joined_model_column_type(column))
     }
 
@@ -115,12 +101,12 @@ impl<M: Model> QueryBuilder<M> {
     /// UUID or timestamp column is bound as one, not as text.
     fn joined_model_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
         let (qualifier, name) = column.split_once('.')?;
-        let table = self.joins.iter().find_map(|join| match &join.alias {
-            Some(alias) if alias == qualifier => Some(join.table.as_str()),
-            None if join.table == qualifier => Some(join.table.as_str()),
-            _ => None,
-        })?;
-        crate::sync::registered_column_type(table, name)
+        let join = self
+            .clauses
+            .joins
+            .iter()
+            .find(|join| join.qualifier() == qualifier)?;
+        crate::sync::registered_column_type(join.bare_table(), name)
     }
 
     pub(crate) fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
@@ -131,15 +117,6 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     pub(crate) fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
-        if column.contains('(')
-            || column.contains('*')
-            || column.contains(' ')
-            || column.contains('"')
-            || column.contains('`')
-        {
-            return Expr::cust(self.format_column_for_db(db_type, column));
-        }
-
         // Both shapes canonicalize, so `where_eq("users.display_name", ..)`
         // addresses the same column `where_eq("display_name", ..)` does.
         // Validation already resolves a self-qualified reference through the
@@ -183,7 +160,8 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query::sql) fn condition_spec<'a>(
         condition: &'a WhereCondition,
     ) -> Option<ConditionSpec<'a>> {
-        match (&condition.operator, &condition.value) {
+        let operator = &condition.operator;
+        match (operator, &condition.value) {
             (Operator::Raw, ConditionValue::RawExpr(raw_sql)) => Some(ConditionSpec::Raw {
                 raw_sql,
                 values: &[],
@@ -203,112 +181,34 @@ impl<M: Model> QueryBuilder<M> {
                     template: true,
                 })
             }
-            (operator, ConditionValue::Column(other)) => {
-                let operator = match operator {
-                    Operator::Eq => ComparisonOperator::Eq,
-                    Operator::NotEq => ComparisonOperator::NotEq,
-                    Operator::Gt => ComparisonOperator::Gt,
-                    Operator::Gte => ComparisonOperator::Gte,
-                    Operator::Lt => ComparisonOperator::Lt,
-                    Operator::Lte => ComparisonOperator::Lte,
-                    _ => return None,
-                };
-                Some(ConditionSpec::CompareColumns { operator, other })
-            }
+            (_, ConditionValue::Column(other)) => Some(ConditionSpec::CompareColumns {
+                operator: ComparisonOperator::of(operator)?,
+                other,
+            }),
             // `col = NULL` and `col != NULL` are UNKNOWN for every row, so binding
             // the JSON null as a parameter would silently match nothing with no
             // error to explain it. Rewriting here makes both emit the null check
             // `where_null()` and `where_not_null()` build.
-            (Operator::Eq, ConditionValue::Single(serde_json::Value::Null)) => {
-                Some(ConditionSpec::NullCheck { negated: false })
-            }
-            (Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => {
-                Some(ConditionSpec::NullCheck { negated: true })
-            }
-            (Operator::Eq, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::Eq,
-                value,
-            }),
-            (Operator::NotEq, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::NotEq,
-                value,
-            }),
-            (Operator::Gt, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::Gt,
-                value,
-            }),
-            (Operator::Gte, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::Gte,
-                value,
-            }),
-            (Operator::Lt, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::Lt,
-                value,
-            }),
-            (Operator::Lte, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
-                operator: ComparisonOperator::Lte,
-                value,
-            }),
-            (Operator::Like, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
-                negated: false,
-                escaped: false,
-                value,
-            }),
-            (Operator::LikeEscaped, ConditionValue::Single(value)) => {
-                Some(ConditionSpec::Pattern {
-                    negated: false,
-                    escaped: true,
-                    value,
+            (Operator::Eq | Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => {
+                Some(ConditionSpec::NullCheck {
+                    negated: matches!(operator, Operator::NotEq),
                 })
             }
-            (Operator::NotLike, ConditionValue::Single(value)) => Some(ConditionSpec::Pattern {
-                negated: true,
-                escaped: false,
+            (
+                Operator::Like | Operator::LikeEscaped | Operator::NotLike,
+                ConditionValue::Single(value),
+            ) => Some(ConditionSpec::Pattern {
+                negated: matches!(operator, Operator::NotLike),
+                escaped: matches!(operator, Operator::LikeEscaped),
                 value,
             }),
-            (Operator::In, ConditionValue::List(values)) => Some(ConditionSpec::List {
-                operator: ListOperator::In,
-                values,
-            }),
-            (Operator::NotIn, ConditionValue::List(values)) => Some(ConditionSpec::List {
-                operator: ListOperator::NotIn,
-                values,
-            }),
-            (Operator::EqAny, ConditionValue::List(values)) => Some(ConditionSpec::List {
-                operator: ListOperator::EqAny,
-                values,
-            }),
-            (Operator::NeAll, ConditionValue::List(values)) => Some(ConditionSpec::List {
-                operator: ListOperator::NeAll,
-                values,
-            }),
-            (Operator::IsNull, ConditionValue::None) => {
-                Some(ConditionSpec::NullCheck { negated: false })
-            }
-            (Operator::IsNotNull, ConditionValue::None) => {
-                Some(ConditionSpec::NullCheck { negated: true })
-            }
-            (Operator::Between, ConditionValue::Range(low, high)) => Some(ConditionSpec::Between {
-                low,
-                high,
-                negated: false,
-            }),
-            (Operator::NotBetween, ConditionValue::Range(low, high)) => {
-                Some(ConditionSpec::Between {
-                    low,
-                    high,
-                    negated: true,
-                })
-            }
-            (Operator::JsonContains, ConditionValue::Single(value)) => {
+            (Operator::JsonContains | Operator::JsonContainedBy, ConditionValue::Single(value)) => {
                 Some(ConditionSpec::JsonValue {
-                    operator: JsonValueOperator::Contains,
-                    value,
-                })
-            }
-            (Operator::JsonContainedBy, ConditionValue::Single(value)) => {
-                Some(ConditionSpec::JsonValue {
-                    operator: JsonValueOperator::ContainedBy,
+                    containment: if matches!(operator, Operator::JsonContains) {
+                        db_sql::JsonContainment::Contains
+                    } else {
+                        db_sql::JsonContainment::ContainedBy
+                    },
                     value,
                 })
             }
@@ -319,30 +219,39 @@ impl<M: Model> QueryBuilder<M> {
                 | Operator::JsonPathNotExists,
                 ConditionValue::Single(serde_json::Value::String(target)),
             ) => Some(ConditionSpec::JsonExists {
-                existence: match condition.operator {
+                existence: match operator {
                     Operator::JsonKeyExists | Operator::JsonKeyNotExists => JsonExistence::Key,
                     _ => JsonExistence::Path,
                 },
                 negated: matches!(
-                    condition.operator,
+                    operator,
                     Operator::JsonKeyNotExists | Operator::JsonPathNotExists
                 ),
                 target,
             }),
-            (Operator::ArrayContains, ConditionValue::List(values)) => Some(ConditionSpec::Array {
-                operator: ArrayOperator::Contains,
-                values,
+            (_, ConditionValue::Single(value)) => Some(ConditionSpec::Compare {
+                operator: ComparisonOperator::of(operator)?,
+                value,
             }),
-            (Operator::ArrayContainedBy, ConditionValue::List(values)) => {
-                Some(ConditionSpec::Array {
-                    operator: ArrayOperator::ContainedBy,
-                    values,
+            (Operator::IsNull | Operator::IsNotNull, ConditionValue::None) => {
+                Some(ConditionSpec::NullCheck {
+                    negated: matches!(operator, Operator::IsNotNull),
                 })
             }
-            (Operator::ArrayOverlaps, ConditionValue::List(values)) => Some(ConditionSpec::Array {
-                operator: ArrayOperator::Overlaps,
-                values,
-            }),
+            (Operator::Between | Operator::NotBetween, ConditionValue::Range(low, high)) => {
+                Some(ConditionSpec::Between {
+                    low,
+                    high,
+                    negated: matches!(operator, Operator::NotBetween),
+                })
+            }
+            (_, ConditionValue::List(values)) => match ArrayOperator::of(operator) {
+                Some(operator) => Some(ConditionSpec::Array { operator, values }),
+                None => Some(ConditionSpec::List {
+                    operator: ListOperator::of(operator)?,
+                    values,
+                }),
+            },
             _ => None,
         }
     }
@@ -352,27 +261,11 @@ impl<M: Model> QueryBuilder<M> {
     /// `condition_spec` returns `None` for an unrepresentable pair and the WHERE
     /// renderer skips a `None`, so such a condition would silently disappear from
     /// the rendered predicate — widening a targeted mutation into a full-table
-    /// one. Surfacing it as `invalid_query` at render time keeps an unrenderable
+    /// one. Surfacing it as a query error at render time keeps an unrenderable
     /// filter from ever becoming a missing filter.
     pub(in crate::query::sql) fn ensure_conditions_are_representable(&self) -> Result<()> {
-        for condition in &self.conditions {
+        for condition in self.all_conditions() {
             Self::ensure_condition_is_representable(condition)?;
-        }
-
-        for group in &self.or_groups {
-            Self::ensure_group_conditions_are_representable(group)?;
-        }
-
-        Ok(())
-    }
-
-    fn ensure_group_conditions_are_representable(group: &OrGroup) -> Result<()> {
-        for condition in &group.conditions {
-            Self::ensure_condition_is_representable(condition)?;
-        }
-
-        for nested_group in &group.nested_groups {
-            Self::ensure_group_conditions_are_representable(nested_group)?;
         }
 
         Ok(())
@@ -401,7 +294,7 @@ impl<M: Model> QueryBuilder<M> {
             return Ok(());
         }
 
-        Err(Error::invalid_query(format!(
+        Err(Error::query(format!(
             "WHERE condition on '{}' for model '{}' compares against NULL with operator {:?}; a NULL comparison is never true — use where_null() or where_not_null() instead",
             condition.column,
             M::table_name(),
@@ -411,7 +304,7 @@ impl<M: Model> QueryBuilder<M> {
 
     fn ensure_condition_is_representable(condition: &WhereCondition) -> Result<()> {
         if let ConditionValue::Invalid(reason) = &condition.value {
-            return Err(Error::invalid_query(format!(
+            return Err(Error::query(format!(
                 "WHERE condition on '{}' for model '{}': {}",
                 condition.column,
                 M::table_name(),
@@ -430,7 +323,7 @@ impl<M: Model> QueryBuilder<M> {
             condition.column.as_str()
         };
 
-        Err(Error::invalid_query(format!(
+        Err(Error::query(format!(
             "WHERE condition on '{}' for model '{}' pairs operator {:?} with an incompatible value {:?} and cannot be rendered as SQL",
             column,
             M::table_name(),

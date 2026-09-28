@@ -48,7 +48,7 @@ fn fts5_in_columns(columns: &[String], operand: String) -> String {
     }
     let names: Vec<String> = columns
         .iter()
-        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .map(|column| quote_ident(DatabaseType::SQLite, column))
         .collect();
     format!("{{{}}} : ({operand})", names.join(" "))
 }
@@ -60,22 +60,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub(super) fn build_mysql_sql(&self) -> Result<(String, Vec<Value>)> {
         let mut params = Vec::new();
         let predicate = self.mysql_predicate(&mut params);
-        let mut sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
-            .raw("SELECT ")
-            .raw(&crate::query::db_sql::model_columns_sql::<T>(
-                DatabaseType::MySQL,
-                None,
-            ))
-            .raw(" FROM ")
-            .raw(&crate::query::db_sql::quote_table::<T>(DatabaseType::MySQL))
-            .raw(" WHERE ")
-            .raw(&predicate)
-            .raw(" ")
-            .into_sql();
-
-        self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params)?;
-
-        Ok((sql, params))
+        Ok(self.select_where(DatabaseType::MySQL, &predicate, params))
     }
 
     pub(super) fn build_mysql_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
@@ -113,7 +98,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         sql.push_str("ORDER BY _fts_rank DESC ");
 
-        self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params)?;
+        self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params);
 
         Ok((sql, params))
     }
@@ -121,14 +106,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub(super) fn build_mysql_count_sql(&self) -> Result<(String, Vec<Value>)> {
         let mut params = Vec::new();
         let predicate = self.mysql_predicate(&mut params);
-        let sql = SqlBuilder::new(DatabaseType::MySQL, &mut params)
-            .raw("SELECT COUNT(*) as count FROM ")
-            .raw(&crate::query::db_sql::quote_table::<T>(DatabaseType::MySQL))
-            .raw(" WHERE ")
-            .raw(&predicate)
-            .into_sql();
-
-        Ok((sql, params))
+        Ok(Self::count_where(DatabaseType::MySQL, &predicate, params))
     }
 
     /// The `AGAINST(..)` operand for the search mode, empty when the search
@@ -209,7 +187,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(" ")
             .into_sql();
 
-        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params)?;
+        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params);
 
         Ok((sql, params))
     }
@@ -263,7 +241,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(" DESC ");
         }
 
-        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params)?;
+        self.append_limit_offset(DatabaseType::SQLite, &mut sql, &mut params);
 
         Ok((sql, params))
     }

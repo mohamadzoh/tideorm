@@ -57,17 +57,8 @@ impl Schema {
 
     /// Whether the current MySQL database's `table` has an index named `index`.
     async fn mysql_index_exists(&self, table: &str, index: &str) -> Result<bool> {
-        let sql = "SELECT COUNT(*) AS found FROM information_schema.statistics \
-                   WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?";
-        let rows = crate::database::__current_db()?
-            .__raw_json_with_params(sql, vec![table.into(), index.into()])
-            .await
-            .map_err(|error| error.with_context(ErrorContext::new().query(sql)))?;
-        Ok(rows
-            .first()
-            .and_then(|row| row.get("found"))
-            .and_then(serde_json::Value::as_i64)
-            .is_some_and(|found| found > 0))
+        let connection = crate::database::__current_db()?.__get_connection()?;
+        super::ddl::mysql_index_exists(&connection.executor(), None, table, index).await
     }
 
     /// Alter an existing table

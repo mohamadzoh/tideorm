@@ -1,13 +1,6 @@
 use super::*;
 
 impl<M: Model> QueryBuilder<M> {
-    fn pattern_value(value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::String(text) => text.clone(),
-            _ => value.to_string(),
-        }
-    }
-
     /// A raw fragment, optionally prefixed with the column it constrains.
     ///
     /// A fragment carrying `values` already uses the backend's own placeholder
@@ -36,15 +29,28 @@ impl<M: Model> QueryBuilder<M> {
         operator: ComparisonOperator,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        let value = self.column_value(column, value);
-        match operator {
-            ComparisonOperator::Eq => column_expr.eq(value),
-            ComparisonOperator::NotEq => column_expr.ne(value),
-            ComparisonOperator::Gt => column_expr.gt(value),
-            ComparisonOperator::Gte => column_expr.gte(value),
-            ComparisonOperator::Lt => column_expr.lt(value),
-            ComparisonOperator::Lte => column_expr.lte(value),
-        }
+        operator.apply(column_expr, self.column_value(column, value))
+    }
+
+    /// Whether `column` holds JSON, which compares as documents, not text.
+    pub(in crate::query::sql) fn is_json_column(&self, column: &str) -> bool {
+        matches!(
+            self.column_type(column),
+            Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
+        )
+    }
+
+    /// The JSON `column` holding the document `value`, or not when `negated`.
+    pub(in crate::query::sql) fn build_json_equals_expression(
+        &self,
+        db_type: DatabaseType,
+        column: &str,
+        value: &serde_json::Value,
+        negated: bool,
+    ) -> SimpleExpr {
+        let column_sql = self.format_column_for_db(db_type, column);
+        let bound = db_sql::json_equals_bound(db_type, &column_sql, value, negated);
+        self.build_custom_expression(bound.sql, bound.values)
     }
 
     pub(crate) fn build_pattern_expression(
@@ -55,7 +61,7 @@ impl<M: Model> QueryBuilder<M> {
         escaped: bool,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        let pattern = Self::pattern_value(value);
+        let pattern = crate::internal::json_text(value);
         if escaped {
             let operator = if negated { "NOT LIKE" } else { "LIKE" };
             self.build_custom_expression(
@@ -100,12 +106,10 @@ impl<M: Model> QueryBuilder<M> {
             return listed;
         }
         match operator {
-            ListOperator::In | ListOperator::EqAny if values.is_empty() => column_expr.is_null(),
-            ListOperator::In | ListOperator::EqAny => listed.or(column_expr.is_null()),
-            ListOperator::NotIn | ListOperator::NeAll if values.is_empty() => {
-                column_expr.is_not_null()
-            }
-            ListOperator::NotIn | ListOperator::NeAll => listed.and(column_expr.is_not_null()),
+            ListOperator::In if values.is_empty() => column_expr.is_null(),
+            ListOperator::In => listed.or(column_expr.is_null()),
+            ListOperator::NotIn if values.is_empty() => column_expr.is_not_null(),
+            ListOperator::NotIn => listed.and(column_expr.is_not_null()),
         }
     }
 
@@ -119,16 +123,11 @@ impl<M: Model> QueryBuilder<M> {
     ) -> SimpleExpr {
         // A JSON column compares documents, one per listed value, as
         // `where_eq`/`where_not` do.
-        if matches!(
-            self.column_type(column),
-            Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
-        ) {
-            let negated = matches!(operator, ListOperator::NotIn | ListOperator::NeAll);
-            let column_sql = self.format_column_for_db(db_type, column);
-            let mut documents = values.iter().map(|value| {
-                let bound = db_sql::json_equals_bound(db_type, &column_sql, value, negated);
-                self.build_custom_expression(bound.sql, bound.values)
-            });
+        if self.is_json_column(column) {
+            let negated = matches!(operator, ListOperator::NotIn);
+            let mut documents = values
+                .iter()
+                .map(|value| self.build_json_equals_expression(db_type, column, value, negated));
             if let Some(first) = documents.next() {
                 return documents.fold(first, |all, document| {
                     if negated {
@@ -155,8 +154,8 @@ impl<M: Model> QueryBuilder<M> {
 
             let array = Expr::val(array);
             return match operator {
-                ListOperator::In | ListOperator::EqAny => column_expr.eq(PgFunc::any(array)),
-                ListOperator::NotIn | ListOperator::NeAll => column_expr.ne(PgFunc::all(array)),
+                ListOperator::In => column_expr.eq(PgFunc::any(array)),
+                ListOperator::NotIn => column_expr.ne(PgFunc::all(array)),
             };
         }
         // SQLite reads a long text list from one JSON parameter. Other types
@@ -173,8 +172,8 @@ impl<M: Model> QueryBuilder<M> {
                 .collect::<Option<Vec<_>>>()
         {
             let operator_sql = match operator {
-                ListOperator::In | ListOperator::EqAny => "IN",
-                ListOperator::NotIn | ListOperator::NeAll => "NOT IN",
+                ListOperator::In => "IN",
+                ListOperator::NotIn => "NOT IN",
             };
             return self.build_custom_expression(
                 format!(
@@ -183,9 +182,7 @@ impl<M: Model> QueryBuilder<M> {
                     operator_sql,
                     db_sql::placeholder(db_type, 1)
                 ),
-                vec![Value::String(Some(
-                    serde_json::Value::Array(texts).to_string(),
-                ))],
+                vec![db_sql::json_array_parameter(&texts)],
             );
         }
         // Every backend caps one statement at 32,766 or 65,535 bind parameters,
@@ -200,28 +197,13 @@ impl<M: Model> QueryBuilder<M> {
         {
             let literals = literals.into_iter().map(Expr::cust);
             return match operator {
-                ListOperator::In | ListOperator::EqAny => column_expr.is_in(literals),
-                ListOperator::NotIn | ListOperator::NeAll => column_expr.is_not_in(literals),
+                ListOperator::In => column_expr.is_in(literals),
+                ListOperator::NotIn => column_expr.is_not_in(literals),
             };
         }
         match operator {
             ListOperator::In => column_expr.is_in(sea_values),
             ListOperator::NotIn => column_expr.is_not_in(sea_values),
-            // An empty candidate set can never match, and rendering `ARRAY[]`
-            // would make PostgreSQL reject the statement outright.
-            ListOperator::EqAny if values.is_empty() => Expr::cust("0 = 1".to_string()),
-            // No PostgreSQL special case: `col = ANY(ARRAY[a, b])` is just
-            // `col IN (a, b)`, and sea-query binds `is_in` correctly on every
-            // backend. Rendering the ARRAY form by hand cannot work here —
-            // sea-query's fragment tokenizer treats `[` as a string delimiter
-            // running to `]`, so placeholders inside the brackets are never
-            // substituted and their values are dropped from the statement,
-            // leaving `$1`/`$2` pointing at whatever else the query bound.
-            ListOperator::EqAny => column_expr.is_in(sea_values),
-            // Nothing to differ from, so an empty candidate set always matches.
-            ListOperator::NeAll if values.is_empty() => Expr::cust("1 = 1".to_string()),
-            // Same reasoning as `EqAny`: `<> ALL(ARRAY[..])` is `NOT IN (..)`.
-            ListOperator::NeAll => column_expr.is_not_in(sea_values),
         }
     }
 }

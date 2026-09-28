@@ -228,33 +228,19 @@ impl Migrator {
     /// applied change with no ledger row.
     pub async fn run(&self) -> Result<MigrationResult> {
         let db = require_db()?;
-        let db_type = db.backend();
-
-        let lock = MigrationLock::acquire(&db, db_type).await?;
-        let outcome = self.run_locked(&db, db_type).await;
-        let released = lock.release().await;
-
-        let result = outcome?;
-        released?;
-        Ok(result)
+        with_migration_lock(&db, self.run_locked(&db)).await
     }
 
-    async fn run_locked(&self, db: &Database, db_type: DatabaseType) -> Result<MigrationResult> {
+    async fn run_locked(&self, db: &Database) -> Result<MigrationResult> {
         let ledger = self.ledger()?;
         ledger.ensure(db).await?;
 
         let applied = self.applied_versions(&ledger, db).await?;
-        let mut result = MigrationResult::new();
+        let mut result = MigrationResult::default();
 
-        let mut migrations: Vec<_> = self.migrations.iter().collect();
-        migrations.sort_by_key(|migration| migration.version());
-
-        for migration in migrations {
+        for migration in self.sorted() {
             let version = migration.version();
-            let info = MigrationInfo {
-                version: version.to_string(),
-                name: migration.name().to_string(),
-            };
+            let info = info_of(migration.as_ref());
 
             if applied.iter().any(|applied| applied == version) {
                 result.skipped.push(info);
@@ -262,13 +248,7 @@ impl Migrator {
             }
 
             tide_info!("Running migration: {} - {}", version, migration.name());
-            apply_migration(
-                db,
-                db_type,
-                Arc::clone(migration),
-                ledger.table().to_string(),
-            )
-            .await?;
+            apply_migration(db, Arc::clone(migration), ledger.table().to_string()).await?;
             tide_info!("Completed migration: {} - {}", version, migration.name());
 
             result.applied.push(info);
@@ -283,22 +263,10 @@ impl Migrator {
     /// migration in one transaction where the backend allows it.
     pub async fn rollback(&self) -> Result<MigrationResult> {
         let db = require_db()?;
-        let db_type = db.backend();
-
-        let lock = MigrationLock::acquire(&db, db_type).await?;
-        let outcome = self.rollback_locked(&db, db_type).await;
-        let released = lock.release().await;
-
-        let result = outcome?;
-        released?;
-        Ok(result)
+        with_migration_lock(&db, self.rollback_locked(&db)).await
     }
 
-    async fn rollback_locked(
-        &self,
-        db: &Database,
-        db_type: DatabaseType,
-    ) -> Result<MigrationResult> {
+    async fn rollback_locked(&self, db: &Database) -> Result<MigrationResult> {
         let ledger = self.ledger()?;
         ledger.ensure(db).await?;
 
@@ -307,7 +275,7 @@ impl Migrator {
         // version. After a long-lived branch merges those are routinely
         // different migrations.
         let applied = self.applied_versions(&ledger, db).await?;
-        let mut result = MigrationResult::new();
+        let mut result = MigrationResult::default();
 
         let Some(last_version) = applied.last() else {
             return Ok(result);
@@ -329,24 +297,20 @@ impl Migrator {
 
         revert_migration(
             db,
-            db_type,
             Arc::clone(migration),
             last_version,
             ledger.table().to_string(),
         )
         .await?;
 
-        result.rolled_back.push(MigrationInfo {
-            version: migration.version().to_string(),
-            name: migration.name().to_string(),
-        });
+        result.rolled_back.push(info_of(migration.as_ref()));
 
         Ok(result)
     }
 
     /// Rollback multiple migrations
     pub async fn rollback_steps(&self, steps: usize) -> Result<MigrationResult> {
-        let mut result = MigrationResult::new();
+        let mut result = MigrationResult::default();
 
         for _ in 0..steps {
             let step_result = self.rollback().await?;
@@ -409,10 +373,8 @@ impl Migrator {
 
         let applied = self.applied_versions(&ledger, &db).await?;
 
-        let mut migrations: Vec<_> = self.migrations.iter().collect();
-        migrations.sort_by_key(|migration| migration.version());
-
-        Ok(migrations
+        Ok(self
+            .sorted()
             .into_iter()
             .map(|migration| MigrationStatus {
                 version: migration.version().to_string(),
@@ -429,14 +391,14 @@ impl Migrator {
     /// because every path that touches the ledger already returns `Result`,
     /// while the builder method has nowhere to report a bad name.
     pub(super) fn ledger(&self) -> Result<Ledger<'_>> {
-        if !is_safe_identifier_segment(&self.table) {
-            return Err(Error::configuration(format!(
-                "invalid migrations table name '{}': expected ASCII letters, numbers, and underscores",
-                self.table
-            )));
-        }
+        checked_ledger(&self.table)
+    }
 
-        Ok(Ledger::migrations(&self.table))
+    /// The registered migrations in version order.
+    fn sorted(&self) -> Vec<&Arc<dyn Migration>> {
+        let mut migrations: Vec<_> = self.migrations.iter().collect();
+        migrations.sort_by_key(|migration| migration.version());
+        migrations
     }
 
     /// Versions of the migrations registered on this migrator.
@@ -461,57 +423,171 @@ impl Migrator {
     }
 }
 
-/// Apply one migration and record it in the ledger.
-///
-/// On a backend with transactional DDL both happen in one transaction, so a
-/// statement failing partway cannot leave schema changes behind with no ledger
-/// row. `Schema` and the ledger both resolve their connection from the ambient
-/// scope, which is what puts them inside that transaction. Elsewhere the two
-/// run unwrapped, because the backend would implicitly commit the DDL anyway.
+/// What a run reports about `migration`.
+fn info_of(migration: &dyn Migration) -> MigrationInfo {
+    MigrationInfo {
+        version: migration.version().to_string(),
+        name: migration.name().to_string(),
+    }
+}
+
+/// Apply one migration and record it in the ledger, in one
+/// [`in_ddl_scope`].
 async fn apply_migration(
     db: &Database,
-    db_type: DatabaseType,
     migration: Arc<dyn Migration>,
     table: String,
 ) -> Result<()> {
-    let apply = async move {
+    let db_type = db.backend();
+    in_ddl_scope(db, async move {
         let mut schema = Schema::new(db_type);
         migration.up(&mut schema).await?;
         Ledger::migrations(&table)
             .record(&require_db()?, migration.version(), &[migration.name()])
             .await
-    };
-
-    if supports_transactional_ddl(db_type) {
-        return db.transaction(move |_| Box::pin(apply)).await;
-    }
-
-    apply.await
+    })
+    .await
 }
 
-/// Revert one migration and remove its ledger row, with the same transaction
-/// rules as [`apply_migration`].
+/// Revert one migration and remove its ledger row, in one [`in_ddl_scope`].
 async fn revert_migration(
     db: &Database,
-    db_type: DatabaseType,
     migration: Arc<dyn Migration>,
     version: &str,
     table: String,
 ) -> Result<()> {
+    let db_type = db.backend();
     let version = version.to_string();
-    let revert = async move {
+    in_ddl_scope(db, async move {
         let mut schema = Schema::new(db_type);
         migration.down(&mut schema).await?;
         Ledger::migrations(&table)
             .remove(&require_db()?, &version)
             .await
-    };
+    })
+    .await
+}
 
-    if supports_transactional_ddl(db_type) {
-        return db.transaction(move |_| Box::pin(revert)).await;
+/// Run `work` holding the migration lock, so concurrent migrators, the CLI's
+/// included, take turns.
+async fn with_migration_lock<T>(
+    db: &Database,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let lock = MigrationLock::acquire(db, db.backend()).await?;
+    let outcome = work.await;
+    let released = lock.release().await;
+
+    let result = outcome?;
+    released?;
+    Ok(result)
+}
+
+/// Run `work` in one transaction where the backend's DDL is transactional,
+/// so a statement failing partway cannot leave schema changes behind with no
+/// ledger row; elsewhere unwrapped, because the backend would implicitly
+/// commit the DDL anyway. `Schema` and the ledger resolve their connection
+/// from the ambient scope, which is what puts them inside the transaction.
+async fn in_ddl_scope(
+    db: &Database,
+    work: impl std::future::Future<Output = Result<()>> + Send + 'static,
+) -> Result<()> {
+    if supports_transactional_ddl(db.backend()) {
+        return db.transaction(move |_| Box::pin(work)).await;
     }
 
-    revert.await
+    work.await
+}
+
+/// Apply one migration given as SQL statements on `db` and record it in the
+/// ledger `table`, or with `apply` false revert it and remove it, as
+/// [`Migrator`] does: holding the migration lock, in one transaction where
+/// the backend's DDL is transactional. The CLI runs its migrations through it.
+///
+/// Returns `false`, having run nothing, when the ledger read under the lock
+/// shows another run already did it.
+#[doc(hidden)]
+pub async fn __run_sql_migration(
+    db: &Database,
+    table: &str,
+    version: &str,
+    name: &str,
+    statements: Vec<String>,
+    apply: bool,
+) -> Result<bool> {
+    let ledger = checked_ledger(table)?;
+    with_migration_lock(db, async {
+        ledger.ensure(db).await?;
+        let recorded = ledger.keys(db).await?.iter().any(|key| key == version);
+        if recorded == apply {
+            return Ok(false);
+        }
+
+        let (handle, table, version, name) = (
+            db.clone(),
+            table.to_string(),
+            version.to_string(),
+            name.to_string(),
+        );
+        in_ddl_scope(db, async move {
+            for statement in &statements {
+                handle.exec_raw(statement).await?;
+            }
+            let ledger = Ledger::migrations(&table);
+            if apply {
+                ledger.record(&handle, &version, &[&name]).await
+            } else {
+                ledger.remove(&handle, &version).await
+            }
+        })
+        .await?;
+        Ok(true)
+    })
+    .await
+}
+
+/// Create the migrations ledger `table` on `db` if it is missing, in the shape
+/// [`Migrator`] creates it.
+#[doc(hidden)]
+pub async fn __ensure_migration_ledger(db: &Database, table: &str) -> Result<()> {
+    checked_ledger(table)?.ensure(db).await
+}
+
+/// Create the seed ledger on `db` if it is missing.
+#[doc(hidden)]
+pub async fn __ensure_seed_ledger(db: &Database) -> Result<()> {
+    Ledger::seeds().ensure(db).await
+}
+
+/// Record a migration as applied in the ledger `table`, or with `applied`
+/// false remove it, without running it: the CLI's `migrate mark`.
+#[doc(hidden)]
+pub async fn __mark_migration(
+    db: &Database,
+    table: &str,
+    version: &str,
+    name: &str,
+    applied: bool,
+) -> Result<()> {
+    let ledger = checked_ledger(table)?;
+    ledger.ensure(db).await?;
+    if applied {
+        ledger.record(db, version, &[name]).await
+    } else {
+        ledger.remove(db, version).await
+    }
+}
+
+/// The migrations ledger `table` names, checked before it reaches any SQL.
+fn checked_ledger(table: &str) -> Result<Ledger<'_>> {
+    if !is_safe_identifier_segment(table) {
+        return Err(Error::configuration(format!(
+            "invalid migrations table name '{}': expected ASCII letters, numbers, and underscores",
+            table
+        )));
+    }
+
+    Ok(Ledger::migrations(table))
 }
 
 impl Default for Migrator {

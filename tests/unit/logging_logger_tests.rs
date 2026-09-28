@@ -66,12 +66,12 @@ fn state_starts_from_the_documented_environment_variables() {
 
     assert!(configured.enabled.load(Ordering::SeqCst));
     assert_eq!(*configured.level.read(), Some(LogLevel::Debug));
-    assert_eq!(configured.slow_threshold_ms.load(Ordering::SeqCst), 250);
+    assert_eq!(configured.counters.slow_threshold_ms(), 250);
 
     let unset = LoggerState::from_vars(|_| None);
     assert_eq!(*unset.level.read(), None);
     assert_eq!(
-        unset.slow_threshold_ms.load(Ordering::SeqCst),
+        unset.counters.slow_threshold_ms(),
         DEFAULT_SLOW_QUERY_THRESHOLD_MS
     );
 }

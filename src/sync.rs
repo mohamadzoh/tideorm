@@ -58,6 +58,7 @@ pub(crate) use registry::registered_column_type;
 pub use registry::{ColumnTypeOf, CompiledModelRegistration};
 use registry::{MODEL_SCHEMAS, register_compiled_models_matching};
 pub use registry::{RegisterModels, SyncModel};
+pub(crate) use schema::decode_table_exists;
 use schema::sync_model_schemas;
 pub use schema::{ColumnDef, ModelSchema};
 
@@ -75,10 +76,14 @@ impl SyncRegistry {
         MODEL_SCHEMAS.write().clear();
     }
 
-    /// Register a TideORM model schema for synchronization
+    /// Register a TideORM model schema for synchronization, once per table:
+    /// a table of the same name in another schema is another table.
     pub fn register_schema(schema: ModelSchema) {
         let mut schemas = MODEL_SCHEMAS.write();
-        if !schemas.iter().any(|s| s.table_name == schema.table_name) {
+        if !schemas.iter().any(|registered| {
+            registered.table_name == schema.table_name
+                && registered.schema_name == schema.schema_name
+        }) {
             schemas.push(schema);
         }
     }

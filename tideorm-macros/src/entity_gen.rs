@@ -6,12 +6,9 @@ use syn::Type;
 
 use crate::context::BuildContext;
 use crate::meta_support::has_managed_timestamp_columns;
-use crate::parse::{
-    ModelField, RelationKind, find_db_field, is_optional_type, type_string, variant_ident,
-};
+use crate::parse::{ModelField, RelationKind, is_optional_type, type_string, variant_ident};
 
 pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenStream2> {
-    validate_searchable_fields(ctx)?;
     let base_impl = generate_base_impl(ctx)?;
     let sync_impl = generate_sync_impl(ctx);
     let columns_impl = generate_columns_impl(ctx);
@@ -20,29 +17,6 @@ pub(crate) fn generate_entity_support(ctx: &BuildContext) -> syn::Result<TokenSt
         #sync_impl
         #columns_impl
     })
-}
-
-/// Reject `#[tideorm(searchable = "...")]` entries that name no field or column.
-///
-/// `searchable_fields()` is metadata only, so a typo there would otherwise stay silent
-/// until a search returned nothing at runtime.
-fn validate_searchable_fields(ctx: &BuildContext) -> syn::Result<()> {
-    match ctx
-        .searchable_fields
-        .iter()
-        .find(|name| find_db_field(&ctx.db_fields, name).is_none())
-    {
-        // The name comes from an attribute string, so there is no token of its own
-        // to span; the struct name is the closest real location.
-        Some(name) => Err(syn::Error::new_spanned(
-            &ctx.struct_name,
-            format!(
-                "#[tideorm(searchable = ...)] references unknown field or column '{}'",
-                name
-            ),
-        )),
-        None => Ok(()),
-    }
 }
 
 fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
@@ -99,6 +73,70 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
         }
     });
     let relation_payload_filters = build_relation_payload_filters(ctx);
+    // Each method is emitted only where the model differs from its default.
+    let primary_key_auto_increment_impl = pk_auto_increment.then(|| {
+        quote!(
+            fn primary_key_auto_increment() -> bool {
+                true
+            }
+        )
+    });
+    let hidden_attributes_impl = (hidden_attrs.as_slice() != ["deleted_at"]).then(|| {
+        quote!(
+            fn hidden_attributes() -> Vec<&'static str> {
+                vec![#(#hidden_attrs),*]
+            }
+        )
+    });
+    let relation_payload_filters_impl = (!relation_payload_filters.is_empty()).then(|| {
+        quote! {
+            fn relation_payload_filters() -> Vec<(&'static str, ::tideorm::model::RelationPayloadFilter)> {
+                vec![#(#relation_payload_filters),*]
+            }
+        }
+    });
+    let searchable_fields_impl = (!searchable_fields.is_empty()).then(|| {
+        quote!(
+            fn searchable_fields() -> Vec<&'static str> {
+                vec![#(#searchable_fields),*]
+            }
+        )
+    });
+    let translatable_fields_impl = (!translatable_fields.is_empty()).then(|| {
+        quote!(
+            fn translatable_fields() -> Vec<&'static str> {
+                vec![#(#translatable_fields),*]
+            }
+        )
+    });
+    let encrypted_fields_impl = (!encrypted_fields.is_empty()).then(|| {
+        quote! {
+            fn encrypted_fields() -> Vec<&'static str> { vec![#(#encrypted_fields),*] }
+            fn encrypted_column_names() -> Vec<&'static str> { vec![#(#encrypted_column_names),*] }
+        }
+    });
+    let attached_files_impl =
+        (!has_one_files.is_empty() || !has_many_files.is_empty()).then(|| {
+            quote! {
+                fn has_one_attached_file() -> Vec<&'static str> { vec![#(#has_one_files),*] }
+                fn has_many_attached_files() -> Vec<&'static str> { vec![#(#has_many_files),*] }
+            }
+        });
+    let has_timestamps_impl = has_timestamps.then(|| {
+        quote!(
+            fn has_timestamps() -> bool {
+                true
+            }
+        )
+    });
+    let indexes_impl = (!index_impls.is_empty() || !unique_index_impls.is_empty()).then(|| {
+        quote! {
+            fn indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#index_impls),*] }
+            fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> {
+                vec![#(#unique_index_impls),*]
+            }
+        }
+    });
     let driver_limited_fields = ctx.driver_limited_fields();
     let driver_limited_fields_impl = (!driver_limited_fields.is_empty()).then(|| {
         let (fields, types): (Vec<_>, Vec<_>) = driver_limited_fields.into_iter().unzip();
@@ -238,7 +276,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             fn table_name() -> &'static str { #table_name }
             #meta_schema_name
             fn primary_key_names() -> &'static [&'static str] { &[#(#pk_column_names),*] }
-            fn primary_key_auto_increment() -> bool { #pk_auto_increment }
+            #primary_key_auto_increment_impl
             fn primary_key_display(primary_key: &Self::PrimaryKey) -> String {
                 #primary_key_display_impl
             }
@@ -247,26 +285,21 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
             fn column_names() -> &'static [&'static str] { &[#(#column_names),*] }
             fn field_names() -> &'static [&'static str] { &[#(#field_names),*] }
-            fn hidden_attributes() -> Vec<&'static str> { vec![#(#hidden_attrs),*] }
+            #hidden_attributes_impl
             #serialized_name_impl
             #serde_round_trips_impl
-            fn relation_payload_filters() -> Vec<(&'static str, ::tideorm::model::RelationPayloadFilter)> {
-                vec![#(#relation_payload_filters),*]
-            }
-            fn searchable_fields() -> Vec<&'static str> { vec![#(#searchable_fields),*] }
+            #relation_payload_filters_impl
+            #searchable_fields_impl
             #morph_owner_key_impl
-            fn translatable_fields() -> Vec<&'static str> { vec![#(#translatable_fields),*] }
-            fn encrypted_fields() -> Vec<&'static str> { vec![#(#encrypted_fields),*] }
-            fn encrypted_column_names() -> Vec<&'static str> { vec![#(#encrypted_column_names),*] }
+            #translatable_fields_impl
+            #encrypted_fields_impl
             #driver_limited_fields_impl
             #allowed_languages_impl
             #fallback_language_impl
-            fn has_one_attached_file() -> Vec<&'static str> { vec![#(#has_one_files),*] }
-            fn has_many_attached_files() -> Vec<&'static str> { vec![#(#has_many_files),*] }
+            #attached_files_impl
             #soft_delete_impl
-            fn has_timestamps() -> bool { #has_timestamps }
-            fn indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#index_impls),*] }
-            fn unique_indexes() -> Vec<::tideorm::model::IndexDefinition> { vec![#(#unique_index_impls),*] }
+            #has_timestamps_impl
+            #indexes_impl
         }
     })
 }
@@ -295,11 +328,10 @@ fn build_morph_owner_key_impl(ctx: &BuildContext) -> syn::Result<Option<TokenStr
             .local_key
             .as_deref()
             .unwrap_or(ctx.default_local_key());
-        let Some(key_column) =
-            find_db_field(&ctx.db_fields, local_key).map(ModelField::column_name)
-        else {
-            continue;
-        };
+        // `local_key = "id"` names the primary key, whatever it is called.
+        let key_column = ctx
+            .resolve_local_key(local_key, field.ident())?
+            .column_name();
         let Some(child) = field.related_types().into_iter().next() else {
             continue;
         };
@@ -353,16 +385,10 @@ fn sea_orm_field_def(field: &ModelField) -> TokenStream2 {
 
 fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_column_names = &ctx.pk_column_names;
-    if let [pk_column_name] = pk_column_names.as_slice() {
-        return quote! {
-            format!("{} = {}", #pk_column_name, primary_key)
-        };
-    }
-
-    let bindings = ctx.primary_key_bindings();
+    let (bind, components) = ctx.primary_key_components();
     quote! {
-        let (#(#bindings),*) = primary_key.clone();
-        vec![#(format!("{} = {}", #pk_column_names, #bindings)),*].join(" AND ")
+        #bind
+        [#(format!("{} = {}", #pk_column_names, #components)),*].join(" AND ")
     }
 }
 
@@ -371,9 +397,9 @@ fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
         return quote!(::tideorm::model::__is_default(primary_key));
     }
 
-    let bindings = ctx.primary_key_bindings();
+    let (bind, components) = ctx.primary_key_components();
     quote! {
-        let (#(#bindings),*) = primary_key.clone();
+        #bind
         // A composite key counts as unsaved when *any* component is still at its default:
         // a partially-assigned key means the row has not been fully keyed yet.
         //
@@ -381,7 +407,7 @@ fn build_primary_key_is_new_impl(ctx: &BuildContext) -> TokenStream2 {
         // such as `(42, "")`, but it makes the failure silent: a genuinely new row with a
         // partial key routes to `update()` and quietly affects zero rows. ORing routes it
         // to `create()`, where a real collision surfaces loudly as a duplicate-key error.
-        false #(|| ::tideorm::model::__is_default(&#bindings))*
+        false #(|| ::tideorm::model::__is_default(#components))*
     }
 }
 

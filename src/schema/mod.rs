@@ -16,6 +16,7 @@ mod types;
 mod writer;
 
 pub use generator::SchemaGenerator;
+pub(crate) use types::column_declaration_methods;
 pub use types::{ColumnSchema, TableSchema, TableSchemaBuilder, rust_type_to_column_type};
 pub use writer::SchemaWriter;
 

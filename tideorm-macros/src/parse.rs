@@ -240,66 +240,36 @@ impl ModelField {
         }
     }
 
+    /// Whether the last segment of the field's type, `Option` removed, is one
+    /// of `names`.
+    fn base_type_is(&self, names: &[&str]) -> bool {
+        terminal_ident(self.validation_base_type()).is_some_and(|name| names.contains(&&*name))
+    }
+
     pub(crate) fn supports_string_validations(&self) -> bool {
-        matches!(
-            terminal_ident(self.validation_base_type()).as_deref(),
-            Some("String" | "str" | "Text")
-        )
+        self.base_type_is(&["String", "str", "Text"])
     }
 
     /// Whether an encrypted column can hold the field: `String` or `Text`,
     /// optionally inside an `Option`.
     pub(crate) fn supports_encryption(&self) -> bool {
-        matches!(
-            terminal_ident(self.validation_base_type()).as_deref(),
-            Some("String" | "Text")
-        )
+        self.base_type_is(&["String", "Text"])
     }
 
     /// Whether the field is a Rust integer, the only kind of key a database
     /// counter can fill.
     pub(crate) fn is_integer(&self) -> bool {
-        matches!(
-            terminal_ident(self.validation_base_type()).as_deref(),
-            Some(
-                "i8" | "i16"
-                    | "i32"
-                    | "i64"
-                    | "i128"
-                    | "isize"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "u128"
-                    | "usize"
-            )
-        )
+        self.base_type_is(&[
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+        ])
     }
 
+    /// Integers, floats, decimals, and text, which the numeric rules read as
+    /// a length.
     pub(crate) fn supports_numeric_validations(&self) -> bool {
-        matches!(
-            terminal_ident(self.validation_base_type()).as_deref(),
-            Some(
-                "i8" | "i16"
-                    | "i32"
-                    | "i64"
-                    | "i128"
-                    | "isize"
-                    | "u8"
-                    | "u16"
-                    | "u32"
-                    | "u64"
-                    | "u128"
-                    | "usize"
-                    | "f32"
-                    | "f64"
-                    | "Decimal"
-                    | "String"
-                    | "str"
-                    | "Text"
-            )
-        )
+        self.is_integer()
+            || self.base_type_is(&["f32", "f64", "Decimal"])
+            || self.supports_string_validations()
     }
 
     /// The field's column definition, or an error on its type when TideORM

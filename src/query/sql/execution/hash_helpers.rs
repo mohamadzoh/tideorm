@@ -65,10 +65,7 @@ fn hash_condition_value<H: Hasher>(value: &ConditionValue, hasher: &mut H) {
         ConditionValue::RawExpr(expression) => expression.hash(hasher),
         ConditionValue::Column(other) | ConditionValue::Invalid(other) => other.hash(hasher),
         ConditionValue::RawExprWithValues { sql, values }
-        | ConditionValue::RawTemplate { sql, values } => {
-            sql.hash(hasher);
-            hash_bound_values(values, hasher);
-        }
+        | ConditionValue::RawTemplate { sql, values } => hash_fragment(sql, values, hasher),
     }
 }
 
@@ -81,14 +78,15 @@ fn hash_condition_value<H: Hasher>(value: &ConditionValue, hasher: &mut H) {
 /// rows to another. sea-query's `Value` implements neither `Hash` nor `Eq`, but
 /// its `Debug` rendering is variant- and payload-distinct, which is what the key
 /// needs.
-pub(super) fn hash_bound_values<H: Hasher>(values: &[Value], hasher: &mut H) {
+fn hash_bound_values<H: Hasher>(values: &[Value], hasher: &mut H) {
     values.len().hash(hasher);
     for value in values {
         format!("{:?}", value).hash(hasher);
     }
 }
 
-pub(super) fn hash_having_clause<H: Hasher>(sql: &str, params: &[Value], hasher: &mut H) {
+/// Hash a parameterized SQL fragment: its text and its bound values.
+pub(super) fn hash_fragment<H: Hasher>(sql: &str, params: &[Value], hasher: &mut H) {
     sql.hash(hasher);
     hash_bound_values(params, hasher);
 }

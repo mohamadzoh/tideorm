@@ -141,40 +141,6 @@ pub trait Callbacks: Sized {
     }
 }
 
-/// Helper trait to run callbacks around model operations
-///
-/// This is used internally by TideORM to execute callbacks.
-/// You typically don't need to use this directly.
-pub trait CallbackRunner: Callbacks {
-    /// Run the post-create callbacks
-    fn run_after_create_callbacks(&self) -> Result<()> {
-        self.after_create()?;
-        self.after_save()?;
-        Ok(())
-    }
-
-    /// Run the post-update callbacks
-    fn run_after_update_callbacks(&self) -> Result<()> {
-        self.after_update()?;
-        self.after_save()?;
-        Ok(())
-    }
-
-    /// Run the delete callback chain
-    fn run_delete_callbacks(&self) -> Result<()> {
-        self.before_delete()?;
-        Ok(())
-    }
-
-    /// Run post-delete callbacks
-    fn run_after_delete_callbacks(&self) -> Result<()> {
-        self.after_delete()?;
-        Ok(())
-    }
-}
-
-impl<T: Callbacks> CallbackRunner for T {}
-
 // The `*Dispatch` traits below implement autoref specialization: a bounded impl
 // on `&mut T` / `&T` (requiring `T: Callbacks`) plus an unbounded no-op fallback
 // on `&&mut T` / `&&T`. `Callbacks` is optional, so this is how a model that
@@ -196,9 +162,10 @@ pub trait AfterCreateDispatch<T> {
     fn run_after_create(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> AfterCreateDispatch<T> for &T {
+impl<T: Callbacks> AfterCreateDispatch<T> for &T {
     fn run_after_create(self) -> Result<()> {
-        self.run_after_create_callbacks()
+        self.after_create()?;
+        self.after_save()
     }
 }
 
@@ -298,9 +265,10 @@ pub trait AfterUpdateDispatch<T> {
     fn run_after_update(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> AfterUpdateDispatch<T> for &T {
+impl<T: Callbacks> AfterUpdateDispatch<T> for &T {
     fn run_after_update(self) -> Result<()> {
-        self.run_after_update_callbacks()
+        self.after_update()?;
+        self.after_save()
     }
 }
 
@@ -315,9 +283,9 @@ pub trait BeforeDeleteDispatch<T> {
     fn run_before_delete(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> BeforeDeleteDispatch<T> for &T {
+impl<T: Callbacks> BeforeDeleteDispatch<T> for &T {
     fn run_before_delete(self) -> Result<()> {
-        self.run_delete_callbacks()
+        self.before_delete()
     }
 }
 
@@ -332,9 +300,9 @@ pub trait AfterDeleteDispatch<T> {
     fn run_after_delete(self) -> Result<()>;
 }
 
-impl<T: CallbackRunner> AfterDeleteDispatch<T> for &T {
+impl<T: Callbacks> AfterDeleteDispatch<T> for &T {
     fn run_after_delete(self) -> Result<()> {
-        self.run_after_delete_callbacks()
+        self.after_delete()
     }
 }
 

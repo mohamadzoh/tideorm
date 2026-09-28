@@ -1,22 +1,27 @@
 mod error_exhaustive_variants {
     use tideorm::error::Error;
 
+    /// One error of every variant.
+    fn every_variant() -> Vec<Error> {
+        vec![
+            Error::not_found("find user"),
+            Error::connection("Connection refused"),
+            Error::query("syntax error"),
+            Error::validation("email", "invalid"),
+            Error::conversion("type mismatch"),
+            Error::transaction("timeout"),
+            Error::configuration("not set"),
+            Error::internal("oops"),
+            Error::backend_not_supported("arrays", "SQLite"),
+            Error::primary_key_not_set("missing pk", "Post"),
+            Error::tokenization("encode failed"),
+            Error::invalid_token("tampered"),
+        ]
+    }
+
     #[test]
     fn test_all_error_variants_have_unique_codes() {
-        let errors: Vec<Error> = vec![
-            Error::not_found("test"),
-            Error::connection("test"),
-            Error::query("test"),
-            Error::validation("f", "test"),
-            Error::conversion("test"),
-            Error::transaction("test"),
-            Error::configuration("test"),
-            Error::internal("test"),
-            Error::backend_not_supported("test", "pg"),
-            Error::primary_key_not_set("test", "User"),
-            Error::tokenization("test"),
-            Error::invalid_token("test"),
-        ];
+        let errors = every_variant();
 
         let codes: Vec<&str> = errors.iter().map(|e| e.code()).collect();
         let unique: std::collections::HashSet<&&str> = codes.iter().collect();
@@ -25,20 +30,7 @@ mod error_exhaustive_variants {
 
     #[test]
     fn test_all_error_http_statuses_are_valid() {
-        let errors: Vec<Error> = vec![
-            Error::not_found("test"),
-            Error::connection("test"),
-            Error::query("test"),
-            Error::validation("f", "test"),
-            Error::conversion("test"),
-            Error::transaction("test"),
-            Error::configuration("test"),
-            Error::internal("test"),
-            Error::backend_not_supported("test", "pg"),
-            Error::primary_key_not_set("test", "User"),
-            Error::tokenization("test"),
-            Error::invalid_token("test"),
-        ];
+        let errors = every_variant();
 
         for err in &errors {
             let status = err.http_status();
@@ -53,20 +45,7 @@ mod error_exhaustive_variants {
 
     #[test]
     fn test_all_suggestions_are_nonempty() {
-        let errors: Vec<Error> = vec![
-            Error::not_found("find user"),
-            Error::connection("Connection refused"),
-            Error::query("syntax error"),
-            Error::validation("email", "invalid"),
-            Error::conversion("type mismatch"),
-            Error::transaction("timeout"),
-            Error::configuration("not set"),
-            Error::internal("oops"),
-            Error::backend_not_supported("arrays", "SQLite"),
-            Error::primary_key_not_set("missing pk", "Post"),
-            Error::tokenization("encode failed"),
-            Error::invalid_token("tampered"),
-        ];
+        let errors = every_variant();
 
         for err in &errors {
             let suggestion = err.suggestion();
@@ -176,8 +155,7 @@ mod error_log_format_comprehensive {
 
     #[test]
     fn test_log_format_with_full_context() {
-        let err = Error::query_with_context(
-            "column \"xyz\" does not exist",
+        let err = Error::query("column \"xyz\" does not exist").with_context(
             ErrorContext::new()
                 .table("users")
                 .column("xyz")

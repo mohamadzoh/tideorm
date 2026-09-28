@@ -4,7 +4,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a window function to the SELECT clause
     #[must_use]
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
-        self.window_functions.push(window_fn);
+        self.clauses.window_functions.push(window_fn);
         self
     }
 

@@ -27,7 +27,10 @@ const DEFAULT_SNAPSHOT_CAPACITY: usize = 10_000;
 
 struct SnapshotEntry {
     sequence: u64,
-    values: SnapshotValues,
+    /// `None` when the pool's baseline was forgotten while another pool
+    /// still held a different one: a model does not say which pool it came
+    /// from, so the other baseline must not become the key's.
+    values: Option<SnapshotValues>,
 }
 
 /// Bounded, insertion-ordered store of dirty-tracking baselines.
@@ -57,60 +60,115 @@ impl SnapshotStore {
     /// read from.
     ///
     /// A model does not record which database it came from, so where two
-    /// databases gave the key different rows, no baseline is known for it:
-    /// the scope a model is inspected in need not be the one it was loaded
-    /// through, and guessing would report another row's values.
+    /// databases gave the key different rows, or one pool's baseline of it
+    /// was forgotten, no baseline is known for it: the scope a model is
+    /// inspected in need not be the one it was loaded through, and guessing
+    /// would report another row's values.
     fn get(&self, row: &RowKey) -> Option<&SnapshotValues> {
-        let mut baselines = self.entries.get(row)?.values().map(|entry| &entry.values);
-        let first = baselines.next()?;
-        baselines.all(|other| other == first).then_some(first)
+        let mut baselines = self
+            .entries
+            .get(row)?
+            .values()
+            .map(|entry| entry.values.as_ref());
+        let first = baselines.next()??;
+        baselines.all(|other| other == Some(first)).then_some(first)
     }
 
-    fn insert(&mut self, row: RowKey, origin: Origin, values: SnapshotValues) {
+    /// Store one pool's baseline of `row` and return its sequence.
+    fn insert(&mut self, row: RowKey, origin: Origin, values: Option<SnapshotValues>) -> u64 {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.put(row, origin, SnapshotEntry { sequence, values });
+        sequence
+    }
 
-        let entry = SnapshotEntry { sequence, values };
-        let baselines = self.entries.entry(row.clone()).or_default();
-        if let Some(previous) = baselines.insert(origin, entry) {
+    fn put(&mut self, row: RowKey, origin: Origin, entry: SnapshotEntry) {
+        self.order.insert(entry.sequence, (row.clone(), origin));
+        if let Some(previous) = self.entries.entry(row).or_default().insert(origin, entry) {
             self.order.remove(&previous.sequence);
         }
-        self.order.insert(sequence, (row, origin));
 
+        // A row leaves with every pool's baseline of it, so no pool's
+        // baseline outlives another's and becomes the key's.
         while self.order.len() > self.capacity {
-            let Some((_, (row, origin))) = self.order.pop_first() else {
+            let Some((_, (row, _))) = self.order.pop_first() else {
                 break;
             };
-            self.take(&row, origin);
+            for entry in self
+                .entries
+                .remove(&row)
+                .into_iter()
+                .flat_map(HashMap::into_values)
+            {
+                self.order.remove(&entry.sequence);
+            }
         }
     }
 
-    /// Remove one pool's baseline of `row` from `entries` alone.
+    /// Remove one pool's baseline of `row`.
     fn take(&mut self, row: &RowKey, origin: Origin) -> Option<SnapshotEntry> {
         let baselines = self.entries.get_mut(row)?;
-        let entry = baselines.remove(&origin);
+        let entry = baselines.remove(&origin)?;
         if baselines.is_empty() {
             self.entries.remove(row);
         }
-        entry
+        self.order.remove(&entry.sequence);
+        Some(entry)
     }
 
-    /// Set one pool's baseline of `row` to `values`, or drop it for `None`,
-    /// and return the baseline it replaces.
+    /// Set one pool's baseline of `row` to `values`, or forget it for `None`.
+    /// Returns the entry it replaces, and the sequence of the entry left in
+    /// its place, if any, for [`restore`](Self::restore).
     fn replace(
         &mut self,
         row: RowKey,
         origin: Origin,
         values: Option<SnapshotValues>,
-    ) -> Option<SnapshotValues> {
-        let previous = self.take(&row, origin).map(|entry| {
-            self.order.remove(&entry.sequence);
-            entry.values
-        });
-        if let Some(values) = values {
-            self.insert(row, origin, values);
+    ) -> (Option<SnapshotEntry>, Option<u64>) {
+        let previous = self.take(&row, origin);
+        let values = match values {
+            Some(values) => Some(values),
+            // Forgotten while another pool still holds a different baseline
+            // of the key: that baseline must not become the key's.
+            None if previous.as_ref().is_some_and(|previous| {
+                self.entries.get(&row).is_some_and(|others| {
+                    others
+                        .values()
+                        .any(|other| previous.values.is_none() || other.values != previous.values)
+                })
+            }) =>
+            {
+                None
+            }
+            None => return (previous, None),
+        };
+        let sequence = self.insert(row, origin, values);
+        (previous, Some(sequence))
+    }
+
+    /// Undo a [`replace`](Self::replace) that left `standing` behind, by
+    /// putting `previous` back, unless the pool's baseline of `row` changed
+    /// again since: a transaction that rolls back undoes its own reads and
+    /// writes, not a later one's.
+    fn restore(
+        &mut self,
+        row: RowKey,
+        origin: Origin,
+        standing: Option<u64>,
+        previous: Option<SnapshotEntry>,
+    ) {
+        let current = self
+            .entries
+            .get(&row)
+            .and_then(|baselines| baselines.get(&origin))
+            .map(|entry| entry.sequence);
+        if current != standing {
+            return;
         }
-        previous
+        self.take(&row, origin);
+        if let Some(previous) = previous {
+            self.put(row, origin, previous);
+        }
     }
 
     fn remove_model_type(&mut self, model_type: TypeId) {
@@ -129,10 +187,11 @@ impl SnapshotStore {
         }
     }
 
+    /// Drop every baseline. Sequences go on from where they were, so an
+    /// undo step still pending cannot mistake a new baseline for its own.
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
-        self.next_sequence = 0;
     }
 }
 
@@ -144,10 +203,18 @@ thread_local! {
 /// Run `load` with the rows it converts remembered as read from `origin`,
 /// for a load through a handle other than the scope's own connection.
 pub(crate) fn loading_from<T>(origin: Option<u64>, load: impl FnOnce() -> T) -> T {
-    let previous = LOADING_ORIGIN.with(|slot| slot.replace(Some(origin)));
-    let result = load();
-    LOADING_ORIGIN.with(|slot| slot.set(previous));
-    result
+    /// Puts the previous origin back when the load ends, even by a panic,
+    /// which would otherwise leave later loads on the thread under `origin`.
+    struct Restore(Option<Option<u64>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOADING_ORIGIN.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let _restore = Restore(LOADING_ORIGIN.with(|slot| slot.replace(Some(origin))));
+    load()
 }
 
 /// The pool the baselines being remembered or forgotten belong to.
@@ -214,14 +281,17 @@ pub fn remember_model<M: Model>(model: &M) -> Result<()> {
 ///
 /// A row read or written inside a transaction is only what the database
 /// holds once it commits, so if it rolls back instead, the baseline this
-/// replaced comes back.
+/// replaced comes back, unless the pool's baseline of the row changed again
+/// in the meantime.
 fn set_baseline(row: RowKey, values: Option<SnapshotValues>) {
     let origin = origin();
-    let previous = snapshot_store()
+    let (previous, standing) = snapshot_store()
         .write()
         .replace(row.clone(), origin, values);
     crate::cache::undo_on_rollback(move || {
-        snapshot_store().write().replace(row, origin, previous);
+        snapshot_store()
+            .write()
+            .restore(row, origin, standing, previous);
     });
 }
 
@@ -240,16 +310,6 @@ pub fn remember_collection<M: Model>(models: &[M]) -> Result<()> {
 /// Forget one model's dirty-tracking baseline.
 pub fn forget_model<M: Model>(model: &M) -> Result<()> {
     let Some(row) = row_key_for_model(model)? else {
-        return Ok(());
-    };
-
-    set_baseline(row, None);
-    Ok(())
-}
-
-/// Forget one dirty-tracking baseline by primary key.
-pub fn forget_primary_key<M: Model>(primary_key: &M::PrimaryKey) -> Result<()> {
-    let Some(row) = row_key_for_primary_key::<M>(primary_key)? else {
         return Ok(());
     };
 
@@ -302,7 +362,7 @@ pub(crate) fn original_value<M: Model>(
     field: &str,
 ) -> Result<Option<Option<serde_json::Value>>> {
     let Some(field_name) = M::canonical_field_name(field) else {
-        return Err(Error::invalid_query(format!(
+        return Err(Error::query(format!(
             "unknown field or column '{}' for model '{}'",
             field,
             M::table_name()

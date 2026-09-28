@@ -1,7 +1,4 @@
-use super::{
-    Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd,
-    escape_like_literal,
-};
+use super::{Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd};
 use crate::query::{ConditionValue, Operator};
 
 impl<T> Column<T> {
@@ -14,23 +11,22 @@ impl<T> Column<T> {
     }
 }
 
-fn like_pattern(pattern: String) -> ConditionValue {
-    ConditionValue::Single(serde_json::Value::String(pattern))
-}
-
 // Each macro implements one trait for every listed column type, so a nullable
 // column (`Column<Option<T>>`) shares the comparisons of its plain twin.
 
 macro_rules! impl_eq {
+    (@methods $value:ty) => {
+        fn eq(self, value: $value) -> ColumnCondition {
+            self.cond(Operator::Eq, ConditionValue::single(value))
+        }
+
+        fn ne(self, value: $value) -> ColumnCondition {
+            self.cond(Operator::NotEq, ConditionValue::single(value))
+        }
+    };
     ($value:ty => $($column:ty),+) => {$(
         impl ColumnEq<$value> for Column<$column> {
-            fn eq(self, value: $value) -> ColumnCondition {
-                self.cond(Operator::Eq, ConditionValue::single(value))
-            }
-
-            fn ne(self, value: $value) -> ColumnCondition {
-                self.cond(Operator::NotEq, ConditionValue::single(value))
-            }
+            impl_eq!(@methods $value);
         }
     )+};
 }
@@ -82,32 +78,23 @@ macro_rules! impl_like {
     ($($column:ty),+) => {$(
         impl ColumnLike for Column<$column> {
             fn like(self, pattern: &str) -> ColumnCondition {
-                self.cond(Operator::Like, like_pattern(pattern.to_string()))
+                self.cond(Operator::Like, ConditionValue::text(pattern))
             }
 
             fn not_like(self, pattern: &str) -> ColumnCondition {
-                self.cond(Operator::NotLike, like_pattern(pattern.to_string()))
+                self.cond(Operator::NotLike, ConditionValue::text(pattern))
             }
 
             fn contains(self, substr: &str) -> ColumnCondition {
-                self.cond(
-                    Operator::LikeEscaped,
-                    like_pattern(format!("%{}%", escape_like_literal(substr))),
-                )
+                self.cond(Operator::LikeEscaped, ConditionValue::contains(substr))
             }
 
             fn starts_with(self, prefix: &str) -> ColumnCondition {
-                self.cond(
-                    Operator::LikeEscaped,
-                    like_pattern(format!("{}%", escape_like_literal(prefix))),
-                )
+                self.cond(Operator::LikeEscaped, ConditionValue::starts_with(prefix))
             }
 
             fn ends_with(self, suffix: &str) -> ColumnCondition {
-                self.cond(
-                    Operator::LikeEscaped,
-                    like_pattern(format!("%{}", escape_like_literal(suffix))),
-                )
+                self.cond(Operator::LikeEscaped, ConditionValue::ends_with(suffix))
             }
         }
     )+};
@@ -154,23 +141,11 @@ impl_nullable!(Option<bool>);
 // enum, a newtype, a JSON value — and a nullable column (`Column<Option<T>>`)
 // compares with a plain `T` too.
 impl<T: serde::Serialize> ColumnEq<T> for Column<T> {
-    fn eq(self, value: T) -> ColumnCondition {
-        self.cond(Operator::Eq, ConditionValue::single(value))
-    }
-
-    fn ne(self, value: T) -> ColumnCondition {
-        self.cond(Operator::NotEq, ConditionValue::single(value))
-    }
+    impl_eq!(@methods T);
 }
 
 impl<T: serde::Serialize> ColumnEq<T> for Column<Option<T>> {
-    fn eq(self, value: T) -> ColumnCondition {
-        self.cond(Operator::Eq, ConditionValue::single(value))
-    }
-
-    fn ne(self, value: T) -> ColumnCondition {
-        self.cond(Operator::NotEq, ConditionValue::single(value))
-    }
+    impl_eq!(@methods T);
 }
 
 impl<T: serde::Serialize> ColumnIn<T> for Column<T> {

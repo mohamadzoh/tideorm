@@ -6,9 +6,9 @@ use crate::config::DatabaseType;
 use crate::database::Database;
 use crate::error::Result;
 use crate::internal::sql_safety::quote_ident;
-use crate::internal::{ConnectionTrait, Value, build_statement, push_param, translate_error};
-
-use super::ddl;
+use crate::internal::{
+    ConnectionTrait, Value, build_statement_with_values, push_param, translate_error,
+};
 
 /// A table recording which migrations or seeds have run.
 ///
@@ -56,16 +56,36 @@ impl<'a> Ledger<'a> {
     /// Inside a transaction this runs on it on PostgreSQL and SQLite, whose DDL
     /// is transactional: SQLite's pool may hold nothing but the transaction's
     /// connection, and waiting for a second one would never end. MySQL and
-    /// MariaDB commit an open transaction before any DDL, so there the table is
-    /// created on a pooled connection instead.
+    /// MariaDB commit an open transaction before any DDL, so there a missing
+    /// table is created on a pooled connection instead, after the ambient
+    /// connection found it missing: a transaction holding the pool's only
+    /// connection then waits for another only the first time.
     pub(crate) async fn ensure(&self, db: &Database) -> Result<()> {
         let db_type = db.execution_backend();
         let sql = self.create_table_sql(db_type);
         if matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB) {
-            db.__internal_connection()?
-                .execute_unprepared(&sql)
+            let connection = db.__get_connection()?;
+            let executor = connection.executor();
+            let probe = build_statement_with_values(
+                executor.get_database_backend(),
+                "SELECT COUNT(*) > 0 FROM information_schema.tables \
+                 WHERE table_schema = DATABASE() AND table_name = ?",
+                vec![self.table.into()],
+            );
+            let present = match executor
+                .query_one_raw(probe)
                 .await
-                .map_err(translate_error)?;
+                .map_err(translate_error)?
+            {
+                Some(row) => crate::sync::decode_table_exists(&row, self.table)?,
+                None => false,
+            };
+            if !present {
+                db.__internal_connection()?
+                    .execute_unprepared(&sql)
+                    .await
+                    .map_err(translate_error)?;
+            }
         } else {
             db.__get_connection()?
                 .executor()
@@ -81,16 +101,9 @@ impl<'a> Ledger<'a> {
     /// ambient connection, so an entry recorded earlier in the same transaction
     /// is seen.
     pub(crate) async fn keys(&self, db: &Database) -> Result<Vec<String>> {
-        let connection = db.__get_connection()?;
-        let executor = connection.executor();
-        let statement = build_statement(
-            executor.get_database_backend(),
-            self.keys_sql(db.execution_backend()),
-        );
-        let rows = executor
-            .query_all_raw(statement)
-            .await
-            .map_err(translate_error)?;
+        let rows = db
+            .fetch_rows(&self.keys_sql(db.execution_backend()), Vec::new())
+            .await?;
 
         rows.iter()
             .map(|row| row.try_get("", self.key_column).map_err(translate_error))
@@ -186,7 +199,7 @@ impl<'a> Ledger<'a> {
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
             quote_ident(db_type, self.table),
-            ddl::column_list(db_type, &columns),
+            crate::internal::sql_safety::column_list(db_type, &columns, ""),
             placeholders.join(", ")
         );
 

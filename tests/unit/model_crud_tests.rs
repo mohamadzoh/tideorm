@@ -49,7 +49,7 @@ async fn insert_all_rejects_an_invalid_model_before_touching_the_database() {
 
 #[tokio::test]
 async fn paginate_rejects_a_zero_page_number() {
-    let error = paginate::<PaginationUser>(0, 10)
+    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(0, 10)
         .await
         .expect_err("page 0 should be rejected");
 
@@ -61,7 +61,7 @@ async fn paginate_rejects_a_zero_page_number() {
 
 #[tokio::test]
 async fn paginate_rejects_a_zero_page_size() {
-    let error = paginate::<PaginationUser>(1, 0)
+    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(1, 0)
         .await
         .expect_err("per_page 0 should be rejected");
 
@@ -73,7 +73,7 @@ async fn paginate_rejects_a_zero_page_size() {
 
 #[tokio::test]
 async fn paginate_reports_an_offset_that_would_overflow() {
-    let error = paginate::<PaginationUser>(u64::MAX, 4)
+    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(u64::MAX, 4)
         .await
         .expect_err("an overflowing offset should be reported");
 
@@ -87,7 +87,7 @@ async fn paginate_reports_an_offset_that_would_overflow() {
 async fn paginate_rejects_a_page_size_or_offset_past_i64_max() {
     // The drivers take LIMIT and OFFSET as `i64`; SQLite's and PostgreSQL's
     // panic converting a larger `u64`.
-    let error = paginate::<PaginationUser>(1, i64::MAX as u64 + 1)
+    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(1, i64::MAX as u64 + 1)
         .await
         .expect_err("an oversized page size should be rejected");
     assert!(
@@ -95,7 +95,7 @@ async fn paginate_rejects_a_page_size_or_offset_past_i64_max() {
         "unexpected error: {error:?}"
     );
 
-    let error = paginate::<PaginationUser>(3, 1 << 62)
+    let error = crate::internal::QueryExecutor::paginate::<PaginationUser>(3, 1 << 62)
         .await
         .expect_err("an offset past i64::MAX should be rejected");
     assert!(
@@ -110,7 +110,7 @@ async fn the_reload_lookup_reports_a_missing_connection_as_a_connection_error() 
     // `reload` uses must too, or callers miss every connection-specific branch.
     crate::database::Database::reset_global();
 
-    let error = find_including_trashed::<SoftDeleteUser>(1)
+    let error = reload_by_key::<SoftDeleteUser>(1)
         .await
         .expect_err("a missing global connection should be reported");
 

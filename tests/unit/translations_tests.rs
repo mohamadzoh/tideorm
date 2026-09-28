@@ -150,21 +150,6 @@ impl HasTranslations for TranslatableProbe {
 }
 
 #[test]
-fn test_apply_translations_accepts_allowed_field_and_language() {
-    let mut model = TranslatableProbe::default();
-    let mut input = TranslationInput::new();
-    input.add("name", "en", "Product");
-    input.add("name", "ar", "منتج");
-
-    model.apply_translations(input).unwrap();
-
-    assert_eq!(
-        model.get_translation("name", "ar").unwrap(),
-        Some(serde_json::json!("منتج"))
-    );
-}
-
-#[test]
 fn test_translation_lookups_fall_back_to_the_fallback_language_then_the_default() {
     let mut model = TranslatableProbe::default();
     model.set_translation("name", "en", "Product").unwrap();

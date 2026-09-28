@@ -1,9 +1,9 @@
 use parking_lot::RwLock;
 use std::collections::VecDeque;
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::entry::{LogLevel, QueryLogEntry, QueryStats};
+use super::entry::{LogLevel, QueryLogEntry, QueryStats, StatsCounters};
 use super::format::{format_debug, format_error, format_slow, format_summary};
 
 /// The slow-query threshold the logger and the profiler both start from.
@@ -17,10 +17,7 @@ static STATE: LazyLock<LoggerState> = LazyLock::new(LoggerState::from_env);
 struct LoggerState {
     enabled: AtomicBool,
     timing: AtomicBool,
-    slow_threshold_ms: AtomicU64,
-    query_count: AtomicU64,
-    slow_query_count: AtomicU64,
-    total_time_ns: AtomicU64,
+    counters: StatsCounters,
     /// `None` until a level is set in code or through `TIDE_LOG_LEVEL`.
     level: RwLock<Option<LogLevel>>,
     history: RwLock<VecDeque<QueryLogEntry>>,
@@ -46,10 +43,7 @@ impl LoggerState {
         Self {
             enabled: AtomicBool::new(enabled),
             timing: AtomicBool::new(true),
-            slow_threshold_ms: AtomicU64::new(slow_threshold_ms),
-            query_count: AtomicU64::new(0),
-            slow_query_count: AtomicU64::new(0),
-            total_time_ns: AtomicU64::new(0),
+            counters: StatsCounters::new(slow_threshold_ms),
             level: RwLock::new(level),
             history: RwLock::new(VecDeque::new()),
             history_limit: RwLock::new(100),
@@ -111,18 +105,8 @@ impl QueryLogger {
             return;
         }
 
-        STATE.query_count.fetch_add(1, Ordering::SeqCst);
-        if let Some(duration) = entry.duration {
-            STATE
-                .total_time_ns
-                .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
-        }
-
-        let threshold = STATE.slow_threshold_ms.load(Ordering::SeqCst);
-        let is_slow = entry.is_slow(threshold);
-        if is_slow {
-            STATE.slow_query_count.fetch_add(1, Ordering::SeqCst);
-        }
+        let threshold = STATE.counters.slow_threshold_ms();
+        let is_slow = STATE.counters.record(entry.duration);
 
         {
             let mut history = STATE.history.write();
@@ -148,19 +132,12 @@ impl QueryLogger {
 
     /// Snapshot the current aggregate query counters.
     pub fn stats() -> QueryStats {
-        QueryStats {
-            total_queries: STATE.query_count.load(Ordering::SeqCst),
-            slow_queries: STATE.slow_query_count.load(Ordering::SeqCst),
-            total_time_ns: STATE.total_time_ns.load(Ordering::SeqCst),
-            slow_threshold_ms: STATE.slow_threshold_ms.load(Ordering::SeqCst),
-        }
+        STATE.counters.snapshot()
     }
 
     /// Clear the aggregate query counters.
     pub fn reset_stats() {
-        STATE.query_count.store(0, Ordering::SeqCst);
-        STATE.slow_query_count.store(0, Ordering::SeqCst);
-        STATE.total_time_ns.store(0, Ordering::SeqCst);
+        STATE.counters.reset();
     }
 
     /// Return the stored query history as a new vector.
@@ -175,7 +152,7 @@ impl QueryLogger {
 
     /// Return history entries that meet the current slow-query threshold.
     pub fn slow_queries() -> Vec<QueryLogEntry> {
-        let threshold = STATE.slow_threshold_ms.load(Ordering::SeqCst);
+        let threshold = STATE.counters.slow_threshold_ms();
         STATE
             .history
             .read()
@@ -267,7 +244,7 @@ impl QueryLoggerBuilder {
             STATE.timing.store(timing, Ordering::SeqCst);
         }
         if let Some(ms) = self.threshold_ms {
-            STATE.slow_threshold_ms.store(ms, Ordering::SeqCst);
+            STATE.counters.set_slow_threshold_ms(ms);
         }
         if let Some(limit) = self.history_limit {
             *STATE.history_limit.write() = limit;

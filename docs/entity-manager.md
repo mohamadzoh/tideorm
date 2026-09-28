@@ -10,7 +10,7 @@ Create one per request or unit of work. Its identity map keeps every model it ha
 
 ```toml
 [dependencies]
-tideorm = { version = "0.12.0", features = ["postgres", "entity-manager"] }
+tideorm = { version = "0.13.0", features = ["postgres", "entity-manager"] }
 ```
 
 Use the backend feature you need (`postgres`, `mysql`, or `sqlite`) alongside `entity-manager`.
@@ -111,26 +111,15 @@ When the context saves a row it also holds as a managed entity, through `entity_
 
 A managed entity keeps the primary key it was loaded or saved with: a flush refuses one whose key was changed, rather than write it over the row holding the new key. Detach it and persist a new entity instead.
 
+A manager runs one `flush()` or `save()` at a time: a second one waits for the first, so an entity waiting to be inserted is inserted once. A flush or save called inside another, such as from a callback, joins it instead. An edit made to a managed entity while a flush writes it stays over the row as stored, and the entity stays dirty for the next flush.
+
 A flush that fails, is cancelled part way, or runs inside a transaction that later rolls back leaves the context as it was before the flush, since none of what it wrote was committed. The one outcome no client can know is a flush cancelled while its `COMMIT` is on the wire: the database may have committed it. The context is restored then too, so reload what the flush wrote before flushing it again.
 
-## Compatibility Helpers
+## Relations of a Model the Manager Loaded
 
-The `EntityManager` facade is the recommended API, but the generated compatibility entry points remain available:
+When a model was loaded through `EntityManager::find(...)` or `find_managed(...)`, every relation it holds, the polymorphic and self-referencing ones included, queries through the entity manager's database handle: `load()`, `load_with(...)`, `count()` and `exists()` work even if no global database is configured.
 
-- `Model::find_in_entity_manager(pk, &entity_manager)`
-- `relation.load_in_entity_manager(&entity_manager)`
-- `save_with_entity_manager(&model, &entity_manager)`
-
-The explicit tracked-collection helper also remains available when needed:
-
-```rust
-tideorm::entity_manager::TrackedHasManyEntityManagerExt::load(&mut user.posts, &entity_manager)
-    .await?;
-```
-
-When a model itself was loaded through `EntityManager::find(...)` or `find_in_entity_manager(...)`, plain relation read helpers such as `load()`, `load_with(...)`, `count()`, and `exists()` continue to query through that same entity-manager database handle even if no global database is configured.
-
-Use `entity_manager.load(&mut relation)` or `relation.load_in_entity_manager(&entity_manager)` when the relation should become tracked for aggregate synchronization on `save()` or `flush()`.
+Use `entity_manager.load(&mut relation)` when the relation should become tracked for aggregate synchronization on `save()` or `flush()`.
 
 ## What Aggregate Saves Synchronize
 
@@ -145,15 +134,15 @@ Use `entity_manager.load(&mut relation)` or `relation.load_in_entity_manager(&en
 
 Entity-manager identity tracking works with the same primary-key shapes as the generated model APIs:
 
-- Auto-increment numeric keys, such as `User::find_in_entity_manager(1, &entity_manager)`.
-- Natural keys, such as `ApiKey::find_in_entity_manager("api-key-1".to_string(), &entity_manager)`.
-- Composite keys, such as `Membership::find_in_entity_manager((team_id, member_id), &entity_manager)`.
+- Auto-increment numeric keys, such as `entity_manager.find::<User>(1)`.
+- Natural keys, such as `entity_manager.find::<ApiKey>("api-key-1".to_string())`.
+- Composite keys, such as `entity_manager.find::<Membership>((team_id, member_id))`.
 
 Tracked `HasOne<T>` and `HasMany<T>` synchronization uses the related model's actual primary key for updates and deletes, so natural-key and composite-key children work the same way as numeric-key children.
 
 ## Notes
 
 - `EntityManager` is explicit. It does not replace TideORM's global database APIs.
-- `EntityManager::save()` and `save_with_entity_manager()` are designed for aggregate workflows around loaded models plus loaded `HasOne<T>`, `HasMany<T>`, and `HasManyThrough<T, P>` relations.
+- `EntityManager::save()` is designed for aggregate workflows around loaded models plus loaded `HasOne<T>`, `HasMany<T>`, and `HasManyThrough<T, P>` relations.
 - `BelongsTo<T>` participates in entity-manager-aware loads and identity reuse, but aggregate saves do not cascade `BelongsTo<T>` updates.
 - Reuse the same `EntityManager` for aggregate loads, managed edits, and flushes when you want one consistent persistence context.

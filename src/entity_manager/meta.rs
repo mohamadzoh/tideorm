@@ -63,12 +63,21 @@ pub trait TideEntityManagerMeta {
         Vec::new()
     }
 
-    fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
-}
+    /// Each `(related table, foreign key, referenced column)` a declared
+    /// relation joins rows with: a row's `foreign key` holds the `referenced
+    /// column` of a row of the related table. The flush orders the rows of
+    /// one table by the ones whose related table is that table.
+    ///
+    /// Derived from `belongs_to`, `has_one`, `has_many` and the
+    /// self-referencing relations; empty for hand-written implementations.
+    fn tide_row_references() -> Vec<(&'static str, &'static str, &'static str)>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
 
-#[doc(hidden)]
-pub trait TideEntityManagerFieldWriter {
-    fn tide_set_field_value(&mut self, field: &str, value: serde_json::Value) -> Result<()>;
+    fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
 }
 
 #[doc(hidden)]
@@ -92,6 +101,16 @@ where
     T: serde::Serialize,
 {
     serde_json::to_string(value).map_err(Error::from)
+}
+
+/// `model`'s identity key as a generated `tide_pk_key` and every relation
+/// wrapper's owner key write it, where nothing can fail: a key that does not
+/// serialize falls back to the model's own rendering of it, which maps equal
+/// keys alike and holds " = ", so it never collides with a serialized key.
+#[doc(hidden)]
+pub fn __identity_key<M: Model>(model: &M) -> String {
+    let primary_key = model.primary_key();
+    pk_to_entity_manager_key(&primary_key).unwrap_or_else(|_| M::primary_key_display(&primary_key))
 }
 
 #[doc(hidden)]

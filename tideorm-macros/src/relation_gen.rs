@@ -4,67 +4,43 @@ use quote::quote;
 use crate::context::BuildContext;
 use crate::parse::{ModelField, RelationKind};
 
-pub(crate) fn build_relation_field_inits(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
+/// For each relation, the statements that rebuild its wrapper from the
+/// model's own fields and keep the runtime state of the wrapper it replaces:
+/// `previous`'s when there is one, else its own.
+pub(crate) fn build_relation_wiring(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
     ctx.relation_fields
         .iter()
         .map(|field| {
             let ident = field.ident();
             let assignment = build_relation_assignment(ctx, field)?;
             Ok(quote! {
-                let previous = self.#ident.clone();
+                let own = ::std::mem::take(&mut self.#ident);
                 #assignment
-                self.#ident.preserve_runtime_state_from(&previous);
+                self.#ident
+                    .preserve_runtime_state_from(previous.map_or(&own, |previous| &previous.#ident));
             })
         })
         .collect()
-}
-
-pub(crate) fn build_relation_state_refreshes(ctx: &BuildContext) -> syn::Result<Vec<TokenStream2>> {
-    ctx.relation_fields
-        .iter()
-        .map(|field| {
-            let ident = field.ident();
-            let assignment = build_relation_assignment(ctx, field)?;
-            Ok(quote! {
-                #assignment
-                self.#ident.preserve_runtime_state_from(&previous.#ident);
-            })
-        })
-        .collect()
-}
-
-/// Emit the expression that renders a model's primary key as its entity-manager
-/// identity key.
-///
-/// `TideEntityManagerMeta::tide_pk_key` and every relation wrapper's
-/// `with_owner_key` have to agree on this string, and both are emitted into
-/// contexts that cannot fail — `with_relations` returns `Self`, so a
-/// serialization error has nowhere to go. Panicking from generated code the
-/// user never sees is close to undebuggable, so fall back to the model's own
-/// primary-key rendering: it is infallible, still maps equal primary keys to
-/// equal identity keys, and always contains " = ", so it can never collide with
-/// a JSON-encoded key.
-///
-/// `model_expr` is how the surrounding context names the model: `self` inside a
-/// `&self` method, `&self` where the method owns or mutably borrows it.
-pub(crate) fn entity_manager_identity_key_expr(model_expr: TokenStream2) -> TokenStream2 {
-    quote! {
-        {
-            let primary_key = <Self as ::tideorm::model::Model>::primary_key(#model_expr);
-            ::tideorm::entity_manager::__pk_to_entity_manager_key(&primary_key)
-                .unwrap_or_else(|_| {
-                    <Self as ::tideorm::model::ModelMeta>::primary_key_display(&primary_key)
-                })
-        }
-    }
 }
 
 pub(crate) fn generate_with_relations_method(ctx: &BuildContext) -> TokenStream2 {
-    let relation_field_inits = &ctx.relation_field_inits;
+    let relation_wiring = &ctx.relation_wiring;
+    let previous = if relation_wiring.is_empty() {
+        quote!(_previous)
+    } else {
+        quote!(previous)
+    };
     quote! {
         pub fn with_relations(mut self) -> Self {
-            #(#relation_field_inits)*
+            self.__wire_relations(None);
             self
+        }
+
+        /// Build every relation wrapper from the model's own fields, keeping
+        /// the runtime state of `previous`'s, or else of the one it replaces.
+        #[doc(hidden)]
+        pub fn __wire_relations(&mut self, #previous: Option<&Self>) {
+            #(#relation_wiring)*
         }
     }
 }
@@ -79,14 +55,15 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         .relation_kind()
         .expect("relation fields have a relation wrapper type");
     let foreign_key = field.foreign_key.as_deref();
-    let local_key = field
+    let local_key_name = field
         .local_key
         .as_deref()
         .unwrap_or(ctx.default_local_key());
 
     let relation = match kind {
         RelationKind::HasOne | RelationKind::HasMany | RelationKind::HasManyThrough => {
-            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let (local_key_ident, local_key) = (local.ident(), local.column_name());
             let foreign_key = foreign_key.expect("validated relation foreign_key");
             let constructor = match kind {
                 RelationKind::HasOne => {
@@ -109,14 +86,13 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
                 }
             };
             let relation_name = field.name();
-            let owner_key = entity_manager_identity_key_expr(quote!(&self));
             quote! {
                 let relation = #constructor
                     .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
                 ::tideorm::__if_entity_manager! {
                     let relation = relation
                         .with_metadata(#relation_name, <Self as ::tideorm::model::ModelMeta>::table_name())
-                        .with_owner_key(#owner_key);
+                        .with_owner_key(::tideorm::entity_manager::__identity_key::<Self>(&self));
                 }
             }
         }
@@ -131,7 +107,8 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         }
         RelationKind::MorphOne | RelationKind::MorphMany => {
             let morph_name = field.morph_name.as_deref().expect("validated morph_name");
-            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let (local_key_ident, local_key) = (local.ident(), local.column_name());
             let wrapper = if kind == RelationKind::MorphOne {
                 quote!(MorphOne)
             } else {
@@ -165,7 +142,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
             // The parent is looked up by this column, so a typo is caught here
             // rather than as an unknown column at the first load.
-            ctx.resolve_local_key_ident(local_key, ident)?;
+            let local_key = ctx.resolve_local_key(local_key_name, ident)?.column_name();
             quote! {
                 let relation = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
                     .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
@@ -173,7 +150,8 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         }
         RelationKind::SelfRefMany => {
             let foreign_key = foreign_key.unwrap_or("parent_id");
-            let local_key_ident = ctx.resolve_local_key_ident(local_key, ident)?;
+            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let (local_key_ident, local_key) = (local.ident(), local.column_name());
             quote! {
                 let relation = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)
                     .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));

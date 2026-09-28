@@ -10,6 +10,9 @@ use crate::query::QueryBuilder;
 #[cfg(feature = "entity-manager")]
 use crate::entity_manager::{EntityManager, TideEntityManagerMeta, model_entity_manager_key};
 
+#[cfg(feature = "entity-manager")]
+use super::state::RelationState;
+
 pub(crate) use crate::internal::sql_safety::quote_ident;
 
 pub(crate) fn ensure_relation_configured(
@@ -30,7 +33,7 @@ pub(crate) fn require_scalar_relation_key<'a>(
     context: &str,
 ) -> Result<&'a serde_json::Value> {
     if value.is_array() || value.is_object() {
-        return Err(Error::invalid_query(format!(
+        return Err(Error::query(format!(
             "{} only supports scalar relation keys; composite primary keys require an explicit single-column relation key or a custom query",
             context
         )));
@@ -51,7 +54,7 @@ pub(crate) fn where_key<M: Model>(
 ) -> QueryBuilder<M> {
     let column = column.into();
     if key.is_null() {
-        query.eq_any(column, Vec::<serde_json::Value>::new())
+        query.where_in(column, Vec::<serde_json::Value>::new())
     } else {
         query.where_eq(column, key.clone())
     }
@@ -63,17 +66,11 @@ pub(crate) fn linkable_key<'a>(
     context: &str,
 ) -> Result<&'a serde_json::Value> {
     if key.is_null() {
-        return Err(Error::invalid_query(format!(
+        return Err(Error::query(format!(
             "{context}: the owner's key is NULL, so no row can be linked to it"
         )));
     }
     Ok(key)
-}
-
-/// Whether a query issued now has a connection to run on — the ambient
-/// transaction or the global database.
-pub(crate) fn has_active_database() -> bool {
-    crate::database::__current_db().is_ok()
 }
 
 /// A relation's lookup key, which must have been supplied and be a scalar.
@@ -106,17 +103,6 @@ pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
             text.is_empty() || uuid::Uuid::parse_str(text).is_ok_and(|uuid| uuid.is_nil())
         }
         Some(_) => false,
-    }
-}
-
-pub(crate) fn preserve_cached_value<C: Clone>(
-    cached: &mut Option<C>,
-    previous_cached: &Option<C>,
-    allow_cached_without_context: bool,
-    same_runtime_context: bool,
-) {
-    if (allow_cached_without_context && previous_cached.is_some()) || same_runtime_context {
-        *cached = previous_cached.clone();
     }
 }
 
@@ -204,22 +190,22 @@ impl QuerySource {
 
 /// The owning row a loaded relation's snapshot is recorded under.
 #[cfg(feature = "entity-manager")]
-pub(crate) struct SnapshotOwner<'a> {
+pub(crate) struct SnapshotOwner {
     table: &'static str,
-    key: &'a str,
+    key: String,
     relation: &'static str,
 }
 
 #[cfg(feature = "entity-manager")]
-impl<'a> SnapshotOwner<'a> {
+impl SnapshotOwner {
     /// Fails when the wrapper never received its owner's identity key, which
     /// the derive supplies through `with_owner_key`.
     pub(crate) fn new(
         table: &'static str,
-        key: &'a Option<String>,
+        key: &Option<String>,
         relation: &'static str,
     ) -> Result<Self> {
-        let key = key.as_deref().ok_or_else(|| {
+        let key = key.clone().ok_or_else(|| {
             Error::query(format!(
                 "entity manager owner key not set for relation '{relation}'"
             ))
@@ -230,6 +216,74 @@ impl<'a> SnapshotOwner<'a> {
             relation,
         })
     }
+}
+
+/// Load a to-one relation into `entity_manager` and cache it in `state`:
+/// the row the manager already tracks under `lookup`'s column and key, else
+/// the one its query reads. A relation that has loaded keeps what it holds,
+/// which gives way to the instance the manager tracks. The caller ties
+/// `state` to the manager before building the query, so `load` then serves
+/// that cache, which the manager owns, and the query runs on its database.
+#[cfg(feature = "entity-manager")]
+pub(crate) async fn load_one_in_entity_manager<'s, E>(
+    state: &'s mut RelationState<Box<E>>,
+    entity_manager: &Arc<EntityManager>,
+    lookup: Result<(&str, serde_json::Value, QueryBuilder<E>)>,
+    owner: Option<SnapshotOwner>,
+) -> Result<Option<&'s E>>
+where
+    E: Model + TideEntityManagerMeta,
+{
+    if !state.is_loaded() {
+        let (column, key, query) = lookup?;
+        let found = match entity_manager.find_by_field::<E>(column, &key)? {
+            Some(tracked) => Some(tracked),
+            None => query.first().await?,
+        };
+        state.set_cached(found.map(Box::new));
+    }
+
+    register_loaded(
+        entity_manager,
+        state.cached_mut().map(|model| &mut **model),
+        owner,
+    )
+    .await?;
+    Ok(state.cached().map(|model| &**model))
+}
+
+/// Load a to-many relation into `entity_manager` and cache it in `state`:
+/// the rows it holds already, else those `query` reads, each giving way to
+/// the instance the manager tracks, and recorded as `owner`'s snapshot;
+/// the caller ties `state` to the manager first, as for a to-one relation.
+#[cfg(feature = "entity-manager")]
+pub(crate) async fn load_many_in_entity_manager<'s, E>(
+    state: &'s mut RelationState<Vec<E>>,
+    entity_manager: &Arc<EntityManager>,
+    query: Result<QueryBuilder<E>>,
+    owner: SnapshotOwner,
+) -> Result<&'s Vec<E>>
+where
+    E: Model + TideEntityManagerMeta,
+{
+    let models = match state.take() {
+        Some(models) => models,
+        None => query?.get().await?,
+    };
+    let models = state.insert(models);
+    register_loaded(entity_manager, models.iter_mut(), Some(owner)).await?;
+    Ok(models)
+}
+
+/// The entity-manager identity keys of the rows `models` holds, skipping
+/// those not stored yet.
+#[cfg(feature = "entity-manager")]
+pub(crate) fn identity_keys<E: Model>(models: Option<&Vec<E>>) -> Result<Vec<String>> {
+    models
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model_entity_manager_key(model).transpose())
+        .collect()
 }
 
 /// Hand a relation's loaded models to `entity_manager`, replacing each in place
@@ -244,7 +298,7 @@ impl<'a> SnapshotOwner<'a> {
 pub(crate) async fn register_loaded<'m, E>(
     entity_manager: &EntityManager,
     models: impl IntoIterator<Item = &'m mut E>,
-    owner: Option<SnapshotOwner<'_>>,
+    owner: Option<SnapshotOwner>,
 ) -> Result<()>
 where
     E: Model + TideEntityManagerMeta,
@@ -260,7 +314,7 @@ where
     }
 
     if let Some(owner) = owner {
-        entity_manager.snapshot::<E>(owner.table, owner.key, owner.relation, &keys);
+        entity_manager.snapshot::<E>(owner.table, &owner.key, owner.relation, &keys);
     }
     Ok(())
 }
@@ -277,18 +331,23 @@ pub(crate) fn scoped_column(
     )
 }
 
+/// `E`'s deleted-at test, `IS NULL` for live rows or `IS NOT NULL` for trashed
+/// ones, with the column qualified by `scope` when one is given; `None` for a
+/// model without soft delete.
 pub(crate) fn soft_delete_clause<E: Model>(
     db_type: crate::config::DatabaseType,
-    scope: &str,
+    scope: Option<&str>,
+    trashed: bool,
 ) -> Option<String> {
-    if E::soft_delete_enabled() {
-        Some(format!(
-            "{} IS NULL",
-            scoped_column(db_type, scope, E::deleted_at_column())
-        ))
-    } else {
-        None
+    if !E::soft_delete_enabled() {
+        return None;
     }
+    let column = match scope {
+        Some(scope) => scoped_column(db_type, scope, E::deleted_at_column()),
+        None => quote_ident(db_type, E::deleted_at_column()),
+    };
+    let test = if trashed { "IS NOT NULL" } else { "IS NULL" };
+    Some(format!("{column} {test}"))
 }
 
 /// Build the recursive-CTE query that walks a self-referencing tree.
@@ -349,13 +408,13 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
         scoped_column(db_type, "node", foreign_key),
         parent_placeholder
     )];
-    if let Some(clause) = soft_delete_clause::<E>(db_type, "node") {
+    if let Some(clause) = soft_delete_clause::<E>(db_type, Some("node"), false) {
         base_predicates.push(clause);
     }
 
     let mut recursive_predicates =
         vec![format!("{}.{} < {}", tree, depth_alias, depth_placeholder)];
-    if let Some(clause) = soft_delete_clause::<E>(db_type, "child") {
+    if let Some(clause) = soft_delete_clause::<E>(db_type, Some("child"), false) {
         recursive_predicates.push(clause);
     }
 

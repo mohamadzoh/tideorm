@@ -100,12 +100,7 @@ impl FilesData {
 
     /// Check if relation has files
     pub fn has_files(&self, relation: &str) -> bool {
-        match self.data.get(relation) {
-            Some(serde_json::Value::Null) => false,
-            Some(serde_json::Value::Array(array)) => !array.is_empty(),
-            Some(serde_json::Value::Object(_)) => true,
-            _ => false,
-        }
+        self.count_files(relation) > 0
     }
 
     /// Count files in relation

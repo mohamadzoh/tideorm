@@ -120,7 +120,6 @@ fn test_pivot_keys_resolve_renamed_columns() {
 
     let (insert, _) = super::build_pivot_insert::<M2mRenderRenamedLink>(
         DatabaseType::Postgres,
-        "m2m_render_renamed_links",
         "post_id",
         "tag_id",
         &json!(1),
@@ -134,7 +133,7 @@ fn test_pivot_keys_resolve_renamed_columns() {
 #[test]
 fn test_a_null_owner_key_links_nothing() {
     let sql = load_sql(relation(), json!(null));
-    assert!(sql.contains("0 = 1"), "{sql}");
+    assert!(sql.contains("1 = 2"), "{sql}");
     assert!(!sql.contains("IS NULL"), "{sql}");
 }
 
@@ -158,7 +157,6 @@ fn test_constrained_load_joins_the_pivot() {
 fn attach_inserts_only_a_missing_pivot_row_and_tolerates_a_key_conflict() {
     let (sql, params) = super::build_pivot_insert::<M2mRenderPostTag>(
         DatabaseType::Postgres,
-        "m2m_render_post_tags",
         "post_id",
         "tag_id",
         &json!(7),
@@ -176,7 +174,6 @@ fn attach_inserts_only_a_missing_pivot_row_and_tolerates_a_key_conflict() {
     // `INSERT .. SELECT` reads, and two such attaches deadlock.
     let (sql, params) = super::build_pivot_insert::<M2mRenderPostTag>(
         DatabaseType::MySQL,
-        "m2m_render_post_tags",
         "post_id",
         "tag_id",
         &json!(7),
@@ -190,11 +187,18 @@ fn attach_inserts_only_a_missing_pivot_row_and_tolerates_a_key_conflict() {
     assert_eq!(params.len(), 2);
 }
 
+#[tideorm::model(table = "user_roles", schema = "billing")]
+struct M2mSchemaPivot {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    post_id: i64,
+    tag_id: i64,
+}
+
 #[test]
-fn a_pivot_named_with_its_schema_is_quoted_part_by_part() {
-    let (sql, _) = super::build_pivot_insert::<M2mRenderPostTag>(
+fn a_pivot_model_with_a_schema_is_quoted_part_by_part() {
+    let (sql, _) = super::build_pivot_insert::<M2mSchemaPivot>(
         DatabaseType::Postgres,
-        "billing.user_roles",
         "post_id",
         "tag_id",
         &json!(7),

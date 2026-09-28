@@ -23,7 +23,10 @@ impl SchemaWriter {
     /// the catalog - its columns, primary key and secondary indexes - and
     /// rendered by [`SchemaGenerator`]. What a table's columns and indexes
     /// cannot describe comes after the tables as the catalog reports it: a
-    /// full-text, expression, partial or prefix index.
+    /// full-text, expression, partial or prefix index, or one with `INCLUDE`
+    /// columns. The tables' `CHECK` and foreign key constraints (and
+    /// PostgreSQL's `EXCLUDE` ones) come last, added with `ALTER TABLE` once
+    /// every table they name exists.
     ///
     /// SQLite keeps the statement that created each table, view, index and
     /// trigger, so its file is those statements, generated columns,
@@ -34,7 +37,11 @@ impl SchemaWriter {
         let db_type = db.backend();
         let conn = db.__internal_connection()?;
 
-        let Catalog { tables, verbatim } = match db_type {
+        let Catalog {
+            tables,
+            verbatim,
+            constraints,
+        } = match db_type {
             DatabaseType::Postgres => introspect_postgres(&conn).await?,
             DatabaseType::MySQL | DatabaseType::MariaDB => {
                 introspect_mysql(&conn, db_type == DatabaseType::MariaDB).await?
@@ -48,7 +55,7 @@ impl SchemaWriter {
         }
 
         let mut text = generator.generate();
-        for statement in verbatim {
+        for statement in verbatim.into_iter().chain(constraints) {
             if statement.starts_with("--") {
                 text.push_str(&statement);
                 text.push('\n');
@@ -65,13 +72,15 @@ impl SchemaWriter {
     }
 }
 
-/// What a catalog read found: the tables the generator renders, and the
+/// What a catalog read found: the tables the generator renders, the
 /// statements written as the catalog reports them, or a comment naming what
-/// could not be exported.
+/// could not be exported, and the `ALTER TABLE .. ADD CONSTRAINT` statements
+/// that follow them.
 #[derive(Default)]
 struct Catalog {
     tables: Vec<TableSchema>,
     verbatim: Vec<String>,
+    constraints: Vec<String>,
 }
 
 /// One column as the catalog reports it.
@@ -223,7 +232,8 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
                     pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
                     NOT a.attnotnull AS is_nullable,
                     pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default,
-                    a.attidentity::text AS identity
+                    a.attidentity::text AS identity,
+                    a.attgenerated::text AS generated
              FROM pg_catalog.pg_attribute a
              JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
              JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace
@@ -238,6 +248,18 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
         .iter()
         .map(|row| {
             let default: Option<String> = get(row, "column_default")?;
+            let mut sql_type: String = get(row, "data_type")?;
+            // `pg_attrdef` also holds a generated column's expression, which
+            // is no default: one may read the row's other columns.
+            let generated: String = get(row, "generated")?;
+            let generation = match generated.as_str() {
+                "s" => Some("STORED"),
+                "v" => Some("VIRTUAL"),
+                _ => None,
+            };
+            if let (Some(kind), Some(expression)) = (generation, &default) {
+                sql_type = format!("{sql_type} GENERATED ALWAYS AS ({expression}) {kind}");
+            }
             // A serial column's default is its sequence, which the serial
             // type recreates, as it does an identity column's.
             let identity: String = get(row, "identity")?;
@@ -248,10 +270,10 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
 
             Ok(CatalogColumn {
                 name: get(row, "column_name")?,
-                sql_type: get(row, "data_type")?,
+                sql_type,
                 nullable: get(row, "is_nullable")?,
-                default: default.filter(|_| !auto_increment),
-                auto_increment,
+                default: default.filter(|_| !auto_increment && generation.is_none()),
+                auto_increment: auto_increment && generation.is_none(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -259,9 +281,15 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
         // One row per key column, in key order: `indkey` lists the columns
         // the way the index was declared, which `attnum` does not. An index
         // on an expression, a partial one or one not a B-tree cannot be told
-        // by its columns, and is exported as `pg_get_indexdef` renders it.
-        const PLAIN_INDEX: &str =
-            "ix.indexprs IS NULL AND ix.indpred IS NULL AND am.amname = 'btree'";
+        // by its columns, and is exported as `pg_get_indexdef` renders it; so
+        // is one whose `INCLUDE` columns `indkey` lists after its keys, which
+        // exported as keys would let rows repeat a unique key, and one whose
+        // key `NULLS NOT DISTINCT` refuses a second NULL (read through
+        // `to_jsonb`, since the column exists from PostgreSQL 15 on). A
+        // primary key's `INCLUDE` columns are left out of it.
+        const PLAIN_INDEX: &str = "ix.indexprs IS NULL AND ix.indpred IS NULL \
+             AND am.amname = 'btree' AND ix.indnatts = ix.indnkeyatts \
+             AND NOT COALESCE((to_jsonb(ix) ->> 'indnullsnotdistinct')::boolean, false)";
         let mut primary_key = Vec::new();
         let mut index_columns = Vec::new();
         for row in query(
@@ -277,7 +305,8 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
                  JOIN pg_catalog.pg_am am ON am.oid = i.relam
                  CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, position)
                  JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-                 WHERE ns.nspname = $1 AND t.relname = $2 AND {PLAIN_INDEX}
+                 WHERE ns.nspname = $1 AND t.relname = $2
+                 AND (ix.indisprimary OR ({PLAIN_INDEX})) AND k.position <= ix.indnkeyatts
                  ORDER BY i.relname, k.position"
             ),
             params(),
@@ -315,6 +344,36 @@ async fn introspect_postgres(conn: &OrmConnection) -> Result<Catalog> {
         .await?
         {
             catalog.verbatim.push(get(&row, "definition")?);
+        }
+
+        // A partition's constraints come with its parent's, and an inherited
+        // CHECK with the table it is inherited from.
+        let table = format!(
+            "{}.{}",
+            quote_ident(DatabaseType::Postgres, &table_schema),
+            quote_ident(DatabaseType::Postgres, &table_name)
+        );
+        for row in query(
+            conn,
+            pg,
+            "SELECT c.conname AS constraint_name,
+                    pg_catalog.pg_get_constraintdef(c.oid) AS definition
+             FROM pg_catalog.pg_constraint c
+             JOIN pg_catalog.pg_class t ON t.oid = c.conrelid
+             JOIN pg_catalog.pg_namespace ns ON ns.oid = t.relnamespace
+             WHERE ns.nspname = $1 AND t.relname = $2
+             AND c.contype IN ('c', 'x', 'f') AND c.conislocal AND c.conparentid = 0
+             ORDER BY c.contype = 'f', c.conname",
+            params(),
+        )
+        .await?
+        {
+            let name: String = get(&row, "constraint_name")?;
+            let definition: String = get(&row, "definition")?;
+            catalog.constraints.push(format!(
+                "ALTER TABLE {table} ADD CONSTRAINT {} {definition}",
+                quote_ident(DatabaseType::Postgres, &name)
+            ));
         }
 
         catalog.tables.push(catalog_table(
@@ -369,7 +428,7 @@ async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog
             mysql,
             "SELECT column_name AS column_name, column_type AS column_type,
                     is_nullable AS is_nullable, column_default AS column_default,
-                    extra AS extra
+                    extra AS extra, generation_expression AS generation_expression
              FROM information_schema.columns
              WHERE table_schema = ? AND table_name = ?
              ORDER BY ordinal_position",
@@ -380,8 +439,28 @@ async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog
         .map(|row| {
             let is_nullable: String = get(row, "is_nullable")?;
             let extra: String = get(row, "extra")?;
-            let sql_type: String = get(row, "column_type")?;
-            let default = mysql_default(get(row, "column_default")?, &sql_type, &extra, mariadb);
+            let mut sql_type: String = get(row, "column_type")?;
+            let mut default =
+                mysql_default(get(row, "column_default")?, &sql_type, &extra, mariadb);
+            // `extra` names a generated column's kind; MySQL escapes the
+            // quotes of its expression as it does an expression default's.
+            let upper_extra = extra.to_ascii_uppercase();
+            let generation = ["VIRTUAL", "STORED", "PERSISTENT"]
+                .into_iter()
+                .find(|kind| upper_extra.contains(&format!("{kind} GENERATED")));
+            let expression: Option<String> = get(row, "generation_expression")?;
+            // A generated column takes no `DEFAULT`, which MariaDB refuses
+            // beside `GENERATED ALWAYS AS`; it reports one anyway, the text
+            // `NULL`, where MySQL reports none.
+            if let (Some(kind), Some(expression)) = (generation, expression) {
+                let expression = if mariadb {
+                    expression
+                } else {
+                    expression.replace("\\'", "'")
+                };
+                sql_type = format!("{sql_type} GENERATED ALWAYS AS ({expression}) {kind}");
+                default = None;
+            }
 
             Ok(CatalogColumn {
                 name: get(row, "column_name")?,
@@ -478,6 +557,15 @@ async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog
             ));
         }
 
+        mysql_constraints(
+            conn,
+            &db_name,
+            &table_name,
+            mariadb,
+            &mut catalog.constraints,
+        )
+        .await?;
+
         catalog.tables.push(catalog_table(
             &table_name,
             None,
@@ -489,6 +577,140 @@ async fn introspect_mysql(conn: &OrmConnection, mariadb: bool) -> Result<Catalog
     }
 
     Ok(catalog)
+}
+
+/// The foreign key and `CHECK` constraints of one MySQL or MariaDB table, as
+/// `ALTER TABLE .. ADD CONSTRAINT` statements.
+///
+/// MySQL reports a `CHECK` clause with its quotes escaped, as it does an
+/// expression default, and whether it is enforced; MariaDB reports the
+/// clause as written, including the `json_valid` check it gives a JSON
+/// column, whose type it reports as `longtext`.
+async fn mysql_constraints(
+    conn: &OrmConnection,
+    db_name: &str,
+    table_name: &str,
+    mariadb: bool,
+    constraints: &mut Vec<String>,
+) -> Result<()> {
+    let mysql = Backend::MySql;
+    let quote = |name: &str| quote_ident(DatabaseType::MySQL, name);
+    let params = || vec![db_name.into(), table_name.into()];
+    let table = quote(table_name);
+
+    let check_sql = if mariadb {
+        "SELECT constraint_name AS constraint_name, check_clause AS check_clause,
+                'YES' AS enforced
+         FROM information_schema.check_constraints
+         WHERE constraint_schema = ? AND table_name = ?
+         ORDER BY constraint_name"
+    } else {
+        "SELECT tc.constraint_name AS constraint_name, cc.check_clause AS check_clause,
+                tc.enforced AS enforced
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.check_constraints cc
+             ON cc.constraint_schema = tc.constraint_schema
+             AND cc.constraint_name = tc.constraint_name
+         WHERE tc.table_schema = ? AND tc.table_name = ? AND tc.constraint_type = 'CHECK'
+         ORDER BY tc.constraint_name"
+    };
+    for row in query(conn, mysql, check_sql, params()).await? {
+        let name: String = get(&row, "constraint_name")?;
+        let clause: String = get(&row, "check_clause")?;
+        let enforced: String = get(&row, "enforced")?;
+        let clause = if mariadb {
+            clause
+        } else {
+            clause.replace("\\'", "'")
+        };
+        let enforcement = if enforced.eq_ignore_ascii_case("NO") {
+            " NOT ENFORCED"
+        } else {
+            ""
+        };
+        constraints.push(format!(
+            "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({clause}){enforcement}",
+            quote(&name)
+        ));
+    }
+
+    // One row per key column, in key order.
+    let mut foreign_keys: Vec<(String, MysqlForeignKey)> = Vec::new();
+    for row in query(
+        conn,
+        mysql,
+        "SELECT rc.constraint_name AS constraint_name, kcu.column_name AS column_name,
+                kcu.referenced_table_schema AS referenced_schema,
+                kcu.referenced_table_name AS referenced_table,
+                kcu.referenced_column_name AS referenced_column,
+                rc.update_rule AS update_rule, rc.delete_rule AS delete_rule
+         FROM information_schema.referential_constraints rc
+         JOIN information_schema.key_column_usage kcu
+             ON kcu.constraint_schema = rc.constraint_schema
+             AND kcu.constraint_name = rc.constraint_name
+             AND kcu.table_name = rc.table_name
+         WHERE rc.constraint_schema = ? AND rc.table_name = ?
+         ORDER BY rc.constraint_name, kcu.ordinal_position",
+        params(),
+    )
+    .await?
+    {
+        let name: String = get(&row, "constraint_name")?;
+        if foreign_keys.last().is_none_or(|(last, _)| *last != name) {
+            let referenced_schema: String = get(&row, "referenced_schema")?;
+            let referenced_table: String = get(&row, "referenced_table")?;
+            let referenced = if referenced_schema == db_name {
+                quote(&referenced_table)
+            } else {
+                format!("{}.{}", quote(&referenced_schema), quote(&referenced_table))
+            };
+            foreign_keys.push((
+                name.clone(),
+                MysqlForeignKey {
+                    columns: Vec::new(),
+                    referenced,
+                    referenced_columns: Vec::new(),
+                    on_delete: get(&row, "delete_rule")?,
+                    on_update: get(&row, "update_rule")?,
+                },
+            ));
+        }
+        let (_, key) = foreign_keys.last_mut().expect("pushed above");
+        key.columns
+            .push(quote(&get::<String>(&row, "column_name")?));
+        key.referenced_columns
+            .push(quote(&get::<String>(&row, "referenced_column")?));
+    }
+    for (name, key) in foreign_keys {
+        let mut statement = format!(
+            "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
+            quote(&name),
+            key.columns.join(", "),
+            key.referenced,
+            key.referenced_columns.join(", ")
+        );
+        for (event, rule) in [("DELETE", &key.on_delete), ("UPDATE", &key.on_update)] {
+            let rule = rule.to_ascii_uppercase();
+            if matches!(
+                rule.as_str(),
+                "CASCADE" | "SET NULL" | "SET DEFAULT" | "RESTRICT" | "NO ACTION"
+            ) {
+                statement.push_str(&format!(" ON {event} {rule}"));
+            }
+        }
+        constraints.push(statement);
+    }
+
+    Ok(())
+}
+
+/// One MySQL foreign key, its columns and those it references quoted.
+struct MysqlForeignKey {
+    columns: Vec<String>,
+    referenced: String,
+    referenced_columns: Vec<String>,
+    on_delete: String,
+    on_update: String,
 }
 
 /// One MySQL index as `information_schema.statistics` lists it: each key
@@ -504,8 +726,9 @@ struct MysqlKey {
 /// MariaDB reports the clause's own spelling. MySQL 8 reports a literal bare
 /// (`draft` for `DEFAULT 'draft'`), and an expression, which `extra` marks
 /// `DEFAULT_GENERATED`, without its parentheses and with its quotes escaped;
-/// both are restored here. A current-timestamp default stays bare, as MySQL
-/// takes it.
+/// both are restored here. A `TIMESTAMP` or `DATETIME` column's
+/// `CURRENT_TIMESTAMP` default stays bare, as MySQL takes it; the same text
+/// as another column's literal is quoted like any other.
 pub(super) fn mysql_default(
     default: Option<String>,
     sql_type: &str,
@@ -516,16 +739,24 @@ pub(super) fn mysql_default(
     if mariadb {
         return Some(default);
     }
-    if default
+    let lowered = sql_type.to_ascii_lowercase();
+    let temporal = lowered.starts_with("timestamp") || lowered.starts_with("datetime");
+    let current_timestamp = default
         .to_ascii_uppercase()
-        .starts_with("CURRENT_TIMESTAMP")
-    {
+        .strip_prefix("CURRENT_TIMESTAMP")
+        .is_some_and(|precision| {
+            precision.is_empty()
+                || precision
+                    .strip_prefix('(')
+                    .and_then(|digits| digits.strip_suffix(')'))
+                    .is_some_and(|digits| digits.chars().all(|digit| digit.is_ascii_digit()))
+        });
+    if temporal && current_timestamp {
         return Some(default);
     }
     if extra.to_ascii_uppercase().contains("DEFAULT_GENERATED") {
         return Some(format!("({})", default.replace("\\'", "'")));
     }
-    let lowered = sql_type.to_ascii_lowercase();
     let numeric = [
         "tinyint",
         "smallint",

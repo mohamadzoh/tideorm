@@ -47,42 +47,6 @@ impl managed::ManagedCheckpoint for CountingCheckpoint {
     }
 }
 
-struct AppendingManagedEntry {
-    flush_count: Arc<AtomicUsize>,
-    appended: AtomicBool,
-    child: Option<Arc<dyn managed::ManagedOps>>,
-}
-
-#[async_trait]
-impl managed::ManagedOps for AppendingManagedEntry {
-    fn current_state(&self) -> EntityState {
-        EntityState::Managed
-    }
-
-    fn detach_from_context(&self, _entity_manager: &EntityManager) {}
-
-    no_declared_relations!();
-
-    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
-        Box::new(NoopCheckpoint)
-    }
-
-    async fn flush(
-        self: Arc<Self>,
-        entity_manager: &Arc<EntityManager>,
-    ) -> crate::error::Result<()> {
-        self.flush_count.fetch_add(1, Ordering::SeqCst);
-
-        if let Some(child) = &self.child
-            && !self.appended.swap(true, Ordering::SeqCst)
-        {
-            entity_manager.managed_entries.write().push(child.clone());
-        }
-
-        Ok(())
-    }
-}
-
 struct CheckpointedManagedEntry {
     flush_count: Arc<AtomicUsize>,
     rollback_count: Arc<AtomicUsize>,
@@ -120,7 +84,7 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
         }
 
         if self.fail {
-            return Err(Error::invalid_query("forced flush failure".to_string()));
+            return Err(Error::query("forced flush failure".to_string()));
         }
 
         Ok(())
@@ -372,16 +336,20 @@ impl managed::ManagedOps for RunawayManagedEntry {
 async fn flush_in_scope_processes_entries_added_during_flush() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
     let child_flush_count = Arc::new(AtomicUsize::new(0));
-    let child: Arc<dyn managed::ManagedOps> = Arc::new(AppendingManagedEntry {
+    let child: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
         flush_count: child_flush_count.clone(),
+        rollback_count: Arc::default(),
         appended: AtomicBool::new(false),
         child: None,
+        fail: false,
     });
     let parent_flush_count = Arc::new(AtomicUsize::new(0));
-    let parent: Arc<dyn managed::ManagedOps> = Arc::new(AppendingManagedEntry {
+    let parent: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
         flush_count: parent_flush_count.clone(),
+        rollback_count: Arc::default(),
         appended: AtomicBool::new(false),
         child: Some(child),
+        fail: false,
     });
 
     entity_manager.managed_entries.write().push(parent);
@@ -656,7 +624,10 @@ fn transaction_scope_is_restored_when_a_polled_future_panics() {
     use std::task::{Context, Poll, Waker};
 
     struct PanickingFuture {
+        owner: Arc<EntityManager>,
+        other: Arc<EntityManager>,
         scope_seen: Arc<AtomicBool>,
+        other_in_scope: Arc<AtomicBool>,
     }
 
     impl Future for PanickingFuture {
@@ -664,18 +635,29 @@ fn transaction_scope_is_restored_when_a_polled_future_panics() {
 
         fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
             self.scope_seen.store(
-                save::in_entity_manager_transaction_scope(),
+                save::in_entity_manager_transaction_scope(&self.owner),
+                Ordering::SeqCst,
+            );
+            self.other_in_scope.store(
+                save::in_entity_manager_transaction_scope(&self.other),
                 Ordering::SeqCst,
             );
             panic!("flush failed inside the entity manager transaction scope");
         }
     }
 
+    let owner = EntityManager::new(Arc::new(Database::disconnected()));
+    let other = EntityManager::new(Arc::new(Database::disconnected()));
     let scope_seen = Arc::new(AtomicBool::new(false));
+    let other_in_scope = Arc::new(AtomicBool::new(false));
     let mut future = Box::pin(save::with_entity_manager_transaction_scope(
+        &owner,
         save::new_identity_rollback_log(),
         PanickingFuture {
+            owner: owner.clone(),
+            other: other.clone(),
             scope_seen: scope_seen.clone(),
+            other_in_scope: other_in_scope.clone(),
         },
     ));
     let waker = Waker::noop();
@@ -693,7 +675,11 @@ fn transaction_scope_is_restored_when_a_polled_future_panics() {
     assert!(polled.is_err());
     assert!(scope_seen.load(Ordering::SeqCst));
     assert!(
-        !save::in_entity_manager_transaction_scope(),
+        !other_in_scope.load(Ordering::SeqCst),
+        "one manager's unit of work is not another's"
+    );
+    assert!(
+        !save::in_entity_manager_transaction_scope(&owner),
         "a panic must not leave the transaction scope pinned on this worker thread"
     );
 }
@@ -815,4 +801,53 @@ async fn registering_two_unsaved_entities_keeps_them_distinct() {
         second.name, "second",
         "an unsaved entity has no identity to share, so it must not alias another"
     );
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tideorm::model(table = "entity_manager_scope_notes")]
+struct ScopeNote {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    body: String,
+}
+
+/// A manager's save inside another manager's unit of work runs its own unit
+/// of work, on its own database, instead of joining the other's transaction.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn another_managers_save_inside_a_unit_of_work_uses_its_own_database()
+-> crate::error::Result<()> {
+    let outer_db = Arc::new(Database::connect("sqlite::memory:").await?);
+    let inner_db = Arc::new(Database::connect("sqlite::memory:").await?);
+    for db in [&outer_db, &inner_db] {
+        db.__execute_with_params(
+            "CREATE TABLE entity_manager_scope_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)",
+            vec![],
+        )
+        .await?;
+    }
+    let outer = EntityManager::new(outer_db.clone());
+    let inner = EntityManager::new(inner_db.clone());
+
+    save::in_unit_of_work(&outer, Vec::new, move |_| async move {
+        inner
+            .save(&ScopeNote {
+                id: 0,
+                body: "inner".to_string(),
+            })
+            .await
+            .map(drop)
+    })
+    .await?;
+
+    let count = "SELECT COUNT(*) AS n FROM entity_manager_scope_notes";
+    assert_eq!(
+        outer_db.__raw_json_with_params(count, vec![]).await?,
+        vec![serde_json::json!({"n": 0})]
+    );
+    assert_eq!(
+        inner_db.__raw_json_with_params(count, vec![]).await?,
+        vec![serde_json::json!({"n": 1})]
+    );
+    Ok(())
 }

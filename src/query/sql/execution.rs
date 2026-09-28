@@ -8,14 +8,14 @@ mod shaped_reads;
 
 pub use shaped_reads::Paginated;
 
-use hash_helpers::{hash_bound_values, hash_having_clause, hash_or_group, hash_where_condition};
+use hash_helpers::{hash_fragment, hash_or_group, hash_where_condition};
 
 #[allow(missing_docs)]
 impl<M: Model> QueryBuilder<M> {
     fn chunk_primary_key_column(&self) -> Result<&'static str> {
         match M::primary_key_names() {
             [primary_key] => Ok(*primary_key),
-            _ => Err(Error::invalid_query(format!(
+            _ => Err(Error::query(format!(
                 "chunk() only supports models with a single-column primary key; model '{}' uses {} key columns",
                 M::table_name(),
                 M::primary_key_names().len()
@@ -23,17 +23,15 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
-    fn is_chunk_primary_key_order(column: &str, primary_key: &str) -> bool {
-        column == primary_key || column == format!("{}.{}", M::table_name(), primary_key)
-    }
-
-    fn chunk_order(&self, primary_key: &str) -> Result<crate::query::Order> {
-        match self.order_by.as_slice() {
+    /// The direction `chunk()` pages in: the query's ordering, which may only
+    /// be by `primary_key`, bare or as `cursor_column`, else ascending.
+    fn chunk_order(&self, primary_key: &str, cursor_column: &str) -> Result<crate::query::Order> {
+        match self.clauses.order_by.as_slice() {
             [] => Ok(crate::query::Order::Asc),
-            [(column, direction)] if Self::is_chunk_primary_key_order(column, primary_key) => {
+            [(column, direction)] if column == primary_key || column == cursor_column => {
                 Ok(*direction)
             }
-            _ => Err(Error::invalid_query(format!(
+            _ => Err(Error::query(format!(
                 "chunk() only supports explicit ordering by the single primary key '{}' for model '{}'",
                 primary_key,
                 M::table_name()
@@ -56,21 +54,21 @@ impl<M: Model> QueryBuilder<M> {
     /// seen once the TTL expires.
     #[must_use]
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {
-        self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
+        self.clauses.cache_options = Some(crate::cache::CacheOptions::new(ttl));
         self
     }
 
     #[must_use]
     pub fn cache_with_key(mut self, key: &str, ttl: std::time::Duration) -> Self {
-        self.cache_key = Some(key.to_string());
-        self.cache_options = Some(crate::cache::CacheOptions::new(ttl));
+        self.clauses.cache_key = Some(key.to_string());
+        self.clauses.cache_options = Some(crate::cache::CacheOptions::new(ttl));
         self
     }
 
     #[must_use]
     pub fn no_cache(mut self) -> Self {
-        self.cache_options = None;
-        self.cache_key = None;
+        self.clauses.cache_options = None;
+        self.clauses.cache_key = None;
         self
     }
 
@@ -124,22 +122,20 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Result<Vec<serde_json::Value>> {
         let db = self.current_db()?;
         let outputs = self.projection_outputs();
-        let joined_names: Vec<String> = outputs
-            .iter()
-            .filter(|(_, source)| {
-                source
-                    .as_ref()
-                    .is_some_and(|(table, _)| table != M::table_name())
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
+        // An output is typed by where it comes from, not by its name: a model
+        // column under any alias by that column's type, and another table's
+        // column or an expression (`COUNT(*) AS active`) by what the driver
+        // declares, even when a model field shares its name.
         let model_type = |name: &str| {
             if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
-                Some(column_type.clone())
-            } else if joined_names.iter().any(|joined| joined == name) {
-                None
-            } else {
-                crate::internal::column_type_of::<M>(name)
+                return Some(column_type.clone());
+            }
+            match outputs.iter().find(|(output, _)| output == name) {
+                Some((_, Some((table, column)))) if table == M::table_name() => {
+                    crate::internal::column_type_of::<M>(column)
+                }
+                Some(_) => None,
+                None => crate::internal::column_type_of::<M>(name),
             }
         };
         let rows = db.__raw_json_typed(sql, params, &model_type);
@@ -219,42 +215,38 @@ impl<M: Model> QueryBuilder<M> {
         let mut tables = vec![M::table_name().to_string()];
         push_table_tag(&mut tables, M::table_name());
 
-        for join in &self.joins {
+        for join in &self.clauses.joins {
             push_table_tag(&mut tables, &join.table);
         }
 
-        for union in &self.unions {
+        for union in &self.clauses.unions {
             collect_tables_from_sql(&union.query_sql, &mut tables);
         }
 
-        for cte in &self.ctes {
+        for cte in &self.clauses.ctes {
             collect_tables_from_sql(&cte.query_sql, &mut tables);
         }
 
-        for subquery in &self.subquery_select_expressions {
+        for subquery in &self.clauses.subquery_select_expressions {
             collect_tables_from_sql(&subquery.query_sql, &mut tables);
         }
 
         // Raw SQL in the projection, HAVING and ORDER BY can read other
         // tables through subqueries of its own.
-        for expression in &self.raw_select_expressions {
+        for expression in &self.clauses.raw_select_expressions {
             collect_tables_from_sql(expression, &mut tables);
         }
         for (having, _) in self.having_clauses() {
             collect_tables_from_sql(having, &mut tables);
         }
-        for (column, _) in &self.order_by {
+        for (column, _) in &self.clauses.order_by {
             if let Some(expression) = crate::query::builder::raw_order_by_expression(column) {
                 collect_tables_from_sql(expression, &mut tables);
             }
         }
 
-        for condition in &self.conditions {
+        for condition in self.all_conditions() {
             collect_condition_tables(condition, &mut tables);
-        }
-
-        for group in &self.or_groups {
-            collect_or_group_tables(group, &mut tables);
         }
 
         tables
@@ -272,7 +264,7 @@ impl<M: Model> QueryBuilder<M> {
         M::table_name().hash(&mut hasher);
         self.hash_database_identity(&mut hasher);
 
-        if let Some(key) = &self.cache_key {
+        if let Some(key) = &self.clauses.cache_key {
             // A caller-supplied key is only unique within its own model and
             // connection, so namespace it exactly like the structural key instead
             // of using it as a bare global key.
@@ -282,54 +274,51 @@ impl<M: Model> QueryBuilder<M> {
             return crate::cache::QueryCache::global().generate_key(M::table_name(), hash);
         }
 
-        for condition in &self.conditions {
+        for condition in &self.clauses.conditions {
             hash_where_condition(condition, &mut hasher);
         }
 
-        for group in &self.or_groups {
+        for group in &self.clauses.or_groups {
             hash_or_group(group, &mut hasher);
         }
 
-        self.order_by.hash(&mut hasher);
-        self.limit_value.hash(&mut hasher);
-        self.offset_value.hash(&mut hasher);
-        self.include_trashed.hash(&mut hasher);
-        self.only_trashed.hash(&mut hasher);
-        self.select_columns.hash(&mut hasher);
-        self.raw_select_expressions.hash(&mut hasher);
+        self.clauses.order_by.hash(&mut hasher);
+        self.clauses.limit_value.hash(&mut hasher);
+        self.clauses.offset_value.hash(&mut hasher);
+        self.clauses.include_trashed.hash(&mut hasher);
+        self.clauses.only_trashed.hash(&mut hasher);
+        self.clauses.select_columns.hash(&mut hasher);
+        self.clauses.raw_select_expressions.hash(&mut hasher);
 
         // `select_subquery()`, `union()` and `with_query()` render their operand
         // as *parameterized* SQL, so two operands differing only in a bound value
         // are byte-identical strings: the values have to be hashed alongside the
         // text or the two queries share one cache entry.
-        for subquery in &self.subquery_select_expressions {
-            subquery.query_sql.hash(&mut hasher);
+        for subquery in &self.clauses.subquery_select_expressions {
+            hash_fragment(&subquery.query_sql, &subquery.params, &mut hasher);
             subquery.alias.hash(&mut hasher);
-            hash_bound_values(&subquery.params, &mut hasher);
         }
 
-        self.joins.hash(&mut hasher);
-        self.group_by.hash(&mut hasher);
+        self.clauses.joins.hash(&mut hasher);
+        self.clauses.group_by.hash(&mut hasher);
 
         for (having, bindings) in self.having_clauses() {
-            hash_having_clause(having, bindings, &mut hasher);
+            hash_fragment(having, bindings, &mut hasher);
         }
 
-        for union in &self.unions {
-            union.query_sql.hash(&mut hasher);
+        for union in &self.clauses.unions {
+            hash_fragment(&union.query_sql, &union.params, &mut hasher);
             union.union_type.hash(&mut hasher);
-            hash_bound_values(&union.params, &mut hasher);
         }
 
-        for cte in &self.ctes {
+        for cte in &self.clauses.ctes {
             cte.name.hash(&mut hasher);
-            cte.query_sql.hash(&mut hasher);
+            hash_fragment(&cte.query_sql, &cte.params, &mut hasher);
             cte.recursive.hash(&mut hasher);
             cte.columns.hash(&mut hasher);
-            hash_bound_values(&cte.params, &mut hasher);
         }
 
-        self.window_functions.hash(&mut hasher);
+        self.clauses.window_functions.hash(&mut hasher);
 
         let hash = hasher.finish();
         crate::cache::QueryCache::global().generate_key(M::table_name(), hash)
@@ -344,9 +333,9 @@ impl<M: Model> QueryBuilder<M> {
         // a hit would hide rows the transaction itself has already written.
         // A model whose own serde skips or converts a stored field is not
         // cached: the copy read back would lack those values.
-        let cache_fill = if self.cache_options.is_some()
+        let cache_fill = if self.clauses.cache_options.is_some()
             && M::__serde_round_trips()
-            && !self.lock_for_update
+            && !self.clauses.lock_for_update
             && !self.runs_in_transaction()
         {
             let cache = crate::cache::QueryCache::global();
@@ -354,7 +343,6 @@ impl<M: Model> QueryBuilder<M> {
             let key = self.generate_cache_key();
             if let Some(cached) = cache.get::<Vec<M>>(&key) {
                 let cached: Vec<M> = cached.into_iter().map(M::__rebuild_relations).collect();
-                #[cfg(feature = "dirty-tracking")]
                 crate::model::__remember_dirty_snapshots(&cached);
                 return Ok(cached);
             }
@@ -373,7 +361,8 @@ impl<M: Model> QueryBuilder<M> {
             })
             .await?;
 
-        if let (Some((key, fill_point)), Some(options)) = (cache_fill, &self.cache_options) {
+        if let (Some((key, fill_point)), Some(options)) = (cache_fill, &self.clauses.cache_options)
+        {
             let _ = crate::cache::QueryCache::global().fill_tagged(
                 fill_point,
                 &key,
@@ -420,37 +409,37 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_query_is_executable()?;
 
         if chunk_size == 0 {
-            return Err(Error::invalid_query(
+            return Err(Error::query(
                 "chunk() requires chunk_size to be greater than 0",
             ));
         }
 
-        if self.offset_value.unwrap_or(0) > 0 {
-            return Err(Error::invalid_query(
+        if self.clauses.offset_value.unwrap_or(0) > 0 {
+            return Err(Error::query(
                 "chunk() does not support offset(); use page()/get() for fixed windows or chunk over primary-key order",
             ));
         }
 
-        if !self.unions.is_empty() {
-            return Err(Error::invalid_query(
+        if !self.clauses.unions.is_empty() {
+            return Err(Error::query(
                 "chunk() pages by the model's primary key, which the other branches of a union() do not follow; read a union with get(), or page() it",
             ));
         }
 
         let primary_key = self.chunk_primary_key_column()?;
-        let order = self.chunk_order(primary_key)?;
-        let mut remaining = self.limit_value;
-        let mut base_query = self;
-        let explicit_cache_key = base_query.cache_key.clone();
-        base_query.limit_value = None;
-        base_query.offset_value = None;
-        if base_query.order_by.is_empty() {
-            base_query = base_query.order_by(format!("{}.{}", M::table_name(), primary_key), order);
-        }
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
+        let order = self.chunk_order(primary_key, &cursor_column)?;
+        let mut remaining = self.clauses.limit_value;
+        let mut base_query = self;
+        let explicit_cache_key = base_query.clauses.cache_key.clone();
+        base_query.clauses.limit_value = None;
+        base_query.clauses.offset_value = None;
+        if base_query.clauses.order_by.is_empty() {
+            base_query = base_query.order_by(cursor_column.as_str(), order);
+        }
         // A join can repeat a row's primary key. A full batch that ends inside
         // such a run hands its tail to the next batch, which starts at that key.
-        let joins_repeat_keys = !base_query.joins.is_empty();
+        let joins_repeat_keys = !base_query.clauses.joins.is_empty();
         let key_of = |model: &M| serde_json::to_value(model.primary_key()).map_err(Error::from);
         // The last key handed to the callback, and whether the next batch
         // starts at it rather than after it.
@@ -482,7 +471,7 @@ impl<M: Model> QueryBuilder<M> {
                     ),
                     None => "null".to_string(),
                 };
-                batch_query.cache_key = Some(format!(
+                batch_query.clauses.cache_key = Some(format!(
                     "{}::chunk(cursor={},limit={})",
                     cache_key, cursor_marker, batch_limit
                 ));
@@ -514,7 +503,7 @@ impl<M: Model> QueryBuilder<M> {
                         .where_eq(&cursor_column, last_key.clone())
                         .limit(chunk_size.saturating_add(1));
                     if let Some(cache_key) = &explicit_cache_key {
-                        run_query.cache_key = Some(format!(
+                        run_query.clauses.cache_key = Some(format!(
                             "{}::chunk(run={})",
                             cache_key,
                             serde_json::to_string(&last_key).map_err(Error::from)?
@@ -522,7 +511,7 @@ impl<M: Model> QueryBuilder<M> {
                     }
                     let run = run_query.get().await?;
                     if run.len() as u64 > chunk_size {
-                        return Err(Error::invalid_query(format!(
+                        return Err(Error::query(format!(
                             "chunk({}) found more rows with the key {} than a batch holds: the join repeats it, so pass a larger chunk size",
                             chunk_size, last_key
                         )));
@@ -644,7 +633,6 @@ impl<M: Model> QueryBuilder<M> {
     pub(crate) fn invalidate_model_state(rows_affected: u64) {
         if rows_affected > 0 {
             crate::QueryCache::global().invalidate_model(M::table_name());
-            #[cfg(feature = "dirty-tracking")]
             crate::model::__invalidate_dirty_snapshots::<M>();
         }
     }
@@ -720,8 +708,8 @@ impl<M: Model> QueryBuilder<M> {
     /// Refuse to soft-delete the trash: its rows are deleted already, and a
     /// caller asking for it means to remove them.
     fn ensure_not_only_trashed(&self, operation: &str) -> Result<()> {
-        if self.only_trashed {
-            return Err(Error::invalid_query(format!(
+        if self.clauses.only_trashed {
+            return Err(Error::query(format!(
                 "{}() on only_trashed() rows of {} would mark rows that are already deleted; force_delete() removes them for good",
                 operation,
                 M::table_name()
@@ -758,7 +746,7 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_mutation_query_is_safe("soft_delete")?;
 
         if !M::soft_delete_enabled() {
-            return Err(Error::invalid_query(
+            return Err(Error::query(
                 "soft_delete() can only be used on models with soft delete enabled",
             ));
         }
@@ -778,7 +766,7 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_mutation_query_is_safe("restore")?;
 
         if !M::soft_delete_enabled() {
-            return Err(Error::invalid_query(
+            return Err(Error::query(
                 "restore() can only be used on models with soft delete enabled",
             ));
         }
@@ -793,8 +781,8 @@ impl<M: Model> QueryBuilder<M> {
         // `AND deleted_at IS NOT NULL` onto an unparenthesized body where a
         // top-level OR would bind it to the last branch only.
         let mut query = self;
-        query.only_trashed = true;
-        query.include_trashed = false;
+        query.clauses.only_trashed = true;
+        query.clauses.include_trashed = false;
 
         let db_type = query.db_type_for_sql();
         let (where_sql, params) = query.build_where_clause_with_condition_for_db(db_type);
@@ -818,8 +806,8 @@ impl<M: Model> QueryBuilder<M> {
         // scope hides, so trashed rows are put back in scope — unless the caller
         // asked for trashed rows only, which must not widen to live ones.
         let mut query = self;
-        if !query.only_trashed {
-            query.include_trashed = true;
+        if !query.clauses.only_trashed {
+            query.clauses.include_trashed = true;
         }
 
         let (sql, params) = query.build_delete_sql("force_delete")?;
@@ -1013,16 +1001,6 @@ fn collect_condition_tables(condition: &crate::query::WhereCondition, tables: &m
 }
 
 /// Collect the tables named inside an OR group and everything nested under it.
-fn collect_or_group_tables(group: &crate::query::OrGroup, tables: &mut Vec<String>) {
-    for condition in &group.conditions {
-        collect_condition_tables(condition, tables);
-    }
-
-    for nested in &group.nested_groups {
-        collect_or_group_tables(nested, tables);
-    }
-}
-
 #[cfg(test)]
 #[path = "../../../tests/unit/query_execution_tests.rs"]
 mod tests;

@@ -127,7 +127,7 @@ impl Database {
     }
 
     /// Run a row-returning statement on this handle's connection.
-    async fn fetch_rows(
+    pub(crate) async fn fetch_rows(
         &self,
         sql: &str,
         params: Vec<DbValue>,
@@ -266,30 +266,6 @@ impl Database {
             .await
     }
 
-    /// Read a single column out of a statement TideORM rendered itself.
-    ///
-    /// Like the other internal entry points this never touches the cache; its
-    /// callers know what they queried.
-    #[doc(hidden)]
-    pub async fn __query_scalar<T>(&self, sql: &str, column: &str) -> Result<Option<T>>
-    where
-        T: crate::internal::TryGetable,
-    {
-        use crate::internal::{ConnectionTrait, build_statement};
-
-        let connection = self.__get_connection()?;
-        let executor = connection.executor();
-        let statement = build_statement(executor.get_database_backend(), sql);
-        let row = crate::profiling::__profile_future(executor.query_one_raw(statement))
-            .await
-            .map_err(translate_error)?;
-
-        match row {
-            Some(row) => row.try_get("", column).map(Some).map_err(translate_error),
-            None => Ok(None),
-        }
-    }
-
     /// Execute a raw SQL query with parameters on this handle and return
     /// results as JSON
     ///
@@ -361,20 +337,20 @@ impl Database {
         Self::may_write(sql, false) || Self::may_write(sql, true)
     }
 
-    /// [`raw_sql_may_write`](Self::raw_sql_may_write) for one reading of
-    /// backslashes inside quotes.
-    fn may_write(sql: &str, backslash_escapes: bool) -> bool {
-        let statement = Self::strip_leading_sql_noise(sql);
+    /// [`raw_sql_may_write`](Self::raw_sql_may_write) for one reading: MySQL's
+    /// or everyone else's.
+    fn may_write(sql: &str, mysql: bool) -> bool {
+        let statement = Self::strip_leading_sql_noise(sql, mysql);
         // A batch is read-only only if every statement is; its first keyword
         // speaks for the first one.
-        if Self::holds_more_statements(statement, backslash_escapes) {
+        if Self::holds_more_statements(statement, mysql) {
             return true;
         }
 
         match Self::leading_keyword(statement).as_str() {
             "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => false,
-            "EXPLAIN" => Self::explain_may_write(statement, backslash_escapes),
-            "WITH" => Self::with_statement_may_write(statement, backslash_escapes),
+            "EXPLAIN" => Self::explain_may_write(statement, mysql),
+            "WITH" => Self::with_statement_may_write(statement, mysql),
             _ => true,
         }
     }
@@ -382,14 +358,14 @@ impl Database {
     /// Classify an `EXPLAIN`: a plain one only plans its statement, while
     /// `EXPLAIN ANALYZE` (PostgreSQL, MySQL) runs it, so a `DELETE` it
     /// explains is deleted.
-    fn explain_may_write(statement: &str, backslash_escapes: bool) -> bool {
+    fn explain_may_write(statement: &str, mysql: bool) -> bool {
         let (_, mut rest) = Self::split_word(statement);
         let mut analyzes = false;
         loop {
-            rest = Self::skip_sql_noise(rest);
+            rest = Self::skip_sql_noise(rest, mysql);
             if rest.starts_with('(') {
                 // PostgreSQL's option list: `EXPLAIN (ANALYZE, BUFFERS) ..`.
-                let (options, after) = Self::split_parenthesized_group(rest, backslash_escapes);
+                let (options, after) = Self::split_parenthesized_group(rest, mysql);
                 analyzes |= options
                     .split(|character: char| !character.is_ascii_alphabetic())
                     .any(|word| word.eq_ignore_ascii_case("ANALYZE"));
@@ -404,7 +380,7 @@ impl Database {
             }
             rest = after;
         }
-        analyzes && Self::may_write(rest, backslash_escapes)
+        analyzes && Self::may_write(rest, mysql)
     }
 
     /// Classify a `WITH` statement, the one shape whose leading keyword does
@@ -416,11 +392,11 @@ impl Database {
     /// reached at the top level decides the rest. Quoted text is skipped, so
     /// neither a `"deleted_at"` identifier nor a `'delete me'` literal can be
     /// mistaken for a statement keyword.
-    fn with_statement_may_write(statement: &str, backslash_escapes: bool) -> bool {
+    fn with_statement_may_write(statement: &str, mysql: bool) -> bool {
         let (_, mut rest) = Self::split_word(statement);
 
         loop {
-            rest = Self::skip_sql_noise(rest);
+            rest = Self::skip_sql_noise(rest, mysql);
 
             let Some(next) = rest.chars().next() else {
                 // The CTE list never reached a statement, so this is not SQL
@@ -430,13 +406,13 @@ impl Database {
 
             match next {
                 '(' => {
-                    let (group, after) = Self::split_parenthesized_group(rest, backslash_escapes);
-                    if Self::cte_body_may_write(group, backslash_escapes) {
+                    let (group, after) = Self::split_parenthesized_group(rest, mysql);
+                    if Self::cte_body_may_write(group, mysql) {
                         return true;
                     }
                     rest = after;
                 }
-                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, mysql),
                 _ if next.is_ascii_alphabetic() || next == '_' => {
                     let (word, after) = Self::split_word(rest);
                     match word.to_ascii_uppercase().as_str() {
@@ -456,12 +432,12 @@ impl Database {
     /// Such a group is either a CTE body or the optional column list in front of
     /// `AS`. Only a body opens with a statement keyword, so a group that does
     /// not is no statement at all and cannot write.
-    fn cte_body_may_write(group: &str, backslash_escapes: bool) -> bool {
-        let body = Self::strip_leading_sql_noise(group);
+    fn cte_body_may_write(group: &str, mysql: bool) -> bool {
+        let body = Self::strip_leading_sql_noise(group, mysql);
 
         match Self::leading_keyword(body).as_str() {
             "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => true,
-            "WITH" => Self::with_statement_may_write(body, backslash_escapes),
+            "WITH" => Self::with_statement_may_write(body, mysql),
             _ => false,
         }
     }
@@ -477,20 +453,21 @@ impl Database {
 
     /// Whether a statement separator outside quoted text and comments is
     /// followed by another statement.
-    fn holds_more_statements(sql: &str, backslash_escapes: bool) -> bool {
+    fn holds_more_statements(sql: &str, mysql: bool) -> bool {
         let mut rest = sql;
 
         while let Some(next) = rest.chars().next() {
             match next {
                 ';' => {
-                    rest = Self::skip_sql_noise(&rest[1..]);
+                    rest = Self::skip_sql_noise(&rest[1..], mysql);
                     if !rest.is_empty() && !rest.starts_with(';') {
                         return true;
                     }
                 }
-                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
-                '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest),
-                '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest),
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, mysql),
+                '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest, mysql),
+                '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest, mysql),
+                '#' if mysql => rest = Self::skip_sql_noise(rest, mysql),
                 _ => rest = &rest[next.len_utf8()..],
             }
         }
@@ -514,7 +491,7 @@ impl Database {
     /// Nested groups, quoted text, and comments inside the group are skipped, so
     /// the split lands on the matching close parenthesis. An unterminated group
     /// yields everything that was left.
-    fn split_parenthesized_group(sql: &str, backslash_escapes: bool) -> (&str, &str) {
+    fn split_parenthesized_group(sql: &str, mysql: bool) -> (&str, &str) {
         let Some(body) = sql.strip_prefix('(') else {
             return ("", sql);
         };
@@ -535,9 +512,10 @@ impl Database {
                         return (&body[..body.len() - rest.len() - 1], rest);
                     }
                 }
-                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, backslash_escapes),
-                '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest),
-                '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest),
+                '\'' | '"' | '`' => rest = Self::skip_quoted(rest, next, mysql),
+                '-' if rest.starts_with("--") => rest = Self::skip_sql_noise(rest, mysql),
+                '/' if rest.starts_with("/*") => rest = Self::skip_sql_noise(rest, mysql),
+                '#' if mysql => rest = Self::skip_sql_noise(rest, mysql),
                 _ => rest = &rest[next.len_utf8()..],
             }
         }
@@ -549,13 +527,13 @@ impl Database {
     ///
     /// A doubled delimiter is SQL's escape for the delimiter itself, so it
     /// continues the quoted run rather than ending it; with
-    /// `backslash_escapes`, as MySQL reads a string, so does one after a
+    /// `mysql`, as MySQL reads a string, so does one after a
     /// backslash.
-    fn skip_quoted(sql: &str, delimiter: char, backslash_escapes: bool) -> &str {
+    fn skip_quoted(sql: &str, delimiter: char, mysql: bool) -> &str {
         let mut rest = &sql[delimiter.len_utf8()..];
 
         loop {
-            let end = if backslash_escapes && delimiter != '`' {
+            let end = if mysql && delimiter != '`' {
                 let mut escaped = false;
                 rest.char_indices().find_map(|(at, character)| {
                     if escaped {
@@ -585,22 +563,26 @@ impl Database {
     }
 
     /// Skip leading whitespace, comments, and opening parentheses.
-    fn strip_leading_sql_noise(sql: &str) -> &str {
-        let mut rest = Self::skip_sql_noise(sql);
+    fn strip_leading_sql_noise(sql: &str, mysql: bool) -> &str {
+        let mut rest = Self::skip_sql_noise(sql, mysql);
 
         while let Some(after) = rest.strip_prefix('(') {
-            rest = Self::skip_sql_noise(after);
+            rest = Self::skip_sql_noise(after, mysql);
         }
 
         rest
     }
 
-    /// Skip leading whitespace and comments, keeping parentheses.
-    fn skip_sql_noise(sql: &str) -> &str {
+    /// Skip leading whitespace and comments, keeping parentheses; a `#`
+    /// comment only in MySQL's reading.
+    fn skip_sql_noise(sql: &str, mysql: bool) -> &str {
         let mut rest = sql.trim_start();
 
         loop {
-            if let Some(after) = rest.strip_prefix("--") {
+            let line_comment = rest
+                .strip_prefix("--")
+                .or_else(|| rest.strip_prefix('#').filter(|_| mysql));
+            if let Some(after) = line_comment {
                 rest = after
                     .find('\n')
                     .map_or("", |end| &after[end + 1..])

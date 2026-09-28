@@ -128,7 +128,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.12.0", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.13.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -265,9 +265,9 @@ match user.changed_fields()? {
 
 `changed_fields()` only reports persisted model fields, not runtime relation wrappers. The tracked baseline is refreshed by TideORM loads such as `find()`, query results, `reload()`, `save()`, and `update()`. Bulk mutation helpers such as `update_all()` and query-builder deletes invalidate the baseline for that model type.
 
-Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
+Because TideORM models are plain Rust structs without hidden instance-local tracking state, dirty tracking follows the latest persisted snapshot TideORM knows for a primary key. A snapshot taken inside a transaction that then rolls back is withdrawn, and the one before it comes back, unless the row got a newer snapshot from outside the transaction in the meantime. If you keep multiple in-memory copies of the same row and one of them saves first, reload the stale copies before relying on their original values.
 
-Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row.
+Each database keeps its own snapshots, since two databases can hold different rows under one key (`query_with(db)`, `find_with(id, db)`). A model does not record which database it came from, so when TideORM has read different rows for a key from two databases, both methods return `None` for that key rather than compare the model with the wrong row, and they keep doing so after one database's snapshot is forgotten, until the row is read again.
 
 ### Delete
 
@@ -430,7 +430,7 @@ If you call a model's named scopes from a different module than the `#[tideorm::
 use crate::models::UserQueryScopes as _;
 ```
 
-The lower-level `.scope(...)` helper still works when you want ad hoc reusable fragments that are not tied to one model type:
+Plain functions over a `QueryBuilder` compose too, for ad hoc fragments not tied to one model type: call them with the query.
 
 ```rust
 // Define scope functions
@@ -442,12 +442,8 @@ fn recent<M: Model>(q: QueryBuilder<M>) -> QueryBuilder<M> {
     q.order_desc("created_at").limit(10)
 }
 
-// Apply scopes
-let users = User::query()
-    .scope(active)
-    .scope(recent)
-    .get()
-    .await?;
+// Apply them
+let users = recent(active(User::query())).get().await?;
 ```
 
 ### Conditional Scopes
@@ -723,7 +719,7 @@ errors.add("email", "Email format is invalid");
 errors.add("password", "Password must be at least 8 characters");
 
 // Check if there are errors
-if errors.has_errors() {
+if !errors.is_empty() {
     // Get all errors for a specific field
     let email_errors = errors.field_errors("email");
     for msg in email_errors {
@@ -764,10 +760,10 @@ TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
 
 // Tokenize a record
 let user = User::find(1).await?.unwrap();
-let token = user.tokenize()?;  // "iIBmdKYhJh4_vSKFlBTP..."
+let token = user.to_token()?;  // "iIBmdKYhJh4_vSKFlBTP..."
 
 // Decode token to the model's primary key type (doesn't hit database)
-let id = User::detokenize(&token)?;  // 1
+let id = User::decode_token(&token)?;  // 1
 
 // Fetch record directly from token
 let same_user = User::from_token(&token).await?;
@@ -792,13 +788,10 @@ When a model has `#[tideorm(tokenize)]`, these methods are available:
 
 | Method | Description |
 |--------|-------------|
-| `user.tokenize()` | Convert record to token (instance method) |
-| `user.to_token()` | Alias for `tokenize()` |
+| `user.to_token()` | Convert record to token; the default encoder uses a new random nonce each call, so every token differs |
 | `User::tokenize_id(42)` | Tokenize an ID without having the record |
-| `User::detokenize(&token)` | Decode token to the model's primary key type |
-| `User::decode_token(&token)` | Alias for `detokenize()` |
+| `User::decode_token(&token)` | Decode token to the model's primary key type |
 | `User::from_token(&token).await` | Decode token and fetch record from DB |
-| `user.regenerate_token()` | Generate a fresh token; the default encoder uses a new random nonce each time |
 
 ### Model-Specific Tokens
 
@@ -817,7 +810,7 @@ let product_token = Product::tokenize_id(1)?;
 assert_ne!(user_token, product_token);  // Different!
 
 // Cross-model decoding fails
-assert!(User::detokenize(&product_token).is_err());  // Error!
+assert!(User::decode_token(&product_token).is_err());  // Error!
 ```
 
 ### Using Tokens in APIs
@@ -836,7 +829,7 @@ pub struct User {
 async fn get_user(token: String) -> tideorm::Result<Json<serde_json::Value>> {
     let user = User::from_token(&token).await?;
     let mut body = user.to_json(None);          // `hidden` drops the raw id
-    body["token"] = serde_json::json!(user.tokenize()?);
+    body["token"] = serde_json::json!(user.to_token()?);
     Ok(Json(body))
 }
 
@@ -1048,7 +1041,7 @@ All these methods accept both `"column_name"` (string) and `Model::columns.field
 | **ORDER BY** | `order_by`, `order_asc`, `order_desc` |
 | **GROUP BY** | `group_by` |
 | **Aggregations** | `sum`, `avg`, `min`, `max`, `count_distinct` |
-| **HAVING** | `having_sum_gt`, `having_avg_gt` |
+| **HAVING** | `having` (`Aggregate::sum(..).gt(..)`, `Aggregate::count().gte(..)`, ...) |
 | **Window** | `partition_by`, `order_by` (in WindowFunctionBuilder) |
 
 ### Self-Referencing Relations
@@ -1211,12 +1204,6 @@ let cakes = Cake::query()
 // where_exists() with a model query applies that model's soft-delete scope
 let cakes = Cake::query()
     .where_exists(Fruit::query().where_raw("fruits.cake_id = cakes.id"))
-    .get().await?;
-
-// eq_any() / ne_all() - array membership, rendered as IN / NOT IN on every backend
-let users = User::query()
-    .eq_any("id", vec![1, 2, 3, 4, 5])    // "id" IN (1, 2, 3, 4, 5)
-    .ne_all("role", vec!["banned"])        // "role" NOT IN ('banned')
     .get().await?;
 
 // Unix timestamps

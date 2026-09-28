@@ -59,7 +59,6 @@ impl FullTextIndex {
 
     /// Generate CREATE INDEX statement for PostgreSQL
     pub fn to_postgres_sql(&self) -> String {
-        let language = self.config.language.as_deref().unwrap_or("english");
         let index_type = match self.config.pg_index_type {
             PgFullTextIndexType::GIN => "GIN",
             PgFullTextIndexType::GiST => "GiST",
@@ -70,14 +69,12 @@ impl FullTextIndex {
             .raw("CREATE INDEX ")
             .ident(&self.name)
             .raw(" ON ")
-            .ident(&self.table)
+            .table(&self.table)
             .raw(" USING ")
             .raw(index_type)
-            .raw(" ((to_tsvector('")
-            .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, language))
-            .raw("', ")
-            .raw(&pg_search_document(&self.columns))
-            .raw(")))")
+            .raw(" ((")
+            .raw(&pg_tsvector(self.config.language.as_deref(), &self.columns))
+            .raw("))")
             .into_sql()
     }
 
@@ -88,7 +85,7 @@ impl FullTextIndex {
             .raw("CREATE FULLTEXT INDEX ")
             .ident(&self.name)
             .raw(" ON ")
-            .ident(&self.table)
+            .table(&self.table)
             .raw("(")
             .raw(&column_list(DatabaseType::MySQL, &self.columns, ""))
             .raw(")");
@@ -111,9 +108,20 @@ impl FullTextIndex {
     /// vacuuming any other table, a UUID- or text-keyed one, run
     /// [`sqlite_rebuild_sql`](Self::sqlite_rebuild_sql) before anything reads
     /// or writes it, or searches return other rows.
+    ///
+    /// A table has one SQLite full-text index, the `<table>_fts` table its
+    /// searches read, whatever the index is named. Applying the same index
+    /// again changes nothing; applying one over a column the table's index
+    /// does not hold fails with `no such column` rather than keeping the
+    /// first index's columns: drop `<table>_fts` and its triggers first.
+    ///
+    /// The index of a table in an attached database (`tenant.posts`) is
+    /// created in that database. Its content table and its triggers' tables
+    /// are named without it, as FTS5 and SQLite's triggers require.
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let mut params = Vec::new();
-        let fts_table = format!("{}_fts", self.table);
+        let (_, table) = self.sqlite_table_parts();
+        let fts_table = format!("{table}_fts");
         let columns = column_list(DatabaseType::SQLite, &self.columns, "");
 
         let insert_new = SqlBuilder::new(DatabaseType::SQLite, &mut params)
@@ -140,14 +148,28 @@ impl FullTextIndex {
         vec![
             SqlBuilder::new(DatabaseType::SQLite, &mut params)
                 .raw("CREATE VIRTUAL TABLE IF NOT EXISTS ")
-                .ident(&fts_table)
+                .raw(&self.sqlite_qualified(&fts_table))
                 .raw(" USING fts5(")
                 .raw(&columns)
                 .raw(", content=")
-                .ident(&self.table)
+                .ident(table)
                 .raw(", content_rowid=")
                 .ident("rowid")
                 .raw(")")
+                .into_sql(),
+            // An index already there, which the statement above kept, has to
+            // hold these columns. They are qualified: SQLite reads an unknown
+            // bare `"column"` as a string.
+            SqlBuilder::new(DatabaseType::SQLite, &mut params)
+                .raw("SELECT ")
+                .raw(&column_list(
+                    DatabaseType::SQLite,
+                    &self.columns,
+                    &format!("{}.", self.sqlite_qualified(&fts_table)),
+                ))
+                .raw(" FROM ")
+                .raw(&self.sqlite_qualified(&fts_table))
+                .raw(" LIMIT 0")
                 .into_sql(),
             self.sqlite_trigger("ai", "INSERT", &insert_new),
             self.sqlite_trigger("ad", "DELETE", &delete_old),
@@ -162,10 +184,11 @@ impl FullTextIndex {
     /// rowids as they are now: what a `VACUUM` of a table without an
     /// `INTEGER PRIMARY KEY` calls for (see [`to_sqlite_sql`](Self::to_sqlite_sql)).
     pub fn sqlite_rebuild_sql(&self) -> String {
-        let fts_table = format!("{}_fts", self.table);
+        let (_, table) = self.sqlite_table_parts();
+        let fts_table = format!("{table}_fts");
         SqlBuilder::new(DatabaseType::SQLite, &mut Vec::new())
             .raw("INSERT INTO ")
-            .ident(&fts_table)
+            .raw(&self.sqlite_qualified(&fts_table))
             .raw("(")
             .ident(&fts_table)
             .raw(") VALUES('rebuild')")
@@ -174,18 +197,40 @@ impl FullTextIndex {
 
     /// Render the `AFTER <event>` trigger named `<table>_<suffix>`.
     fn sqlite_trigger(&self, suffix: &str, event: &str, body: &str) -> String {
+        let (_, table) = self.sqlite_table_parts();
         let mut params = Vec::new();
         SqlBuilder::new(DatabaseType::SQLite, &mut params)
             .raw("CREATE TRIGGER IF NOT EXISTS ")
-            .ident(&format!("{}_{}", self.table, suffix))
+            .raw(&self.sqlite_qualified(&format!("{table}_{suffix}")))
             .raw(" AFTER ")
             .raw(event)
             .raw(" ON ")
-            .ident(&self.table)
+            .ident(table)
             .raw(" BEGIN ")
             .raw(body)
             .raw(" END")
             .into_sql()
+    }
+
+    /// The attached database the table is named in, if any, and its name.
+    fn sqlite_table_parts(&self) -> (Option<&str>, &str) {
+        match self.table.split_once('.') {
+            Some((schema, table))
+                if is_safe_identifier_segment(schema) && is_safe_identifier_segment(table) =>
+            {
+                (Some(schema), table)
+            }
+            _ => (None, &self.table),
+        }
+    }
+
+    /// `name` quoted, in the table's attached database when it has one.
+    fn sqlite_qualified(&self, name: &str) -> String {
+        let quoted = quote_ident(DatabaseType::SQLite, name);
+        match self.sqlite_table_parts() {
+            (Some(schema), _) => format!("{}.{quoted}", quote_ident(DatabaseType::SQLite, schema)),
+            (None, _) => quoted,
+        }
     }
 
     /// Generate CREATE INDEX for the current database type
@@ -314,6 +359,11 @@ pub(crate) fn snippet_around_first_match(
 }
 
 /// Generate highlighted snippets from text
+///
+/// The `fragment_words` words either side of the first whole-word match of
+/// `query`, with each whole-word match between the tags as [`highlight_text`]
+/// marks it; the first words of `text` when nothing matches. `text` is not
+/// HTML-escaped.
 pub fn generate_snippet(
     text: &str,
     query: &str,
@@ -321,56 +371,11 @@ pub fn generate_snippet(
     start_tag: &str,
     end_tag: &str,
 ) -> String {
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let query_words_owned: Vec<String> =
-        query.split_whitespace().map(|w| w.to_lowercase()).collect();
-
-    let mut match_pos = None;
-    for (i, word) in words.iter().enumerate() {
-        let word_lower = word.to_lowercase();
-        if query_words_owned.iter().any(|q| word_lower.contains(q)) {
-            match_pos = Some(i);
-            break;
-        }
-    }
-
-    if let Some(pos) = match_pos {
-        let start = pos.saturating_sub(fragment_words);
-        // The matching word itself, then `fragment_words` after it.
-        let end = pos
-            .saturating_add(fragment_words)
-            .saturating_add(1)
-            .min(words.len());
-
-        let snippet_words: Vec<String> = words[start..end]
-            .iter()
-            .map(|w| {
-                let word_lower = w.to_lowercase();
-                if query_words_owned.iter().any(|q| word_lower.contains(q)) {
-                    format!("{}{}{}", start_tag, w, end_tag)
-                } else {
-                    w.to_string()
-                }
-            })
-            .collect();
-
-        let mut snippet = snippet_words.join(" ");
-        if start > 0 {
-            snippet = format!("...{}", snippet);
-        }
-        if end < words.len() {
-            snippet = format!("{}...", snippet);
-        }
-        snippet
-    } else {
-        // No match found, return beginning of text
-        let end = fragment_words.min(words.len());
-        let snippet = words[..end].join(" ");
-        if end < words.len() {
-            format!("{}...", snippet)
-        } else {
-            snippet
-        }
+    let pattern = term_pattern(query);
+    let snippet = snippet_around_first_match(text, pattern.as_ref(), fragment_words);
+    match pattern {
+        Some(pattern) => mark_matches(&snippet, &pattern, start_tag, end_tag, false).0,
+        None => snippet,
     }
 }
 
@@ -391,8 +396,8 @@ pub fn pg_headline_sql(
         .unwrap_or_else(|| quote_ident(DatabaseType::Postgres, column));
     let options = format!(
         "StartSel={}, StopSel={}, MaxWords=35, MinWords=15",
-        quote_ts_headline_option(start_tag),
-        quote_ts_headline_option(end_tag),
+        double_quoted(start_tag),
+        double_quoted(end_tag),
     );
 
     let mut params = Vec::new();
@@ -409,13 +414,4 @@ pub fn pg_headline_sql(
         .raw(&escape_sql_literal_for_db(DatabaseType::Postgres, &options))
         .raw("')")
         .into_sql()
-}
-
-/// Quote a `ts_headline` option value.
-///
-/// PostgreSQL lets an option value be wrapped in double quotes, with an
-/// embedded double quote written twice. Quoting unconditionally means a value
-/// containing `,` or `=` stays one value instead of introducing extra options.
-fn quote_ts_headline_option(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }

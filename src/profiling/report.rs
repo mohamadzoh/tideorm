@@ -215,7 +215,7 @@ impl ProfileReport {
         let select_star = self
             .queries
             .iter()
-            .filter(|query| query.sql.contains("SELECT *") || query.sql.contains("select *"))
+            .filter(|query| query.sql.to_uppercase().contains("SELECT *"))
             .count();
 
         if select_star > 5 {

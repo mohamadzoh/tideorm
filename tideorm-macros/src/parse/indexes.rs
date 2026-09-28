@@ -41,74 +41,33 @@ impl IndexDef {
     pub(crate) fn attribute_name(&self) -> &'static str {
         attribute_name(self.unique)
     }
+}
 
-    pub(crate) fn get_name(&self, table_name: &str) -> String {
-        self.name.clone().unwrap_or_else(|| {
-            let prefix = if self.unique { "uidx" } else { "idx" };
-            bounded_index_name(format!(
-                "{}_{}_{}",
-                prefix,
-                table_name,
-                self.columns.join("_")
-            ))
+/// The `#[index(..)]` and `#[unique_index(..)]` attributes on the struct.
+pub(crate) fn parse_index_attributes(attrs: &[Attribute]) -> Vec<IndexDef> {
+    attrs
+        .iter()
+        .filter_map(|attr| {
+            let unique = attr.path().is_ident("unique_index");
+            if !unique && !attr.path().is_ident("index") {
+                return None;
+            }
+            let span = attr.span();
+            Some(
+                parse_index_attribute(attr, unique)
+                    .unwrap_or_else(|error| IndexDef::invalid(unique, span, error)),
+            )
         })
-    }
-}
-
-/// A generated index name of at most 63 bytes: past that PostgreSQL cuts it
-/// (two long names that share a prefix then collide) and MySQL rejects it.
-/// A longer one keeps its first 54 bytes and ends in `_` and eight hex digits
-/// of its FNV-1a hash. `tideorm::migration`'s `bounded_index_name` is the
-/// same function, so a migration and a model name an index alike.
-pub(crate) fn bounded_index_name(name: String) -> String {
-    const MAX_IDENTIFIER_BYTES: usize = 63;
-    if name.len() <= MAX_IDENTIFIER_BYTES {
-        return name;
-    }
-    let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-    });
-    let mut cut = MAX_IDENTIFIER_BYTES - 9;
-    while !name.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}_{:08x}", &name[..cut], hash)
-}
-
-pub(crate) fn parse_index_attributes(attrs: &[Attribute]) -> (Vec<IndexDef>, Vec<IndexDef>) {
-    let mut indexes = Vec::new();
-    let mut unique_indexes = Vec::new();
-
-    for attr in attrs {
-        let is_index = attr.path().is_ident("index");
-        let is_unique_index = attr.path().is_ident("unique_index");
-        if !is_index && !is_unique_index {
-            continue;
-        }
-
-        let unique = is_unique_index;
-        let span = attr.span();
-        let parsed = parse_index_attribute(attr, unique)
-            .unwrap_or_else(|error| IndexDef::invalid(unique, span, error));
-
-        if unique {
-            unique_indexes.push(parsed);
-        } else {
-            indexes.push(parsed);
-        }
-    }
-
-    (indexes, unique_indexes)
+        .collect()
 }
 
 /// `#[index]` and `#[unique_index]` on a field: an index on that field's
 /// column alone. The attribute is bare there; one that names columns or the
 /// index belongs on the struct.
-pub(crate) fn parse_field_index_attributes(data: &syn::Data) -> (Vec<IndexDef>, Vec<IndexDef>) {
+pub(crate) fn parse_field_index_attributes(data: &syn::Data) -> Vec<IndexDef> {
     let mut indexes = Vec::new();
-    let mut unique_indexes = Vec::new();
     let syn::Data::Struct(data) = data else {
-        return (indexes, unique_indexes);
+        return indexes;
     };
 
     for field in &data.fields {
@@ -138,15 +97,11 @@ pub(crate) fn parse_field_index_attributes(data: &syn::Data) -> (Vec<IndexDef>, 
                     )
                 }
             };
-            if unique {
-                unique_indexes.push(parsed);
-            } else {
-                indexes.push(parsed);
-            }
+            indexes.push(parsed);
         }
     }
 
-    (indexes, unique_indexes)
+    indexes
 }
 
 fn parse_index_attribute(attr: &Attribute, unique: bool) -> syn::Result<IndexDef> {

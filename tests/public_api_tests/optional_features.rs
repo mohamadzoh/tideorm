@@ -109,24 +109,6 @@ mod translations_extended_tests {
     }
 
     #[test]
-    fn test_has_translations_get_translated_with_fallback() {
-        let mut product = TestProduct::new(1, "Default Product", "Default Description");
-
-        product
-            .set_translation("name", "en", "English Name")
-            .unwrap();
-        product
-            .set_translation("name", "ar", "الاسم العربي")
-            .unwrap();
-
-        let ar = product.get_translated("name", "ar").unwrap();
-        assert_eq!(ar, serde_json::json!("الاسم العربي"));
-
-        let es = product.get_translated("name", "es").unwrap();
-        assert_eq!(es, serde_json::json!("English Name"));
-    }
-
-    #[test]
     fn test_has_translations_fallback_to_default() {
         let product = TestProduct::new(1, "Default Product", "Default Description");
 

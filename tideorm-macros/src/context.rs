@@ -10,7 +10,7 @@ use crate::parse::{
     IndexDef, ModelField, ModelInput, find_db_field, parse_validation_attributes, unraw_ident,
     variant_ident,
 };
-use crate::relation_gen::{build_relation_field_inits, build_relation_state_refreshes};
+use crate::relation_gen::build_relation_wiring;
 use helpers::*;
 
 pub(crate) struct BuildContext {
@@ -69,8 +69,8 @@ pub(crate) struct BuildContext {
     pub(crate) column_names: Vec<String>,
     pub(crate) column_variants: Vec<Ident>,
     pub(crate) timestamps_enabled: bool,
-    pub(crate) relation_field_inits: Vec<TokenStream2>,
-    pub(crate) relation_state_refreshes: Vec<TokenStream2>,
+    /// The statements `__wire_relations` runs, one block per relation.
+    pub(crate) relation_wiring: Vec<TokenStream2>,
     pub(crate) internal_entity_mod: Ident,
     pub(crate) columns_struct_name: Ident,
     pub(crate) index_impls: Vec<TokenStream2>,
@@ -108,7 +108,6 @@ impl BuildContext {
     pub(crate) fn new(
         input: &ModelInput,
         indexes: Vec<IndexDef>,
-        unique_indexes: Vec<IndexDef>,
         existing_derives: &ExistingDerives,
     ) -> syn::Result<Self> {
         let struct_name = input.ident.clone();
@@ -137,11 +136,14 @@ impl BuildContext {
             !input.skip_derives && !input.skip_serialize && !existing_derives.has_serialize;
         let should_gen_deserialize =
             !input.skip_derives && !input.skip_deserialize && !existing_derives.has_deserialize;
-        let translatable_fields = split_csv(input.translatable.as_ref()).unwrap_or_default();
-        let encrypted = split_csv(input.encrypted.as_ref()).unwrap_or_default();
-        let has_one_files = split_csv(input.has_one_files.as_ref()).unwrap_or_default();
-        let has_many_files = split_csv(input.has_many_files.as_ref()).unwrap_or_default();
-        let searchable_fields = split_csv(input.searchable.as_ref()).unwrap_or_default();
+        let list = |attribute: &str, value: Option<&String>| {
+            split_csv(&input.ident, attribute, value).map(Option::unwrap_or_default)
+        };
+        let translatable = list("translatable", input.translatable.as_ref())?;
+        let encrypted = list("encrypted", input.encrypted.as_ref())?;
+        let has_one_files = list("has_one_files", input.has_one_files.as_ref())?;
+        let has_many_files = list("has_many_files", input.has_many_files.as_ref())?;
+        let searchable = list("searchable", input.searchable.as_ref())?;
 
         let fields: Vec<ModelField> = match &input.data {
             darling::ast::Data::Struct(fields) => fields.iter().cloned().collect(),
@@ -166,7 +168,7 @@ impl BuildContext {
 
         validate_primary_key_fields(&input.ident, &db_fields, input.tokenize)?;
         validate_relation_fields(&fields)?;
-        validate_index_definitions(&indexes, &unique_indexes, &db_fields)?;
+        validate_index_definitions(&indexes, &db_fields)?;
 
         let resolved_encrypted_fields =
             resolve_encrypted_fields(&input.ident, &db_fields, &encrypted)?;
@@ -178,6 +180,12 @@ impl BuildContext {
             .iter()
             .map(|field| field.column_name())
             .collect();
+        let field_names_of = |attribute: &str, names: &[String]| {
+            resolve_field_list(&input.ident, attribute, &db_fields, names)
+                .map(|fields| fields.into_iter().map(ModelField::name).collect::<Vec<_>>())
+        };
+        let translatable_fields = field_names_of("translatable", &translatable)?;
+        let searchable_fields = field_names_of("searchable", &searchable)?;
 
         let mut validation_rules = Vec::new();
         let mut attribute_errors = Vec::new();
@@ -219,7 +227,7 @@ impl BuildContext {
         let internal_entity_mod =
             format_ident!("__tideorm_internal_{}", to_snake_case(&struct_name_str));
         let index_impls = build_index_impls(&table_name, &indexes, false, &db_fields);
-        let unique_index_impls = build_index_impls(&table_name, &unique_indexes, true, &db_fields);
+        let unique_index_impls = build_index_impls(&table_name, &indexes, true, &db_fields);
         let hidden_attrs = resolve_hidden_fields(
             &input.ident,
             &fields,
@@ -227,7 +235,7 @@ impl BuildContext {
                 .iter()
                 .chain(&has_many_files)
                 .collect::<Vec<_>>(),
-            split_csv(input.hidden.as_ref()),
+            split_csv(&input.ident, "hidden", input.hidden.as_ref())?,
             soft_delete.as_ref().map(|(field, _)| field),
         )?;
 
@@ -266,7 +274,7 @@ impl BuildContext {
             translatable_fields,
             encrypted_fields,
             encrypted_column_names,
-            allowed_languages: split_csv(input.languages.as_ref()),
+            allowed_languages: split_csv(&input.ident, "languages", input.languages.as_ref())?,
             fallback_language: input.fallback_language.clone(),
             has_one_files,
             has_many_files,
@@ -300,8 +308,7 @@ impl BuildContext {
                 .map(|field| variant_ident(field.ident()))
                 .collect(),
             timestamps_enabled,
-            relation_field_inits: Vec::new(),
-            relation_state_refreshes: Vec::new(),
+            relation_wiring: Vec::new(),
             internal_entity_mod,
             index_impls,
             unique_index_impls,
@@ -310,12 +317,10 @@ impl BuildContext {
             relation_fields,
             db_fields,
         };
-        ctx.relation_field_inits = build_relation_field_inits(&ctx)?;
-        ctx.relation_state_refreshes = build_relation_state_refreshes(&ctx)?;
+        ctx.relation_wiring = build_relation_wiring(&ctx)?;
         Ok(ctx)
     }
 
-    /// `pk_0, pk_1, ..`: one binding per component of a destructured primary key.
     /// `(field, type)` for each persisted field whose integer type a backend's
     /// driver cannot store and read back.
     pub(crate) fn driver_limited_fields(&self) -> Vec<(String, &'static str)> {
@@ -325,20 +330,20 @@ impl BuildContext {
             .collect()
     }
 
-    /// Refuses the write before it starts when the model has a field the
-    /// connected backend's driver cannot store; nothing for other models.
-    pub(crate) fn ensure_fields_storable(&self) -> Option<TokenStream2> {
-        (!self.driver_limited_fields().is_empty()).then(|| {
-            quote! {
-                ::tideorm::internal::ensure_fields_storable::<Self, _>(&connection.executor())?;
-            }
-        })
-    }
-
-    pub(crate) fn primary_key_bindings(&self) -> Vec<Ident> {
-        (0..self.pk_idents.len())
+    /// A reference to each component of the `primary_key: &Self::PrimaryKey`
+    /// in scope: `primary_key` itself for a single key, else `pk_0`, `pk_1`,
+    /// .., which the returned statement binds from the tuple.
+    pub(crate) fn primary_key_components(&self) -> (TokenStream2, Vec<TokenStream2>) {
+        if let [_] = self.pk_idents.as_slice() {
+            return (TokenStream2::new(), vec![quote!(primary_key)]);
+        }
+        let bindings: Vec<Ident> = (0..self.pk_idents.len())
             .map(|index| format_ident!("pk_{index}"))
-            .collect()
+            .collect();
+        (
+            quote!(let (#(#bindings),*) = primary_key;),
+            bindings.iter().map(|binding| quote!(#binding)).collect(),
+        )
     }
 
     /// Whether `field` is one of the model's `#[tideorm(encrypted = ..)]` columns.
@@ -370,13 +375,25 @@ impl BuildContext {
         }
     }
 
+    /// The ident of the field a relation's `local_key` names.
     pub(crate) fn resolve_local_key_ident(
         &self,
         key: &str,
         relation_ident: &Ident,
     ) -> syn::Result<Ident> {
+        self.resolve_local_key(key, relation_ident)
+            .map(|field| field.ident().clone())
+    }
+
+    /// The field a relation's `local_key` names: a field or column, or `id`
+    /// for the primary key, whatever it is called.
+    pub(crate) fn resolve_local_key(
+        &self,
+        key: &str,
+        relation_ident: &Ident,
+    ) -> syn::Result<&ModelField> {
         if let Some(field) = find_db_field(&self.db_fields, key) {
-            return Ok(field.ident().clone());
+            return Ok(field);
         }
 
         if key != "id" {
@@ -386,13 +403,12 @@ impl BuildContext {
             ));
         }
 
-        if self.pk_idents.len() == 1 {
-            Ok(self.pk_ident.clone())
-        } else {
-            Err(syn::Error::new_spanned(
+        match self.db_fields.iter().find(|field| field.primary_key) {
+            Some(field) if self.pk_idents.len() == 1 => Ok(field),
+            _ => Err(syn::Error::new_spanned(
                 relation_ident,
                 "composite primary keys require an explicit relation local_key; implicit 'id' is ambiguous",
-            ))
+            )),
         }
     }
 }

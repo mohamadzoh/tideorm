@@ -65,34 +65,24 @@ pub trait HasAttachments {
         attachment: FileAttachment,
     ) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-
-        let mut files = self.get_files_data()?;
-
-        if Self::is_has_one_relation(relation) {
-            files.set_one(relation, attachment);
-        } else {
-            files.add_many(relation, attachment);
-        }
-
-        self.set_files_data(files)
+        let has_one = Self::is_has_one_relation(relation);
+        edit_files(self, |files| {
+            if has_one {
+                files.set_one(relation, attachment);
+            } else {
+                files.add_many(relation, attachment);
+            }
+        })
     }
 
     /// Attach multiple files to a `hasMany` relation.
     fn attach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
-        if !Self::is_has_many_relation(relation) {
-            return Err(AttachmentError::InvalidRelation(format!(
-                "'{}' is not a hasMany relation, use attach() instead",
-                relation
-            )));
-        }
-
-        let mut files = self.get_files_data()?;
-
-        for key in file_keys {
-            files.add_many(relation, FileAttachment::new(key));
-        }
-
-        self.set_files_data(files)
+        require_has_many::<Self>(relation, ", use attach() instead")?;
+        edit_files(self, |files| {
+            for key in file_keys {
+                files.add_many(relation, FileAttachment::new(key));
+            }
+        })
     }
 
     /// Remove attachments from a relation.
@@ -102,39 +92,29 @@ pub trait HasAttachments {
     /// remove one entry or `None` to clear the whole relation.
     fn detach(&mut self, relation: &str, file_key: Option<&str>) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-
-        let mut files = self.get_files_data()?;
-
-        if Self::is_has_one_relation(relation) {
-            let attached = files.get_one(relation);
-            if file_key.is_none_or(|key| attached.is_some_and(|file| file.key == key)) {
-                files.remove_one(relation);
+        let has_one = Self::is_has_one_relation(relation);
+        edit_files(self, |files| {
+            if has_one {
+                let attached = files.get_one(relation);
+                if file_key.is_none_or(|key| attached.is_some_and(|file| file.key == key)) {
+                    files.remove_one(relation);
+                }
+            } else if let Some(key) = file_key {
+                files.remove_from_many(relation, key);
+            } else {
+                files.clear_many(relation);
             }
-        } else if let Some(key) = file_key {
-            files.remove_from_many(relation, key);
-        } else {
-            files.clear_many(relation);
-        }
-
-        self.set_files_data(files)
+        })
     }
 
     /// Remove multiple keys from a `hasMany` relation.
     fn detach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
-        if !Self::is_has_many_relation(relation) {
-            return Err(AttachmentError::InvalidRelation(format!(
-                "'{}' is not a hasMany relation",
-                relation
-            )));
-        }
-
-        let mut files = self.get_files_data()?;
-
-        for key in file_keys {
-            files.remove_from_many(relation, key);
-        }
-
-        self.set_files_data(files)
+        require_has_many::<Self>(relation, "")?;
+        edit_files(self, |files| {
+            for key in file_keys {
+                files.remove_from_many(relation, key);
+            }
+        })
     }
 
     /// Replace the current relation contents with a new list of file keys.
@@ -153,46 +133,40 @@ pub trait HasAttachments {
         attachments: Vec<FileAttachment>,
     ) -> Result<(), AttachmentError> {
         self.validate_relation(relation)?;
-
-        let mut files = self.get_files_data()?;
-
-        if Self::is_has_one_relation(relation) {
-            match attachments.into_iter().next() {
-                Some(first) => files.set_one(relation, first),
-                None => files.remove_one(relation),
+        let has_one = Self::is_has_one_relation(relation);
+        edit_files(self, |files| {
+            if has_one {
+                match attachments.into_iter().next() {
+                    Some(first) => files.set_one(relation, first),
+                    None => files.remove_one(relation),
+                }
+            } else {
+                files.clear_many(relation);
+                for attachment in attachments {
+                    files.add_many(relation, attachment);
+                }
             }
-        } else {
-            files.clear_many(relation);
-            for attachment in attachments {
-                files.add_many(relation, attachment);
-            }
-        }
-
-        self.set_files_data(files)
+        })
     }
 
     /// Return the single attachment for a `hasOne` relation.
     fn get_file(&self, relation: &str) -> Result<Option<FileAttachment>, AttachmentError> {
-        let files = self.get_files_data()?;
-        Ok(files.get_one(relation))
+        Ok(self.get_files_data()?.get_one(relation))
     }
 
     /// Return all attachments for a `hasMany` relation.
     fn get_files(&self, relation: &str) -> Result<Vec<FileAttachment>, AttachmentError> {
-        let files = self.get_files_data()?;
-        Ok(files.get_many(relation))
+        Ok(self.get_files_data()?.get_many(relation))
     }
 
     /// Check if a relation has any files
     fn has_files(&self, relation: &str) -> Result<bool, AttachmentError> {
-        let files = self.get_files_data()?;
-        Ok(files.has_files(relation))
+        Ok(self.count_files(relation)? > 0)
     }
 
     /// Count files in a relation
     fn count_files(&self, relation: &str) -> Result<usize, AttachmentError> {
-        let files = self.get_files_data()?;
-        Ok(files.count_files(relation))
+        Ok(self.get_files_data()?.count_files(relation))
     }
 
     /// Validate that a relation exists
@@ -206,4 +180,27 @@ pub trait HasAttachments {
         }
         Ok(())
     }
+}
+
+/// Read `model`'s attachments, change them with `edit`, and write them back.
+fn edit_files<M: HasAttachments + ?Sized>(
+    model: &mut M,
+    edit: impl FnOnce(&mut FilesData),
+) -> Result<(), AttachmentError> {
+    let mut files = model.get_files_data()?;
+    edit(&mut files);
+    model.set_files_data(files)
+}
+
+/// Refuse a relation that is not `M`'s `hasMany`, `hint` saying what to use.
+fn require_has_many<M: HasAttachments + ?Sized>(
+    relation: &str,
+    hint: &str,
+) -> Result<(), AttachmentError> {
+    if M::is_has_many_relation(relation) {
+        return Ok(());
+    }
+    Err(AttachmentError::InvalidRelation(format!(
+        "'{relation}' is not a hasMany relation{hint}"
+    )))
 }

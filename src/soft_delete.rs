@@ -79,17 +79,8 @@ pub trait SoftDelete: Model {
             return self.update().await;
         }
         let primary_key = self.primary_key();
-        let display = Self::primary_key_display(&primary_key);
         <Self as Model>::delete(self).await?;
-        crate::model::find_including_trashed::<Self>(primary_key)
-            .await?
-            .ok_or_else(|| {
-                crate::Error::not_found(format!(
-                    "{} with {} no longer exists",
-                    Self::table_name(),
-                    display
-                ))
-            })
+        crate::model::reload_by_key::<Self>(primary_key).await
     }
 
     /// Clear the soft-delete timestamp and persist the restored record.

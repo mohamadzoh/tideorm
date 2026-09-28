@@ -453,6 +453,11 @@ fn masking_covers_the_whole_userinfo_and_nothing_else() {
         "postgres://db/app"
     );
     assert_eq!(mask_url_credentials("sqlite::memory:"), "sqlite::memory:");
+    // A password holding an unencoded `/` ends at the last `@` all the same.
+    assert_eq!(
+        mask_url_credentials("postgres://user:pa/ss@localhost/db"),
+        "postgres://***@localhost/db"
+    );
 
     // The PostgreSQL driver also reads a password from the query string, and
     // an `@` there is not the end of the userinfo.

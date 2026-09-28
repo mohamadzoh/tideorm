@@ -9,7 +9,6 @@
 //! cached, so a deserialized JSON payload can never pass itself off as database
 //! state.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[cfg(feature = "entity-manager")]
 use std::sync::Arc;
 
@@ -19,12 +18,12 @@ use crate::error::Result;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-use super::helpers::{
-    QuerySource, ensure_relation_configured, owner_is_unsaved, preserve_cached_value, required_key,
-    where_key,
-};
 #[cfg(feature = "entity-manager")]
-use super::helpers::{SnapshotOwner, register_loaded};
+use super::helpers::{
+    SnapshotOwner, identity_keys, load_many_in_entity_manager, load_one_in_entity_manager,
+};
+use super::helpers::{ensure_relation_configured, owner_is_unsaved, required_key, where_key};
+use super::state::{RelationState, relation_serde};
 
 mod belongs_to;
 mod has_many;

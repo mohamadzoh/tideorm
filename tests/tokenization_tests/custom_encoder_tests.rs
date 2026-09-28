@@ -43,7 +43,7 @@ impl Tokenizable for CustomModel {
 #[test]
 fn test_custom_encoder() {
     let model = CustomModel { id: 42 };
-    let token = model.tokenize().unwrap();
+    let token = model.to_token().unwrap();
 
     assert_eq!(token, "custom-42");
 }
@@ -59,7 +59,7 @@ fn test_custom_decoder() {
 #[test]
 fn test_custom_roundtrip() {
     let model = CustomModel { id: 999 };
-    let token = model.tokenize().unwrap();
+    let token = model.to_token().unwrap();
     let decoded = CustomModel::decode_token(&token).unwrap();
 
     assert_eq!(decoded, 999);

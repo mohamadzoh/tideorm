@@ -21,11 +21,23 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::columns::IntoColumnName;
 use crate::error::{Error, Result};
 use crate::internal::InternalModel;
 use crate::model::Model;
-use crate::query::{Order, QueryBuilder};
+use crate::query::QueryBuilder;
+
+/// `model`'s value of the field or column `name`: the generated accessor's,
+/// or for a hand-written model without one, the serialized model's.
+fn key_value<M: Model>(model: &M, name: &str) -> Result<serde_json::Value> {
+    if let Some(value) = model.field_json_value(name)? {
+        return Ok(value);
+    }
+    serde_json::to_value(model)
+        .map_err(|error| Error::query(format!("Failed to serialize model: {error}")))?
+        .get(name)
+        .cloned()
+        .ok_or_else(|| Error::query(format!("Field '{name}' not found on model")))
+}
 
 /// A model plus the relation payloads an eager load resolved for it.
 ///
@@ -233,11 +245,9 @@ impl RelationTree {
 
 /// A [`QueryBuilder`] paired with the relations to resolve once it has run.
 ///
-/// Reached from `Model::query().with("posts")`, or from
-/// [`EagerLoadExt::eager`] for a query with no filters. It exposes a deliberately
-/// small slice of the query builder — enough to filter, order and page the root
-/// query. For anything richer, build the `QueryBuilder` first and call `.with()`
-/// last, since that keeps the full builder available up to that point.
+/// Reached from `Model::query().with("posts")` or `.with_many(..)`, which keep
+/// the filters, ordering and paging already on the query. Shape the root query
+/// before `.with()`, or afterwards through [`query`](Self::query).
 ///
 /// Terminals ([`get`](Self::get), [`first`](Self::first), [`find`](Self::find))
 /// yield [`WithRelations`] and require `M: EagerLoadModel`, which the derive
@@ -313,13 +323,13 @@ pub trait EagerLoadModel: Model + InternalModel {
             // The database matched each row under the column's collation,
             // which can ignore case (SQLite's NOCASE, MySQL's default ones),
             // accents or trailing spaces. When a row's key is not one of the
-            // requested keys as text, or two requested keys could be one
-            // such key, the database pairs them instead.
+            // requested keys as text, or two requested keys could match one
+            // stored key, the database pairs them instead.
             let requested: std::collections::HashSet<String> =
                 chunk.iter().map(__relation_key).collect();
             let mut keyed = Vec::with_capacity(rows.len());
             for row in rows {
-                let key = __relation_key(&row.get_field_value(foreign_key)?);
+                let key = __relation_key(&key_value(&row, foreign_key)?);
                 keyed.push((key, row));
             }
             if keyed.iter().all(|(key, _)| requested.contains(key)) && !fold_together(chunk) {
@@ -354,13 +364,28 @@ pub trait EagerLoadModel: Model + InternalModel {
     }
 }
 
-/// Whether two of `keys` are the same text but for case or trailing spaces,
-/// which a case-insensitive collation matches to the same rows.
-fn fold_together(keys: &[serde_json::Value]) -> bool {
+/// Whether the database could match two of `keys` to the same stored key.
+///
+/// A case-insensitive collation matches text that differs only by ASCII
+/// case or trailing spaces, which is checked here. Beyond plain ASCII what
+/// matches is the collation's to say (`cafe` and `café` under an
+/// accent-insensitive one, `ss` and `ß` under others), so text keys of which
+/// any is not plain ASCII are left to the database.
+pub(super) fn fold_together(keys: &[serde_json::Value]) -> bool {
+    let texts: Vec<&str> = keys.iter().filter_map(serde_json::Value::as_str).collect();
+    if texts.len() < 2 {
+        return false;
+    }
+    if texts
+        .iter()
+        .any(|key| !key.bytes().all(|byte| (b' '..=b'~').contains(&byte)))
+    {
+        return true;
+    }
     let mut folded = std::collections::HashSet::new();
-    keys.iter()
-        .filter_map(serde_json::Value::as_str)
-        .any(|key| !folded.insert(key.trim_end_matches(' ').to_lowercase()))
+    texts
+        .iter()
+        .any(|key| !folded.insert(key.trim_end_matches(' ').to_ascii_lowercase()))
 }
 
 /// How many keys one pairing query compares, one `UNION ALL` member each:
@@ -375,7 +400,7 @@ async fn matching_keys<M: Model>(
     foreign_key: &str,
     morph_type: Option<(&'static str, &'static str)>,
 ) -> Result<HashMap<String, Vec<String>>> {
-    let column = M::canonical_column_name(foreign_key).unwrap_or(foreign_key);
+    let column = M::column_named(foreign_key);
     let lookup = |index: usize, key: &serde_json::Value| {
         let mut query = M::query()
             .select(vec![column])
@@ -425,10 +450,7 @@ async fn matching_keys<M: Model>(
 /// same value, as the database's own comparison does.
 #[doc(hidden)]
 pub fn __relation_key(key: &serde_json::Value) -> String {
-    match key {
-        serde_json::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
+    crate::internal::json_text(key)
 }
 
 /// `models` with each primary key once, in order.
@@ -441,6 +463,80 @@ pub fn __distinct_by_primary_key<M: crate::model::Model>(models: Vec<M>) -> Vec<
             seen.insert(serde_json::to_string(&model.primary_key()).unwrap_or_default())
         })
         .collect()
+}
+
+/// The rows of `R` whose `related_key` holds each of `parent_keys`, matched by
+/// value, so an `i64` key finds an `i32` or a text foreign key holding it; a
+/// `MorphOne`/`MorphMany` adds its type discriminator. One group per parent
+/// key, in order, for a to-many relation.
+#[doc(hidden)]
+pub async fn __eager_keyed_many<R: EagerLoadModel>(
+    parent_keys: &[serde_json::Value],
+    related_key: &str,
+    morph_type: Option<(&'static str, &'static str)>,
+) -> Result<Vec<Vec<R>>> {
+    let by_key = R::__load_grouped_by_key(parent_keys, related_key, morph_type).await?;
+    Ok(parent_keys
+        .iter()
+        .map(|key| {
+            by_key
+                .get(&__relation_key(key))
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect())
+}
+
+/// [`__eager_keyed_many`] for a to-one relation: the first row per parent key.
+#[doc(hidden)]
+pub async fn __eager_keyed_one<R: EagerLoadModel>(
+    parent_keys: &[serde_json::Value],
+    related_key: &str,
+    morph_type: Option<(&'static str, &'static str)>,
+) -> Result<Vec<Option<R>>> {
+    let by_key = R::__load_grouped_by_key(parent_keys, related_key, morph_type).await?;
+    Ok(parent_keys
+        .iter()
+        .map(|key| {
+            by_key
+                .get(&__relation_key(key))
+                .and_then(|group| group.first().cloned())
+        })
+        .collect())
+}
+
+/// The related rows of a `HasManyThrough` per parent key: the live pivot rows
+/// of every parent, then the live related rows they link, each step matched by
+/// value as the other relations are, so a pivot key of another integer type
+/// than the owner's or the related model's key still links them. Each step
+/// reads through its model's query, whose soft-delete scope leaves out trashed
+/// pivot and related rows. A pair the pivot holds twice is one related row.
+#[doc(hidden)]
+pub async fn __eager_through<R: EagerLoadModel, P: EagerLoadModel>(
+    parent_keys: &[serde_json::Value],
+    foreign_key: &str,
+    related_key: &str,
+    related_local_key: &str,
+) -> Result<Vec<Vec<R>>> {
+    let links = P::__load_grouped_by_key(parent_keys, foreign_key, None).await?;
+    let mut related_keys = Vec::new();
+    for link in links.values().flatten() {
+        related_keys.push(key_value(link, related_key)?);
+    }
+    let related_by_key = R::__load_grouped_by_key(&related_keys, related_local_key, None).await?;
+
+    let mut related = Vec::with_capacity(parent_keys.len());
+    for key in parent_keys {
+        let mut rows = Vec::new();
+        for link in links.get(&__relation_key(key)).into_iter().flatten() {
+            let link_key = key_value(link, related_key)?;
+            if let Some(found) = related_by_key.get(&__relation_key(&link_key)) {
+                rows.extend(found.iter().cloned());
+            }
+        }
+        related.push(__distinct_by_primary_key(rows));
+    }
+    Ok(related)
 }
 
 /// Resolve the next level of a to-many relation for every parent at once.
@@ -499,18 +595,6 @@ pub async fn __eager_load_nested_one<R: EagerLoadModel>(
 }
 
 impl<M: Model> EagerQueryBuilder<M> {
-    /// An unfiltered query over `M` with no relations requested yet.
-    ///
-    /// Equivalent to [`EagerLoadExt::eager`]. Add relations with
-    /// [`with`](Self::with) — without any, the terminals still work and simply
-    /// skip the loader.
-    pub fn new() -> Self {
-        Self {
-            query: QueryBuilder::new(),
-            relation_tree: RelationTree::new(),
-        }
-    }
-
     #[must_use]
     pub(crate) fn from_query(query: QueryBuilder<M>) -> Self {
         Self {
@@ -539,8 +623,7 @@ impl<M: Model> EagerQueryBuilder<M> {
         self
     }
 
-    /// Shape the *root* query with any [`QueryBuilder`] method, for the ones
-    /// this builder does not forward:
+    /// Shape the *root* query with any [`QueryBuilder`] method after `.with()`:
     ///
     /// ```ignore
     /// let users = User::query()
@@ -550,58 +633,11 @@ impl<M: Model> EagerQueryBuilder<M> {
     ///     .await?;
     /// ```
     ///
-    /// Relation queries are unaffected, as with the methods below.
+    /// Relation queries are unaffected; constrain those by loading them lazily
+    /// with `load_with` instead.
     #[must_use]
     pub fn query(mut self, shape: impl FnOnce(QueryBuilder<M>) -> QueryBuilder<M>) -> Self {
         self.query = shape(self.query);
-        self
-    }
-
-    /// Filter the *root* query. Relation queries are unaffected — constrain
-    /// those by loading them lazily with `load_with` instead.
-    pub fn where_eq<V: serde::Serialize>(mut self, column: impl IntoColumnName, value: V) -> Self {
-        self.query = self.query.where_eq(column, value);
-        self
-    }
-
-    /// Restrict the root query to rows whose `column` is one of `values`.
-    pub fn where_in<V: serde::Serialize>(
-        mut self,
-        column: impl IntoColumnName,
-        values: impl IntoIterator<Item = V>,
-    ) -> Self {
-        self.query = self.query.where_in(column, values);
-        self
-    }
-
-    /// Add a raw SQL predicate to the root query.
-    ///
-    /// The trusted-SQL escape hatch: the fragment is not parameterized, so never
-    /// build it from user input. Validation is deferred — a rejected fragment
-    /// surfaces when a terminal runs, not here.
-    pub fn where_raw(mut self, sql: &str) -> Self {
-        self.query = self.query.where_raw(sql);
-        self
-    }
-
-    /// Order the root query by a validated column reference. Related rows keep
-    /// whatever order the batched relation query returned them in.
-    pub fn order_by(mut self, column: impl IntoColumnName, order: Order) -> Self {
-        self.query = self.query.order_by(column, order);
-        self
-    }
-
-    /// Cap the number of *root* rows. Relations are then loaded for exactly
-    /// those rows, so this bounds the eager load too.
-    pub fn limit(mut self, n: u64) -> Self {
-        self.query = self.query.limit(n);
-        self
-    }
-
-    /// Skip `n` root rows. Pair with [`order_by`](Self::order_by), since row
-    /// order is otherwise unspecified.
-    pub fn offset(mut self, n: u64) -> Self {
-        self.query = self.query.offset(n);
         self
     }
 
@@ -622,11 +658,7 @@ impl<M: Model> EagerQueryBuilder<M> {
         match database {
             // A `query_with(db)` reads the relations from `db` too: the
             // loaders run their queries on the scope's connection.
-            Some(database) => {
-                let connection = database.__get_connection()?;
-                let origin = crate::database::origin_of(&connection);
-                crate::database::with_connection_override(connection, origin, None, load).await?;
-            }
+            Some(database) => crate::database::__in_db_scope(&database, load).await?,
             None => load.await?,
         }
         Ok(results)
@@ -635,8 +667,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     /// Like [`get`](Self::get) but stops at the first row, applying `LIMIT 1` to
     /// the root query so the relation load covers only that row.
     ///
-    /// Without an [`order_by`](Self::order_by) "first" is whatever the backend
-    /// returns first.
+    /// Without an `order_by` "first" is whatever the backend returns first.
     pub async fn first(mut self) -> Result<Option<WithRelations<M>>>
     where
         M: EagerLoadModel,
@@ -661,68 +692,3 @@ impl<M: Model> EagerQueryBuilder<M> {
         self.first().await
     }
 }
-
-impl<M: Model> Default for EagerQueryBuilder<M> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Blanket-implemented entry points for starting an eager load from the model
-/// type rather than from a query.
-///
-/// `User::eager().with("posts")` and `User::query().with("posts")` build the
-/// same thing; these read better when there is nothing to filter, and are worse
-/// when there is, because they start from an unconstrained query.
-///
-/// Implemented for every [`Model`], so it only needs to be in scope — it is in
-/// the prelude and at the crate root.
-pub trait EagerLoadExt: Model {
-    /// Start an eager query with no relations requested yet. Chain
-    /// [`EagerQueryBuilder::with`] to add them.
-    fn eager() -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new()
-    }
-
-    /// Start an eager query for several relations at once.
-    fn with_relations(relations: &[&str]) -> EagerQueryBuilder<Self>
-    where
-        Self: Sized,
-    {
-        EagerQueryBuilder::new().with_many(relations)
-    }
-}
-
-impl<T: Model> EagerLoadExt for T {}
-
-/// Read one field of a model as JSON, by name.
-///
-/// This is how relation loading gets at a key column without knowing the model's
-/// concrete field types — grouping eagerly-loaded rows by their foreign key, for
-/// instance. Blanket-implemented for every [`Model`].
-pub trait RelationExt: Model {
-    /// The value of `field`, rendered as JSON.
-    ///
-    /// Tries the typed accessor first and falls back to serializing the whole
-    /// model, so relation fields and other serde-only keys resolve too — at the
-    /// cost of a full serialization. `field` is the Rust field name as serde
-    /// spells it, not necessarily the database column. Errors when no such key
-    /// exists.
-    fn get_field_value(&self, field: &str) -> Result<serde_json::Value> {
-        if let Some(value) = <Self as InternalModel>::field_json_value(self, field)? {
-            return Ok(value);
-        }
-
-        let json = serde_json::to_value(self)
-            .map_err(|e| Error::query(format!("Failed to serialize model: {}", e)))?;
-
-        json.get(field)
-            .cloned()
-            .ok_or_else(|| Error::query(format!("Field '{}' not found on model", field)))
-    }
-}
-
-impl<T: Model> RelationExt for T {}

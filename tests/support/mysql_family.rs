@@ -288,3 +288,34 @@ async fn a_database_opened_directly_knows_its_server() {
         .expect("connect failed");
     assert_eq!(db.backend(), backend::DATABASE_TYPE);
 }
+
+/// A seeder inside a transaction that holds the pool's only connection finds
+/// its ledger on that connection. The ledger was created, `IF NOT EXISTS`,
+/// on a second pooled connection every time, which never came, so the seeder
+/// waited out the pool's timeout even with the ledger already there.
+#[tokio::test]
+async fn a_seeder_in_a_transaction_on_a_one_connection_pool_uses_its_ledger() {
+    use std::time::Duration;
+    use tideorm::seeding::Seeder;
+
+    if !backend::connect().await {
+        return;
+    }
+    Seeder::new()
+        .run()
+        .await
+        .expect("creating the ledger failed");
+
+    tideorm::TideConfig::init()
+        .database(backend::database_url())
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect()
+        .await
+        .expect("connect failed");
+    let db = tideorm::require_db().expect("a global database");
+    let seeded = db
+        .transaction(|_| Box::pin(async { Seeder::new().run().await }))
+        .await;
+    assert!(seeded.is_ok(), "{seeded:?}");
+}

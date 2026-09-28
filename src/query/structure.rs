@@ -10,8 +10,8 @@
 
 mod consolidation;
 
+use super::Order;
 use super::db_sql;
-use super::{Order, WhereCondition};
 use crate::config::DatabaseType;
 use crate::internal::Value;
 use crate::model::Model;
@@ -72,6 +72,19 @@ pub struct JoinClause {
     pub left_column: String,
     /// Right-hand side of the `ON` equality, normally `joined_table.column`.
     pub right_column: String,
+}
+
+impl JoinClause {
+    /// The joined table's name without its schema: `events` for `audit.events`.
+    pub(crate) fn bare_table(&self) -> &str {
+        self.table.rsplit('.').next().unwrap_or(&self.table)
+    }
+
+    /// The name other clauses qualify the joined columns with: the alias,
+    /// else the bare table name.
+    pub(crate) fn qualifier(&self) -> &str {
+        self.alias.as_deref().unwrap_or_else(|| self.bare_table())
+    }
 }
 
 /// A scalar subquery projected by
@@ -160,10 +173,9 @@ impl UnionClause {
         params: Vec<Value>,
     ) -> Self {
         Self {
-            union_type,
-            query_sql,
             params,
             raw: false,
+            ..Self::new(union_type, query_sql)
         }
     }
 }
@@ -291,6 +303,28 @@ pub enum WindowFunctionType {
 }
 
 impl WindowFunctionType {
+    /// The column the function reads, if it takes one.
+    pub(crate) fn column(&self) -> Option<&str> {
+        match self {
+            Self::Lag(column, ..)
+            | Self::Lead(column, ..)
+            | Self::FirstValue(column)
+            | Self::LastValue(column)
+            | Self::NthValue(column, _)
+            | Self::Sum(column)
+            | Self::Avg(column)
+            | Self::Count(Some(column))
+            | Self::Min(column)
+            | Self::Max(column) => Some(column),
+            Self::RowNumber
+            | Self::Rank
+            | Self::DenseRank
+            | Self::Ntile(_)
+            | Self::Count(None)
+            | Self::Custom(_) => None,
+        }
+    }
+
     /// This function with its column argument, if any, passed through `column`.
     fn map_column(&self, column: &dyn Fn(&str) -> String) -> Self {
         match self {
@@ -593,11 +627,8 @@ impl CTE {
     /// list must have exactly as many entries as the body projects.
     pub fn with_columns(name: &str, columns: Vec<&str>, query_sql: String) -> Self {
         Self {
-            name: name.to_string(),
             columns: Some(columns.into_iter().map(|s| s.to_string()).collect()),
-            query_sql,
-            recursive: false,
-            params: Vec::new(),
+            ..Self::new(name, query_sql)
         }
     }
 
@@ -607,11 +638,8 @@ impl CTE {
     /// `query_sql`.
     pub(crate) fn with_params(name: &str, query_sql: String, params: Vec<Value>) -> Self {
         Self {
-            name: name.to_string(),
-            columns: None,
-            query_sql,
-            recursive: false,
             params,
+            ..Self::new(name, query_sql)
         }
     }
 
@@ -660,119 +688,17 @@ impl CTE {
 ///
 /// A fragment stores clauses verbatim rather than rendered SQL, so it carries no
 /// inline literals and stays backend-agnostic: HAVING clauses keep their `?`
-/// placeholders and travel next to their bound values in `having_bindings`,
-/// exactly as [`UnionClause`] and [`CTE`] operands do.
+/// placeholders next to their bound values, exactly as [`UnionClause`] and
+/// [`CTE`] operands do.
 ///
 /// Produced by [`QueryBuilder::consolidate()`](super::QueryBuilder::consolidate)
 /// and merged back in by [`QueryBuilder::apply()`](super::QueryBuilder::apply),
-/// whose documentation defines the merge semantics. The fields mirror the
-/// builder's own one for one, and each one's doc names which of the three merge
-/// rules it follows:
-///
-/// - **appended** — every list slot. Merging is additive, so a fragment's
-///   ORDER BY term becomes a *further* sort key rather than replacing the
-///   builder's.
-/// - **last-wins** — every single-value setter slot. A fragment that left the
-///   slot unset leaves the builder's value alone.
-/// - **first-wins** — [`invalid_query_reason`](Self::invalid_query_reason)
-///   alone, so the earliest recorded failure is the one reported.
-///
-/// The type cannot be constructed with a struct literal from outside the crate
-/// because of a private `PhantomData` field. That is deliberate: it keeps the
-/// [`order_by`](Self::order_by) raw-expression marker unforgeable, since a
-/// fragment can only ever be obtained from a builder that already validated the
-/// clauses it holds.
+/// whose documentation defines the merge semantics. Its clauses are private,
+/// so a fragment can only come from a builder that already validated them.
 #[derive(Debug, Clone)]
 pub struct QueryFragment<M: Model> {
     pub(crate) _marker: PhantomData<M>,
-    /// WHERE conditions combined with AND. **Appended.**
-    pub conditions: Vec<WhereCondition>,
-    /// Parenthesized OR groups, AND-ed with [`conditions`](Self::conditions).
-    /// **Appended.**
-    pub or_groups: Vec<super::OrGroup>,
-    /// Index into `or_groups` of the group the `or_where_*` calls built; on
-    /// merge it joins the builder's own such group instead of being appended.
-    pub(crate) simple_or_group: Option<usize>,
-    /// ORDER BY terms as `(column, direction)` pairs. **Appended**, so the
-    /// fragment's terms become the least significant sort keys.
-    ///
-    /// The first element is *not* necessarily a column name: an entry added by
-    /// [`order_by_raw()`](super::QueryBuilder::order_by_raw) is a trusted SQL
-    /// expression carrying a private marker prefix that both validation and
-    /// rendering use to tell it apart from a validated column reference. Treat
-    /// the string as opaque; matching it against your model's columns will not
-    /// work.
-    pub order_by: Vec<(String, Order)>,
-    /// LIMIT. **Last-wins**, mirroring `.limit(5).limit(10)`.
-    pub limit_value: Option<u64>,
-    /// OFFSET. **Last-wins.** A standalone offset is portable — rendering
-    /// supplies the open-ended LIMIT that MySQL, MariaDB and SQLite require.
-    pub offset_value: Option<u64>,
-    /// The typed half of the projection, from
-    /// [`select()`](super::QueryBuilder::select). **Last-wins**, and `None`
-    /// means "not chosen", not "select nothing".
-    pub select_columns: Option<Vec<String>>,
-    /// Raw SELECT expressions, plus the sentinel `QueryBuilder::distinct()`
-    /// records here. The sentinel travels with the projection it modifies, so a
-    /// fragment round trip preserves `DISTINCT` without a slot of its own; the
-    /// renderer strips it and emits the keyword instead.
-    ///
-    /// **Appended**, except that the sentinel is deduplicated on merge so an
-    /// already-distinct builder does not collect a second copy.
-    pub raw_select_expressions: Vec<String>,
-    /// Scalar subquery projections from
-    /// [`select_subquery()`](super::QueryBuilder::select_subquery), with their
-    /// bound values. **Appended.**
-    pub(crate) subquery_select_expressions: Vec<SubquerySelect>,
-    /// GROUP BY columns. **Appended.** These are validated as column references
-    /// only — unlike ORDER BY there is no raw escape hatch, because GROUP BY is
-    /// rendered outside any quoted literal.
-    pub group_by: Vec<String>,
-    /// HAVING clause templates, AND-ed together. **Appended** in lockstep with
-    /// `having_bindings`.
-    ///
-    /// Each entry keeps its `?` placeholders unsubstituted; a clause's
-    /// placeholder count must equal the length of its binding slot, and
-    /// validation rejects the query outright when it does not, rather than
-    /// leaving PostgreSQL's `$n` numbering to drift for every later parameter.
-    pub having_conditions: Vec<String>,
-    /// Values bound to each HAVING clause, indexed in lockstep with
-    /// `having_conditions`: slot `i` holds the values for the `?` placeholders
-    /// in clause `i`, and is empty for a clause written as raw SQL.
-    pub(crate) having_bindings: Vec<Vec<crate::internal::Value>>,
-    /// JOIN clauses, in the order they will be rendered. **Appended.**
-    pub joins: Vec<JoinClause>,
-    /// Compound-select operands. **Appended.**
-    pub unions: Vec<UnionClause>,
-    /// Window functions added to the projection. **Appended.**
-    pub window_functions: Vec<WindowFunction>,
-    /// `WITH` clause bodies, in declaration order. **Appended.**
-    pub ctes: Vec<CTE>,
-    /// Result-cache settings. **Last-wins**; `None` means the query is not
-    /// cached rather than "use the default TTL".
-    pub cache_options: Option<crate::cache::CacheOptions>,
-    /// Caller-supplied cache key from
-    /// [`cache_with_key()`](super::QueryBuilder::cache_with_key). **Last-wins.**
-    /// When set it replaces the structural key entirely, so two genuinely
-    /// different queries sharing a key share a cache entry — it is still
-    /// namespaced per model and per connection.
-    pub cache_key: Option<String>,
-    /// The first builder call that failed, deferred to execution time.
-    /// **First-wins**, so the earliest failure is the one reported and later
-    /// ones do not mask it.
-    pub invalid_query_reason: Option<String>,
-    /// A page `page()` refused, carried as the field and reason it reports.
-    pub(crate) invalid_page: Option<(&'static str, String)>,
-    /// `with_trashed()`: include soft-deleted rows. **Last-wins**, and mutually
-    /// exclusive with [`only_trashed`](Self::only_trashed) — a fragment that set
-    /// neither leaves the builder's scope untouched.
-    pub include_trashed: bool,
-    /// `only_trashed()`: return *only* soft-deleted rows. Takes precedence over
-    /// [`include_trashed`](Self::include_trashed) when merged.
-    pub only_trashed: bool,
-    /// [`lock_for_update()`](super::QueryBuilder::lock_for_update). **Sticky**:
-    /// a fragment that locks makes the builder it is applied to lock.
-    pub lock_for_update: bool,
+    pub(crate) clauses: super::clauses::Clauses,
 }
 
 impl<M: Model> Default for QueryFragment<M> {
@@ -790,29 +716,7 @@ impl<M: Model> QueryFragment<M> {
     pub fn new() -> Self {
         Self {
             _marker: PhantomData,
-            conditions: Vec::new(),
-            or_groups: Vec::new(),
-            simple_or_group: None,
-            order_by: Vec::new(),
-            limit_value: None,
-            offset_value: None,
-            select_columns: None,
-            raw_select_expressions: Vec::new(),
-            subquery_select_expressions: Vec::new(),
-            group_by: Vec::new(),
-            having_conditions: Vec::new(),
-            having_bindings: Vec::new(),
-            joins: Vec::new(),
-            unions: Vec::new(),
-            window_functions: Vec::new(),
-            ctes: Vec::new(),
-            cache_options: None,
-            cache_key: None,
-            invalid_query_reason: None,
-            invalid_page: None,
-            include_trashed: false,
-            only_trashed: false,
-            lock_for_update: false,
+            clauses: super::clauses::Clauses::default(),
         }
     }
 
@@ -822,29 +726,7 @@ impl<M: Model> QueryFragment<M> {
     /// own: a fragment whose only content is `with_trashed()` still changes the
     /// query it is applied to, so reporting it as empty would be wrong.
     pub fn is_empty(&self) -> bool {
-        let has_query_state = !self.conditions.is_empty()
-            || !self.or_groups.is_empty()
-            || !self.order_by.is_empty()
-            || self.limit_value.is_some()
-            || self.offset_value.is_some()
-            || self.select_columns.is_some()
-            || !self.raw_select_expressions.is_empty()
-            || !self.subquery_select_expressions.is_empty()
-            || !self.group_by.is_empty()
-            || !self.having_conditions.is_empty()
-            || !self.joins.is_empty()
-            || !self.unions.is_empty()
-            || !self.window_functions.is_empty()
-            || !self.ctes.is_empty()
-            || self.cache_options.is_some()
-            || self.cache_key.is_some()
-            || self.invalid_query_reason.is_some()
-            || self.invalid_page.is_some()
-            || self.lock_for_update;
-
-        let has_soft_delete_scope = self.include_trashed || self.only_trashed;
-
-        !has_query_state && !has_soft_delete_scope
+        self.clauses.is_empty()
     }
 
     /// How many WHERE predicates the fragment carries, counting the contents of
@@ -854,8 +736,9 @@ impl<M: Model> QueryFragment<M> {
     /// only the WHERE clause: HAVING conditions, joins and CTE bodies are not
     /// included no matter how selective they are.
     pub fn condition_count(&self) -> usize {
-        self.conditions.len()
+        self.clauses.conditions.len()
             + self
+                .clauses
                 .or_groups
                 .iter()
                 .map(super::OrGroup::condition_count)

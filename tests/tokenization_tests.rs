@@ -17,8 +17,8 @@
 //!     pub name: String,
 //! }
 //!
-//! let token = user.tokenize()?;
-//! let id = User::detokenize(&token)?;
+//! let token = user.to_token()?;
+//! let id = User::decode_token(&token)?;
 //! let user = User::from_token(&token).await?;
 //! ```
 

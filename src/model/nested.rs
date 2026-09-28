@@ -151,7 +151,7 @@ fn require_scalar_primary_key<M: Model>(
     let value = serde_json::to_value(primary_key)
         .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?;
     if value.is_array() || value.is_object() {
-        return Err(Error::invalid_query(format!(
+        return Err(Error::query(format!(
             "{} does not support composite primary keys for {}",
             context,
             M::table_name()
@@ -170,7 +170,7 @@ fn require_scalar_primary_key<M: Model>(
 /// bucket, leaving the child's foreign key unchanged while the save succeeds.
 fn resolve_foreign_key_field<R: Model>(foreign_key: &str) -> Result<&'static str> {
     R::canonical_field_name(foreign_key).ok_or_else(|| {
-        Error::invalid_query(format!(
+        Error::query(format!(
             "Unknown foreign key '{}' for {}; expected one of: {}",
             foreign_key,
             R::table_name(),
@@ -217,6 +217,29 @@ async fn save_related<R: Model>(
     Ok(saved)
 }
 
+/// Save `parent`, then each of `children` pointed at its key, in one
+/// transaction. The foreign-key name is resolved first, so a bad one fails
+/// before anything is written.
+async fn save_parent_then<M: Model, R: Model>(
+    parent: M,
+    children: Vec<R>,
+    foreign_key: &str,
+    context: &'static str,
+) -> Result<(M, Vec<R>)> {
+    let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
+
+    super::crud::transaction(move |_| {
+        Box::pin(async move {
+            let parent = parent.save().await?;
+            let pk_value = require_scalar_primary_key::<M>(&parent.primary_key(), context)?;
+            let children = save_related(children, foreign_key, &pk_value).await?;
+
+            Ok((parent, children))
+        })
+    })
+    .await
+}
+
 /// Extension trait for cascade save operations.
 ///
 /// Each method writes the parent and its children as one unit of work: they
@@ -225,23 +248,10 @@ async fn save_related<R: Model>(
 #[async_trait]
 pub trait NestedSave: Model {
     async fn save_with_one<R: Model>(self, related: R, foreign_key: &str) -> Result<(Self, R)> {
-        // Resolved up front so a bad foreign-key name fails before anything is
-        // written at all.
-        let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
-
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let parent = self.save().await?;
-                let pk_value =
-                    require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_one")?;
-                let related = apply_foreign_key(related, foreign_key, &pk_value)?
-                    .save()
-                    .await?;
-
-                Ok((parent, related))
-            })
-        })
-        .await
+        let (parent, mut related) =
+            save_parent_then(self, vec![related], foreign_key, "save_with_one").await?;
+        let related = related.pop().expect("save_related saves every child");
+        Ok((parent, related))
     }
 
     async fn save_with_many<R: Model>(
@@ -249,24 +259,7 @@ pub trait NestedSave: Model {
         related: Vec<R>,
         foreign_key: &str,
     ) -> Result<(Self, Vec<R>)> {
-        if related.is_empty() {
-            let parent = self.save().await?;
-            return Ok((parent, Vec::new()));
-        }
-
-        let foreign_key = resolve_foreign_key_field::<R>(foreign_key)?;
-
-        super::crud::transaction(move |_| {
-            Box::pin(async move {
-                let parent = self.save().await?;
-                let pk_value =
-                    require_scalar_primary_key::<Self>(&parent.primary_key(), "save_with_many")?;
-                let related = save_related(related, foreign_key, &pk_value).await?;
-
-                Ok((parent, related))
-            })
-        })
-        .await
+        save_parent_then(self, related, foreign_key, "save_with_many").await
     }
 
     async fn update_with_one<R: Model>(self, related: R) -> Result<(Self, R)> {

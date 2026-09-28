@@ -79,8 +79,8 @@ impl<M: Model> QueryBuilder<M> {
     /// Filter by primary key, one condition per key column; a key whose shape
     /// does not match the declared columns is refused.
     pub(crate) fn where_primary_key(mut self, primary_key: &M::PrimaryKey) -> Result<Self> {
-        if !self.unions.is_empty() {
-            return Err(Error::invalid_query(format!(
+        if !self.clauses.unions.is_empty() {
+            return Err(Error::query(format!(
                 "a primary-key lookup on a union of {} would filter its first query only; filter each query of the union instead",
                 M::table_name()
             )));
@@ -94,7 +94,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let columns = M::primary_key_names();
         if values.len() != columns.len() {
-            return Err(Error::invalid_query(format!(
+            return Err(Error::query(format!(
                 "Primary key value for {} did not match declared key columns",
                 M::table_name()
             )));
@@ -156,14 +156,20 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Vec<T>> {
         let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        let union_distinct = (!self.clauses.unions.is_empty()).then(|| self.is_distinct());
+        let query = match union_distinct {
+            None => self.select(vec![column.as_str()]),
+            Some(_) => self,
+        };
         // The row names the column by its output name; other projections the
         // query carries, such as `select_raw()`, come back beside it.
-        let output = self.derived_output_name(&column);
-        let union_distinct = (!self.unions.is_empty()).then(|| self.is_distinct());
-        let rows = match union_distinct {
-            None => self.select(vec![column.as_str()]).get_json().await?,
-            Some(_) => self.get_json().await?,
-        };
+        let output = query.derived_output_name(&column).ok_or_else(|| {
+            Error::query(format!(
+                "pluck() on a union() reads a column the query selects, and '{}' is not one of them; select() it",
+                column
+            ))
+        })?;
+        let rows = query.get_json().await?;
         let mut seen = std::collections::HashSet::new();
         rows.into_iter()
             .filter(|row| {

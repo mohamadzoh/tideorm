@@ -19,14 +19,7 @@ pub(crate) fn generate_validation_impl(ctx: &BuildContext) -> TokenStream2 {
     let validation_checks = ctx.validation_rules.iter().map(|(field_ident, rules)| {
         let field_name = unraw_ident(field_ident);
         quote! {
-            {
-                let rules: Vec<::tideorm::validation::ValidationRule> = vec![#(#rules),*];
-                for rule in &rules {
-                    if let Some(msg) = ::tideorm::validation::Validator::validate_rule(&self.#field_ident, rule, #field_name) {
-                        errors.add(#field_name, msg);
-                    }
-                }
-            }
+            errors.__check(#field_name, &self.#field_ident, &[#(#rules),*]);
         }
     });
 

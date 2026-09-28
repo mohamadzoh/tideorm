@@ -10,7 +10,7 @@ impl<M: Model> QueryBuilder<M> {
     {
         let group = f(OrGroup::new());
         if !group.is_empty() {
-            self.or_groups.push(group);
+            self.clauses.or_groups.push(group);
         }
         self
     }
@@ -24,15 +24,16 @@ impl<M: Model> QueryBuilder<M> {
     /// creating it among the query's groups on first use.
     pub(crate) fn push_or_condition(mut self, condition: WhereCondition) -> Self {
         match self
+            .clauses
             .simple_or_group
-            .and_then(|index| self.or_groups.get_mut(index))
+            .and_then(|index| self.clauses.or_groups.get_mut(index))
         {
             Some(group) => group.conditions.push(condition),
             None => {
                 let mut group = OrGroup::new();
                 group.conditions.push(condition);
-                self.simple_or_group = Some(self.or_groups.len());
-                self.or_groups.push(group);
+                self.clauses.simple_or_group = Some(self.clauses.or_groups.len());
+                self.clauses.or_groups.push(group);
             }
         }
         self

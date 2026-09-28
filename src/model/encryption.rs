@@ -92,71 +92,28 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
         return Ok(value);
     };
 
-    match value {
-        UpdateValue::Value(value) => Ok(UpdateValue::Value(encrypt_batch_json_value(
-            value,
-            M::table_name(),
-            field_name,
-            column_name,
-        )?)),
-        UpdateValue::Coalesce(value) => Ok(UpdateValue::Coalesce(encrypt_batch_json_value(
-            value,
-            M::table_name(),
-            field_name,
-            column_name,
-        )?)),
-        UpdateValue::UnsafeRaw(_) => {
-            unsupported_batch_operation("trusted raw SQL", field_name, column_name)
-        }
-        UpdateValue::Increment(_) => {
-            unsupported_batch_operation("increment", field_name, column_name)
-        }
-        UpdateValue::Decrement(_) => {
-            unsupported_batch_operation("decrement", field_name, column_name)
-        }
-        UpdateValue::Multiply(_) => {
-            unsupported_batch_operation("multiply", field_name, column_name)
-        }
-        UpdateValue::Divide(_) => unsupported_batch_operation("divide", field_name, column_name),
-        UpdateValue::ArrayAppend(_) => {
-            unsupported_batch_operation("array append", field_name, column_name)
-        }
-        UpdateValue::ArrayRemove(_) => {
-            unsupported_batch_operation("array remove", field_name, column_name)
-        }
-        UpdateValue::JsonSet(_, _) => {
-            unsupported_batch_operation("json set", field_name, column_name)
-        }
-    }
+    let encrypt = |value| encrypt_batch_json_value(value, M::table_name(), field_name, column_name);
+    let operation = match value {
+        UpdateValue::Value(value) => return Ok(UpdateValue::Value(encrypt(value)?)),
+        UpdateValue::Coalesce(value) => return Ok(UpdateValue::Coalesce(encrypt(value)?)),
+        UpdateValue::UnsafeRaw(_) => "trusted raw SQL",
+        UpdateValue::Increment(_) => "increment",
+        UpdateValue::Decrement(_) => "decrement",
+        UpdateValue::Multiply(_) => "multiply",
+        UpdateValue::Divide(_) => "divide",
+        UpdateValue::ArrayAppend(_) => "array append",
+        UpdateValue::ArrayRemove(_) => "array remove",
+        UpdateValue::JsonSet(_, _) => "json set",
+    };
+    unsupported_batch_operation(operation, field_name, column_name)
 }
 
-/// Pair the encrypted field name with its column name.
-///
-/// The two `ModelMeta` lists are declared independently, so a mismatched length
-/// is possible in hand-written metadata. Zipping them would silently drop the
-/// trailing entries, and a dropped entry looks exactly like "this column is not
-/// encrypted" — which would write plaintext into an encrypted column. Refuse
-/// instead.
+/// The encrypted field `name`, a field or column name, names, with its column.
 fn resolve_encrypted_field<M: ModelMeta>(
     name: &str,
 ) -> Result<Option<(&'static str, &'static str)>> {
-    let encrypted_fields = M::encrypted_fields();
-    let encrypted_columns = M::encrypted_column_names();
-
-    if encrypted_fields.len() != encrypted_columns.len() {
-        return Err(Error::configuration(format!(
-            "Model '{}' declares {} encrypted field name(s) but {} encrypted column name(s); \
-             encrypted_fields() and encrypted_column_names() must describe the same columns in \
-             the same order, otherwise an encrypted column can be written as plaintext",
-            M::table_name(),
-            encrypted_fields.len(),
-            encrypted_columns.len()
-        )));
-    }
-
-    Ok(encrypted_fields
+    Ok(super::encrypted_field_columns::<M>()?
         .into_iter()
-        .zip(encrypted_columns)
         .find(|(field_name, column_name)| *field_name == name || *column_name == name))
 }
 
@@ -172,7 +129,7 @@ fn encrypt_batch_json_value(
     // The field is a `String` and decrypts back into one: any other JSON value
     // would be stored, then fail every load of the row.
     if !value.is_string() {
-        return Err(Error::invalid_query(format!(
+        return Err(Error::query(format!(
             "Encrypted field '{}' takes a string or null, not a JSON {}",
             encrypted_field_label(field_name, column_name),
             json_kind(&value)
@@ -200,7 +157,7 @@ fn unsupported_batch_operation<T>(
     field_name: &str,
     column_name: &str,
 ) -> Result<T> {
-    Err(Error::invalid_query(format!(
+    Err(Error::query(format!(
         "Batch operation '{}' is not supported for encrypted field '{}'",
         operation,
         encrypted_field_label(field_name, column_name)

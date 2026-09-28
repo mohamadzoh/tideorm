@@ -49,6 +49,7 @@ use std::sync::OnceLock;
 mod builders;
 mod prepared_statements;
 mod query_cache;
+mod toggle;
 
 pub use builders::{CacheKeyBuilder, CacheOptions};
 pub use prepared_statements::{

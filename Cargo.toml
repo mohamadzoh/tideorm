@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -33,7 +33,6 @@ exclude = [
     "tests/*.rs",
     "tests/edge_case/**",
     "tests/or_clause/**",
-    "tests/postgres_advanced_tests/**",
     "tests/sqlite_ci_smoke_test/**",
     "tests/tokenization_tests/**",
     "tests/typed_columns_and_join_tests/**",
@@ -96,10 +95,12 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.12.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.13.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
+# An async mutex that works on either runtime; sea-orm already builds this crate.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 inventory = "0.3.21"
 regex = "1.12.3"
 url = "2.5.7"
@@ -175,11 +176,6 @@ required-features = ["sqlite", "runtime-tokio"]
 [[test]]
 name = "postgres_integration_tests"
 path = "tests/postgres_integration_tests.rs"
-required-features = ["postgres", "runtime-tokio"]
-
-[[test]]
-name = "postgres_advanced_tests"
-path = "tests/postgres_advanced_tests.rs"
 required-features = ["postgres", "runtime-tokio"]
 
 [[test]]

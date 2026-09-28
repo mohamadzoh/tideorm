@@ -63,14 +63,9 @@ mod helpers;
 mod many_to_many;
 mod polymorphic;
 mod self_referencing;
+mod state;
 
-#[cfg(feature = "entity-manager")]
-pub use crate::entity_manager::TrackedHasMany as HasMany;
-#[cfg(not(feature = "entity-manager"))]
-pub use direct::HasMany;
-#[cfg(feature = "entity-manager")]
-pub(crate) use direct::HasMany as DirectHasMany;
-pub use direct::{BelongsTo, HasOne};
+pub use direct::{BelongsTo, HasMany, HasOne};
 // `EagerLoadModel` is exported from this module and from nowhere else on
 // purpose: it is `#[doc(hidden)]` machinery that macro-generated code names
 // through the fully qualified `::tideorm::relations::EagerLoadModel` path, both
@@ -78,19 +73,20 @@ pub use direct::{BelongsTo, HasOne};
 // deliberately absent from the crate root and the prelude — see the matching
 // note in `lib.rs` — so do not "restore" it there for symmetry with the other
 // relation exports.
-pub use eager::{
-    EagerLoadExt, EagerLoadModel, EagerQueryBuilder, RelationExt, RelationPath, RelationTree,
-    WithRelations,
-};
+pub use eager::{EagerLoadModel, EagerQueryBuilder, RelationPath, RelationTree, WithRelations};
+
 #[cfg(feature = "entity-manager")]
-pub(crate) use helpers::{SnapshotOwner, register_loaded};
+pub(crate) use eager::__relation_key;
+#[cfg(feature = "fulltext")]
+pub(crate) use helpers::soft_delete_clause;
 pub use many_to_many::HasManyThrough;
 pub use polymorphic::{MorphMany, MorphOne, MorphTo};
 pub use self_referencing::{SelfRef, SelfRefMany};
 
 #[doc(hidden)]
 pub use eager::{
-    __distinct_by_primary_key, __eager_load_nested_many, __eager_load_nested_one, __relation_key,
+    __eager_keyed_many, __eager_keyed_one, __eager_load_nested_many, __eager_load_nested_one,
+    __eager_through,
 };
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ pub trait Migration: Send + Sync {
 }
 
 /// Result of migration operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MigrationResult {
     /// Successfully applied migrations
     pub applied: Vec<MigrationInfo>,
@@ -42,14 +42,6 @@ pub struct MigrationResult {
 }
 
 impl MigrationResult {
-    pub(super) fn new() -> Self {
-        Self {
-            applied: Vec::new(),
-            skipped: Vec::new(),
-            rolled_back: Vec::new(),
-        }
-    }
-
     /// Check if any migrations were applied
     pub fn has_applied(&self) -> bool {
         !self.applied.is_empty()

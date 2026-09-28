@@ -3,7 +3,7 @@ use std::fmt;
 use crate::migration::write_report_section;
 
 /// Result of seed operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SeedResult {
     /// Successfully executed seeds
     pub executed: Vec<SeedInfo>,
@@ -14,14 +14,6 @@ pub struct SeedResult {
 }
 
 impl SeedResult {
-    pub(super) fn new() -> Self {
-        Self {
-            executed: Vec::new(),
-            skipped: Vec::new(),
-            rolled_back: Vec::new(),
-        }
-    }
-
     /// Check if any seeds were executed
     pub fn has_executed(&self) -> bool {
         !self.executed.is_empty()

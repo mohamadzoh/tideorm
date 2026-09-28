@@ -20,6 +20,17 @@ impl IndexDefinition {
             unique,
         }
     }
+
+    /// An index the model declares without a name, named as a migration's
+    /// `index`/`unique_index` names it.
+    #[doc(hidden)]
+    pub fn __generated(table: &str, columns: Vec<String>, unique: bool) -> Self {
+        Self::new(
+            crate::migration::ddl::index_name(table, &columns, unique),
+            columns,
+            unique,
+        )
+    }
 }
 
 /// Strips hidden attributes from one eager-loaded relation payload, in place.
@@ -115,13 +126,32 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// exist.
     fn canonical_column_parts(name: &str) -> (Option<&str>, &str) {
         match name.split_once('.') {
-            Some((table, column)) if table == Self::table_name() => (
-                Some(table),
-                Self::canonical_column_name(column).unwrap_or(column),
-            ),
+            Some((table, column)) if table == Self::table_name() => {
+                (Some(table), Self::column_named(column))
+            }
             Some((table, column)) => (Some(table), column),
-            None => (None, Self::canonical_column_name(name).unwrap_or(name)),
+            None => (None, Self::column_named(name)),
         }
+    }
+
+    /// The column `name`, a field or column name, stands for; `name` itself
+    /// when the model has no such column.
+    #[doc(hidden)]
+    fn column_named(name: &str) -> &str {
+        Self::canonical_column_name(name).unwrap_or(name)
+    }
+
+    /// The column `name` names when it is one of this model's own: a field or
+    /// column name, bare or qualified with the model's table. `None` for
+    /// another table's column or a name the model does not know.
+    #[doc(hidden)]
+    fn own_column_name(name: &str) -> Option<&'static str> {
+        let name = match name.trim().split_once('.') {
+            Some((table, column)) if table == Self::table_name() => column,
+            Some(_) => return None,
+            None => name.trim(),
+        };
+        Self::canonical_column_name(name)
     }
 
     fn hidden_attributes() -> Vec<&'static str> {
@@ -254,12 +284,6 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     #[cfg(feature = "attachments")]
     fn file_url_generator() -> crate::config::FileUrlGenerator {
         crate::config::Config::get_file_url_generator()
-    }
-
-    #[inline]
-    #[cfg(feature = "attachments")]
-    fn generate_file_url(field_name: &str, file: &crate::attachments::FileAttachment) -> String {
-        Self::file_url_generator()(field_name, file)
     }
 
     fn soft_delete_enabled() -> bool {

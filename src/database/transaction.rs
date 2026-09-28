@@ -154,24 +154,13 @@ async fn ensure_transaction_can_commit(txn: &crate::internal::OrmTransaction) ->
     }
 }
 
-/// Classify a transaction-control failure.
-///
-/// The engine error is translated first so that connection-level failures (a
-/// closed connection, an exhausted pool) keep their own variant instead of
-/// being flattened into `Error::Transaction`; everything else stays a
-/// transaction error, carrying the backend message. Reclassifying moves the
-/// error onto a different variant, so the structured driver failure is carried
-/// over explicitly — otherwise a serialization failure would arrive with no
-/// SQLSTATE and no source chain.
+/// Classify a transaction-control failure: a transaction error carrying the
+/// backend message, unless the connection failed.
 pub(crate) fn transaction_error(err: crate::internal::OrmError) -> Error {
-    let message = err.to_string();
-    match crate::internal::translate_error(err) {
-        connection @ Error::Connection { .. } => connection,
-        other => Error::Transaction {
-            message,
-            source: other.into_db_failure(),
-        },
-    }
+    crate::internal::reclassify_error(err, |message, source| Error::Transaction {
+        message,
+        source,
+    })
 }
 
 impl Database {

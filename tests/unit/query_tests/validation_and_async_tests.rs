@@ -1,51 +1,56 @@
 use super::*;
 
+/// An unsafe raw fragment is refused when the query runs, before it reaches a
+/// database: none is connected here.
 #[tokio::test]
-async fn test_where_raw_rejects_unsafe_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .where_raw("1 = 1; DROP TABLE users")
-        .count()
-        .await
-        .unwrap_err();
+async fn unsafe_sql_is_rejected_before_db_lookup() {
+    type Shape = fn(QueryBuilder<QueryTestUser>) -> QueryBuilder<QueryTestUser>;
+    let cases: [(Shape, &str); 8] = [
+        (
+            |q| q.where_raw("1 = 1; DROP TABLE users"),
+            "unsafe WHERE raw SQL",
+        ),
+        (
+            |q| {
+                q.begin_or()
+                    .or_where_raw("1 = 1; DROP TABLE users")
+                    .end_or()
+            },
+            "unsafe WHERE raw SQL",
+        ),
+        (
+            |q| q.group_by("id").having("COUNT(*) > 0; DROP TABLE users"),
+            "unsafe HAVING raw SQL",
+        ),
+        (
+            |q| {
+                q.group_by("id")
+                    .having("1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'")
+            },
+            "unsafe HAVING raw SQL",
+        ),
+        (
+            |q| q.select_raw("id; DROP TABLE users"),
+            "unsafe SELECT raw SQL",
+        ),
+        (
+            |q| q.select(vec!["COUNT(*); DROP TABLE users"]),
+            "unsafe SELECT column",
+        ),
+        (
+            |q| q.order_by("random(); DROP TABLE users", Order::Asc),
+            "unsafe ORDER BY column",
+        ),
+        (
+            |q| q.group_by("DATE_TRUNC('day', created_at); DROP TABLE users"),
+            "unsafe GROUP BY column",
+        ),
+    ];
 
-    assert!(err.to_string().contains("unsafe WHERE raw SQL"));
-}
-
-#[tokio::test]
-async fn test_or_where_raw_rejects_unsafe_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .begin_or()
-        .or_where_raw("1 = 1; DROP TABLE users")
-        .end_or()
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe WHERE raw SQL"));
-}
-
-#[tokio::test]
-async fn test_having_rejects_unsafe_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .group_by("id")
-        .having("COUNT(*) > 0; DROP TABLE users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe HAVING raw SQL"));
-}
-
-#[tokio::test]
-async fn test_having_rejects_subquery_like_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .group_by("id")
-        .having("1 = 1 OR (SELECT password FROM users LIMIT 1)::text = 'x'")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe HAVING raw SQL"));
+    for (shape, expected) in cases {
+        let err = shape(QueryTestUser::query()).count().await.unwrap_err();
+        assert!(err.to_string().contains(expected), "{expected}: {err}");
+    }
 }
 
 #[tokio::test]
@@ -87,50 +92,6 @@ async fn test_chunk_rejects_non_primary_key_order_before_db_lookup() {
         err.to_string()
             .contains("chunk() only supports explicit ordering by the single primary key 'id'")
     );
-}
-
-#[tokio::test]
-async fn test_select_raw_rejects_unsafe_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .select_raw("id; DROP TABLE users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe SELECT raw SQL"));
-}
-
-#[tokio::test]
-async fn test_select_rejects_unsafe_expression_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .select(vec!["COUNT(*); DROP TABLE users"])
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe SELECT column"));
-}
-
-#[tokio::test]
-async fn test_order_by_rejects_unsafe_expression_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .order_by("random(); DROP TABLE users", Order::Asc)
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe ORDER BY column"));
-}
-
-#[tokio::test]
-async fn test_group_by_rejects_unsafe_expression_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .group_by("DATE_TRUNC('day', created_at); DROP TABLE users")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(err.to_string().contains("unsafe GROUP BY column"));
 }
 
 #[test]
@@ -547,21 +508,6 @@ async fn test_with_cte_rejects_non_select_sql_before_db_lookup() {
 }
 
 #[tokio::test]
-async fn test_with_cte_columns_rejects_non_select_sql_before_db_lookup() {
-    let err = QueryTestUser::query()
-        .with_cte_columns("active_users", vec!["id"], "DELETE FROM users RETURNING id")
-        .count()
-        .await
-        .unwrap_err();
-
-    assert!(
-        err.to_string()
-            .contains("invalid CTE for with_cte_columns(): unsafe subquery"),
-        "{err}"
-    );
-}
-
-#[tokio::test]
 async fn test_with_recursive_cte_rejects_non_select_sql_before_db_lookup() {
     let err = QueryTestUser::query()
         .with_recursive_cte(
@@ -632,7 +578,7 @@ async fn test_sum_rejects_grouped_query_before_db_lookup() {
 #[tokio::test]
 async fn test_count_distinct_rejects_having_before_db_lookup() {
     let err = QueryTestUser::query()
-        .having_count_gt(3)
+        .having(crate::Aggregate::count().gt(3))
         .count_distinct("name")
         .await
         .unwrap_err();
@@ -741,7 +687,7 @@ fn test_having_aggregate_helpers_qualify_table_columns() {
     let sql = QueryTestUser::query()
         .inner_join("profiles", "query_test_users.id", "profiles.user_id")
         .group_by("query_test_users.id")
-        .having_sum_gt("profiles.score", 10.0)
+        .having(crate::Aggregate::sum("profiles.score").gt(10.0))
         .build_select_sql_for_db(DatabaseType::Postgres);
 
     assert!(
@@ -849,7 +795,7 @@ fn test_a_mismatched_raw_template_renders_without_panicking() {
     // Rendering paths that run before validation must not panic.
     let info = query.debug();
     assert!(info.error.is_some());
-    let _ = query.to_subquery_sql_with_params(DatabaseType::Postgres);
+    let _ = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
     let _ = QueryTestUser::query()
         .where_in_subquery("id", query)
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);

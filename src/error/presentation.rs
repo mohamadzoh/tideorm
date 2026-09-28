@@ -79,29 +79,13 @@ fn render_advice(kind: DbFailureKind, detail: &str) -> Option<String> {
     advice(kind).map(|(headline, next_step)| format!("{headline}{detail}. {next_step}"))
 }
 
-/// Render what the driver reported about a failure, for appending to a
-/// suggestion.
-///
-/// Empty when the driver exposed neither a constraint name nor a code, which is
-/// the normal case on backends that only report a message.
-fn failure_detail(failure: &DbFailure) -> String {
-    match (failure.constraint(), failure.code()) {
-        (Some(constraint), Some(code)) => {
-            format!(" on constraint `{}` (SQLSTATE {})", constraint, code)
-        }
-        (Some(constraint), None) => format!(" on constraint `{}`", constraint),
-        (None, Some(code)) => format!(" (SQLSTATE {})", code),
-        (None, None) => String::new(),
-    }
-}
-
 /// Derive the next debugging step from what the driver actually classified.
 ///
 /// Returns `None` for [`DbFailureKind::Unclassified`] so the caller falls back
 /// to reading the message — the only place substring matching is still correct,
 /// because there is no structured data to consult.
 fn structured_suggestion(failure: &DbFailure) -> Option<String> {
-    render_advice(failure.kind(), &failure_detail(failure))
+    render_advice(failure.kind(), &failure.detail())
 }
 
 /// Guess a query failure's classification from its message, for the
@@ -359,22 +343,11 @@ impl Error {
     pub fn log_format(&self) -> String {
         let mut output = format!("[{}] {}", self.code(), self);
 
-        if let Some(ctx) = self.context() {
-            if let Some(ref table) = ctx.table {
-                output.push_str(&format!("\n  Table: {}", table));
-            }
-            if let Some(ref column) = ctx.column {
-                output.push_str(&format!("\n  Column: {}", column));
-            }
-            if !ctx.conditions.is_empty() {
-                output.push_str(&format!("\n  Conditions: {}", ctx.conditions.join(" | ")));
-            }
-            if let Some(ref operator_chain) = ctx.operator_chain {
-                output.push_str(&format!("\n  Operator chain: {}", operator_chain));
-            }
-            if let Some(ref query) = ctx.query {
-                output.push_str(&format!("\n  Query: {}", query));
-            }
+        for (name, value) in self.context().map(|ctx| ctx.entries()).unwrap_or_default() {
+            // `operator_chain` reads `Operator chain`.
+            let mut label = name.replace('_', " ");
+            label[..1].make_ascii_uppercase();
+            output.push_str(&format!("\n  {label}: {value}"));
         }
 
         if let Some(failure) = self.db_failure() {

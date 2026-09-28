@@ -32,13 +32,13 @@
 //!
 //! | Method | Description |
 //! |--------|-------------|
-//! | `user.tokenize()` | Convert record to token (instance method) |
+//! | `user.to_token()` | Convert record to token (instance method) |
 //! | `user.to_token()` | Alias for `tokenize()` |
 //! | `User::tokenize_id(42)` | Tokenize an ID without having the record |
-//! | `User::detokenize(&token)` | Decode token to the model's primary key type |
-//! | `User::decode_token(&token)` | Alias for `detokenize()` |
+//! | `User::decode_token(&token)` | Decode token to the model's primary key type |
+//! | `User::decode_token(&token)` | Alias for `decode_token()` |
 //! | `User::from_token(&token).await` | Decode token and fetch record from DB |
-//! | `user.regenerate_token()` | Generate a fresh token; default encoding uses a new random nonce |
+//! | `user.to_token()` | Generate a fresh token; default encoding uses a new random nonce |
 //!
 //! Override `token_encoder()` and `token_decoder()` on the model only when you
 //! need a model-specific token format. Otherwise, keep the default encrypted
@@ -121,9 +121,14 @@ impl ConfiguredEncryptionKey {
     }
 }
 
-fn with_current_encryption_key<T>(read: impl FnOnce(&ConfiguredEncryptionKey) -> T) -> Option<T> {
+/// Read the configured key, failing when none is set.
+fn configured_key<T>(read: impl FnOnce(&ConfiguredEncryptionKey) -> T) -> Result<T> {
     let state = TOKENIZATION_STATE.read();
-    state.encryption_key.as_ref().map(read)
+    state
+        .encryption_key
+        .as_ref()
+        .map(read)
+        .ok_or_else(|| Error::tokenization("No encryption key configured"))
 }
 
 /// Tokenization configuration and utilities
@@ -154,13 +159,11 @@ impl TokenConfig {
     ///
     /// Fails when no global key has been configured yet.
     pub fn get_encryption_key() -> Result<String> {
-        with_current_encryption_key(|configured| configured.raw.clone())
-            .ok_or_else(|| Error::tokenization("No encryption key configured"))
+        configured_key(|configured| configured.raw.clone())
     }
 
     pub(crate) fn get_derived_encryption_key() -> Result<[u8; 32]> {
-        with_current_encryption_key(|configured| configured.derived)
-            .ok_or_else(|| Error::tokenization("No encryption key configured"))
+        configured_key(|configured| configured.derived)
     }
 
     #[cfg(feature = "encrypted-fields")]
@@ -168,10 +171,7 @@ impl TokenConfig {
         table_name: &str,
         column_name: &str,
     ) -> Result<[u8; 32]> {
-        with_current_encryption_key(|configured| {
-            configured.derived_field_key(table_name, column_name)
-        })
-        .ok_or_else(|| Error::tokenization("No encryption key configured"))
+        configured_key(|configured| configured.derived_field_key(table_name, column_name))
     }
 
     /// Return whether a global encryption key is currently configured.
@@ -209,18 +209,6 @@ impl TokenConfig {
     /// Return the active global decoder, falling back to the default implementation.
     pub fn get_decoder() -> TokenDecoder {
         TOKENIZATION_STATE.read().decoder.unwrap_or(default_decode)
-    }
-
-    /// Encode a serialized primary-key payload using the active global encoder.
-    pub fn encode(record_id: &str, model_name: &str) -> Result<String> {
-        Self::get_encoder()(record_id, model_name)
-    }
-
-    /// Decode a token using the active global decoder.
-    ///
-    /// Returns `Ok(None)` for invalid, tampered, or wrong-model tokens.
-    pub fn decode(token: &str, model_name: &str) -> Result<Option<String>> {
-        Self::get_decoder()(token, model_name)
     }
 }
 
@@ -437,15 +425,13 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Encode this record's primary key into an external token.
     ///
+    /// With the default encoder every call gives a different token, because
+    /// each uses a fresh random nonce; all of them decode to the same key.
+    ///
     /// Fails when the key cannot be serialized or the active encoder reports
     /// an error.
     fn to_token(&self) -> Result<String> {
         Self::tokenize_id(self.token_primary_key())
-    }
-
-    /// Alias for `to_token()`.
-    fn tokenize(&self) -> Result<String> {
-        self.to_token()
     }
 
     /// Encode one primary-key value without loading a record first.
@@ -460,11 +446,6 @@ pub trait Tokenizable: Sized + Send + Sync {
 
     /// Decode a token and load the matching record.
     async fn from_token(token: &str) -> Result<Self>;
-
-    /// Alias for `decode_token()`.
-    fn detokenize(token: &str) -> Result<Self::TokenPrimaryKey> {
-        Self::decode_token(token)
-    }
 
     /// Decode a token into the model primary key without loading the record.
     ///
@@ -483,14 +464,6 @@ pub trait Tokenizable: Sized + Send + Sync {
                 error
             ))
         })
-    }
-
-    /// Generate a fresh token for this record.
-    ///
-    /// With the default encoder, the token changes because a new random nonce
-    /// is used each time.
-    fn regenerate_token(&self) -> Result<String> {
-        self.to_token()
     }
 }
 

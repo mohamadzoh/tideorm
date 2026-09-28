@@ -2,40 +2,28 @@ use super::*;
 
 impl<M: Model> QueryBuilder<M> {
     pub(crate) fn ensure_mutation_query_is_safe(&self, operation: &str) -> Result<()> {
-        if !self.joins.is_empty()
-            || !self.group_by.is_empty()
-            || !self.having_conditions.is_empty()
-            || !self.unions.is_empty()
-            || !self.ctes.is_empty()
-            || !self.window_functions.is_empty()
-            || self.select_columns.is_some()
-            || !self.raw_select_expressions.is_empty()
-            || !self.subquery_select_expressions.is_empty()
-            || !self.order_by.is_empty()
-            || self.limit_value.is_some()
-            || self.offset_value.is_some()
-        {
-            return Err(Error::invalid_query(format!(
-                "{} does not support SELECT/JOIN/ORDER/GROUP specific query modifiers",
-                operation
-            )));
+        match self.mutation_blocker() {
+            Some(part) => Err(Error::query(format!(
+                "{} keeps a query's filters and scope only; {} cannot be part of it",
+                operation, part
+            ))),
+            None => Ok(()),
         }
-
-        Ok(())
     }
 
     fn has_explicit_mutation_filters(&self) -> bool {
-        self.conditions
+        self.clauses
+            .conditions
             .iter()
             .any(|condition| !crate::query::condition_is_vacuous(condition))
-            || self.or_groups.iter().any(OrGroup::is_restrictive)
+            || self.clauses.or_groups.iter().any(OrGroup::is_restrictive)
     }
 
     pub(crate) fn ensure_mutation_has_explicit_filters(&self, operation: &str) -> Result<()> {
         if self.has_explicit_mutation_filters() {
             Ok(())
         } else {
-            Err(Error::invalid_query(format!(
+            Err(Error::query(format!(
                 "{} requires at least one explicit filter that can exclude a row; unfiltered bulk mutations are blocked",
                 operation
             )))
@@ -49,9 +37,9 @@ impl<M: Model> QueryBuilder<M> {
     /// trash, and there the scope would be dropped and the statement would
     /// reach live rows, so `only_trashed()` is refused.
     pub(crate) fn ensure_trash_mutation_has_filters(&self, operation: &str) -> Result<()> {
-        if self.only_trashed {
+        if self.clauses.only_trashed {
             if !M::soft_delete_enabled() {
-                return Err(Error::invalid_query(format!(
+                return Err(Error::query(format!(
                     "{} with only_trashed() on '{}', which has no soft delete and so no trash",
                     operation,
                     M::table_name()
@@ -65,8 +53,8 @@ impl<M: Model> QueryBuilder<M> {
     /// True when a rendered WHERE body cannot exclude any row.
     ///
     /// Covers both an empty body and the constant-true placeholders sea-query can
-    /// emit (an empty `Condition::all()` lowers to `TRUE`; an empty `ne_all` set
-    /// renders `1 = 1`). Parentheses and whitespace are stripped before matching,
+    /// emit (an empty `Condition::all()` lowers to `TRUE`; SQLite's containment
+    /// of an empty array renders `1 = 1`). Parentheses and whitespace are stripped before matching,
     /// which is safe because only this closed set of literals is accepted — a real
     /// predicate never normalizes into it.
     fn is_unrestricted_where_body(where_sql: &str) -> bool {
@@ -92,7 +80,7 @@ impl<M: Model> QueryBuilder<M> {
         where_sql: &str,
     ) -> Result<()> {
         if Self::is_unrestricted_where_body(where_sql) {
-            return Err(Error::invalid_query(format!(
+            return Err(Error::query(format!(
                 "{} rendered a WHERE clause that matches every row; unfiltered bulk mutations are blocked",
                 operation
             )));
@@ -103,7 +91,7 @@ impl<M: Model> QueryBuilder<M> {
 
     pub(crate) fn ensure_mutation_has_no_explicit_filters(&self, operation: &str) -> Result<()> {
         if self.has_explicit_mutation_filters() {
-            Err(Error::invalid_query(format!(
+            Err(Error::query(format!(
                 "{} does not accept WHERE filters; use delete() when you intend to target specific rows",
                 operation
             )))

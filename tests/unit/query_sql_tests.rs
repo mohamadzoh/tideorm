@@ -5,9 +5,9 @@ use crate::model::Model as ModelTrait;
 use crate::query::OrGroup;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::{Database, QueryCache, TideConfig};
+use crate::Database;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use std::time::Duration;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -132,60 +132,20 @@ fn ordering_comparison_against_json_null_is_rejected() {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn query_mutation_cache_test_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn prepare_query_mutation_cache_test_state() {
-    Database::reset_global();
-    TideConfig::reset();
-
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.enable();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn cleanup_query_mutation_cache_test_state() {
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.disable();
-
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_query_mutation_cache_test_db() -> Database {
-    prepare_query_mutation_cache_test_state();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed for query mutation cache tests");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    db.__execute_with_params(
+    let db = crate::test_support::install_sqlite_global(&[
         "CREATE TABLE query_mutation_guard_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating mutation guard schema should succeed");
-    db.__execute_with_params(
         "CREATE TABLE query_mutation_guard_soft_delete_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, deleted_at TEXT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating soft delete mutation guard schema should succeed");
-
+    ])
+    .await;
+    crate::test_support::set_query_cache(true);
     db
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn chunk_processes_rows_without_skipping_when_callback_changes_query_scope() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     for index in 1..=7 {
@@ -247,7 +207,7 @@ async fn chunk_processes_rows_without_skipping_when_callback_changes_query_scope
             .all(|user| user.name == format!("done-{}", user.id))
     );
 
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[test]
@@ -328,6 +288,7 @@ fn mutation_guard_rejects_only_trashed_without_user_filters() {
 fn mutation_guard_rejects_empty_nested_or_groups() {
     let mut query = MutationGuardUser::query();
     query
+        .clauses
         .or_groups
         .push(OrGroup::new().nested_or(|group| group));
 
@@ -403,7 +364,7 @@ fn count_sql_parameterizes_builtin_having_helpers() {
     let (sql, params) = QueryCountGuardUser::query()
         .select(vec!["name"])
         .group_by("name")
-        .having_count_gt(1)
+        .having(crate::Aggregate::count().gt(1))
         .build_count_sql_with_params_for_db(DatabaseType::Postgres);
 
     assert_eq!(params, vec![Value::BigInt(Some(1))]);
@@ -570,7 +531,7 @@ fn debug_output_includes_preview_banner_and_parameterized_sql() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_delete_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = MutationGuardUser {
@@ -581,14 +542,9 @@ async fn query_delete_invalidates_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before = MutationGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before delete should succeed");
+    let cached_before = crate::test_support::cached_rows::<MutationGuardUser>().await;
     assert_eq!(cached_before.len(), 1);
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let rows_affected = MutationGuardUser::query()
         .where_eq("id", saved.id)
@@ -597,15 +553,15 @@ async fn query_delete_invalidates_cached_queries() {
         .expect("query delete should succeed");
 
     assert_eq!(rows_affected, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_delete_all_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     MutationGuardUser {
@@ -616,14 +572,9 @@ async fn query_delete_all_invalidates_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before = MutationGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before delete_all should succeed");
+    let cached_before = crate::test_support::cached_rows::<MutationGuardUser>().await;
     assert_eq!(cached_before.len(), 1);
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let rows_affected = MutationGuardUser::query()
         .delete_all()
@@ -631,15 +582,15 @@ async fn query_delete_all_invalidates_cached_queries() {
         .expect("query delete_all should succeed");
 
     assert_eq!(rows_affected, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn soft_delete_and_restore_invalidate_cached_queries() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = SoftDeleteMutationGuardUser {
@@ -651,14 +602,10 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before_soft_delete = SoftDeleteMutationGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before soft_delete should succeed");
+    let cached_before_soft_delete =
+        crate::test_support::cached_rows::<SoftDeleteMutationGuardUser>().await;
     assert_eq!(cached_before_soft_delete.len(), 1);
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let soft_deleted = SoftDeleteMutationGuardUser::query()
         .where_eq("id", saved.id)
@@ -667,7 +614,7 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
         .expect("soft_delete should succeed");
 
     assert_eq!(soft_deleted, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
     let cached_before_restore = SoftDeleteMutationGuardUser::query()
         .with_trashed()
@@ -677,7 +624,7 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
         .await
         .expect("cached query before restore should succeed");
     assert_eq!(cached_before_restore.len(), 1);
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let restored = SoftDeleteMutationGuardUser::query()
         .where_eq("id", saved.id)
@@ -687,15 +634,15 @@ async fn soft_delete_and_restore_invalidate_cached_queries() {
         .expect("restore should succeed");
 
     assert_eq!(restored, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn force_delete_invalidates_cached_queries() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     let saved = SoftDeleteMutationGuardUser {
@@ -721,7 +668,7 @@ async fn force_delete_invalidates_cached_queries() {
         .await
         .expect("cached query before force_delete should succeed");
     assert_eq!(cached_before.len(), 1);
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let rows_affected = SoftDeleteMutationGuardUser::query()
         .with_trashed()
@@ -731,16 +678,16 @@ async fn force_delete_invalidates_cached_queries() {
         .expect("force_delete should succeed");
 
     assert_eq!(rows_affected, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 /// A query carrying a condition whose operator and value do not pair up, so it
 /// has no SQL rendering.
 fn unrenderable_query() -> crate::query::QueryBuilder<MutationGuardUser> {
     let mut query = MutationGuardUser::query();
-    query.conditions.push(crate::query::WhereCondition {
+    query.clauses.conditions.push(crate::query::WhereCondition {
         column: "id".to_string(),
         operator: crate::query::Operator::Between,
         value: crate::query::ConditionValue::Single(serde_json::json!(1)),
@@ -789,7 +736,7 @@ fn subquery_operands_reject_a_condition_that_cannot_be_rendered() {
 #[test]
 fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
     let query = SoftDeleteMutationGuardUser::query()
-        .eq_any("id", vec![1, 2])
+        .where_in("id", vec![1, 2])
         .with_query(
             "recent",
             MutationGuardUser::query().where_eq("name", "carol"),
@@ -810,7 +757,7 @@ fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
         )
     );
 
-    // `eq_any` used to preview as `= ANY(ARRAY[..])` while it executes as `IN (..)`.
+    // The preview shows the `IN` list the statement binds.
     assert!(preview.contains("\"id\" IN (1, 2)"), "{preview}");
     // Union and CTE operands used to preview their bare placeholders.
     assert!(
@@ -842,7 +789,7 @@ fn sqlite_json_preview_keeps_numbers_numeric() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn aggregates_run_through_the_logged_statement_path() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_query_mutation_cache_test_db().await;
 
     for name in ["a", "b", "b"] {
@@ -877,7 +824,7 @@ async fn aggregates_run_through_the_logged_statement_path() {
         .set_history_limit(100)
         .enable();
     crate::logging::QueryLogger::disable();
-    cleanup_query_mutation_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 
     assert_eq!(distinct.expect("count_distinct should succeed"), 2);
     assert_eq!(total.expect("sum should succeed"), 5);
@@ -898,7 +845,7 @@ async fn aggregates_run_through_the_logged_statement_path() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn a_query_renders_for_the_transaction_it_runs_in() {
-    let _guard = query_mutation_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     crate::Database::reset_global();
     let db = crate::Database::connect("sqlite::memory:")
         .await

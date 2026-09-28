@@ -122,10 +122,21 @@ fn a_key_read_from_two_databases_has_a_baseline_only_where_they_agree() {
         );
     }
 
+    // Forgetting one of them leaves the key as unknown as before: the other
+    // database's baseline is not the model's either.
     loading_from(Some(1), || forget_model(&carol)).expect("forgetting should succeed");
+    for model in [&bob, &carol] {
+        assert_eq!(
+            changed_fields(model).expect("dirty check should succeed"),
+            None
+        );
+    }
+
+    // Reading the row again gives the key a baseline both databases agree on.
+    remember_from(Some(1), &bob);
     assert_eq!(
-        changed_fields(&carol).expect("dirty check should succeed"),
-        Some(vec!["name"])
+        changed_fields(&bob).expect("dirty check should succeed"),
+        Some(Vec::new())
     );
 
     invalidate_model::<TwoDatabaseUser>();
@@ -133,4 +144,56 @@ fn a_key_read_from_two_databases_has_a_baseline_only_where_they_agree() {
         changed_fields(&bob).expect("dirty check should succeed"),
         None
     );
+}
+
+fn named(name: &str) -> SnapshotValues {
+    HashMap::from([("name".to_string(), serde_json::json!(name))])
+}
+
+fn store_row(key: &str) -> RowKey {
+    (TypeId::of::<BaselineUser>(), key.to_string())
+}
+
+#[test]
+fn a_rolled_back_read_leaves_a_baseline_written_since_alone() {
+    let mut store = SnapshotStore::new(10);
+    let row = store_row("1");
+    store.replace(row.clone(), None, Some(named("Alice")));
+
+    // A transaction reads the row, and before it rolls back another task
+    // commits a change to it.
+    let (previous, standing) = store.replace(row.clone(), None, Some(named("Alice")));
+    store.replace(row.clone(), None, Some(named("Bob")));
+    store.restore(row.clone(), None, standing, previous);
+
+    assert_eq!(store.get(&row), Some(&named("Bob")));
+}
+
+#[test]
+fn a_rolled_back_transaction_restores_the_baseline_before_its_first_write() {
+    let mut store = SnapshotStore::new(10);
+    let row = store_row("1");
+    store.replace(row.clone(), None, Some(named("Alice")));
+
+    let (first_previous, first) = store.replace(row.clone(), None, Some(named("Bob")));
+    let (second_previous, second) = store.replace(row.clone(), None, None);
+    // Undo steps run last first.
+    store.restore(row.clone(), None, second, second_previous);
+    store.restore(row.clone(), None, first, first_previous);
+
+    assert_eq!(store.get(&row), Some(&named("Alice")));
+}
+
+#[test]
+fn eviction_drops_every_databases_baseline_of_a_key_together() {
+    let mut store = SnapshotStore::new(2);
+    let row = store_row("1");
+    store.replace(row.clone(), Some(1), Some(named("Bob")));
+    store.replace(row.clone(), Some(2), Some(named("Carol")));
+    // Past capacity, the oldest baseline goes, and with it the key's other.
+    store.replace(store_row("2"), Some(1), Some(named("Dave")));
+
+    assert!(!store.entries.contains_key(&row));
+    assert_eq!(store.order.len(), 1);
+    assert_eq!(store.get(&store_row("2")), Some(&named("Dave")));
 }

@@ -10,18 +10,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
         let mut params = Vec::new();
         let predicate = self.pg_predicate(&mut params)?;
-        let mut sql = SqlBuilder::new(PG, &mut params)
-            .raw("SELECT ")
-            .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
-            .raw(" FROM ")
-            .raw(&crate::query::db_sql::quote_table::<T>(PG))
-            .raw(" WHERE ")
-            .raw(&predicate)
-            .into_sql();
-
-        self.append_limit_offset(PG, &mut sql, &mut params)?;
-
-        Ok((sql, params))
+        Ok(self.select_where(PG, &predicate, params))
     }
 
     pub(super) fn build_postgres_ranked_sql(&self) -> Result<(String, Vec<Value>)> {
@@ -31,14 +20,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub(super) fn build_postgres_count_sql(&self) -> Result<(String, Vec<Value>)> {
         let mut params = Vec::new();
         let predicate = self.pg_predicate(&mut params)?;
-        let sql = SqlBuilder::new(PG, &mut params)
-            .raw("SELECT COUNT(*) as count FROM ")
-            .raw(&crate::query::db_sql::quote_table::<T>(PG))
-            .raw(" WHERE ")
-            .raw(&predicate)
-            .into_sql();
-
-        Ok((sql, params))
+        Ok(Self::count_where(PG, &predicate, params))
     }
 
     /// Every column plus its `_fts_rank`, best match first, leaving out rows
@@ -89,7 +71,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         }
 
         sql.push_str(" ORDER BY _fts_rank DESC");
-        self.append_limit_offset(PG, &mut sql, &mut params)?;
+        self.append_limit_offset(PG, &mut sql, &mut params);
 
         Ok((sql, params))
     }
@@ -107,34 +89,20 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// The `tsvector` and `tsquery` expressions, binding the query, or `None`
     /// when the search text holds no word.
     fn pg_match_parts(&self, params: &mut Vec<Value>) -> Result<Option<(String, String)>> {
+        let language = self.config.language.as_deref();
+        if let Some(name) = language
+            && !name.split('.').all(is_safe_identifier_segment)
+        {
+            return Err(Error::query(format!(
+                "'{name}' is not a text search configuration name"
+            )));
+        }
         if !self.has_search_terms() {
             return Ok(None);
         }
-        let language = self.pg_language()?;
-        let tsvector = format!(
-            "to_tsvector({language}, {})",
-            pg_search_document(&self.column_names())
-        );
-        let tsquery = self.build_pg_tsquery_expr(&language, params);
+        let tsvector = pg_tsvector(language, &self.column_names());
+        let tsquery = self.build_pg_tsquery_expr(&pg_language(language), params);
         Ok(Some((tsvector, tsquery)))
-    }
-
-    /// The text search configuration, written into the SQL as a constant.
-    ///
-    /// An index built by [`FullTextIndex`] names its configuration as a
-    /// constant, and only an expression naming the same constant can use it: a
-    /// bound configuration is cast when the statement runs, which the planner
-    /// cannot match to the index, so every search read the whole table. The
-    /// name is checked to be one, which keeps the constant safe to write.
-    fn pg_language(&self) -> Result<String> {
-        let language = self.config.language.as_deref().unwrap_or("english");
-        if language.split('.').all(is_safe_identifier_segment) {
-            Ok(format!("'{language}'"))
-        } else {
-            Err(Error::invalid_query(format!(
-                "'{language}' is not a text search configuration name"
-            )))
-        }
     }
 
     fn build_pg_tsquery_expr(&self, language: &str, params: &mut Vec<Value>) -> String {

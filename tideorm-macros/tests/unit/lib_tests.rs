@@ -42,10 +42,10 @@ fn field_with_type(ty: Type) -> ModelField {
 }
 
 fn build_context_for(input: &DeriveInput) -> syn::Result<BuildContext> {
-    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let indexes = parse_index_attributes(&input.attrs);
     let existing_derives = detect_existing_derives(&input.attrs);
     let model_input = ModelInput::from_derive_input(input).expect("model input should parse");
-    BuildContext::new(&model_input, indexes, unique_indexes, &existing_derives)
+    BuildContext::new(&model_input, indexes, &existing_derives)
 }
 
 /// The error the derive reports for `input`: from building the context, or
@@ -65,12 +65,10 @@ fn build_error_for(input: &DeriveInput) -> String {
 /// whitespace removed, which is how the assertions below match generated fragments.
 fn expand_model_tokens(input: DeriveInput) -> String {
     let existing_derives = detect_existing_derives(&input.attrs);
-    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let indexes = parse_index_attributes(&input.attrs);
     let model_input = ModelInput::from_derive_input(&input).expect("model input should parse");
 
-    normalize_tokens(
-        &generate_model_impl(&model_input, indexes, unique_indexes, &existing_derives).to_string(),
-    )
+    normalize_tokens(&generate_model_impl(&model_input, indexes, &existing_derives).to_string())
 }
 
 /// The `ActiveModel { .. }` setters of one generated fn, sliced out of a normalized
@@ -261,20 +259,8 @@ fn relation_kind_comes_from_the_wrapper_type() {
 }
 
 #[test]
-fn relation_attributes_must_agree_with_the_wrapper_type() {
-    let mismatched = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            #[tideorm(has_many = "Post", foreign_key = "user_id")]
-            posts: HasOne<Post>,
-        }
-    });
-    assert!(
-        mismatched.contains("#[tideorm(has_many = \"...\")] requires a `HasMany<..>` field"),
-        "{mismatched}"
-    );
-
+fn a_relation_attribute_needs_a_relation_wrapper() {
+    // A wrapper of another kind is pinned by `tests/ui/invalid_relation_kind_mismatch`.
     let not_a_wrapper = build_error_for(&parse_quote! {
         struct User {
             #[tideorm(primary_key, auto_increment)]
@@ -286,35 +272,6 @@ fn relation_attributes_must_agree_with_the_wrapper_type() {
     assert!(
         not_a_wrapper.contains("#[tideorm(has_one = \"...\")] requires a `HasOne<..>` field"),
         "{not_a_wrapper}"
-    );
-}
-
-#[test]
-fn relations_require_the_keys_they_cannot_default() {
-    let missing = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            profile: HasOne<Profile>,
-        }
-    });
-    assert!(
-        missing.contains("has_one relations require #[tideorm(foreign_key = \"...\")]"),
-        "{missing}"
-    );
-
-    let through = build_error_for(&parse_quote! {
-        struct User {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            roles: HasManyThrough<Role, UserRole>,
-        }
-    });
-    assert!(
-        through.contains(
-            "has_many_through relations require #[tideorm(pivot = \"...\")], #[tideorm(foreign_key = \"...\")], #[tideorm(related_key = \"...\")]"
-        ),
-        "{through}"
     );
 }
 
@@ -338,36 +295,6 @@ fn a_relation_without_a_kind_attribute_is_wired_from_its_wrapper_type() {
         "impl::tideorm::orm::Related<<Childas::tideorm::internal::InternalModel>::Entity>forEntity"
     ));
     assert!(!expanded.contains("hasnoeagerpathforHasOnerelations"));
-}
-
-#[test]
-fn column_type_expr_rejects_unknown_types_with_the_supported_ones() {
-    let message = field_with_type(parse_quote!(CustomEnum))
-        .column_type_expr()
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        message.starts_with("unsupported TideORM column type 'CustomEnum': a model field can be"),
-        "{message}"
-    );
-    assert!(message.contains("Store an enum as a String"), "{message}");
-}
-
-/// One unsupported field fails the derive with that error alone, instead of
-/// also emitting an entity whose trait bounds fail on the same type.
-#[test]
-fn an_unsupported_field_type_is_the_only_error() {
-    let expanded = expand_model_tokens(parse_quote! {
-        struct Order {
-            #[tideorm(primary_key, auto_increment)]
-            id: i64,
-            status: Status,
-        }
-    });
-
-    assert!(expanded.starts_with("::core::compile_error!"), "{expanded}");
-    assert!(!expanded.contains("DeriveEntity"), "{expanded}");
 }
 
 #[test]
@@ -775,7 +702,8 @@ fn timestamp_population_and_has_timestamps_agree() {
         }
     });
     assert!(insert_setters(&untyped).contains("created_at:ActiveValue::Set(self.created_at)"));
-    assert!(untyped.contains("fnhas_timestamps()->bool{false}"));
+    // `false` is the default, which the model leaves to the trait.
+    assert!(!untyped.contains("fnhas_timestamps()"));
 
     let untyped = expand_model_tokens(parse_quote! {
         struct Reading {
@@ -793,7 +721,7 @@ fn timestamp_population_and_has_timestamps_agree() {
             name: String,
         }
     });
-    assert!(none.contains("fnhas_timestamps()->bool{false}"));
+    assert!(!none.contains("fnhas_timestamps()"));
 }
 
 /// An `Option<DateTime<Utc>>` timestamp has to get `Some(..)` on *both* paths, and
@@ -859,7 +787,7 @@ fn composite_primary_keys_are_new_when_any_component_is_default() {
     });
 
     assert!(expanded.contains(
-        "false||::tideorm::model::__is_default(&pk_0)||::tideorm::model::__is_default(&pk_1)"
+        "false||::tideorm::model::__is_default(pk_0)||::tideorm::model::__is_default(pk_1)"
     ));
 }
 
@@ -1005,6 +933,72 @@ fn searchable_must_name_a_real_field_or_column() {
     assert!(error.contains("references unknown field or column 'emial'"));
 }
 
+/// Every field-list attribute names real fields, and names them as fields:
+/// a typo in `translatable` used to compile and translate nothing.
+#[test]
+fn field_list_attributes_name_real_fields() {
+    let error = build_context_for(&parse_quote! {
+        #[tideorm(translatable = "titel")]
+        struct Article {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            title: String,
+        }
+    })
+    .err()
+    .expect("an unknown translatable field should be rejected")
+    .to_string();
+    assert!(
+        error.contains("#[tideorm(translatable = ...)] references unknown field or column 'titel'")
+    );
+
+    let error = build_context_for(&parse_quote! {
+        #[tideorm(searchable = "title,")]
+        struct Article {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            title: String,
+        }
+    })
+    .err()
+    .expect("an empty searchable entry should be rejected")
+    .to_string();
+    assert!(error.contains("lists an empty name"), "{error}");
+
+    let ctx = build_context_for(&parse_quote! {
+        #[tideorm(searchable = "heading", translatable = "heading")]
+        struct Article {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "heading")]
+            title: String,
+        }
+    })
+    .expect("a column name resolves to its field");
+    assert_eq!(ctx.searchable_fields, vec!["title"]);
+    assert_eq!(ctx.translatable_fields, vec!["title"]);
+}
+
+/// `local_key = "id"` names the primary key whatever it is called, in the
+/// wrapper as in the field the key is read from.
+#[test]
+fn an_id_local_key_names_the_primary_key_column() {
+    let expanded = expand_model_tokens(parse_quote! {
+        struct Account {
+            #[tideorm(primary_key, auto_increment)]
+            account_no: i64,
+            #[tideorm(has_many = "Order", foreign_key = "account_no", local_key = "id")]
+            orders: HasMany<Order>,
+        }
+    });
+
+    assert!(
+        expanded.contains("::tideorm::relations::HasMany::new(\"account_no\",\"account_no\")"),
+        "{expanded}"
+    );
+    assert!(!expanded.contains("HasMany::new(\"account_no\",\"id\")"));
+}
+
 #[test]
 fn language_overrides_are_emitted_only_when_declared() {
     let configured = expand_model_tokens(parse_quote! {
@@ -1094,7 +1088,8 @@ fn entity_manager_pk_key_falls_back_instead_of_panicking() {
         }
     });
 
-    assert!(expanded.contains("__pk_to_entity_manager_key(&primary_key).unwrap_or_else("));
+    // The runtime's `__identity_key` falls back to the key's own rendering.
+    assert!(expanded.contains("::tideorm::entity_manager::__identity_key(self)"));
     assert!(!expanded.contains("entitymanagerprimarykeyshouldserialize"));
 }
 
@@ -1113,7 +1108,7 @@ fn entity_manager_items_follow_tideorms_own_feature() {
     });
 
     assert!(!expanded.contains("feature=\"entity-manager\""));
-    assert!(expanded.contains("::tideorm::__if_entity_manager!{impl::tideorm::entity_manager::TideEntityManagerFieldWriterforUser"));
+    assert!(expanded.contains("::tideorm::__if_entity_manager!{impl::tideorm::entity_manager::TideEntityManagerMergePersistedforUser"));
     assert!(
         expanded.contains("::tideorm::__if_entity_manager!{letrelation=relation.with_metadata(")
     );
@@ -1272,9 +1267,9 @@ fn raw_identifier_fields_use_one_unraw_name() {
     assert!(expanded.contains("fnfield_names()->&'static[&'staticstr]{&[\"id\",\"type\"]}"));
     assert!(!expanded.contains("\"r#type\""));
     assert!(!expanded.contains("R#type"));
-    assert!(expanded.contains("validate_rule(&self.r#type,rule,\"type\")"));
+    assert!(expanded.contains("errors.__check(\"type\",&self.r#type,"));
     assert!(!expanded.contains("self.type"));
-    assert!(expanded.contains("\"type\"=>Some(__tideorm_internal_doc::Column::Type)"));
+    assert!(expanded.contains("\"type\"=>::tideorm::serde_json::to_value(&self.r#type)"));
     assert!(encrypted_insert_setters(&expanded).contains(
         "r#type:ActiveValue::Set(::tideorm::model::__encrypt_model_field(self.r#type,\"docs\",\"type\",\"type\")?)"
     ));
@@ -1308,10 +1303,10 @@ fn index_columns_are_parsed_from_string_literals_containing_option_names() {
         }
     };
 
-    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let indexes = parse_index_attributes(&input.attrs);
 
-    assert!(unique_indexes.is_empty());
     assert_eq!(indexes.len(), 1);
+    assert!(!indexes[0].unique);
     assert_eq!(indexes[0].columns, vec!["name", "columns"]);
     assert!(indexes[0].name.is_none());
 
@@ -1331,13 +1326,13 @@ fn named_index_attributes_still_parse() {
         }
     };
 
-    let (indexes, unique_indexes) = parse_index_attributes(&input.attrs);
+    let indexes = parse_index_attributes(&input.attrs);
 
-    assert_eq!(indexes.len(), 1);
+    assert_eq!(indexes.len(), 2);
     assert_eq!(indexes[0].name.as_deref(), Some("idx_reports_owner"));
     assert_eq!(indexes[0].columns, vec!["owner_id", "name"]);
-    assert_eq!(unique_indexes.len(), 1);
-    assert!(unique_indexes[0].unique);
+    assert!(!indexes[0].unique);
+    assert!(indexes[1].unique);
 
     build_context_for(&input).expect("named index definitions should be accepted");
 }
@@ -1430,7 +1425,7 @@ fn a_nil_uuid_key_is_keyed_on_insert() {
         "{expanded}"
     );
     assert!(expanded.contains(
-        "letmutmodel=model;model.id=::tideorm::model::__uuid_key(model.id);letmodel_for_lookup=model.clone();"
+        "letmutmodel=model;model.id=::tideorm::model::__uuid_key(model.id);::tideorm::model::__upsert::<Self>(model,builder,"
     ));
 
     // Other keys are left as given, and their upsert needs no rebinding.
@@ -1441,9 +1436,7 @@ fn a_nil_uuid_key_is_keyed_on_insert() {
         }
     });
     assert!(!expanded.contains("__uuid_key"));
-    assert!(
-        expanded.contains(".map_err(::tideorm::Error::from)?;letmodel_for_lookup=model.clone();")
-    );
+    assert!(expanded.contains("{::tideorm::model::__upsert::<Self>(model,builder,"));
 }
 
 #[test]
@@ -1508,14 +1501,14 @@ fn a_user_serialize_derive_maps_fields_to_their_serde_keys() {
     assert!(!expanded.contains("fnserialized_name"));
 }
 
-/// A generated index name past 63 bytes is shortened with a hash, as the
-/// runtime shortens a migration's, so both name the index alike.
+/// An index the model does not name is named by the runtime, as a migration
+/// names it; a named one keeps its name.
 #[test]
-fn a_long_generated_index_name_is_bounded_like_a_migration_one() {
+fn unnamed_indexes_are_named_by_the_runtime_like_a_migration() {
     let expanded = expand_model_tokens(parse_quote! {
         #[tideorm(table = "organization_membership_invitations")]
         #[unique_index("organization_id,invited_email")]
-        #[index("email")]
+        #[index(name = "invitations_by_email", columns = "email")]
         struct Invitation {
             #[tideorm(primary_key, auto_increment)]
             id: i64,
@@ -1526,11 +1519,11 @@ fn a_long_generated_index_name_is_bounded_like_a_migration_one() {
     });
 
     assert!(
-        expanded.contains("uidx_organization_membership_invitations_organization__9ea98e76"),
+        expanded.contains("::tideorm::model::IndexDefinition::__generated(\"organization_membership_invitations\",vec![\"organization_id\".to_string(),\"invited_email\".to_string()],true)"),
         "{expanded}"
     );
     assert!(
-        expanded.contains("\"idx_organization_membership_invitations_email\""),
+        expanded.contains("::tideorm::model::IndexDefinition::new(\"invitations_by_email\","),
         "{expanded}"
     );
 }

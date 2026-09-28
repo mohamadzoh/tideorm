@@ -34,7 +34,7 @@ fn test_search_mode_display() {
 #[test]
 fn test_search_weights() {
     let weights = SearchWeights::new(1.0, 0.5, 0.3, 0.1);
-    assert_eq!(weights.to_pg_array(), "'{0.1,0.3,0.5,1}'");
+    assert_eq!(weights.pg_array(), "{0.1,0.3,0.5,1}");
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn test_term_filters_leave_words_out_of_the_search() {
         .config(config.clone());
     let (sql, _) = nothing_left.build_sql(DatabaseType::SQLite).unwrap();
     assert!(
-        sql.contains("1 = 0"),
+        sql.contains("0 = 1"),
         "a query with no term left matches nothing: {sql}"
     );
 
@@ -186,6 +186,12 @@ fn test_generate_snippet() {
         generate_snippet(text, "fox", 1, "<b>", "</b>"),
         "...brown <b>fox</b> jumps..."
     );
+
+    // A term is a whole word: `art` is not the end of `Restart`.
+    assert_eq!(
+        generate_snippet("Restart the art show now", "art", 1, "<b>", "</b>"),
+        "...the <b>art</b> show..."
+    );
 }
 
 #[test]
@@ -238,13 +244,50 @@ fn test_fulltext_index_sqlite() {
         vec!["title".to_string(), "content".to_string()],
     );
     let sqls = index.to_sqlite_sql();
-    assert_eq!(sqls.len(), 5);
+    assert_eq!(sqls.len(), 6);
     assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
     assert!(sqls[0].contains("fts5"));
     // Rows the table held before the index existed are indexed too.
     assert_eq!(
-        sqls[4],
+        sqls[5],
         "INSERT INTO \"articles_fts\"(\"articles_fts\") VALUES('rebuild')"
+    );
+}
+
+#[test]
+fn a_fulltext_index_names_a_qualified_table_part_by_part() {
+    let index = FullTextIndex::new("posts_search", "tenant.posts", vec!["body".to_string()]);
+
+    assert!(
+        index
+            .to_postgres_sql()
+            .contains(r#" ON "tenant"."posts" USING GIN"#),
+        "{}",
+        index.to_postgres_sql()
+    );
+    assert!(
+        index.to_mysql_sql().contains(" ON `tenant`.`posts`("),
+        "{}",
+        index.to_mysql_sql()
+    );
+    // SQLite creates the index in the attached database and names the tables
+    // inside it bare, as FTS5 and its triggers require.
+    let sqlite = index.to_sqlite_sql();
+    assert!(
+        sqlite[0].starts_with(r#"CREATE VIRTUAL TABLE IF NOT EXISTS "tenant"."posts_fts" USING fts5("body", content="posts""#),
+        "{}",
+        sqlite[0]
+    );
+    assert!(
+        sqlite[2].starts_with(
+            r#"CREATE TRIGGER IF NOT EXISTS "tenant"."posts_ai" AFTER INSERT ON "posts" BEGIN INSERT INTO "posts_fts"("#
+        ),
+        "{}",
+        sqlite[2]
+    );
+    assert_eq!(
+        index.sqlite_rebuild_sql(),
+        r#"INSERT INTO "tenant"."posts_fts"("posts_fts") VALUES('rebuild')"#
     );
 }
 
@@ -269,7 +312,7 @@ fn test_sqlite_fts_triggers_quote_the_virtual_table_consistently() {
 
     // The AFTER INSERT trigger used to write the quotes by hand, which broke on
     // any table name containing a double quote.
-    assert!(sqls[1].contains("INSERT INTO \"art\"\"icles_fts\"(rowid, "));
+    assert!(sqls[2].contains("INSERT INTO \"art\"\"icles_fts\"(rowid, "));
     for sql in &sqls {
         assert!(
             !sql.contains("\"art\"icles_fts\""),
@@ -679,7 +722,7 @@ fn test_sqlite_termless_query_matches_nothing_instead_of_empty_fts5_operand() {
     ] {
         assert!(!sql.contains("MATCH"), "empty MATCH operand: {}", sql);
         assert!(!sql.contains("bm25("), "bm25 without MATCH: {}", sql);
-        assert!(sql.contains("WHERE 1 = 0"), "{}", sql);
+        assert!(sql.contains("WHERE 0 = 1"), "{}", sql);
         assert!(!params.contains(&Value::String(Some(String::new()))));
     }
 
@@ -738,7 +781,7 @@ fn test_mysql_search_without_terms_matches_nothing_instead_of_erroring() {
         builder.build_ranked_sql(DatabaseType::MySQL).unwrap().0,
         builder.build_count_sql(DatabaseType::MySQL).unwrap().0,
     ] {
-        assert!(sql.contains("WHERE 1 = 0"), "{sql}");
+        assert!(sql.contains("WHERE 0 = 1"), "{sql}");
         assert!(!sql.contains("AGAINST"), "{sql}");
     }
 }
@@ -829,7 +872,7 @@ fn test_postgres_search_without_words_matches_nothing() {
         builder.build_ranked_sql(DatabaseType::Postgres).unwrap(),
         builder.build_count_sql(DatabaseType::Postgres).unwrap(),
     ] {
-        assert!(sql.contains("WHERE 1 = 0"), "{sql}");
+        assert!(sql.contains("WHERE 0 = 1"), "{sql}");
         assert!(!sql.contains("tsquery"), "{sql}");
         assert!(params.is_empty(), "{params:?}");
     }
@@ -876,6 +919,37 @@ async fn sqlite_execute(db: &crate::database::Database, statements: &[&str]) {
             .await
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
+}
+
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn a_second_sqlite_index_over_other_columns_fails_instead_of_keeping_the_first() {
+    let db = crate::database::Database::connect("sqlite::memory:")
+        .await
+        .expect("sqlite in-memory connection should succeed");
+    sqlite_execute(
+        &db,
+        &["CREATE TABLE fts_posts (id INTEGER PRIMARY KEY, title TEXT, body TEXT)"],
+    )
+    .await;
+    let by_title = FullTextIndex::new("posts_title", "fts_posts", vec!["title".to_string()]);
+    let statements = by_title.to_sqlite_sql();
+    sqlite_execute(
+        &db,
+        &statements.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .await;
+
+    let by_body = FullTextIndex::new("posts_body", "fts_posts", vec!["body".to_string()]);
+    let mut failure = None;
+    for statement in by_body.to_sqlite_sql() {
+        if let Err(error) = db.__execute_with_params(&statement, Vec::new()).await {
+            failure = Some(error.to_string());
+            break;
+        }
+    }
+    let failure = failure.expect("the second index should be refused");
+    assert!(failure.contains("no such column"), "{failure}");
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

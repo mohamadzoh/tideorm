@@ -33,7 +33,7 @@ pub trait Model:
     /// whole table is materialised in memory, so use [`Model::query`] with a
     /// filter or [`Model::paginate`] for anything that can grow.
     async fn all() -> Result<Vec<Self>> {
-        crud::all::<Self>().await
+        crate::internal::QueryExecutor::find_all::<Self>().await
     }
 
     /// Start a query for this model.
@@ -72,7 +72,7 @@ pub trait Model:
     /// Soft-deleted rows are not counted. Counts the whole table; for a filtered
     /// count use `Model::query().where_eq(..).count()`.
     async fn count() -> Result<u64> {
-        crud::count::<Self>().await
+        crate::internal::QueryExecutor::count::<Self>().await
     }
 
     /// Delete **every** row of this model's table.
@@ -92,7 +92,7 @@ pub trait Model:
     /// Cheaper than [`Model::count`] on a large table: the statement stops at
     /// the first row instead of scanning to produce an exact total.
     async fn exists_any() -> Result<bool> {
-        crud::exists_any::<Self>().await
+        crate::internal::QueryExecutor::exists_any::<Self>().await
     }
 
     /// Insert multiple records and return the inserted models.
@@ -122,7 +122,10 @@ pub trait Model:
     /// non-conflict column is overwritten except a managed `created_at`, which
     /// keeps the stored row's creation time; use [`Model::on_conflict`] when only
     /// some of them should be.
-    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self>;
+    async fn insert_or_update(model: Self, conflict_columns: Vec<&str>) -> Result<Self> {
+        let conflict_columns = conflict_columns.into_iter().map(str::to_string).collect();
+        Self::__insert_with_conflict(model, OnConflictBuilder::new(conflict_columns)).await
+    }
 
     /// Start an upsert whose conflict behaviour you want to narrow.
     ///
@@ -181,7 +184,7 @@ pub trait Model:
     /// explicit order with `Model::query().order_asc(..).first()` when the
     /// choice matters. Soft-deleted rows are excluded.
     async fn first() -> Result<Option<Self>> {
-        crud::first::<Self>().await
+        crate::internal::QueryExecutor::first::<Self>().await
     }
 
     /// Return the row with the highest primary key, or `None` when the table is empty.
@@ -191,7 +194,7 @@ pub trait Model:
     /// inserted row, but for a natural or UUID key it is simply the largest one.
     /// Soft-deleted rows are excluded.
     async fn last() -> Result<Option<Self>> {
-        crud::last::<Self>().await
+        crate::internal::QueryExecutor::last::<Self>().await
     }
 
     /// Return one page of models using 1-based page numbers.
@@ -203,7 +206,7 @@ pub trait Model:
     /// Returns a validation error when `page == 0` or `per_page == 0`, or when
     /// `per_page` or the page's offset is past `i64::MAX`.
     async fn paginate(page: u64, per_page: u64) -> Result<Vec<Self>> {
-        crud::paginate::<Self>(page, per_page).await
+        crate::internal::QueryExecutor::paginate::<Self>(page, per_page).await
     }
 
     /// Look up a record by primary key.
@@ -254,13 +257,35 @@ pub trait Model:
     /// The row is loaded and handed to [`Model::delete`], so its callbacks run
     /// and a soft-delete model is marked rather than removed. Returns `Ok(0)`
     /// when no such row exists, or when it is already trashed.
-    async fn destroy(id: Self::PrimaryKey) -> Result<u64>;
+    async fn destroy(id: Self::PrimaryKey) -> Result<u64> {
+        // Load the row first so `destroy(id)` runs the same delete, and the
+        // same callbacks, as `delete(self)`; a trashed row is not found.
+        match Self::find(id).await? {
+            Some(model) => model.delete().await,
+            None => Ok(0),
+        }
+    }
 
     /// Persist this model.
     ///
     /// Performs an `INSERT` when `is_new()` returns true, otherwise performs
     /// an `UPDATE` for the current primary key.
-    async fn save(self) -> Result<Self>;
+    async fn save(self) -> Result<Self> {
+        if self.is_new() {
+            return Self::create(self).await;
+        }
+        // The row-presence probe counts trashed rows: saving over a trashed
+        // natural-key row must UPDATE it, not INSERT into a conflict with it.
+        let single_counter_key =
+            Self::primary_key_auto_increment() && Self::primary_key_names().len() == 1;
+        if single_counter_key
+            || super::__exists_including_trashed::<Self>(&self.primary_key()).await?
+        {
+            self.update().await
+        } else {
+            Self::create(self).await
+        }
+    }
 
     /// Update an existing record.
     ///
@@ -382,108 +407,5 @@ pub trait Model:
     /// for round-tripping back into a model.
     fn to_hash_map(&self) -> HashMap<String, String> {
         serialization::to_hash_map::<Self>(self)
-    }
-
-    /// Replace this model's translatable fields in place with one language's values.
-    ///
-    /// Falls back to the model's fallback language for any field the requested
-    /// language does not define. Returns `Err` when the model declares no
-    /// translations.
-    fn load_language_translations(&mut self, language: &str) -> std::result::Result<(), String> {
-        serialization::load_language_translations(self, language)
-    }
-
-    /// Read the raw attachment map keyed by relation name.
-    ///
-    /// Returns an empty map when nothing is attached yet, and `Err` when the
-    /// model declares no attachments. The higher-level
-    /// [`attach_file`](Model::attach_file) / [`detach_file`](Model::detach_file)
-    /// / [`sync_files`](Model::sync_files) helpers are usually what you want;
-    /// this is for inspecting the stored metadata directly.
-    fn get_files_attribute(
-        &self,
-    ) -> std::result::Result<HashMap<String, serde_json::Value>, String> {
-        serialization::get_files_attribute(self)
-    }
-
-    /// Overwrite the whole attachment map.
-    ///
-    /// Replaces every relation at once, so read with
-    /// [`get_files_attribute`](Model::get_files_attribute) and modify rather than
-    /// building a map from scratch. Only mutates the in-memory model — call
-    /// `save()` to persist. Returns `Err` when the model declares no attachments.
-    fn set_files_attribute(
-        &mut self,
-        files: HashMap<String, serde_json::Value>,
-    ) -> std::result::Result<(), String> {
-        serialization::set_files_attribute(self, files)
-    }
-
-    /// Attach one stored file to a relation.
-    ///
-    /// For a `has_one` relation this replaces whatever was attached; for a
-    /// `has_many` relation it appends. `file_key` is the storage key — the
-    /// filename is derived from its last path segment and the attachment is
-    /// stamped with the current time. Changes the in-memory model only; call
-    /// `save()` to persist. Returns `Err` for an unknown relation name.
-    fn attach_file(
-        &mut self,
-        relation_type: &str,
-        file_key: &str,
-    ) -> std::result::Result<(), String> {
-        let mut files = self.get_files_attribute()?;
-        serialization::attach_file::<Self>(relation_type, file_key, &mut files)?;
-        self.set_files_attribute(files)?;
-        Ok(())
-    }
-
-    /// Attach several stored files to a `has_many` relation, appending to it.
-    ///
-    /// Rejects a `has_one` relation rather than silently keeping only the last
-    /// key; use [`attach_file`](Model::attach_file) for those.
-    fn attach_files(
-        &mut self,
-        relation_type: &str,
-        file_keys: Vec<&str>,
-    ) -> std::result::Result<(), String> {
-        let mut files = self.get_files_attribute()?;
-        serialization::attach_files::<Self>(relation_type, file_keys, &mut files)?;
-        self.set_files_attribute(files)?;
-        Ok(())
-    }
-
-    /// Detach one file from a relation, or all of them.
-    ///
-    /// `Some(key)` removes just that attachment; `None` clears the relation
-    /// entirely. Only the model's attachment metadata is updated — nothing is
-    /// deleted from the underlying storage, and nothing is persisted until
-    /// `save()`.
-    fn detach_file(
-        &mut self,
-        relation_type: &str,
-        file_key: Option<&str>,
-    ) -> std::result::Result<(), String> {
-        let mut files = self.get_files_attribute()?;
-        serialization::detach_file::<Self>(relation_type, file_key, &mut files)?;
-        self.set_files_attribute(files)?;
-        Ok(())
-    }
-
-    /// Make a relation hold exactly `file_keys` and nothing else.
-    ///
-    /// The declarative counterpart of [`attach_file`](Model::attach_file): keys
-    /// not in the list are dropped, and an empty list clears the relation. A
-    /// `has_one` relation takes the first key. Every entry is re-stamped with
-    /// the current time, so syncing an unchanged list still rewrites the
-    /// metadata.
-    fn sync_files(
-        &mut self,
-        relation_type: &str,
-        file_keys: Vec<&str>,
-    ) -> std::result::Result<(), String> {
-        let mut files = self.get_files_attribute()?;
-        serialization::sync_files::<Self>(relation_type, file_keys, &mut files)?;
-        self.set_files_attribute(files)?;
-        Ok(())
     }
 }

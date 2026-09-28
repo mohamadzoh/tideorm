@@ -14,13 +14,19 @@ mod backend;
 mod batch_insert;
 mod column_values;
 mod executor;
+mod per_poll;
 #[cfg(feature = "fulltext")]
 pub(crate) mod sql_builder;
 pub(crate) mod sql_safety;
+mod topology;
 
 pub use column_values::__column_type_of;
-pub(crate) use column_values::{column_type_of, json_to_assignment_value, json_to_column_value};
+pub(crate) use column_values::{
+    column_type_of, is_integer, json_to_assignment_value, json_to_column_value,
+};
 pub use executor::Executor;
+pub(crate) use per_poll::per_poll;
+pub(crate) use topology::topological_order;
 
 // Re-export the ORM engine through TideORM's facade, broadly, so other modules
 // can import selectively.
@@ -62,6 +68,14 @@ pub(crate) use backend::{build_statement, build_statement_with_values};
 /// built with `.into()` from the corresponding Rust type, so the name is only
 /// needed for annotations and explicit `NULL` bindings.
 pub type DbValue = Value;
+
+/// A JSON value as text: a string's contents, anything else as JSON.
+pub(crate) fn json_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
 
 /// Bind one JSON value as a database parameter.
 ///
@@ -122,8 +136,7 @@ pub fn bindable_value(value: impl Into<Value>) -> Value {
 /// caller would get an error for a row that exists, and a retry would store it
 /// twice; a `u64` past `i64::MAX` panics the driver instead. MySQL's driver
 /// handles every width.
-#[doc(hidden)]
-pub fn ensure_fields_storable<M, C>(conn: &C) -> Result<()>
+pub(crate) fn ensure_fields_storable<M, C>(conn: &C) -> Result<()>
 where
     M: crate::model::ModelMeta,
     C: ConnectionTrait,
@@ -149,13 +162,9 @@ fn check_fields_storable<M: crate::model::ModelMeta>(backend: Backend) -> Result
     if unstorable.is_empty() {
         return Ok(());
     }
-    let driver = match backend {
-        Backend::Postgres => "PostgreSQL",
-        Backend::Sqlite => "SQLite",
-        Backend::MySql => "MySQL",
-    };
     Err(Error::conversion(format!(
-        "the {driver} driver cannot store and read back every field of `{}`: {}",
+        "the {} driver cannot store and read back every field of `{}`: {}",
+        backend.as_database_type(),
         M::table_name(),
         unstorable.join(", ")
     )))
@@ -257,8 +266,14 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
         Ok(self.to_entity_model())
     }
 
-    /// Resolve an entity column enum from either a field name or column name.
-    fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column>;
+    /// Resolve an entity column enum from either a field name or column name,
+    /// a column name first, as [`canonical_column_name`](crate::model::ModelMeta::canonical_column_name)
+    /// resolves one.
+    fn column_from_str(name: &str) -> Option<<Self::Entity as EntityTrait>::Column> {
+        let column = Self::canonical_column_name(name)?;
+        <<Self::Entity as EntityTrait>::Column as crate::orm::Iterable>::iter()
+            .find(|candidate| crate::orm::IdenStatic::as_str(candidate) == column)
+    }
 
     /// Get entity primary key columns.
     fn primary_key_columns() -> Vec<<Self::Entity as EntityTrait>::Column> {
@@ -314,16 +329,6 @@ pub struct InternalConnection {
 }
 
 impl InternalConnection {
-    pub async fn connect(url: &str) -> Result<Self> {
-        let url = crate::config::rewrite_driver_url(url);
-        let mut options = ConnectOptions::new(url.clone());
-        quiet_driver_logging(&mut options);
-        let conn = OrmDatabase::connect(options)
-            .await
-            .map_err(|err| translate_connect_error(err, &url))?;
-        Self::open(conn).await
-    }
-
     /// Wrap a freshly opened `conn`, asking a MySQL-protocol server whether
     /// it is MariaDB. The pool has only just opened, so a failure even of
     /// `SELECT VERSION()` means it is unusable, and is returned.
@@ -511,8 +516,10 @@ pub(crate) fn translate_connect_error(err: OrmError, url: &str) -> Error {
 /// `url` with its credentials masked: everything between the scheme and the
 /// last `@` before the query (its user and password, delimited the way a URL
 /// parser delimits them), and the value of a query parameter that carries a
-/// password, which the PostgreSQL driver reads as `?password=..`.
-pub(crate) fn mask_url_credentials(url: &str) -> String {
+/// password, which the PostgreSQL driver reads as `?password=..`. The CLI
+/// prints URLs through it too.
+#[doc(hidden)]
+pub fn mask_url_credentials(url: &str) -> String {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, Some(query)),
         None => (url, None),
@@ -544,13 +551,21 @@ pub(crate) fn mask_url_credentials(url: &str) -> String {
 }
 
 pub(crate) fn translate_connection_error(err: OrmError) -> Error {
+    reclassify_error(err, |message, source| Error::Connection { message, source })
+}
+
+/// Translate `err` and file it under the variant `class` builds, unless it
+/// is a connection failure, which keeps its own. The variant changes, so the
+/// structured driver failure is carried over explicitly: otherwise a
+/// serialization failure would arrive with no SQLSTATE and no source chain.
+pub(crate) fn reclassify_error(
+    err: OrmError,
+    class: impl FnOnce(String, Option<Box<crate::error::DbFailure>>) -> Error,
+) -> Error {
     let message = err.to_string();
     match translate_error(err) {
         connection @ Error::Connection { .. } => connection,
-        other => Error::Connection {
-            message,
-            source: other.into_db_failure(),
-        },
+        other => class(message, other.into_db_failure()),
     }
 }
 
@@ -730,48 +745,92 @@ where
     select
 }
 
-/// Internal query executor
+/// Run a statement's future profiled, with its error translated and given
+/// the context `context` builds.
+#[doc(hidden)]
+pub async fn run_profiled<T>(
+    statement: impl std::future::Future<Output = std::result::Result<T, OrmError>>,
+    context: impl FnOnce() -> crate::error::ErrorContext,
+) -> Result<T> {
+    crate::profiling::__profile_future(statement)
+        .await
+        .map_err(translate_error)
+        .map_err(|err| err.with_context(context()))
+}
+
+/// The row with primary key `id` on `connection`, a trashed one only when
+/// `include_trashed`. The generated `find`/`find_with`, `reload()` and
+/// `soft_delete()` read through it; `what` names the call in an error.
+///
+/// A key matches at most one row, so the lookup reads with `all()`: `one()`
+/// adds a bound `LIMIT`, which recent SQLite releases recompile the statement
+/// for on every run.
+#[doc(hidden)]
+pub async fn find_by_primary_key<M>(
+    connection: &crate::database::ConnectionRef,
+    id: &M::PrimaryKey,
+    include_trashed: bool,
+    what: &str,
+) -> Result<Option<M>>
+where
+    M: crate::model::Model,
+{
+    let select = if include_trashed {
+        M::Entity::find()
+    } else {
+        scoped_find::<M>()
+    };
+    let rows = run_profiled(
+        select
+            .filter(M::primary_key_condition(id))
+            .all(&connection.executor()),
+        || primary_key_error_context::<M>(id, format!("{what}({})", M::primary_key_display(id))),
+    )
+    .await?;
+    // The baseline dirty tracking keeps is the one of the database the row
+    // came from.
+    crate::model::__loading_through(connection, || {
+        rows.into_iter()
+            .next()
+            .map(M::try_from_entity_model)
+            .transpose()
+    })
+}
+
+/// The typed reads the `Model` defaults run, each on the current connection.
+///
+/// The connection is resolved before the profiled statement, so a missing or
+/// unreachable database keeps its `Error::Connection` class.
 #[doc(hidden)]
 pub struct QueryExecutor;
 
 impl QueryExecutor {
     /// Every row in the model's soft-delete scope.
-    pub async fn find_all<M, C>(conn: &C) -> Result<Vec<M>>
+    pub async fn find_all<M>() -> Result<Vec<M>>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
-        let results = scoped_find::<M>().all(conn);
-        let results = crate::profiling::__profile_future(results)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>("find_all()")))?;
-
-        results.into_iter().map(M::try_from_entity_model).collect()
+        let connection = crate::database::__current_connection()?;
+        let rows = run_profiled(scoped_find::<M>().all(&connection.executor()), || {
+            model_error_context::<M>("find_all()")
+        })
+        .await?;
+        rows.into_iter().map(M::try_from_entity_model).collect()
     }
 
     /// The first row in scope, in the backend's natural order.
-    pub async fn first<M, C>(conn: &C) -> Result<Option<M>>
+    pub async fn first<M>() -> Result<Option<M>>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
-        let statement = one_row_statement(scoped_find::<M>(), conn.get_database_backend());
-        let result = <M::Entity as EntityTrait>::Model::find_by_statement(statement).one(conn);
-        let result = crate::profiling::__profile_future(result)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>("first()")))?;
-
-        result.map(M::try_from_entity_model).transpose()
+        Self::first_of::<M>(scoped_find::<M>(), "first()".to_string()).await
     }
 
     /// The row in scope with the highest primary key; unordered when the model
     /// declares no primary key column.
-    pub async fn last<M, C>(conn: &C) -> Result<Option<M>>
+    pub async fn last<M>() -> Result<Option<M>>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
         let mut select = scoped_find::<M>();
         let mut query_label = String::from("last()");
@@ -784,14 +843,20 @@ impl QueryExecutor {
             query_label = format!("last(order_by={} desc)", M::primary_key_names().join(", "));
         }
 
-        let statement = one_row_statement(select, conn.get_database_backend());
-        let result = <M::Entity as EntityTrait>::Model::find_by_statement(statement).one(conn);
-        let result = crate::profiling::__profile_future(result)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>(query_label)))?;
+        Self::first_of::<M>(select, query_label).await
+    }
 
-        result.map(M::try_from_entity_model).transpose()
+    /// The first row `select` finds, read through [`first_row`].
+    async fn first_of<M>(select: Select<M::Entity>, query_label: String) -> Result<Option<M>>
+    where
+        M: crate::model::Model,
+    {
+        let connection = crate::database::__current_connection()?;
+        let row = run_profiled(first_row(select, &connection.executor()), || {
+            model_error_context::<M>(query_label)
+        })
+        .await?;
+        row.map(M::try_from_entity_model).transpose()
     }
 
     /// `COUNT(*)` over the model's scoped rows.
@@ -799,23 +864,23 @@ impl QueryExecutor {
     /// The statement always returns exactly one row, so it is read with `all`,
     /// which adds no bound `LIMIT` (see [`one_row_statement`]), and a missing
     /// row is a decode failure rather than an empty table.
-    pub async fn count<M, C>(conn: &C) -> Result<u64>
+    pub async fn count<M>() -> Result<u64>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
         #[derive(Debug, FromQueryResult)]
         struct CountResult {
             count: i64,
         }
 
-        let rows = build_count_select::<M>()
-            .into_model::<CountResult>()
-            .all(conn);
-        let rows: Vec<CountResult> = crate::profiling::__profile_future(rows)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>("count(*)")))?;
+        let connection = crate::database::__current_connection()?;
+        let rows: Vec<CountResult> = run_profiled(
+            build_count_select::<M>()
+                .into_model::<CountResult>()
+                .all(&connection.executor()),
+            || model_error_context::<M>("count(*)"),
+        )
+        .await?;
 
         let row = rows
             .into_iter()
@@ -825,62 +890,65 @@ impl QueryExecutor {
     }
 
     /// Whether any row is in the model's scope.
-    pub async fn exists_any<M, C>(conn: &C) -> Result<bool>
+    pub async fn exists_any<M>() -> Result<bool>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
-        let probe =
-            conn.query_one_raw(build_exists_any_statement::<M>(conn.get_database_backend()));
-        let row = crate::profiling::__profile_future(probe)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(model_error_context::<M>("exists_any()")))?;
-
+        let connection = crate::database::__current_connection()?;
+        let executor = connection.executor();
+        let statement = build_exists_any_statement::<M>(executor.get_database_backend());
+        let row = run_profiled(executor.query_one_raw(statement), || {
+            model_error_context::<M>("exists_any()")
+        })
+        .await?;
         Ok(row.is_some())
     }
 
-    /// `limit` rows in scope after skipping `offset`, in primary key order.
+    /// Page `page` of `per_page` rows in scope, in primary key order.
     ///
     /// Without an order PostgreSQL returns rows in heap order, which an UPDATE
     /// changes: a row rewritten between two page requests moves, and the next
     /// page repeats it and skips another.
-    pub async fn paginate<M, C>(conn: &C, limit: i64, offset: i64) -> Result<Vec<M>>
+    pub async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
     where
-        M: InternalModel + crate::model::Model,
-        C: ConnectionTrait,
+        M: crate::model::Model,
     {
+        // The same check `QueryBuilder::page` makes, so both refuse alike.
+        // Every backend takes LIMIT and OFFSET as signed 64-bit integers,
+        // which it already bounds both by.
+        let offset = crate::query::page_offset(page, per_page)
+            .map_err(|(field, message)| Error::validation(field, message))?;
+        let (limit, offset) = (per_page as i64, offset as i64);
+
         let mut select = scoped_find::<M>();
         for pk_col in M::primary_key_columns() {
             select = select.order_by_asc(pk_col);
         }
-        let statement = page_statement(select, conn.get_database_backend(), limit, offset);
-        let results = <M::Entity as EntityTrait>::Model::find_by_statement(statement).all(conn);
-        let results = crate::profiling::__profile_future(results)
-            .await
-            .map_err(translate_error)
-            .map_err(|err| {
-                err.with_context(model_error_context::<M>(format!(
-                    "paginate(limit={}, offset={})",
-                    limit, offset
-                )))
-            })?;
-
-        results.into_iter().map(M::try_from_entity_model).collect()
+        let connection = crate::database::__current_connection()?;
+        let executor = connection.executor();
+        let statement = page_statement(select, executor.get_database_backend(), limit, offset);
+        let rows = run_profiled(
+            <M::Entity as EntityTrait>::Model::find_by_statement(statement).all(&executor),
+            || model_error_context::<M>(format!("paginate(limit={}, offset={})", limit, offset)),
+        )
+        .await?;
+        rows.into_iter().map(M::try_from_entity_model).collect()
     }
 
     // Deletes deliberately do not live here: the macro-generated `delete` and
     // `destroy` filter on `primary_key_condition`, which binds the key through
     // `bindable_value`, rather than deleting an `ActiveModel`.
 
-    /// Insert `models` and return them as stored, in the order they were
-    /// passed; see `batch_insert` for the statements each backend runs.
-    pub async fn insert_many<M>(conn: &Executor<'_>, models: Vec<M>) -> Result<Vec<M>>
+    /// Insert `models` on the current connection and return them as stored,
+    /// in the order they were passed; see `batch_insert` for the statements
+    /// each backend runs.
+    pub async fn insert_many<M>(models: Vec<M>) -> Result<Vec<M>>
     where
-        M: InternalModel + crate::model::Model,
+        M: crate::model::Model,
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
     {
-        batch_insert::insert_many(conn, models).await
+        let connection = crate::database::__current_connection()?;
+        batch_insert::insert_many(&connection.executor(), models).await
     }
 }
 

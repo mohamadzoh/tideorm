@@ -13,7 +13,7 @@ struct UniqueConstraint {
 
 impl UniqueConstraint {
     fn to_sql(&self, db_type: DatabaseType) -> String {
-        let columns = ddl::column_list(db_type, &self.columns);
+        let columns = crate::internal::sql_safety::column_list(db_type, &self.columns, "");
         match &self.name {
             Some(name) => format!(
                 "CONSTRAINT {} UNIQUE ({})",
@@ -23,6 +23,19 @@ impl UniqueConstraint {
             None => format!("UNIQUE ({})", columns),
         }
     }
+}
+
+/// One `TableBuilder` method per column type: `name(column)` adds a column of
+/// that type.
+macro_rules! column_methods {
+    ($($(#[$doc:meta])* $method:ident => $column_type:expr;)*) => {
+        $(
+            $(#[$doc])*
+            pub fn $method(&mut self, name: &str) -> ColumnBuilder<'_> {
+                self.column(name, $column_type)
+            }
+        )*
+    };
 }
 
 /// Builder for creating tables
@@ -75,8 +88,47 @@ impl TableBuilder {
         self
     }
 
-    pub fn string(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::String)
+    column_methods! {
+        /// A `VARCHAR(255)` column.
+        string => ColumnType::String;
+        /// A text column: `TEXT`, `LONGTEXT` on MySQL and MariaDB.
+        text => ColumnType::Text;
+        /// A 32-bit integer column.
+        integer => ColumnType::Integer;
+        /// A 64-bit integer column.
+        big_integer => ColumnType::BigInteger;
+        /// A 16-bit integer column.
+        small_integer => ColumnType::SmallInteger;
+        /// A single-precision float column.
+        float => ColumnType::Float;
+        /// A double-precision float column.
+        double => ColumnType::Double;
+        /// A boolean column.
+        boolean => ColumnType::Boolean;
+        /// A date column.
+        date => ColumnType::Date;
+        /// A time-of-day column.
+        time => ColumnType::Time;
+        /// A timestamp column without a time zone.
+        datetime => ColumnType::DateTime;
+        /// A timestamp column without a time zone.
+        timestamp => ColumnType::Timestamp;
+        /// A timestamp column with a time zone where the backend has one.
+        timestamptz => ColumnType::TimestampTz;
+        /// A UUID column.
+        uuid => ColumnType::Uuid;
+        /// A JSON column.
+        json => ColumnType::Json;
+        /// A binary JSON column: `JSONB` on PostgreSQL, JSON elsewhere.
+        jsonb => ColumnType::Jsonb;
+        /// A binary column.
+        binary => ColumnType::Binary;
+        /// An integer array column: PostgreSQL only, JSON on MySQL.
+        integer_array => ColumnType::IntegerArray;
+        /// A text array column: PostgreSQL only, JSON on MySQL.
+        text_array => ColumnType::TextArray;
+        /// A 64-bit integer column holding another table's key.
+        foreign_id => ColumnType::BigInteger;
     }
 
     /// A `VARCHAR(length)` column; [`string`](Self::string) is `VARCHAR(255)`.
@@ -87,22 +139,6 @@ impl TableBuilder {
     /// `utf8mb4`; a unique or indexed one at most 768 there.
     pub fn string_with(&mut self, name: &str, length: u32) -> ColumnBuilder<'_> {
         self.column(name, ColumnType::Varchar(length))
-    }
-
-    pub fn text(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Text)
-    }
-
-    pub fn integer(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Integer)
-    }
-
-    pub fn big_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::BigInteger)
-    }
-
-    pub fn small_integer(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::SmallInteger)
     }
 
     pub fn decimal(&mut self, name: &str) -> ColumnBuilder<'_> {
@@ -119,55 +155,22 @@ impl TableBuilder {
         self.column(name, ColumnType::Decimal { precision, scale })
     }
 
-    pub fn float(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Float)
-    }
-
-    pub fn double(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Double)
-    }
-
-    pub fn boolean(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Boolean)
-    }
-
-    pub fn date(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Date)
-    }
-
-    pub fn time(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Time)
-    }
-
-    pub fn datetime(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::DateTime)
-    }
-
-    pub fn timestamp(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Timestamp)
-    }
-
-    pub fn timestamptz(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::TimestampTz)
-    }
-
+    /// `created_at` and `updated_at`, with a time zone, defaulting to now.
     pub fn timestamps(&mut self) -> &mut Self {
-        self.column("created_at", ColumnType::TimestampTz)
-            .default_now()
-            .not_null();
-        self.column("updated_at", ColumnType::TimestampTz)
-            .default_now()
-            .not_null();
-        self
+        self.timestamps_of(ColumnType::TimestampTz)
     }
 
+    /// `created_at` and `updated_at`, without a time zone, defaulting to now.
     pub fn timestamps_naive(&mut self) -> &mut Self {
-        self.column("created_at", ColumnType::Timestamp)
-            .default_now()
-            .not_null();
-        self.column("updated_at", ColumnType::Timestamp)
-            .default_now()
-            .not_null();
+        self.timestamps_of(ColumnType::Timestamp)
+    }
+
+    fn timestamps_of(&mut self, column_type: ColumnType) -> &mut Self {
+        for name in ["created_at", "updated_at"] {
+            self.column(name, column_type.clone())
+                .default_now()
+                .not_null();
+        }
         self
     }
 
@@ -175,30 +178,6 @@ impl TableBuilder {
         self.column("deleted_at", ColumnType::TimestampTz)
             .nullable();
         self
-    }
-
-    pub fn uuid(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Uuid)
-    }
-
-    pub fn json(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Json)
-    }
-
-    pub fn jsonb(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Jsonb)
-    }
-
-    pub fn binary(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::Binary)
-    }
-
-    pub fn integer_array(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::IntegerArray)
-    }
-
-    pub fn text_array(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::TextArray)
     }
 
     pub fn column(&mut self, name: &str, column_type: ColumnType) -> ColumnBuilder<'_> {
@@ -211,22 +190,17 @@ impl TableBuilder {
         )
     }
 
-    pub fn foreign_id(&mut self, name: &str) -> ColumnBuilder<'_> {
-        self.column(name, ColumnType::BigInteger)
-    }
-
     /// Index `columns` under a generated name, `idx_<table>_<columns>`,
     /// shortened with a hash past 63 bytes.
     pub fn index(&mut self, columns: &[&str]) -> &mut Self {
-        let name = ddl::bounded_index_name(format!("idx_{}_{}", self.name, columns.join("_")));
+        let name = ddl::index_name(&self.name, columns, false);
         self.push_index(name, columns, false)
     }
 
     /// A unique index on `columns`, named `idx_<table>_<columns>_unique`
     /// (shortened with a hash past 63 bytes).
     pub fn unique_index(&mut self, columns: &[&str]) -> &mut Self {
-        let name =
-            ddl::bounded_index_name(format!("idx_{}_{}_unique", self.name, columns.join("_")));
+        let name = ddl::index_name(&self.name, columns, true);
         self.push_index(name, columns, true)
     }
 
@@ -259,6 +233,13 @@ impl TableBuilder {
         self.composite_primary_key =
             Some(columns.iter().map(|column| column.to_string()).collect());
         self
+    }
+
+    /// The `CREATE TABLE IF NOT EXISTS` statement this table renders, for
+    /// the CLI's migration generator, which writes it into a migration file.
+    #[doc(hidden)]
+    pub fn __create_sql(&self) -> String {
+        self.build_create(true)
     }
 
     pub(crate) fn build_create(&self, if_not_exists: bool) -> String {

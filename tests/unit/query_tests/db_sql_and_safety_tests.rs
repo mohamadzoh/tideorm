@@ -31,10 +31,11 @@ fn test_quote_ident() {
 
 #[test]
 fn test_json_contains_bound_mysql_uses_parameterized_json() {
-    let bound = db_sql::json_contains_bound(
+    let bound = db_sql::json_containment_bound(
         DatabaseType::MySQL,
         "`data`",
         &serde_json::json!({"role": "admin'"}),
+        db_sql::JsonContainment::Contains,
     );
 
     // PostgreSQL's reading: the scalar under `role` must not match an array
@@ -57,10 +58,11 @@ fn test_json_contains_bound_mysql_uses_parameterized_json() {
 
 #[test]
 fn test_json_contained_by_bound_mysql_requires_arrays_where_the_target_has_them() {
-    let bound = db_sql::json_contained_by_bound(
+    let bound = db_sql::json_containment_bound(
         DatabaseType::MySQL,
         "`data`",
         &serde_json::json!({"tags": ["a", "b"]}),
+        db_sql::JsonContainment::ContainedBy,
     );
 
     assert_eq!(
@@ -76,10 +78,11 @@ fn test_json_contained_by_bound_mysql_requires_arrays_where_the_target_has_them(
 
 #[test]
 fn test_json_contains_bound_postgres_uses_postgres_placeholder() {
-    let bound = db_sql::json_contains_bound(
+    let bound = db_sql::json_containment_bound(
         DatabaseType::Postgres,
         "\"data\"",
         &serde_json::json!({"role": "admin'"}),
+        db_sql::JsonContainment::Contains,
     );
 
     assert_eq!(bound.sql, "(\"data\")::jsonb @> $1");
@@ -386,17 +389,17 @@ fn test_inline_parameters_does_not_guess_around_backslashes() {
 }
 
 #[test]
-fn test_offset_postgres_placeholders_skips_single_quoted_literals() {
+fn test_rebase_placeholders_skips_single_quoted_literals() {
     let sql = "name = 'price is $5' AND id = $1 AND note = 'it''s still $2'";
 
     assert_eq!(
-        db_sql::offset_postgres_placeholders(sql, 3),
+        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 3),
         "name = 'price is $5' AND id = $4 AND note = 'it''s still $2'"
     );
 }
 
 #[test]
-fn test_offset_postgres_placeholders_skips_dollar_quotes_and_comments() {
+fn test_rebase_placeholders_skips_dollar_quotes_and_comments() {
     let sql = concat!(
         "note = $$literal $1$$ AND id = $2 ",
         "/* keep $3 */ ",
@@ -405,7 +408,7 @@ fn test_offset_postgres_placeholders_skips_dollar_quotes_and_comments() {
     );
 
     assert_eq!(
-        db_sql::offset_postgres_placeholders(sql, 2),
+        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 2),
         concat!(
             "note = $$literal $1$$ AND id = $4 ",
             "/* keep $3 */ ",
@@ -416,11 +419,11 @@ fn test_offset_postgres_placeholders_skips_dollar_quotes_and_comments() {
 }
 
 #[test]
-fn test_offset_postgres_placeholders_skips_escape_string_literals() {
+fn test_rebase_placeholders_skips_escape_string_literals() {
     let sql = "note = E'price isn\\'t $5' AND id = $1 AND raw = e'keep \\$2 here'";
 
     assert_eq!(
-        db_sql::offset_postgres_placeholders(sql, 4),
+        db_sql::rebase_placeholders(DatabaseType::Postgres, sql, 4),
         "note = E'price isn\\'t $5' AND id = $5 AND raw = e'keep \\$2 here'"
     );
 }
@@ -632,5 +635,30 @@ fn test_a_question_mark_in_quotes_is_no_placeholder() {
         db_sql::map_template_placeholders("x = ? AND y LIKE 'it''s ?' AND z = ?", || "$"
             .to_string()),
         "x = $ AND y LIKE 'it''s ?' AND z = $"
+    );
+}
+
+#[test]
+fn a_question_mark_in_a_dollar_quoted_string_is_no_placeholder() {
+    for (template, count) in [
+        ("name = $$?$$ AND id = ?", 1),
+        ("name = $tag$ it's ? $tag$ AND id = ?", 1),
+        // A tag closes only on the same tag.
+        ("a = $x$ ? $y$ ? $x$", 0),
+        // No closing tag, a positional parameter, and a `$` inside a name are
+        // no dollar quotes.
+        ("a = $$ ? AND b = ?", 2),
+        ("a = $1 AND b = ?", 1),
+        ("price$$ = ? AND b$$ = ?", 2),
+    ] {
+        assert_eq!(
+            db_sql::count_template_placeholders(template),
+            count,
+            "{template}"
+        );
+    }
+    assert_eq!(
+        db_sql::map_template_placeholders("name = $$?$$ AND id = ?", || "$1".to_string()),
+        "name = $$?$$ AND id = $1"
     );
 }

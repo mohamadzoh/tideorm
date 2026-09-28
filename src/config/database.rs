@@ -25,11 +25,6 @@ pub enum DatabaseType {
 }
 
 impl DatabaseType {
-    /// Return whether this backend can store JSON documents. True everywhere.
-    pub fn supports_json(&self) -> bool {
-        true
-    }
-
     /// Return whether the backend has a native array column type.
     ///
     /// PostgreSQL only. Elsewhere an "array" column is a JSON array, which is
@@ -56,26 +51,6 @@ impl DatabaseType {
         }
     }
 
-    /// Return whether the backend can turn a conflicting insert into an update.
-    ///
-    /// True everywhere, so [`Model::on_conflict`](crate::model::Model::on_conflict)
-    /// works on every backend.
-    pub fn supports_upsert(&self) -> bool {
-        true
-    }
-
-    /// Return whether the backend supports window functions (`OVER (..)`).
-    /// True everywhere.
-    pub fn supports_window_functions(&self) -> bool {
-        true
-    }
-
-    /// Return whether the backend supports common table expressions (`WITH ..`).
-    /// True everywhere.
-    pub fn supports_cte(&self) -> bool {
-        true
-    }
-
     /// A reasonable number of rows to write per batch on this backend.
     ///
     /// A guideline for chunking bulk work, chosen to stay clear of each
@@ -85,18 +60,6 @@ impl DatabaseType {
             DatabaseType::Postgres => 1000,
             DatabaseType::MySQL | DatabaseType::MariaDB => 500,
             DatabaseType::SQLite => 100,
-        }
-    }
-
-    /// The placeholder marker this backend uses for bound parameters.
-    ///
-    /// `"$"` on PostgreSQL, where placeholders are numbered (`$1`, `$2`, ...);
-    /// `"?"` elsewhere, where they are positional.
-    pub fn param_style(&self) -> &'static str {
-        match self {
-            DatabaseType::Postgres => "$",
-            DatabaseType::MySQL | DatabaseType::MariaDB => "?",
-            DatabaseType::SQLite => "?",
         }
     }
 

@@ -65,7 +65,7 @@ impl<M: Model> OrBranchBuilder<M> {
                 }
             }
 
-            self.query.or_groups.push(or_group);
+            self.query.clauses.or_groups.push(or_group);
         }
 
         self.query

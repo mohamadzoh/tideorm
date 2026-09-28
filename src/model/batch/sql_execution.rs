@@ -2,11 +2,6 @@ use super::*;
 
 use crate::internal::push_param;
 
-/// `value` as the JSON text a statement reads back with a JSON function.
-fn json_text(value: &serde_json::Value) -> crate::internal::Value {
-    crate::internal::Value::String(Some(value.to_string()))
-}
-
 /// `factor` as the decimal it is written as (`0.1`, not the binary fraction
 /// nearest to it), when a `Decimal` holds it.
 fn exact_decimal(factor: f64) -> Option<rust_decimal::Decimal> {
@@ -20,7 +15,12 @@ fn exact_decimal(factor: f64) -> Option<rust_decimal::Decimal> {
 /// `col` scaled by `factor` in SQLite's integer arithmetic: multiplied by the
 /// factor's numerator and divided by its denominator (the other way round to
 /// divide), with the quotient rounded half away from zero, as `ROUND` does.
-/// `None` when a term does not fit an `i64`.
+///
+/// The column is divided first, `(col / d) * n` plus its remainder's share
+/// `(col % d) * n / d` rounded, so no intermediate product outgrows the
+/// result: SQLite turns an integer overflow into a REAL, which would lose
+/// the low digits of a large value. `None` when the remainder's share could
+/// overflow on its own.
 fn sqlite_integer_scale(
     col: &str,
     factor: rust_decimal::Decimal,
@@ -44,33 +44,39 @@ fn sqlite_integer_scale(
         (times, over)
     };
 
-    let product = |params: &mut Vec<crate::internal::Value>| {
-        if times == 1 {
-            col.to_string()
-        } else {
-            let placeholder =
-                push_param(db_type, params, crate::internal::Value::BigInt(Some(times)));
-            format!("{col} * {placeholder}")
-        }
+    // The remainder is smaller than the divisor, so its share stays within
+    // `(over - 1) * |times| + over / 2`.
+    (over - 1)
+        .checked_mul(times.checked_abs()?)?
+        .checked_add(over / 2)?;
+
+    // Each value is bound where it stands in the statement, in order.
+    let mut bind =
+        |value: i64| push_param(db_type, params, crate::internal::Value::BigInt(Some(value)));
+    let scaled = |operand: String, bind: &mut dyn FnMut(i64) -> String| match times {
+        1 => operand,
+        _ => format!("{operand} * {}", bind(times)),
     };
     if over == 1 {
-        return Some(product(params));
+        return Some(scaled(col.to_string(), &mut bind));
     }
-    let first = product(params);
-    let second = product(params);
-    let half = push_param(
-        db_type,
-        params,
-        crate::internal::Value::BigInt(Some(over / 2)),
-    );
-    let half_again = push_param(
-        db_type,
-        params,
-        crate::internal::Value::BigInt(Some(over / 2)),
-    );
-    let divisor = push_param(db_type, params, crate::internal::Value::BigInt(Some(over)));
+    let divided = format!("({col} / {})", bind(over));
+    let quotient = scaled(divided, &mut bind);
+    let remainder = format!("({col} % {})", bind(over));
+    let remainder = scaled(remainder, &mut bind);
+    // The remainder's share takes the sign of `col * times`, and its half
+    // rounds away from zero.
+    let half = over / 2;
+    let (below_zero, otherwise) = if times < 0 {
+        (half, -half)
+    } else {
+        (-half, half)
+    };
+    let below_zero = bind(below_zero);
+    let otherwise = bind(otherwise);
+    let divisor = bind(over);
     Some(format!(
-        "(({first}) + CASE WHEN ({second}) < 0 THEN -{half} ELSE {half_again} END) / {divisor}"
+        "{quotient} + ({remainder} + CASE WHEN {col} < 0 THEN {below_zero} ELSE {otherwise} END) / {divisor}"
     ))
 }
 
@@ -111,19 +117,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
         use crate::orm::ColumnType;
 
         let column_type = crate::internal::column_type_of::<M>(column);
-        let integral = matches!(
-            column_type,
-            Some(
-                ColumnType::TinyInteger
-                    | ColumnType::SmallInteger
-                    | ColumnType::Integer
-                    | ColumnType::BigInteger
-                    | ColumnType::TinyUnsigned
-                    | ColumnType::SmallUnsigned
-                    | ColumnType::Unsigned
-                    | ColumnType::BigUnsigned
-            )
-        );
+        let integral = column_type
+            .as_ref()
+            .is_some_and(crate::internal::is_integer);
         let decimal = matches!(
             column_type,
             Some(ColumnType::Decimal(_) | ColumnType::Money(_))
@@ -204,14 +200,22 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 // so an object stays an object rather than becoming a string,
                 // and a NULL column starts a new array.
                 crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                    let placeholder = push_param(db_type, params, json_text(value));
+                    let placeholder = push_param(
+                        db_type,
+                        params,
+                        crate::query::db_sql::json_scalar_parameter(value),
+                    );
                     format!(
                         "{} = JSON_ARRAY_APPEND(COALESCE({}, JSON_ARRAY()), '$', JSON_EXTRACT({}, '$'))",
                         col, col, placeholder
                     )
                 }
                 crate::config::DatabaseType::SQLite => {
-                    let placeholder = push_param(db_type, params, json_text(value));
+                    let placeholder = push_param(
+                        db_type,
+                        params,
+                        crate::query::db_sql::json_scalar_parameter(value),
+                    );
                     format!(
                         "{} = json_insert(COALESCE({}, '[]'), '$[#]', json({}))",
                         col, col, placeholder
@@ -262,25 +266,33 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 }
             }),
             UpdateValue::JsonSet(path, value) => {
-                let segments = Self::validate_json_path(path)?;
+                let steps = crate::query::db_sql::parse_json_path(path)
+                    .filter(|steps| !steps.is_empty())
+                    .ok_or_else(|| {
+                        Error::query(format!(
+                            "unsupported JSON path '{}': json_set takes `$` followed by `.key`, `.\"key\"`, `['key']` or `[index]` steps",
+                            path
+                        ))
+                    })?;
                 let bound_path = match db_type {
                     crate::config::DatabaseType::Postgres => {
-                        Self::postgres_json_path_literal(&segments)
+                        crate::query::db_sql::postgres_json_path_array(&steps)
                     }
                     crate::config::DatabaseType::MySQL
                     | crate::config::DatabaseType::MariaDB
-                    | crate::config::DatabaseType::SQLite => path.clone(),
+                    | crate::config::DatabaseType::SQLite => {
+                        crate::query::db_sql::json_path_text(&steps)
+                    }
                 };
                 let path_placeholder = push_param(
                     db_type,
                     params,
                     crate::internal::Value::String(Some(bound_path)),
                 );
-                let json_text = serde_json::to_string(value)?;
                 let value_placeholder = push_param(
                     db_type,
                     params,
-                    crate::internal::Value::String(Some(json_text)),
+                    crate::query::db_sql::json_scalar_parameter(value),
                 );
 
                 Ok(match db_type {
@@ -368,7 +380,10 @@ impl<M: Model> BatchUpdateBuilder<M> {
             None => {}
         }
 
-        query.conditions.extend(self.conditions.iter().cloned());
+        query
+            .clauses
+            .conditions
+            .extend(self.conditions.iter().cloned());
         // The update's `or_where_*` calls join the query's own OR group.
         for condition in &self.or_group.conditions {
             query = query.push_or_condition(condition.clone());
@@ -381,7 +396,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// was never staged, so the update would otherwise run without it.
     fn ensure_values_are_bindable(&self) -> Result<()> {
         match &self.invalid_reason {
-            Some(reason) => Err(Error::invalid_query(format!(
+            Some(reason) => Err(Error::query(format!(
                 "update of {}: {}",
                 M::table_name(),
                 reason
@@ -394,7 +409,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// query's filters, scope and database, and nothing that reshapes rows.
     fn ensure_base_is_updatable(&self) -> Result<()> {
         match self.base.as_ref().and_then(QueryBuilder::update_blocker) {
-            Some(part) => Err(Error::invalid_query(format!(
+            Some(part) => Err(Error::query(format!(
                 "update_all() of a {} query keeps its filters and scope only; {} cannot be part of an UPDATE",
                 M::table_name(),
                 part
@@ -406,10 +421,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// The database the update runs on: the one its query named, else the
     /// scope's.
     fn database(&self) -> Result<crate::database::Database> {
-        match self.base.as_ref().and_then(QueryBuilder::named_database) {
-            Some(database) => Ok(database),
-            None => crate::database::__current_db(),
-        }
+        self.base
+            .as_ref()
+            .map_or_else(crate::database::__current_db, QueryBuilder::current_db)
     }
 
     /// A batch update's filters must pass the query builder's validation, and
@@ -435,7 +449,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     fn limit_scope_primary_key(db_type: crate::config::DatabaseType) -> Result<String> {
         match M::primary_key_names() {
             [column] => Ok(quote_ident(db_type, column)),
-            columns => Err(Error::invalid_query(format!(
+            columns => Err(Error::query(format!(
                 "limit() is not supported for '{}' on {}: that backend cannot cap an UPDATE \
                  directly, so the row limit has to be scoped through a primary-key subquery, \
                  which needs a single primary key column (found {})",
@@ -455,12 +469,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let (set_parts, mut params) = self.build_set_clause_with_params_for_db(db_type)?;
 
         let query = self.build_where_query();
-        let (mut where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
-
-        if matches!(db_type, crate::config::DatabaseType::Postgres) {
-            where_sql =
-                crate::query::db_sql::offset_postgres_placeholders(&where_sql, params.len());
-        }
+        let (where_sql, where_params) = query.build_where_clause_with_condition_for_db(db_type);
+        let where_sql =
+            crate::query::db_sql::rebase_placeholders(db_type, &where_sql, params.len());
         params.extend(where_params);
 
         let table = crate::query::db_sql::quote_table::<M>(db_type);

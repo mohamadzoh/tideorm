@@ -1,14 +1,14 @@
 use crate::config::DatabaseType;
-use crate::internal::Backend;
 
 #[cfg(feature = "fulltext")]
 mod fulltext;
 
 #[cfg(feature = "fulltext")]
 pub(crate) use fulltext::{
-    escape_fts5_query_literal_terms, fts5_boolean_query, fts5_near_query, fts5_phrase_query,
-    fts5_prefix_query, sanitize_mysql_fulltext_query, sanitize_postgres_boolean_tsquery,
-    sanitize_postgres_proximity_tsquery_literals, sanitize_postgres_tsquery_literals,
+    double_quoted, escape_fts5_query_literal_terms, fts5_boolean_query, fts5_near_query,
+    fts5_phrase_query, fts5_prefix_query, has_searchable_char, sanitize_mysql_fulltext_query,
+    sanitize_postgres_boolean_tsquery, sanitize_postgres_proximity_tsquery_literals,
+    sanitize_postgres_tsquery_literals, search_words,
 };
 
 /// Escape `value` for use inside a single-quoted SQL literal on `db_type`.
@@ -528,31 +528,42 @@ pub(crate) fn push_quoted_ident(out: &mut String, db_type: DatabaseType, name: &
     out.push(q);
 }
 
-pub(crate) fn quote_ident_for_backend(backend: Backend, name: &str) -> String {
-    quote_ident(backend.as_database_type(), name)
+/// `columns` quoted and joined for a key, index or insert column list, each
+/// after `prefix`, such as a trigger's `new.`.
+pub(crate) fn column_list(
+    db_type: DatabaseType,
+    columns: &[impl AsRef<str>],
+    prefix: &str,
+) -> String {
+    columns
+        .iter()
+        .map(|column| format!("{prefix}{}", quote_ident(db_type, column.as_ref())))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-pub(crate) fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option<String> {
+/// The parts of a plain identifier reference (`column`, `table.column`,
+/// `schema.table.column`): not quoted, with no parenthesis, `*` or space, and
+/// no empty part. `None` for anything else, such as an expression.
+pub(crate) fn identifier_reference_parts(value: &str) -> Option<Vec<&str>> {
     let trimmed = value.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('"')
         || trimmed.ends_with('"')
         || trimmed.starts_with('`')
         || trimmed.ends_with('`')
-        || trimmed.contains('(')
-        || trimmed.contains(')')
-        || trimmed.contains('*')
-        || trimmed.contains(' ')
+        || trimmed.contains(['(', ')', '*', ' '])
     {
         return None;
     }
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    (!parts.iter().any(|part| part.is_empty())).then_some(parts)
+}
 
-    if trimmed.split('.').any(str::is_empty) {
-        return None;
-    }
-
-    let mut reference = String::with_capacity(trimmed.len() + 4);
-    for (index, part) in trimmed.split('.').enumerate() {
+pub(crate) fn format_identifier_reference(db_type: DatabaseType, value: &str) -> Option<String> {
+    let parts = identifier_reference_parts(value)?;
+    let mut reference = String::with_capacity(value.len() + 4);
+    for (index, part) in parts.into_iter().enumerate() {
         if index > 0 {
             reference.push('.');
         }

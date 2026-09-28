@@ -95,25 +95,6 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self.assign(field, UpdateValue::UnsafeRaw(expression.to_string()))
     }
 
-    /// Assign a value only when `condition` holds, otherwise leave the column alone.
-    ///
-    /// Useful for assembling an update from optional inputs without breaking the
-    /// call chain. Note that a builder whose every `set_if` was skipped has no
-    /// assignments left, and executing it is a no-op that reports zero rows.
-    #[must_use]
-    pub fn set_if(
-        self,
-        field: impl IntoColumnName,
-        value: impl serde::Serialize,
-        condition: bool,
-    ) -> Self {
-        if condition {
-            self.set(field, value)
-        } else {
-            self
-        }
-    }
-
     /// Add `by` to the column's current value in the database.
     ///
     /// The arithmetic happens server-side, so concurrent increments do not lose
@@ -180,10 +161,11 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Set one path inside a JSON column, leaving the rest of the document intact.
     ///
-    /// `path` must be `$.field` or `$.field.subfield`, with plain identifier
-    /// segments; array indexes and wildcards are rejected when the statement is
-    /// built. Prefer this over reading the document into Rust and writing it
-    /// back, which would clobber concurrent edits to other keys.
+    /// `path` is `$` followed by `.key`, `."any key"`, `['any key']` or
+    /// `[index]` steps, as `where_json_path_exists` takes it; wildcards are
+    /// rejected when the statement is built. Prefer this over reading the
+    /// document into Rust and writing it back, which would clobber concurrent
+    /// edits to other keys.
     #[must_use]
     pub fn json_set(
         self,
@@ -224,7 +206,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// or the column's replaces an earlier one through the other.
     fn assign(mut self, field: impl IntoColumnName, value: UpdateValue) -> Self {
         let name = field.column_name();
-        let column = M::canonical_column_name(name).unwrap_or(name);
+        let column = M::column_named(name);
         self.updates.insert(column.to_string(), value);
         self
     }

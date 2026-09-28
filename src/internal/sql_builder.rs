@@ -36,6 +36,14 @@ impl<'a> SqlBuilder<'a> {
         self
     }
 
+    /// Append a table reference, a schema-qualified one (`tenant.posts`)
+    /// quoted part by part.
+    pub fn table(mut self, name: &str) -> Self {
+        self.sql
+            .push_str(&crate::query::db_sql::format_column(self.db_type, name));
+        self
+    }
+
     /// Push a bound parameter and append its placeholder (`?`, `$1`, etc.).
     pub fn param(mut self, value: Value) -> Self {
         let placeholder = super::push_param(self.db_type, self.params, value);

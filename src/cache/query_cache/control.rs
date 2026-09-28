@@ -42,21 +42,19 @@ impl QueryCache {
 
     /// Enable the cache
     pub fn enable(&self) -> &Self {
-        self.config.write().enabled = true;
-        self.enabled.store(true, Ordering::Release);
+        self.config.set_enabled(true);
         self
     }
 
     /// Disable the cache
     pub fn disable(&self) -> &Self {
-        self.config.write().enabled = false;
-        self.enabled.store(false, Ordering::Release);
+        self.config.set_enabled(false);
         self
     }
 
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
+        self.config.is_enabled()
     }
 
     /// Warn, once per process, when a query asks for caching while the cache

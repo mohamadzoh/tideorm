@@ -96,12 +96,12 @@ fn test_positional_placeholder_compound_select_binds_values_left_to_right() {
     let bind = |value: &str| crate::internal::json_to_db_value(&serde_json::json!(value));
 
     let mut query = QueryBuilder::<QueryTestUser>::new().where_eq("name", "base-value");
-    query.ctes.push(CTE::with_params(
+    query.clauses.ctes.push(CTE::with_params(
         "recent_users",
         "SELECT `id` FROM `query_test_users` WHERE `name` = ?".to_string(),
         vec![bind("cte-value")],
     ));
-    query.unions.push(UnionClause::with_params(
+    query.clauses.unions.push(UnionClause::with_params(
         UnionType::UnionAll,
         "SELECT `id` FROM `query_test_users` WHERE `name` = ?".to_string(),
         vec![bind("union-value")],

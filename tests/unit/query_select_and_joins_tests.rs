@@ -311,3 +311,33 @@ fn a_typed_column_of_another_model_in_a_window_keeps_its_table() {
         "{sql}"
     );
 }
+
+#[tideorm::model(table = "linked_audit_events")]
+struct LinkedAuditEvent {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    token: uuid::Uuid,
+}
+
+/// A filter on a joined table named with its schema binds as the joined
+/// model's column type: `linked_audit_events.token` is a UUID, not text,
+/// although the join names `audit.linked_audit_events`.
+#[test]
+fn a_schema_qualified_join_binds_its_columns_as_their_types() {
+    let token = uuid::Uuid::nil();
+    let (_, params) = LinkedSelectUser::query()
+        .inner_join(
+            "audit.linked_audit_events",
+            "linked_select_users.id",
+            "linked_audit_events.id",
+        )
+        .where_eq("linked_audit_events.token", token)
+        .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
+
+    assert!(
+        params
+            .iter()
+            .any(|value| matches!(value, crate::internal::Value::Uuid(Some(_)))),
+        "{params:?}"
+    );
+}

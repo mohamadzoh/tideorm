@@ -2,13 +2,7 @@ use crate::model::Model as ModelTrait;
 use crate::tokenization::Tokenizable as _;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::{Database, QueryCache, TideConfig};
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::OnceLock;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::time::Duration;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use tokio::sync::Mutex;
+use crate::Database;
 
 #[tideorm::model(table = "model_test_users")]
 struct AutoIncrementModel {
@@ -120,61 +114,17 @@ struct ArchivedPostModel {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn model_cache_test_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn prepare_model_cache_test_state() {
-    Database::reset_global();
-    TideConfig::reset();
-
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.enable();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn cleanup_model_cache_test_state() {
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.disable();
-
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_model_cache_test_db() -> Database {
-    prepare_model_cache_test_state();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed for model cache tests");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    db.__execute_with_params(
+    let db = crate::test_support::install_sqlite_global(&[
         "CREATE TABLE model_test_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating model cache test schema should succeed");
-
+    ])
+    .await;
+    crate::test_support::set_query_cache(true);
     db
 }
 
 fn init_model_tokenization_test_key() {
     crate::tokenization::TokenConfig::set_encryption_key("model-tokenization-test-key-32chars");
-}
-
-#[cfg(feature = "translations")]
-#[tideorm::model(table = "model_test_translations", translatable = "title")]
-struct TranslationSerializationModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    title: String,
-    translations: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "translations")]
@@ -236,14 +186,6 @@ struct TranslationRelationUser {
         related_key = "role_id"
     )]
     roles: crate::relations::HasManyThrough<TranslationRelationRole, TranslationRelationUserRole>,
-}
-
-#[cfg(feature = "attachments")]
-#[tideorm::model(table = "model_test_attachments", has_one_files = "thumbnail")]
-struct FileSerializationModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    files: Option<serde_json::Value>,
 }
 
 #[cfg(feature = "attachments")]

@@ -8,7 +8,6 @@ pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -
 where
     M: Model,
 {
-    let hidden = M::hidden_attributes();
     let global_hidden = crate::config::Config::get_hidden_attributes();
 
     let mut json = match model_to_object(model) {
@@ -31,21 +30,12 @@ where
         }
     }
 
-    // After translation resolution, which writes translatable fields back in:
-    // a field that is both hidden and translatable must stay hidden.
-    for attr in &hidden {
-        json.remove(M::serialized_name(attr));
-    }
-
-    for attr in &global_hidden {
-        json.remove(M::serialized_name(attr));
-    }
-
     #[cfg(feature = "attachments")]
     if M::has_file_attachments()
         && let Some(files) = json.remove(M::serialized_name("files"))
         && let Some(files_obj) = files.as_object()
     {
+        let hidden = M::hidden_attributes();
         let url_generator = M::file_url_generator();
         for relation in M::files_relations() {
             // An attachment named among the hidden attributes stays hidden.
@@ -61,9 +51,12 @@ where
         }
     }
 
-    strip_hidden_from_non_column_payloads::<M>(&mut json, &global_hidden);
-
-    serde_json::Value::Object(json)
+    // After translation resolution, which writes translatable fields back in:
+    // a field that is both hidden and translatable must stay hidden. An
+    // attachment named among the hidden attributes was left out above.
+    let mut json = serde_json::Value::Object(json);
+    strip_model_payload::<M>(&mut json, &global_hidden);
+    json
 }
 
 /// Each translatable field's value for `language` (default: the model's
@@ -265,14 +258,7 @@ where
                 continue;
             };
 
-            let str_val = match value {
-                serde_json::Value::String(s) => s.clone(),
-                serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Bool(b) => b.to_string(),
-                serde_json::Value::Null => "null".to_string(),
-                _ => value.to_string(),
-            };
-            map.insert(output_key.to_string(), str_val);
+            map.insert(output_key.to_string(), crate::internal::json_text(value));
         }
     }
 
@@ -298,216 +284,6 @@ where
         Ok(_) => Err("Failed to serialize model into an object".to_string()),
         Err(error) => Err(format!("Failed to serialize model: {}", error)),
     }
-}
-
-pub(crate) fn load_language_translations<M>(
-    model: &mut M,
-    language: &str,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    if !M::has_translations() {
-        return Err("Model does not support translations".to_string());
-    }
-
-    let translations = model
-        .field_json_value("translations")
-        .map_err(|error| error.to_string())?;
-    let Some(translations) = translations.as_ref().and_then(serde_json::Value::as_object) else {
-        return Ok(());
-    };
-    for (field, value) in translated_values::<M>(translations, Some(language)) {
-        model
-            .set_field_json(field, value)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
-}
-
-pub(crate) fn get_files_attribute<M>(
-    model: &M,
-) -> std::result::Result<HashMap<String, serde_json::Value>, String>
-where
-    M: Model,
-{
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
-    match model
-        .field_json_value("files")
-        .map_err(|error| error.to_string())?
-    {
-        None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
-        Some(serde_json::Value::Object(map)) => Ok(map.into_iter().collect()),
-        Some(_) => Err("Model files attribute is not a JSON object".to_string()),
-    }
-}
-
-pub(crate) fn set_files_attribute<M>(
-    model: &mut M,
-    files: HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    if !M::has_file_attachments() {
-        return Err("Model does not support file attachments".to_string());
-    }
-
-    let files = serde_json::Value::Object(files.into_iter().collect());
-    match model.set_field_json("files", files) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("Model has no files field".to_string()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-// The attachment editors below receive `files` from `get_files_attribute`,
-// which has already rejected a model without attachments.
-
-enum FileRelationKind {
-    HasOne,
-    HasMany,
-}
-
-fn file_relation_kind<M>(relation_type: &str) -> std::result::Result<FileRelationKind, String>
-where
-    M: Model,
-{
-    if M::has_one_attached_file().contains(&relation_type) {
-        Ok(FileRelationKind::HasOne)
-    } else if M::has_many_attached_files().contains(&relation_type) {
-        Ok(FileRelationKind::HasMany)
-    } else {
-        Err(format!("Unknown file relation: {}", relation_type))
-    }
-}
-
-/// Metadata recorded for one attached file: its storage key, the key's last
-/// path segment as the file name, and the time it was attached.
-fn file_metadata(file_key: &str) -> serde_json::Value {
-    serde_json::json!({
-        "key": file_key,
-        "filename": file_key.split('/').next_back().unwrap_or(file_key),
-        "created_at": chrono::Utc::now().to_rfc3339(),
-    })
-}
-
-pub(crate) fn attach_file<M>(
-    relation_type: &str,
-    file_key: &str,
-    files: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    let metadata = file_metadata(file_key);
-
-    match file_relation_kind::<M>(relation_type)? {
-        FileRelationKind::HasOne => {
-            files.insert(relation_type.to_string(), metadata);
-        }
-        FileRelationKind::HasMany => {
-            let mut array = files
-                .get(relation_type)
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default();
-            array.push(metadata);
-            files.insert(relation_type.to_string(), serde_json::Value::Array(array));
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn attach_files<M>(
-    relation_type: &str,
-    file_keys: Vec<&str>,
-    files: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    if !matches!(
-        file_relation_kind::<M>(relation_type)?,
-        FileRelationKind::HasMany
-    ) {
-        return Err(format!(
-            "Relation '{}' is not a hasMany relation",
-            relation_type
-        ));
-    }
-
-    for file_key in file_keys {
-        attach_file::<M>(relation_type, file_key, files)?;
-    }
-
-    Ok(())
-}
-
-pub(crate) fn detach_file<M>(
-    relation_type: &str,
-    file_key: Option<&str>,
-    files: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    match file_relation_kind::<M>(relation_type)? {
-        FileRelationKind::HasOne => {
-            if let Some(key) = file_key {
-                if let Some(current) = files.get(relation_type)
-                    && current.get("key").and_then(|k| k.as_str()) == Some(key)
-                {
-                    files.insert(relation_type.to_string(), serde_json::Value::Null);
-                }
-            } else {
-                files.insert(relation_type.to_string(), serde_json::Value::Null);
-            }
-        }
-        FileRelationKind::HasMany => {
-            if let Some(key) = file_key {
-                if let Some(array) = files.get(relation_type).and_then(|v| v.as_array()) {
-                    let filtered: Vec<serde_json::Value> = array
-                        .iter()
-                        .filter(|item| item.get("key").and_then(|k| k.as_str()) != Some(key))
-                        .cloned()
-                        .collect();
-                    files.insert(
-                        relation_type.to_string(),
-                        serde_json::Value::Array(filtered),
-                    );
-                }
-            } else {
-                files.insert(relation_type.to_string(), serde_json::Value::Array(vec![]));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn sync_files<M>(
-    relation_type: &str,
-    file_keys: Vec<&str>,
-    files: &mut HashMap<String, serde_json::Value>,
-) -> std::result::Result<(), String>
-where
-    M: Model,
-{
-    let synced = match file_relation_kind::<M>(relation_type)? {
-        FileRelationKind::HasOne => file_keys
-            .first()
-            .map_or(serde_json::Value::Null, |key| file_metadata(key)),
-        FileRelationKind::HasMany => {
-            serde_json::Value::Array(file_keys.into_iter().map(file_metadata).collect())
-        }
-    };
-    files.insert(relation_type.to_string(), synced);
-
-    Ok(())
 }
 
 #[cfg(test)]

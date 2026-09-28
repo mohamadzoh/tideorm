@@ -351,9 +351,6 @@ User::query()
     .page(3, 25)  // Page 3, 25 per page
     .get()
     .await?;
-
-// Aliases
-User::query().take(10).skip(20)  // Same as limit(10).offset(20)
 ```
 
 Give a paged query a unique order, such as one ending in the primary key. Without one, PostgreSQL returns rows in storage order, which an `UPDATE` changes, so consecutive pages can repeat one row and skip another. `Model::paginate(page, per_page)` orders by the primary key for you.
@@ -508,7 +505,7 @@ let busy_regions: Vec<RegionTotal> = Sale::query()
 Sale::query().group_by("rep").having("COUNT(DISTINCT region) > 1");
 ```
 
-`Aggregate` offers `gt`, `gte`, `lt`, `lte`, `eq` and `ne`; `having_count_gt`, `having_sum_gt` and `having_avg_gt` are shorthands for three of them.
+`Aggregate` offers `gt`, `gte`, `lt`, `lte`, `eq` and `ne`.
 
 ### Filtering by Related Rows
 
@@ -678,11 +675,11 @@ let posts = Post::query()
 
 // CTE with column aliases
 let stats = Sale::query()
-    .with_cte_columns(
+    .with_cte(CTE::with_columns(
         "daily_stats",
         vec!["sale_date", "total_sales", "order_count"],
-        "SELECT DATE(created_at), SUM(amount), COUNT(*) FROM sales GROUP BY DATE(created_at)"
-    )
+        "SELECT DATE(created_at), SUM(amount), COUNT(*) FROM sales GROUP BY DATE(created_at)".to_string(),
+    ))
     .where_raw("date IN (SELECT sale_date FROM daily_stats WHERE total_sales > 10000)")
     .get()
     .await?;
@@ -716,7 +713,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.12.0", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.13.0", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -730,7 +727,8 @@ let results = Article::search(&["title", "content"], "rust programming")
     .await?;
 
 // Search with ranking (ordered by relevance)
-let ranked = Article::search_ranked(&["title", "content"], "rust async")
+let ranked = Article::search(&["title", "content"], "rust async")
+    .with_ranking()
     .limit(10)
     .get_ranked()
     .await?;
@@ -802,11 +800,10 @@ let config = FullTextConfig::new()
     // Custom weights for ranking (title > summary > content)
     .weights(SearchWeights::new(1.0, 0.5, 0.3, 0.1));
 
-let results = Article::search_with_config(
-    &["title", "summary", "content"],
-    "rust programming",
-    config
-).get().await?;
+let results = Article::search(&["title", "summary", "content"], "rust programming")
+    .config(config)
+    .get()
+    .await?;
 ```
 
 `stop_words`, `min_word_length` and `max_word_length` leave terms out of the search text before it is sent, on every backend; the index is untouched. A search whose every term is left out matches nothing, and a `SearchMode::Phrase` search is sent as written.
@@ -816,7 +813,8 @@ let config = FullTextConfig::new()
     .stop_words(vec!["the".into(), "a".into()])
     .min_word_length(3);
 // Searches for "rust" and "ownership" only.
-let results = Article::search_with_config(&["content"], "the rust of ownership", config)
+let results = Article::search(&["content"], "the rust of ownership")
+    .config(config)
     .get()
     .await?;
 ```
@@ -884,6 +882,8 @@ for statement in &statements {
     Database::execute(statement).await?;
 }
 ```
+
+A SQLite table has one full-text index, the `<table>_fts` table its searches read, whatever the index is named. Applying the same index again changes nothing; one over a column that index does not hold fails with `no such column` instead of keeping the first index's columns, so drop `<table>_fts` and its triggers to index other columns. A table named with its attached database (`tenant.posts`) gets its index in that database.
 
 The SQLite index follows the table's rowid, which a `VACUUM` keeps only for a table with an `INTEGER PRIMARY KEY`. After vacuuming a UUID- or text-keyed table, run `index.sqlite_rebuild_sql()` before anything else touches it, or searches return other rows.
 

@@ -5,6 +5,285 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-28
+
+Duplicated code folded into one implementation each, and the defects two further reviews and the
+duplication audit found are fixed. Public API that repeated another method is removed outright.
+This release is breaking: read the upgrade notes and the removal list before upgrading.
+
+### Upgrading — Action Required
+
+- **Relations load into an entity manager through `EntityManager::load` only.** The inherent
+  `load_in_entity_manager` methods of `HasOne`, `HasMany`, `BelongsTo` and `HasManyThrough`, and
+  `TrackedHasManyEntityManagerExt::load`, are gone: write `entity_manager.load(&mut user.posts)`.
+- **`HasMany` is one type.** With the `entity-manager` feature the `HasMany` name used to point at
+  `TrackedHasMany`, a wrapper around the plain relation; the two are merged and `TrackedHasMany`
+  is removed. `HasMany` now has `as_mut()` and `is_loaded()` with or without the feature.
+- **A `HasManyThrough` pivot must be its pivot model's table.** The relation reads, deletes and
+  eagerly loads pivot rows through the `Pivot` model, but `attach()` and `load_with()` used the
+  `pivot = ".."` table, so a relation naming another table read one and wrote the other. Such a
+  relation is now refused with an error naming both tables.
+- **`CacheKeyBuilder` escapes what it is given.** A `\`, `:` or `=` in a table, column, value or
+  direction is escaped with a backslash, and `raw()` parts are written `r:<part>`, so two different
+  sequences of parts never build the same key. Keys built from such text change.
+- **A second SQLite full-text index on a table fails.** SQLite keeps one index per table, the
+  `<table>_fts` table its searches read; applying one over a column that index does not hold
+  failed silently and kept the first index's columns. It now fails with `no such column`.
+- **A model's unnamed unique index is named `idx_<table>_<columns>_unique`**, as a migration's
+  `unique_index` names it; the derive used to name it `uidx_<table>_<columns>`. Schema sync
+  creates the index under the new name and leaves the old one in place, so drop a
+  `uidx_..` index sync created, or give the index its old name with
+  `#[unique_index(name = "uidx_..", columns = "..")]`.
+- **Field-list attributes are checked.** A `translatable = ".."` entry that names no field is a
+  compile error, as a `searchable` one already was, and an empty entry (`hidden = "a,,b"`) in any
+  of `translatable`, `searchable`, `encrypted`, `hidden`, `languages`, `has_one_files` or
+  `has_many_files` is refused.
+- **`Error::invalid_query` is `Error::query`.** They built the same error; the second name is gone.
+
+### Removed — Breaking
+
+- `TrackedHasMany` and `TrackedHasManyEntityManagerExt` (`HasMany` carries what they added).
+- `HasOne::load_in_entity_manager`, `HasMany::load_in_entity_manager`,
+  `BelongsTo::load_in_entity_manager` and `HasManyThrough::load_in_entity_manager`
+  (`EntityManager::load`).
+- `QueryBuilder::eq_any` and `ne_all`, with `Operator::EqAny` and `Operator::NeAll` (`where_in` and
+  `where_not_in`, which they rendered as).
+- `where_array_contains_any` and `where_array_contains_all` (`where_array_overlaps` and
+  `where_array_contains`).
+- `having_count_gt`, `having_sum_gt` and `having_avg_gt`
+  (`having(Aggregate::count().gt(n))`, `having(Aggregate::sum("col").gt(x))`, ...).
+- `with_cte_columns` (`with_cte(CTE::with_columns(name, columns, sql))`).
+- `take` and `skip` (`limit` and `offset`).
+- `scope(f)` (`f(query)`; for chainable named scopes, `User::query().active().recent()`, declare
+  them in a `#[tideorm::scopes]` block).
+- `QueryBuilder::from_fragment` (`Model::query().apply(&fragment)`).
+- `to_subquery_sql_with_params` (pass the query itself to `where_in_subquery`, `where_exists`,
+  `select_subquery`, `union` or `with_query`, which bind its values).
+- The `Model` attachment helpers `get_files_attribute`, `set_files_attribute`, `attach_file`,
+  `attach_files`, `detach_file` and `sync_files` (implement `HasAttachments`, whose `attach`,
+  `attach_many`, `detach` and `sync` they copied; the copy took a file name after the last `/`
+  only, where `HasAttachments` also splits on `\`).
+- `Model::load_language_translations` (`HasTranslations::get_translated`).
+- `CallbackRunner`, which only renamed `Callbacks` methods (implement `Callbacks`).
+- `Database::global()` (`db()`) and `try_db()` (`require_db()`, which returns why).
+- `BatchUpdateBuilder::set_if` (`when(condition, |update| update.set(field, value))`).
+- The generated `Model::find_in_entity_manager` and `save_with_entity_manager`
+  (`entity_manager.find::<Model>(id)` and `entity_manager.save(&model)`).
+- `internal::ensure_fields_storable` is no longer public (every write checks the fields itself),
+  nor is the hidden `TideEntityManagerFieldWriter` trait.
+- `Error::invalid_query` (`Error::query`) and `Error::query_with_context`
+  (`Error::query(message).with_context(context)`).
+- `Tokenizable::tokenize` and `regenerate_token` (`to_token`, which already gives a fresh token
+  each call) and `Tokenizable::detokenize` (`decode_token`).
+- `TokenConfig::encode` and `decode` (`TokenConfig::get_encoder()(..)` and
+  `TokenConfig::get_decoder()(..)`).
+- `ValidationErrors::has_errors` (`!errors.is_empty()`).
+- `FullTextSearch::search_with_config` and `search_ranked` (`search(..).config(config)` and
+  `search(..).with_ranking()`), and `SearchWeights::to_pg_array`.
+- `Config::generate_file_url` and `ModelMeta::generate_file_url` (`file.url(field)`, or
+  `file.url_with_generator(field, Model::file_url_generator())` for a model's own generator),
+  and `Config::set_file_url_generator` (`TideConfig::file_url_generator`).
+- `DatabaseType::supports_json`, `supports_upsert`, `supports_window_functions` and
+  `supports_cte`, which were true on every backend, and `DatabaseType::param_style`.
+- `EagerLoadExt` — `Model::eager()` and `Model::with_relations(&[..])`, which the generated
+  `with_relations(self)` shadowed — with `EagerQueryBuilder::new()` and its `Default`
+  (`Model::query().with(..)` or `.with_many(..)`).
+- `EagerQueryBuilder::where_eq`, `where_in`, `where_raw`, `order_by`, `limit` and `offset`
+  (call them before `.with(..)`, or through `.query(|q| ..)` after it).
+- `RelationExt::get_field_value` (`InternalModel::field_json_value`, or `to_json()` for a
+  relation field).
+
+### Fixed
+
+- **`get_json()` typed an expression by a model field of the same name.** `COUNT(*) AS active` on a
+  model with a boolean `active` came back `true` on SQLite. An output is now typed by where it
+  comes from: a model column under any alias by that column's type, and an expression or another
+  table's column by what the driver declares.
+- **An upsert on a unique column holding NULL failed after writing its row.** NULL matches no stored
+  row, so the upsert inserted, and then read the row back by `column = NULL`, which finds nothing.
+  Such an upsert now inserts the row and returns it as stored.
+- **An aggregate over a `distinct()` or `union()` query ignored the projection's aliases.**
+  `sum("amount")` over `select(["amount AS total"])` read a column the derived table does not have,
+  which SQLite took for the text `'amount'` and summed to 0. The aggregate, `pluck()` on a union and
+  a union's `ORDER BY` now read a column under the name the projection gives it, and an aggregate
+  over a column the projection leaves out is refused.
+- **A `?` inside a PostgreSQL dollar-quoted string counted as a placeholder** in `where_raw_with()`
+  and HAVING templates, so `name = $$?$$ AND id = ?` was refused with one value and rendered its
+  literal `?` as a marker.
+- **The PostgreSQL schema file turned `INCLUDE` columns into unique-key columns**, so a restored
+  unique index accepted rows the original refused. Such an index, and one declared
+  `NULLS NOT DISTINCT`, is now written as `pg_get_indexdef` renders it.
+- **The MySQL schema file wrote a text default starting with `CURRENT_TIMESTAMP` unquoted.** Only a
+  `TIMESTAMP` or `DATETIME` column's current-time default stays bare.
+- **The PostgreSQL and MySQL schema files left out foreign keys and `CHECK` constraints** (and
+  PostgreSQL's `EXCLUDE` ones), so a restored table accepted orphans and rows its checks refused.
+  They are now added with `ALTER TABLE .. ADD CONSTRAINT` after every table, with their actions.
+- **The PostgreSQL and MySQL schema files wrote a generated column as a plain one**, on PostgreSQL
+  with its expression as a default, which PostgreSQL refuses. It is now written
+  `GENERATED ALWAYS AS (..) STORED` or `VIRTUAL`, with no default, which MariaDB reports for
+  one (`NULL`) and refuses beside it.
+- **`change_column` on MySQL/MariaDB dropped a column's character set and collation**, which then
+  took the table's, changing how values compare and which are unique. A column that still holds
+  text keeps them. A column renamed earlier in the same alteration keeps its attributes too; they
+  were looked up under its new name, which the table did not have yet.
+- **A rolled-back transaction could overwrite a dirty-tracking baseline written after it began.** An
+  undone read or write now puts the previous baseline back only if the row's baseline is still the
+  one it left, and a transaction that wrote a row twice undoes both steps.
+- **Forgetting one database's baseline of a key made another database's the key's.** A model does
+  not say which pool it came from, so a key two databases gave different rows has no baseline; once
+  one of them was forgotten or evicted, the other was reported for both. The forgotten one now
+  leaves the key unknown, and eviction drops a key's baselines for every pool together.
+- **`FullTextIndex` quoted a schema-qualified table as one identifier.** `tenant.posts` is now
+  `"tenant"."posts"`; on SQLite the index is created in the attached database, with the tables its
+  FTS5 table and triggers name left bare, as SQLite requires.
+- **`multiply()`/`divide()` of a large integer lost digits on SQLite** when the product of the value
+  and the factor's numerator overflowed an `i64` before the division. The column is now divided
+  first and its remainder scaled on its own, which stays exact wherever the result fits.
+- **Eager loading assigned a child to one parent when two keys differed only in accents or other
+  non-ASCII folding.** Keys the column's collation could match to one stored key are now paired by
+  the database whenever any of them is not plain ASCII.
+- **A seeder or migrator inside a transaction on a one-connection MySQL/MariaDB pool waited for a
+  second connection** to create its ledger with `CREATE TABLE IF NOT EXISTS`, even when the ledger
+  existed. The ledger is now looked up on the transaction's own connection first.
+- **Self-referencing and polymorphic relations of a model an entity manager loaded queried the
+  global database.** Every relation of such a model now runs on the manager's database.
+- **Two concurrent `flush()` calls of one entity manager inserted a new entity twice.** A manager's
+  flushes and saves now run one at a time; one inside another joins it as before.
+- **An edit made to a managed entity while a flush wrote it was lost**, and the entity marked clean.
+  The edit now stays over the row as stored, and the next flush writes it.
+- **A `find_managed()` finishing after another lookup of the same row reset the handle** to the
+  values it read, dropping edits made in between. It now returns the existing handle unchanged.
+- **Schema sync registered one table per name**, so `tenant_b.users` was dropped when
+  `tenant_a.users` was registered. Registrations are now told apart by schema and table.
+- **`HasOne` dropped a new owner's cached child when the owner was saved**, keeping the row but
+  counting it unloaded, so an entity-manager save left it out. A rebuilt relation keeps its cache
+  and its load state together. `MorphOne` records a load too, so an eager load that found no row
+  is served as `None` without a connection.
+- **After an entity manager loaded a `HasMany`, `load()` queried again**, where `HasOne`,
+  `BelongsTo` and `HasManyThrough` served the instances the manager tracks. It serves them too.
+- **`where_array_contained_by` on MySQL/MariaDB matched a row holding a JSON object** whose values
+  were all listed. It now matches arrays only, as on PostgreSQL and SQLite.
+- **A filter on a column of a schema-qualified join was bound as text.** `audit.events.created_at`
+  of a `join("audit.events", ..)` is now typed by the joined model's column, as an unqualified
+  join's is.
+- **`where_raw()` validated its fragment when called and `or_where_raw()` when the query ran**; both
+  now report an unsafe fragment when the query runs, as every other deferred check does.
+- **`json_set()` refused an array index or a quoted key** (`$.items[0]`, `$."a b"`), which the JSON
+  path filters accept. It takes the same paths now.
+- **A raw statement hiding a write behind a MySQL `#` comment left the query cache in place.**
+  `SELECT 1 # it's` followed by `; DELETE ..` read the quote in the comment as the start of a
+  string, missed the second statement and counted the batch as a read.
+- **`pluck()` and `get_json()` returned ciphertext when a hand-written `ModelMeta` listed more
+  encrypted fields than encrypted columns**; they now fail as writes of such a model already did.
+- **`reload()` and `soft_delete()` errors carried no table or key**, where `find()`'s did.
+- **A panic while rows were decoded left later loads on the thread remembered as coming from the
+  panicking load's database**, which dirty tracking then compared against the wrong baseline.
+- **Migration ledger reads were not profiled**; they go through the same statement path as every
+  other read.
+- **`save_with_many()` with no children** saved the parent outside a transaction and accepted any
+  foreign-key name. It runs as `save_with_one()` does.
+- **An upsert could read and write the wrong column when one field's name is another field's
+  column name** (`title` stored in `heading`, `name` stored in `title`): the conflict and update
+  columns were resolved field-name first in one place and column-name first in another. Column
+  lookups by name now take a column name first everywhere, and field lookups a field name first.
+- **A relation whose `local_key` named a field stored under another column** read the field's
+  name as the column (`local_key = "author"` on a field with `column = "author_id"`). The key is
+  read from the field's column.
+- **`generate_snippet()` matched inside words**: a search for `art` marked the end of `Restart`
+  and centred the snippet on it. It marks whole words, as the highlighting does.
+- **`QueryAnalyzer` missed an unfiltered `UPDATE` or `DELETE` preceded by whitespace** (a
+  statement starting with a newline) and scored its complexity lower. `SELECT *` detection in the
+  profiling report is case-insensitive.
+- **A statement through one database ran on another database's open transaction.** Every handle
+  joined whatever transaction was ambient, so `second.transaction(..)`, `query_with(&second)` or
+  `find_with(id, &second)` inside a transaction on `first` ran on `first`. A handle now joins only
+  a transaction on its own database. Likewise an entity manager's `save()` or `flush()` inside
+  another manager's unit of work joined that one, on its database and without its own rollback
+  checkpoints; it now runs its own.
+- **A MySQL/MariaDB upsert could update a row its conflict columns do not name, then fail.**
+  `ON DUPLICATE KEY UPDATE` fires on any unique key: an upsert on `email` with a new email and a
+  taken `username` updated the username's row, and then reported that no row held the new email,
+  with the write already committed. The upsert now locks the row the conflict columns name and
+  updates it, or inserts, in one transaction; a conflict on another unique key fails as a
+  duplicate and writes nothing.
+- **An upsert with a NULL conflict value ignored `NULLS NOT DISTINCT`.** It inserted without a
+  conflict clause, which such a constraint refuses when a NULL is stored. On PostgreSQL and SQLite
+  the conflict is the database's to decide again, and the row written, inserted or updated, is
+  read through `RETURNING`.
+- **An entity-manager flush wrote the rows of a self-referencing table in registration order**,
+  so a child persisted before its parent (`nodes.parent_id -> nodes.id`) was inserted first and
+  refused, as was a parent removed before its child. Rows of one table are now ordered by their
+  declared self-references (`belongs_to`, `has_one`/`has_many` to the same model, `SelfRef` and
+  `SelfRefMany`): referenced rows are inserted first and deleted last.
+
+### Changed
+
+- `futures-util` (already built for sea-orm) is a direct dependency, for the entity manager's
+  runtime-independent lock.
+- A full-text search's `limit`/`offset` are rendered as the query builder's are; one past
+  `i64::MAX` is no longer refused before the statement is sent.
+- `MigrationResult` and `SeedResult` implement `Default`.
+- A suggestion naming a database failure gives its SQLSTATE before its constraint, as
+  `DbFailure`'s `Display` does: ``(SQLSTATE 23505) on constraint `users_email_key` ``.
+
+### Internal
+
+- Relation wrappers share one runtime core (`RelationState`): cache and load state, lookup key,
+  query source, entity-manager owner key, serde, the rule `load()` follows and how a rebuilt
+  wrapper keeps its state. Each wrapper had its own copy; they had drifted.
+- Entity-manager relation loading is two functions, one per cardinality, and `flush()` and
+  `save()` share one unit-of-work wrapper.
+- A derived model generates much less code. The upsert, the statement behind `create()`,
+  `update()` and a permanent delete, the entity manager's relation sync and the eager-loading
+  lookups run in the runtime; only the callback dispatch, which needs the concrete model, is
+  still generated. `Model::save`, `destroy`, `insert_or_update` and `InternalModel::column_from_str`
+  are provided methods, and a model without soft delete no longer carries a soft-delete branch in
+  `delete()`.
+- The typed reads, the generated `find`/`create`/`update`/`delete` and the batch insert run their
+  statements through one profiled, error-translating path (`internal::run_profiled`), and every
+  primary-key lookup through one function (`internal::find_by_primary_key`), which shrinks each
+  model's generated code.
+- The three futures that hold a thread-local scope per poll (connection overrides, caller-logged
+  statements, the entity manager's transaction scope) share one implementation.
+- The query builder and `QueryFragment` hold their clauses in one struct, so a fragment is a copy of
+  a query's clauses and merging one back is a single function; `QueryFragment`'s fields are no
+  longer public (`consolidate()`, `apply()`, `is_empty()` and `condition_count()` remain), nor are
+  `QueryBuilder::conditions` and `or_groups`.
+- The query builder keeps one copy of each rule it had several of: operator mapping, the JSON path
+  parser, JSON containment and equality, array predicates, `?`-template rendering, placeholder
+  rebasing, derived-table wrapping, ORDER BY direction parsing, alias splitting, the scalar
+  aggregate decode chain and the lists of clauses an `UPDATE` or `DELETE` cannot keep.
+- Entity-manager relation sync (`HasMany`, `HasOne`, `HasManyThrough`), the eager-loading lookups
+  and a managed entity's identity key are runtime functions the derive calls; a model's relations
+  are wired by one generated function where two copies were generated. Managed entries are filed
+  and evicted by one function each.
+- Seeding and entity-manager flush order share one topological sort; the seed and migration
+  ledgers are opened the same way.
+- Migrations run under one lock helper, and index names, the MySQL index check, a table's column
+  list and the `TableBuilder` column methods have one implementation each. The CLI's migration
+  generator, ledger and runner use the library's (`TableBuilder`, `AlterTableBuilder`, the
+  migration ledger), so a generated migration's SQL is what the library renders.
+- Full-text search: the PostgreSQL `tsvector` expression is rendered by the one function the index
+  uses, the search statements share their `SELECT`/`COUNT` shells, and snippets go through the
+  highlighter.
+- Validation rules are one table in the derive and one check function at run time; the
+  attachment, translation and profiling paths lost their copies of the same loops.
+- The query cache and the statement cache share their enable switch and hit ratio; the query
+  logger and the global profiler share their counters; `TideConfig::connect` hands its pool
+  settings to `DatabaseBuilder` in one call and rewrites the URL once.
+- `ColumnSchema` and sync's `ColumnDef` share their builder methods; full-text search and
+  relations share the soft-delete predicate and the search-word splitting; `ErrorContext` and
+  `log_format()` render the same list of fields.
+- The entity manager keys its identity maps through one function and diffs relation snapshots
+  through one lookup.
+- Tests: the unit tests share one SQLite harness, one lock for the global database and one
+  PostgreSQL table setup; the MySQL and MariaDB suites one configuration; the PostgreSQL benches
+  one `main`. `postgres_advanced_tests` is retired: its native-array scenario runs in
+  `postgres_integration_tests`, and its JSON and relation checks were already parity scenarios.
+  Tests that repeated another suite's (validation rules, tokenization round trips, type
+  mappings, cache and translation behaviour, profiler counters, macro errors the `tests/ui`
+  fixtures pin) are kept once, and families of near-identical tests are table-driven.
+
 ## [0.12.0] - 2026-09-27
 
 A second repository-wide cleanup. Dead, duplicated and misleading code was removed, unused public
@@ -2133,6 +2412,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.13.0]: https://github.com/mohamadzoh/tideorm/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mohamadzoh/tideorm/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mohamadzoh/tideorm/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/mohamadzoh/tideorm/compare/v0.10.1...v0.10.2

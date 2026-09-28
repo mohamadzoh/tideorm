@@ -48,20 +48,6 @@ impl Tokenizable for TestProduct {
 }
 
 #[test]
-fn test_tokenizable_tokenize_alias() {
-    init_test_env();
-
-    let user = TestUser { id: 42 };
-
-    let token1 = user.to_token().unwrap();
-    let token2 = user.tokenize().unwrap();
-
-    assert_eq!(TestUser::decode_token(&token1).unwrap(), 42);
-    assert_eq!(TestUser::decode_token(&token2).unwrap(), 42);
-    assert_ne!(token1, token2);
-}
-
-#[test]
 fn test_tokenizable_tokenize_id() {
     init_test_env();
 
@@ -72,25 +58,13 @@ fn test_tokenizable_tokenize_id() {
 }
 
 #[test]
-fn test_tokenizable_detokenize() {
-    init_test_env();
-
-    let user = TestUser { id: 99 };
-
-    let token = user.tokenize().unwrap();
-    let decoded = TestUser::detokenize(&token).unwrap();
-
-    assert_eq!(decoded, 99);
-}
-
-#[test]
-fn test_tokenizable_regenerate_token() {
+fn test_tokenizable_tokens_differ_per_call() {
     init_test_env();
 
     let user = TestUser { id: 50 };
 
     let token1 = user.to_token().unwrap();
-    let token2 = user.regenerate_token().unwrap();
+    let token2 = user.to_token().unwrap();
 
     assert_ne!(token1, token2);
     assert_eq!(TestUser::decode_token(&token1).unwrap(), 50);
@@ -102,10 +76,10 @@ fn test_tokenizable_cross_model_rejection() {
     init_test_env();
 
     let user = TestUser { id: 42 };
-    let user_token = user.tokenize().unwrap();
+    let user_token = user.to_token().unwrap();
 
     let product = TestProduct { id: 42 };
-    let product_token = product.tokenize().unwrap();
+    let product_token = product.to_token().unwrap();
 
     assert_ne!(user_token, product_token);
     assert!(TestProduct::decode_token(&user_token).is_err());
@@ -132,7 +106,7 @@ async fn test_tokenizable_from_token() {
 
     let original = TestUser { id: 77 };
 
-    let token = original.tokenize().unwrap();
+    let token = original.to_token().unwrap();
     let restored = TestUser::from_token(&token).await.unwrap();
 
     assert_eq!(restored.id, original.id);
