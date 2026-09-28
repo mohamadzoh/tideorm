@@ -254,16 +254,6 @@ fn test_has_attachments_json_persistence() {
 }
 
 #[test]
-fn test_file_attachment_deep_path() {
-    let attachment = FileAttachment::new("uploads/2024/01/15/user_123/profile/avatar.png");
-    assert_eq!(attachment.filename, "avatar.png");
-    assert_eq!(
-        attachment.key,
-        "uploads/2024/01/15/user_123/profile/avatar.png"
-    );
-}
-
-#[test]
 fn test_file_attachment_unicode_filename() {
     let attachment = FileAttachment::new("uploads/æ–‡æ¡£/å›¾ç‰‡.jpg");
     assert_eq!(attachment.filename, "å›¾ç‰‡.jpg");

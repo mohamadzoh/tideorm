@@ -35,8 +35,8 @@ pub use builder::DatabaseBuilder;
 pub use core::Database;
 #[cfg(feature = "dirty-tracking")]
 pub(crate) use state::__scope_origin;
-pub use state::{__current_connection, __current_db, db, has_global_db, require_db, try_db};
-pub(crate) use state::{connection_identity, origin_of, with_connection_override};
+pub use state::{__current_connection, __current_db, db, has_global_db, require_db};
+pub(crate) use state::{connection_identity, origin_of};
 pub use transaction::Transaction;
 pub(crate) use transaction::transaction_error;
 

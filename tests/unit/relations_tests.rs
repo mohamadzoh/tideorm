@@ -1,7 +1,6 @@
 use super::helpers::build_self_ref_tree_sql;
 use super::{
-    BelongsTo, EagerLoadExt, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, MorphTo,
-    RelationExt, SelfRef, SelfRefMany,
+    BelongsTo, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, MorphTo, SelfRef, SelfRefMany,
 };
 use crate::config::DatabaseType;
 use crate::internal::Value;
@@ -9,10 +8,6 @@ use serde_json::json;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 use crate::Database;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::OnceLock;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use tokio::sync::Mutex;
 
 #[tideorm::model(table = "relation_test_nodes")]
 struct RelationTestNode {
@@ -57,53 +52,17 @@ struct RelationTestEmployee {
     avatar: MorphOne<RelationTestImage>,
 }
 
-#[tideorm::model(table = "relation_ext_lookup_models")]
-struct RelationExtLookupModel {
+#[tideorm::model(table = "aliased_key_models")]
+struct AliasedKeyModel {
     #[tideorm(primary_key)]
     id: i64,
     #[tideorm(column = "owner_id")]
     account_id: i64,
 }
 
-#[tideorm::model(table = "relation_ext_parent_models")]
-struct RelationExtParentModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    name: String,
-
-    #[tideorm(foreign_key = "parent_id")]
-    child: HasOne<RelationExtChildModel>,
-}
-
-#[tideorm::model(table = "relation_ext_child_models")]
-struct RelationExtChildModel {
-    #[tideorm(primary_key)]
-    id: i64,
-    parent_id: i64,
-    label: String,
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn direct_relation_db_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn cleanup_direct_relation_test_db() {
-    Database::reset_global();
-}
-
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_direct_relation_test_db() -> Database {
-    cleanup_direct_relation_test_db();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    db
+    crate::test_support::install_sqlite_global(&[]).await
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -141,9 +100,6 @@ struct DirectRelationPost {
 #[path = "relations_tests/query_and_constraints.rs"]
 mod query_and_constraints;
 
-#[path = "relations_tests/relation_ext.rs"]
-mod relation_ext;
-
 #[path = "relations_tests/macro_runtime.rs"]
 mod macro_runtime;
 
@@ -178,4 +134,44 @@ async fn a_morph_to_with_null_columns_has_no_owner() {
             .expect("load failed")
             .is_none()
     );
+}
+
+/// Keys the database may match to one stored key are paired by it: ASCII
+/// case and trailing spaces are folded here, anything beyond plain ASCII is
+/// left to the collation.
+#[test]
+fn keys_a_collation_could_fold_together_are_left_to_the_database() {
+    use super::eager::fold_together;
+
+    assert!(fold_together(&[json!("abc"), json!("ABC ")]));
+    assert!(fold_together(&[json!("cafe"), json!("café")]));
+    assert!(fold_together(&[json!("strasse"), json!("straße")]));
+    assert!(!fold_together(&[json!("abc"), json!("abd")]));
+    assert!(!fold_together(&[json!("café")]));
+    assert!(!fold_together(&[json!(1), json!(2)]));
+}
+
+/// A relation reads, deletes and loads its pivot rows through the pivot
+/// model, so a pivot table other than that model's is refused rather than
+/// written to beside it.
+#[tokio::test]
+async fn a_pivot_table_other_than_the_pivot_models_is_refused() {
+    let relation = HasManyThrough::<RelationTestNode, RelationTestPivot>::new(
+        "left_id",
+        "right_id",
+        "id",
+        "id",
+        "some_other_table",
+    )
+    .with_parent_pk(json!(1));
+
+    let error = relation.count().await.expect_err("the pivot is refused");
+    assert!(
+        error.to_string().contains(
+            "'some_other_table' is not the table of its pivot model, 'relation_test_pivots'"
+        ),
+        "{error}"
+    );
+    let error = relation.attach(2).await.expect_err("the pivot is refused");
+    assert!(error.to_string().contains("some_other_table"), "{error}");
 }

@@ -69,6 +69,19 @@ fn mismatched_encrypted_metadata_is_rejected_for_unrelated_columns_too() {
 }
 
 #[test]
+fn mismatched_encrypted_metadata_is_rejected_when_rows_are_decrypted() {
+    // A bare `zip` would leave `other` out and hand its ciphertext back.
+    let mut rows = vec![serde_json::json!({ "other_column": "ciphertext" })];
+    let error = crate::model::decrypt_json_rows::<MismatchedEncryptedMeta>(&mut rows, &[])
+        .expect_err("a metadata mismatch must not return a column undecrypted");
+
+    assert!(
+        error.to_string().contains("encrypted column name"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn crypto_errors_keep_their_class_and_name_the_field() {
     let error = annotate_crypto_error(
         Error::configuration("no key"),

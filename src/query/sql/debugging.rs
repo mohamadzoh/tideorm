@@ -31,8 +31,6 @@ impl<M: Model> QueryBuilder<M> {
             Operator::ArrayContainedBy => "ARRAY_CONTAINED_BY",
             Operator::ArrayOverlaps => "ARRAY_OVERLAPS",
             Operator::Raw => "RAW",
-            Operator::EqAny => "= ANY",
-            Operator::NeAll => "<> ALL",
         }
     }
 
@@ -95,21 +93,26 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// The description of each OR group that holds a condition.
+    fn described_or_groups(&self) -> impl Iterator<Item = String> + '_ {
+        self.clauses
+            .or_groups
+            .iter()
+            .map(Self::describe_or_group)
+            .filter(|group| !group.is_empty())
+    }
+
     pub(crate) fn build_query_error_context(
         &self,
         query: Option<&str>,
     ) -> crate::error::ErrorContext {
         let conditions: Vec<String> = self
+            .clauses
             .conditions
             .iter()
             .map(Self::describe_condition)
             .collect();
-        let groups: Vec<String> = self
-            .or_groups
-            .iter()
-            .map(Self::describe_or_group)
-            .filter(|group| !group.is_empty())
-            .collect();
+        let groups: Vec<String> = self.described_or_groups().collect();
         let having: Vec<String> = self
             .having_clauses()
             .map(|(template, bindings)| Self::describe_having_clause(template, bindings))
@@ -215,37 +218,40 @@ impl<M: Model> QueryBuilder<M> {
             .map(|value| format!("{:?}", value))
             .collect();
 
-        for condition in &self.conditions {
-            info.add_condition(Self::describe_condition(condition));
-        }
-        for group in &self.or_groups {
-            let group = Self::describe_or_group(group);
-            if !group.is_empty() {
-                info.add_condition(group);
-            }
+        for condition in self
+            .clauses
+            .conditions
+            .iter()
+            .map(Self::describe_condition)
+            .chain(self.described_or_groups())
+        {
+            info.add_condition(condition);
         }
         info.error = self.validate().err().map(|error| error.to_string());
 
-        for (column, direction) in &self.order_by {
+        for (column, direction) in &self.clauses.order_by {
             info.add_order_by(format!("{} {}", column, direction.as_str()));
         }
 
-        info.group_by = self.group_by.clone();
-        info.limit = self.limit_value;
-        info.offset = self.offset_value;
+        info.group_by = self.clauses.group_by.clone();
+        info.limit = self.clauses.limit_value;
+        info.offset = self.clauses.offset_value;
 
-        if !self.raw_select_expressions.is_empty() || !self.subquery_select_expressions.is_empty() {
-            info.select = self.raw_select_expressions.clone();
+        if !self.clauses.raw_select_expressions.is_empty()
+            || !self.clauses.subquery_select_expressions.is_empty()
+        {
+            info.select = self.clauses.raw_select_expressions.clone();
             info.select.extend(
-                self.subquery_select_expressions
+                self.clauses
+                    .subquery_select_expressions
                     .iter()
                     .map(|subquery| format!("({}) AS {}", subquery.query_sql, subquery.alias)),
             );
-        } else if let Some(columns) = &self.select_columns {
+        } else if let Some(columns) = &self.clauses.select_columns {
             info.select = columns.clone();
         }
 
-        for join in &self.joins {
+        for join in &self.clauses.joins {
             info.joins.push(format!(
                 "{:?} JOIN {} ON {} = {}",
                 join.join_type, join.table, join.left_column, join.right_column

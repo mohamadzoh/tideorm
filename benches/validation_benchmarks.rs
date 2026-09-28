@@ -284,10 +284,10 @@ fn bench_validation_errors(c: &mut Criterion) {
         b.iter(|| format!("{}", errors))
     });
 
-    group.bench_function("has_errors_check", |b| {
+    group.bench_function("is_empty_check", |b| {
         let mut errors = ValidationErrors::new();
         errors.add("field", "error");
-        b.iter(|| errors.has_errors())
+        b.iter(|| !errors.is_empty())
     });
 
     group.finish();

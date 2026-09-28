@@ -92,49 +92,25 @@ fn encrypted_field_rejects_legacy_global_payloads() {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn encrypted_model_test_guard() -> &'static tokio::sync::Mutex<()> {
-    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn prepare_encrypted_model_test_state() {
-    crate::tokenization::TokenConfig::reset();
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 fn cleanup_encrypted_model_test_state() {
     crate::tokenization::TokenConfig::reset();
-    Database::reset_global();
-    TideConfig::reset();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_encrypted_model_test_db() -> Database {
-    prepare_encrypted_model_test_state();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed for encrypted field tests");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-    crate::tokenization::TokenConfig::set_encryption_key("encrypted-field-model-test-key-32chars");
-
-    db.__execute_with_params(
+    let db = crate::test_support::install_sqlite_global(&[
         "CREATE TABLE model_test_encrypted_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, customer_phone_number TEXT NOT NULL, backup_phone TEXT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating encrypted field test schema should succeed");
-
+    ])
+    .await;
+    crate::tokenization::TokenConfig::set_encryption_key("encrypted-field-model-test-key-32chars");
     db
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn create_find_and_batch_update_auto_encrypt_and_decrypt_fields() {
-    let _guard = encrypted_model_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_encrypted_model_test_db().await;
 
     let created = EncryptedFieldModel::create(EncryptedFieldModel {
@@ -254,7 +230,7 @@ async fn create_find_and_batch_update_auto_encrypt_and_decrypt_fields() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn load_rejects_plaintext_values_without_prefix() {
-    let _guard = encrypted_model_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let db = setup_encrypted_model_test_db().await;
 
     db.__execute_with_params(

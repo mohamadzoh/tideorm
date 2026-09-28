@@ -18,8 +18,11 @@ impl QueryAnalyzer {
             ));
         }
 
-        if (sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE"))
-            && !sql_upper.contains("WHERE")
+        let operation = crate::logging::QueryOperation::from_sql(sql);
+        if matches!(
+            operation,
+            crate::logging::QueryOperation::Update | crate::logging::QueryOperation::Delete
+        ) && !sql_upper.contains("WHERE")
         {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Critical,
@@ -97,13 +100,12 @@ impl QueryAnalyzer {
         let sql_upper = sql.to_uppercase();
         let mut score = 0;
 
-        if sql_upper.starts_with("SELECT") {
-            score += 1;
-        } else if sql_upper.starts_with("INSERT") {
-            score += 2;
-        } else if sql_upper.starts_with("UPDATE") || sql_upper.starts_with("DELETE") {
-            score += 3;
-        }
+        score += match crate::logging::QueryOperation::from_sql(sql) {
+            crate::logging::QueryOperation::Select => 1,
+            crate::logging::QueryOperation::Insert => 2,
+            crate::logging::QueryOperation::Update | crate::logging::QueryOperation::Delete => 3,
+            _ => 0,
+        };
 
         score += sql_upper.matches("JOIN").count() * 2;
         score += sql_upper.matches("SELECT").count().saturating_sub(1) * 3;

@@ -4,25 +4,25 @@
     feature = "entity-manager"
 ))]
 
-#[path = "support/mysql_test_config.rs"]
+#[path = "support/mysql_family_test_config.rs"]
 mod test_config;
+
+static SERVER: test_config::Server = test_config::Server::new("MySQL", "MYSQL");
 
 mod backend {
     use std::sync::Arc;
 
     use tideorm::Database;
 
-    use super::test_config::{mysql_database_url, should_run_mysql_tests};
+    use super::SERVER;
 
     pub async fn connect() -> tideorm::Result<Option<Arc<Database>>> {
-        if !should_run_mysql_tests() {
-            println!(
-                "Skipping MySQL entity-manager test: set RUN_MYSQL_TESTS or MYSQL_DATABASE_URL (SKIP_MYSQL_TESTS overrides both)"
-            );
+        if !SERVER.enabled() {
+            println!("{}", SERVER.skipped("entity-manager test"));
             return Ok(None);
         }
 
-        let db = Arc::new(Database::connect(mysql_database_url()).await?);
+        let db = Arc::new(Database::connect(SERVER.database_url()).await?);
         Database::set_global(db.as_ref().clone())?;
         Ok(Some(db))
     }

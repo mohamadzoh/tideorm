@@ -29,11 +29,7 @@ impl<M: Model> QueryBuilder<M> {
                     ));
                 }
                 let sql = if template {
-                    let mut index = 0;
-                    db_sql::map_template_placeholders(raw_sql, || {
-                        index += 1;
-                        db_sql::placeholder(db_type, index)
-                    })
+                    db_sql::render_template(db_type, raw_sql, 1)
                 } else {
                     raw_sql.to_string()
                 };
@@ -43,28 +39,17 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Compare {
                 operator: operator @ (ComparisonOperator::Eq | ComparisonOperator::NotEq),
                 value,
-            } if matches!(
-                self.column_type(column),
-                Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
-            ) =>
-            {
-                let negated = matches!(operator, ComparisonOperator::NotEq);
-                let bound = db_sql::json_equals_bound(db_type, &column_sql(), value, negated);
-                self.build_custom_expression(bound.sql, bound.values)
-            }
+            } if self.is_json_column(column) => self.build_json_equals_expression(
+                db_type,
+                column,
+                value,
+                matches!(operator, ComparisonOperator::NotEq),
+            ),
             ConditionSpec::Compare { operator, value } => {
                 self.build_compare_expression(column, column_expr(), operator, value)
             }
             ConditionSpec::CompareColumns { operator, other } => {
-                let (left, right) = (column_expr(), self.sea_column_expr(db_type, other));
-                match operator {
-                    ComparisonOperator::Eq => left.eq(right),
-                    ComparisonOperator::NotEq => left.ne(right),
-                    ComparisonOperator::Gt => left.gt(right),
-                    ComparisonOperator::Gte => left.gte(right),
-                    ComparisonOperator::Lt => left.lt(right),
-                    ComparisonOperator::Lte => left.lte(right),
-                }
+                operator.apply(column_expr(), self.sea_column_expr(db_type, other))
             }
             ConditionSpec::Pattern {
                 negated,
@@ -80,8 +65,8 @@ impl<M: Model> QueryBuilder<M> {
             ConditionSpec::Between { low, high, negated } => {
                 self.build_between_expression(column, column_expr(), low, high, negated)
             }
-            ConditionSpec::JsonValue { operator, value } => {
-                self.build_json_value_expression(db_type, &column_sql(), operator, value)
+            ConditionSpec::JsonValue { containment, value } => {
+                self.build_json_value_expression(db_type, &column_sql(), containment, value)
             }
             ConditionSpec::JsonExists {
                 existence,
@@ -105,28 +90,34 @@ impl<M: Model> QueryBuilder<M> {
         group: &OrGroup,
         db_type: DatabaseType,
     ) -> Condition {
-        let mut condition = match group.combine_with {
+        let condition = match group.combine_with {
             LogicalOp::And => Condition::all(),
             LogicalOp::Or => Condition::any(),
         };
+        self.add_filters(condition, &group.conditions, &group.nested_groups, db_type)
+    }
 
-        for filter in &group.conditions {
+    /// `condition` with each of `conditions` and each non-empty group added.
+    pub(in crate::query::sql) fn add_filters(
+        &self,
+        mut condition: Condition,
+        conditions: &[WhereCondition],
+        groups: &[OrGroup],
+        db_type: DatabaseType,
+    ) -> Condition {
+        for filter in conditions {
             if let Some(expression) = self.build_condition_expression(filter, db_type) {
                 condition = condition.add(expression);
             }
         }
-
-        for nested_group in &group.nested_groups {
-            if !nested_group.is_empty() {
-                condition = condition.add(self.build_or_group_condition(nested_group, db_type));
-            }
+        for group in groups.iter().filter(|group| !group.is_empty()) {
+            condition = condition.add(self.build_or_group_condition(group, db_type));
         }
-
         condition
     }
 
     pub(crate) fn build_soft_delete_expression(&self, db_type: DatabaseType) -> Option<SimpleExpr> {
-        match query_scope_for::<M>(self.include_trashed, self.only_trashed) {
+        match query_scope_for::<M>(self.clauses.include_trashed, self.clauses.only_trashed) {
             SoftDeleteScope::Disabled | SoftDeleteScope::WithTrashed => None,
             SoftDeleteScope::ActiveOnly => Some(
                 self.sea_column_expr(db_type, M::deleted_at_column())
@@ -143,16 +134,14 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         db_type: DatabaseType,
     ) -> (String, Vec<Value>) {
-        let has_filters = !self.conditions.is_empty()
-            || !self.or_groups.is_empty()
-            || self.build_soft_delete_expression(db_type).is_some();
-        if !has_filters {
+        let condition = self.build_sea_condition_for_db(db_type);
+        if condition.is_empty() {
             return (String::new(), Vec::new());
         }
 
         let mut query = Query::select();
         query.expr(Expr::cust("1"));
-        query.cond_where(self.build_sea_condition_for_db(db_type));
+        query.cond_where(condition);
 
         let (sql, values) = match db_type {
             DatabaseType::Postgres => query.build(PostgresQueryBuilder),

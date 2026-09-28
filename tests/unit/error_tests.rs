@@ -71,22 +71,6 @@ fn test_is_retryable() {
 }
 
 #[test]
-fn test_log_format() {
-    let err = Error::query_with_context(
-        "syntax error at position 10",
-        ErrorContext::new()
-            .table("users")
-            .query("SELECT * FROM users WHERE"),
-    );
-
-    let log = err.log_format();
-    assert!(log.contains("TIDE_QUERY"));
-    assert!(log.contains("syntax error"));
-    assert!(log.contains("Table: users"));
-    assert!(log.contains("Suggestion:"));
-}
-
-#[test]
 fn test_error_context() {
     let ctx = ErrorContext::new()
         .table("users")
@@ -109,27 +93,8 @@ fn test_error_context() {
 }
 
 #[test]
-fn test_validation_errors() {
-    use crate::validation::ValidationErrors;
-
-    let mut errors = ValidationErrors::new();
-    assert!(errors.is_empty());
-
-    errors.add("email", "Invalid email format");
-    errors.add("name", "Name is required");
-
-    assert!(!errors.is_empty());
-    assert_eq!(errors.len(), 2);
-
-    let display = format!("{}", errors);
-    assert!(display.contains("email"));
-    assert!(display.contains("name"));
-}
-
-#[test]
 fn test_error_context_is_not_reported_as_source() {
-    let err = Error::query_with_context(
-        "syntax error",
+    let err = Error::query("syntax error").with_context(
         ErrorContext::new()
             .table("users")
             .query("SELECT * FROM users WHERE"),
@@ -235,7 +200,7 @@ fn the_not_initialized_error_says_to_connect_first() {
 
 #[test]
 fn errors_that_never_reached_a_driver_report_no_failure() {
-    let err = Error::invalid_query("where_eq called without a column");
+    let err = Error::query("where_eq called without a column");
 
     assert!(err.db_failure().is_none());
     assert_eq!(err.failure_kind(), DbFailureKind::Unclassified);

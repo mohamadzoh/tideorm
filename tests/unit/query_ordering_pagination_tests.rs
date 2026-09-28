@@ -49,6 +49,6 @@ fn test_page_sets_limit_and_offset() {
     let query = PaginationUser::query().page(3, 25);
 
     assert!(query.ensure_query_is_valid().is_ok());
-    assert_eq!(query.limit_value, Some(25));
-    assert_eq!(query.offset_value, Some(50));
+    assert_eq!(query.clauses.limit_value, Some(25));
+    assert_eq!(query.clauses.offset_value, Some(50));
 }

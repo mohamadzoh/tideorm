@@ -43,31 +43,6 @@ fn test_query_cache_enabled_disabled() {
 }
 
 #[test]
-fn test_query_cache_ttl() {
-    let cache = QueryCache::new();
-    cache.enable();
-    cache.set_default_ttl(Duration::from_millis(50));
-    cache.set_strategy(CacheStrategy::TTL);
-
-    cache
-        .set(
-            "ttl_key",
-            &"ttl_value",
-            Some(Duration::from_millis(10)),
-            "model",
-        )
-        .unwrap();
-
-    let result: Option<String> = cache.get("ttl_key");
-    assert!(result.is_some());
-
-    std::thread::sleep(Duration::from_millis(20));
-
-    let result: Option<String> = cache.get("ttl_key");
-    assert!(result.is_none());
-}
-
-#[test]
 fn test_query_cache_entry_expires_after_default_ttl() {
     let cache = QueryCache::with_config(CacheConfig {
         enabled: true,
@@ -261,21 +236,6 @@ fn test_prepared_statement_enabled_disabled() {
     cache.get_or_prepare("SELECT 1");
     let (_, cached) = cache.get_or_prepare("SELECT 1");
     assert!(cached);
-}
-
-#[test]
-fn test_cache_key_builder_with_order_limit_and_offset() {
-    let key = CacheKeyBuilder::new()
-        .table("posts")
-        .order("created_at", "desc")
-        .limit(10)
-        .offset(20)
-        .build();
-
-    assert!(key.contains("t:posts"));
-    assert!(key.contains("o:created_at:desc"));
-    assert!(key.contains("l:10"));
-    assert!(key.contains("off:20"));
 }
 
 #[test]

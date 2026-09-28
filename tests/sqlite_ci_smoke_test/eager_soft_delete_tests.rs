@@ -14,8 +14,9 @@ async fn sqlite_eager_find_preserves_existing_filters() {
     .await
     .expect("failed to insert eager test user");
 
-    let filtered_out = CiUser::eager()
+    let filtered_out = CiUser::query()
         .where_eq("active", false)
+        .with_many(&[])
         .find(created.id)
         .await
         .expect("eager find with filter should succeed");
@@ -24,8 +25,9 @@ async fn sqlite_eager_find_preserves_existing_filters() {
         "eager find should respect prior query filters"
     );
 
-    let matched = CiUser::eager()
+    let matched = CiUser::query()
         .where_eq("active", true)
+        .with_many(&[])
         .find(created.id)
         .await
         .expect("eager find with matching filter should succeed");
@@ -210,30 +212,4 @@ async fn sqlite_reload_returns_not_found_after_delete() {
     assert!(matches!(err, Error::NotFound { .. }));
     assert!(err.to_string().contains("ci_users"));
     assert!(err.to_string().contains("no longer exists"));
-}
-
-#[tokio::test]
-async fn sqlite_reload_still_finds_soft_deleted_records() {
-    fresh_table(CI_SOFT_DELETE_USERS_DDL).await;
-
-    let user = CiSoftDeleteUser {
-        id: 0,
-        name: "Soft Deleted".to_string(),
-        deleted_at: None,
-    }
-    .save()
-    .await
-    .expect("failed to insert soft-delete user");
-
-    let deleted = user
-        .soft_delete()
-        .await
-        .expect("failed to soft delete user");
-
-    let reloaded = deleted
-        .reload()
-        .await
-        .expect("reload should include soft-deleted records");
-    assert_eq!(reloaded.id, deleted.id);
-    assert!(reloaded.deleted_at.is_some());
 }

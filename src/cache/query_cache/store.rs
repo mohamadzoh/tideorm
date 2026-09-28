@@ -288,11 +288,6 @@ pub struct CacheStats {
 impl CacheStats {
     /// Calculate the cache hit ratio
     pub fn hit_ratio(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
-            0.0
-        } else {
-            self.hits as f64 / total as f64
-        }
+        crate::cache::toggle::hit_ratio(self.hits, self.misses)
     }
 }

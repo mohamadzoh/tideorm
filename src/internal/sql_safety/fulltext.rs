@@ -85,12 +85,12 @@ fn split_search_segments(input: &str) -> Vec<SearchSegment> {
 /// resulting empty quoted lexeme with `syntax error in tsquery`, and FTS5
 /// rejects an empty `MATCH` operand, so such runs are dropped rather than
 /// forwarded to either query parser.
-fn has_searchable_char(text: &str) -> bool {
+pub(crate) fn has_searchable_char(text: &str) -> bool {
     text.chars().any(char::is_alphanumeric)
 }
 
 /// The searchable words of `input`, quotes and operators aside.
-fn search_words(input: &str) -> Vec<&str> {
+pub(crate) fn search_words(input: &str) -> Vec<&str> {
     input
         .split(|ch: char| ch.is_whitespace() || ch == '"')
         .filter(|word| has_searchable_char(word))
@@ -211,8 +211,9 @@ pub(crate) fn sanitize_postgres_boolean_tsquery(input: &str) -> String {
         .join(" & ")
 }
 
-/// `text` as one FTS5 string, which FTS5 tokenizes instead of parsing.
-fn fts5_string(text: &str) -> String {
+/// `text` between double quotes, each one in it doubled: an FTS5 string,
+/// which FTS5 tokenizes instead of parsing, or a `ts_headline` option value.
+pub(crate) fn double_quoted(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\""))
 }
 
@@ -229,7 +230,7 @@ pub(crate) fn escape_fts5_query_literal_terms(input: &str) -> String {
     split_search_segments(input)
         .into_iter()
         .filter(|segment| has_searchable_char(&segment.text))
-        .map(|segment| fts5_string(&segment.text))
+        .map(|segment| double_quoted(&segment.text))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -247,12 +248,12 @@ pub(crate) fn fts5_boolean_query(input: &str) -> String {
     }
     let included: Vec<String> = included
         .iter()
-        .map(|segment| fts5_string(&segment.text))
+        .map(|segment| double_quoted(&segment.text))
         .collect();
     let mut query = format!("({})", included.join(" AND "));
     for segment in excluded {
         query.push_str(" NOT ");
-        query.push_str(&fts5_string(&segment.text));
+        query.push_str(&double_quoted(&segment.text));
     }
     query
 }
@@ -263,7 +264,7 @@ pub(crate) fn fts5_phrase_query(input: &str) -> String {
     if words.is_empty() {
         String::new()
     } else {
-        fts5_string(&words.join(" "))
+        double_quoted(&words.join(" "))
     }
 }
 
@@ -271,14 +272,14 @@ pub(crate) fn fts5_phrase_query(input: &str) -> String {
 pub(crate) fn fts5_prefix_query(input: &str) -> String {
     search_words(input)
         .into_iter()
-        .map(|word| format!("{}*", fts5_string(word)))
+        .map(|word| format!("{}*", double_quoted(word)))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 /// The words of `input` within `distance` words of each other.
 pub(crate) fn fts5_near_query(input: &str, distance: u32) -> String {
-    let words: Vec<String> = search_words(input).into_iter().map(fts5_string).collect();
+    let words: Vec<String> = search_words(input).into_iter().map(double_quoted).collect();
     match words.as_slice() {
         [] => String::new(),
         [word] => word.clone(),

@@ -126,17 +126,11 @@ for user in users {
     let posts = user.posts.get_cached().unwrap_or_default();
     println!("{} has {} cached posts", user.name, posts.len());
 }
-
-// You can also start directly from the eager-loading builder.
-let users = User::eager()
-    .with_many(&["profile", "posts", "posts.comments"])
-    .get()
-    .await?;
 ```
 
 Eager queries return `WithRelations<User>` wrappers that dereference to `User`, so the normal relation helper fields remain available and expose their cached payloads through `get_cached()`.
 
-After `with()`, the eager builder forwards the common filters (`where_eq`, `where_in`, `where_raw`, `order_by`, `limit`, `offset`); `query(|q| ..)` reaches every other query method:
+Filter, order and page the query before `with()`; after it, `query(|q| ..)` reaches every query method:
 
 ```rust
 let users = User::query()
@@ -186,8 +180,6 @@ If you enable the `entity-manager` feature, TideORM adds an explicit persistence
 Use `entity_manager.find::<Model>(...)` to load the root model, `entity_manager.load(&mut relation)` to load `HasOne<T>`, `HasMany<T>`, `BelongsTo<T>`, or `HasManyThrough<T, P>` relations inside the same context, and `entity_manager.save(&model)` or `entity_manager.flush()` to persist loaded aggregate-side changes.
 
 If the root model itself came from the entity manager, plain relation read helpers such as `load()`, `load_with(...)`, `count()`, and `exists()` stay on that same database handle even when no global database is configured. Use `entity_manager.load(&mut relation)` when the relation should also become tracked for aggregate synchronization.
-
-`find_in_entity_manager(...)`, `load_in_entity_manager(...)`, and `save_with_entity_manager(...)` remain available as lower-level compatibility entry points.
 
 See [Entity Manager](entity-manager.md) for the full workflow and primary-key support details.
 
@@ -244,7 +236,7 @@ When the pivot model has soft delete, a trashed pivot row no longer links its pa
 
 `attach()` of a pair already linked succeeds without a second row, even when two calls race. When another unique key of the pivot keeps the pair out, such as one on `role_id` alone, `attach()` and `sync()` return an error rather than report a link they did not make.
 
-`load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
+The `pivot` attribute names the pivot model's own table: the relation reads, deletes and loads its pivot rows through that model, so a relation naming another table is refused. `load()`, `count()` and eager loading return each related row once, however many pivot rows link it. `load_with()` joins the pivot table instead, so its closure can order by or read a pivot column, and returns a row per pivot row that links it. The pivot keys may name the fields of renamed columns, and a pivot key need not share the owner's integer type.
 
 ### Polymorphic Relations
 
@@ -293,7 +285,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.12.0", features = ["postgres", "attachments"] }
+tideorm = { version = "0.13.0", features = ["postgres", "attachments"] }
 ```
 
 ### Model Setup
@@ -611,7 +603,7 @@ use tideorm::attachments::FileAttachment;
 
 // Create a FileAttachment for URL generation
 let file = FileAttachment::new("uploads/image.jpg");
-let url = Config::generate_file_url("thumbnail", &file);
+let url = file.url("thumbnail");  // Uses the global generator with the field name
 
 // With metadata for smarter URL generation
 let file = FileAttachment::with_metadata(
@@ -620,15 +612,15 @@ let file = FileAttachment::with_metadata(
     Some(50_000_000),
     Some("video/mp4"),
 );
-let url = Config::generate_file_url("video", &file);
+let url = file.url("video");
 
-// Using model-specific generator
-let url = Product::generate_file_url("thumbnail", &file);
+// Using the model's generator (its `file_url_generator()` override, if any)
+let url = file.url_with_generator("thumbnail", Product::file_url_generator());
 
 // Using FileAttachment method directly
 let attachment = product.get_file("thumbnail")?;
 if let Some(thumb) = attachment {
-    let url = thumb.url("thumbnail");  // Uses global generator with field name
+    let url = thumb.url("thumbnail");
     
     // Or with custom generator
     let url = thumb.url_with_generator("thumbnail", |field_name, file| {
@@ -656,7 +648,7 @@ Enable the feature first:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.12.0", features = ["postgres", "translations"] }
+tideorm = { version = "0.13.0", features = ["postgres", "translations"] }
 ```
 
 ### Model Setup

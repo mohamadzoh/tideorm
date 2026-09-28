@@ -11,7 +11,7 @@
 //! The document is bound as JSON text, which `JSON_CONTAINS` parses on MySQL
 //! and MariaDB alike; MariaDB has no `CAST(.. AS JSON)`.
 
-use super::{Value, json_scalar_parameter, json_string_contents};
+use super::{Value, json_member_path, json_scalar_parameter};
 
 /// `column_sql @> candidate`.
 pub(super) fn mysql_json_contains(
@@ -58,7 +58,7 @@ fn contains_guards(candidate: &serde_json::Value, path: String, guards: &mut Vec
     match candidate {
         serde_json::Value::Object(members) => {
             for (key, value) in members {
-                contains_guards(value, member_path(&path, key), guards);
+                contains_guards(value, json_member_path(&path, key), guards);
             }
             guards.push((path, Kind::Object));
         }
@@ -75,17 +75,13 @@ fn contained_by_guards(target: &serde_json::Value, path: String, guards: &mut Ve
     match target {
         serde_json::Value::Object(members) => {
             for (key, value) in members {
-                contained_by_guards(value, member_path(&path, key), guards);
+                contained_by_guards(value, json_member_path(&path, key), guards);
             }
         }
         serde_json::Value::Array(_) if path == "$" => guards.push((path, Kind::NotObject)),
         serde_json::Value::Array(_) => guards.push((path, Kind::ArrayOrAbsent)),
         _ => {}
     }
-}
-
-fn member_path(path: &str, key: &str) -> String {
-    format!("{path}.\"{}\"", json_string_contents(key))
 }
 
 /// `containment AND` each guard, binding the document and then each path.

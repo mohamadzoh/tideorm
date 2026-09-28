@@ -1,9 +1,26 @@
 use std::time::Duration;
 
 /// Builder for generating cache keys from query parameters
+///
+/// Every text a key is built from has its `\`, `:` and `=` escaped with a
+/// backslash, and every part is tagged, so two different sequences of parts
+/// never build one key: `.condition("name", "a:o:id:ASC")` and
+/// `.condition("name", "a").order("id", "ASC")` stay apart.
 #[derive(Debug, Default)]
 pub struct CacheKeyBuilder {
     parts: Vec<String>,
+}
+
+/// `text` with the separators a key is built with escaped.
+fn escaped(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | ':' | '=') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 impl CacheKeyBuilder {
@@ -14,19 +31,24 @@ impl CacheKeyBuilder {
 
     /// Add a table name
     pub fn table(mut self, table: &str) -> Self {
-        self.parts.push(format!("t:{}", table));
+        self.parts.push(format!("t:{}", escaped(table)));
         self
     }
 
     /// Add a column condition
     pub fn condition(mut self, column: &str, value: impl std::fmt::Display) -> Self {
-        self.parts.push(format!("{}={}", column, value));
+        self.parts.push(format!(
+            "{}={}",
+            escaped(column),
+            escaped(&value.to_string())
+        ));
         self
     }
 
     /// Add an order by clause
     pub fn order(mut self, column: &str, direction: &str) -> Self {
-        self.parts.push(format!("o:{}:{}", column, direction));
+        self.parts
+            .push(format!("o:{}:{}", escaped(column), escaped(direction)));
         self
     }
 
@@ -42,9 +64,9 @@ impl CacheKeyBuilder {
         self
     }
 
-    /// Add a raw part
+    /// Add a raw part, as `r:<part>`
     pub fn raw(mut self, part: &str) -> Self {
-        self.parts.push(part.to_string());
+        self.parts.push(format!("r:{}", escaped(part)));
         self
     }
 

@@ -40,34 +40,6 @@ impl UnixTimestamp {
     }
 }
 
-impl Default for UnixTimestamp {
-    fn default() -> Self {
-        Self::now()
-    }
-}
-
-impl From<UnixTimestamp> for i64 {
-    fn from(ts: UnixTimestamp) -> Self {
-        ts.0
-    }
-}
-
-impl From<DateTime<Utc>> for UnixTimestamp {
-    fn from(dt: DateTime<Utc>) -> Self {
-        Self::from_datetime(dt)
-    }
-}
-
-impl fmt::Display for UnixTimestamp {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(dt) = self.to_datetime() {
-            write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S UTC"))
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
 /// Unix timestamp as milliseconds since the epoch.
 ///
 /// The sub-second counterpart of [`UnixTimestamp`], with the same caveat: it
@@ -118,24 +90,6 @@ impl UnixTimestampMillis {
     }
 }
 
-impl Default for UnixTimestampMillis {
-    fn default() -> Self {
-        Self::now()
-    }
-}
-
-impl From<UnixTimestampMillis> for i64 {
-    fn from(ts: UnixTimestampMillis) -> Self {
-        ts.0
-    }
-}
-
-impl From<DateTime<Utc>> for UnixTimestampMillis {
-    fn from(dt: DateTime<Utc>) -> Self {
-        Self::from_datetime(dt)
-    }
-}
-
 /// `From` cannot report failure, so seconds that do not fit in milliseconds saturate at
 /// `i64::MIN`/`i64::MAX` instead of overflowing. Such values are ~292 million years from
 /// the epoch and are not representable as a `chrono::DateTime` either.
@@ -145,12 +99,38 @@ impl From<UnixTimestamp> for UnixTimestampMillis {
     }
 }
 
-impl fmt::Display for UnixTimestampMillis {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(dt) = self.to_datetime() {
-            write!(f, "{}", dt.format("%Y-%m-%d %H:%M:%S%.3f UTC"))
-        } else {
-            write!(f, "{}", self.0)
+/// What both timestamp types share: `now()` as the default, the raw count as
+/// an `i64`, a `DateTime` in, and the date as their display.
+macro_rules! unix_time_impls {
+    ($name:ident, $display:literal) => {
+        impl Default for $name {
+            fn default() -> Self {
+                Self::now()
+            }
         }
-    }
+
+        impl From<$name> for i64 {
+            fn from(ts: $name) -> Self {
+                ts.0
+            }
+        }
+
+        impl From<DateTime<Utc>> for $name {
+            fn from(dt: DateTime<Utc>) -> Self {
+                Self::from_datetime(dt)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self.to_datetime() {
+                    Some(dt) => write!(f, "{}", dt.format($display)),
+                    None => write!(f, "{}", self.0),
+                }
+            }
+        }
+    };
 }
+
+unix_time_impls!(UnixTimestamp, "%Y-%m-%d %H:%M:%S UTC");
+unix_time_impls!(UnixTimestampMillis, "%Y-%m-%d %H:%M:%S%.3f UTC");

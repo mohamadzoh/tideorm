@@ -11,14 +11,6 @@ fn hash_map_output_key_hides_structured_params() {
     assert_eq!(hash_map_output_key("title", &json!("title")), Some("title"));
 }
 
-#[test]
-fn hash_map_output_key_preserves_scalar_params_values() {
-    assert_eq!(
-        hash_map_output_key("params", &json!("keep me")),
-        Some("params")
-    );
-}
-
 // Three models wired into a two-hop chain (post -> author -> profile) so the
 // eager-loaded payloads `to_json` has to filter are reachable in-process.
 //

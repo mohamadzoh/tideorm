@@ -6,7 +6,6 @@ mod managed;
 mod meta;
 mod save;
 mod state;
-mod tracked;
 
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
@@ -15,21 +14,19 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 pub use managed::{EntityState, Managed};
-pub use meta::{
-    TideEntityManagerFieldWriter, TideEntityManagerMergePersisted, TideEntityManagerMeta,
-    TideEntityManagerSync,
-};
-pub use save::save_with_entity_manager;
-pub use tracked::{TrackedHasMany, TrackedHasManyEntityManagerExt};
+pub use meta::{TideEntityManagerMergePersisted, TideEntityManagerMeta, TideEntityManagerSync};
 
+#[doc(hidden)]
+pub use meta::__identity_key;
 pub(crate) use meta::model_entity_manager_key;
 #[doc(hidden)]
 pub use meta::model_entity_manager_key as __model_entity_manager_key;
-#[doc(hidden)]
-pub use meta::pk_to_entity_manager_key as __pk_to_entity_manager_key;
 pub(crate) use save::with_entity_manager_db;
 #[doc(hidden)]
-pub use save::{__delete_detached_entities, __sync_related_entity};
+pub use save::{
+    __SyncOwner, __delete_detached_entities, __sync_has_many, __sync_has_many_through,
+    __sync_has_one, __sync_related_entity,
+};
 
 type IdentityKey = (TypeId, String);
 type SnapshotKey = (&'static str, TypeId, String, &'static str);
@@ -84,6 +81,8 @@ pub struct EntityManager {
     managed_identity_map: RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>,
     managed_entries: RwLock<Vec<Arc<dyn managed::ManagedOps>>>,
     snapshots: RwLock<HashMap<SnapshotKey, HashSet<String>>>,
+    /// Held by the flush or save running as this context's unit of work.
+    unit_of_work: futures_util::lock::Mutex<()>,
     pub(crate) db: Arc<crate::database::Database>,
 }
 
@@ -95,6 +94,7 @@ impl EntityManager {
             managed_identity_map: RwLock::new(HashMap::new()),
             managed_entries: RwLock::new(Vec::new()),
             snapshots: RwLock::new(HashMap::new()),
+            unit_of_work: futures_util::lock::Mutex::new(()),
             db,
         })
     }
@@ -183,18 +183,34 @@ impl EntityManager {
         // succeeds. Setting it here made `put` + `remove` + `flush` issue a real
         // DELETE — and fire before/after_delete — for a row that was never written.
         // The identity map is keyed separately below, so tracking still works.
+        self.file_managed(entity, None, EntityState::New, None, key.as_deref())
+    }
+
+    /// Manage `entity` in a new entry, filed in the managed map under
+    /// `identity_key` when it has one: `persist` files a client-assigned key
+    /// before any insert, which `persisted_key` leaves `None`.
+    fn file_managed<T>(
+        self: &Arc<Self>,
+        entity: T,
+        snapshot: Option<T>,
+        state: EntityState,
+        persisted_key: Option<String>,
+        identity_key: Option<&str>,
+    ) -> Managed<T>
+    where
+        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
+        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
+            PartialEq,
+    {
         let entry = Arc::new(managed::ManagedEntry::new(
             entity,
-            None,
-            EntityState::New,
-            None,
+            snapshot,
+            state,
+            persisted_key,
         ));
         self.register_managed_entry(entry.clone());
-        if let Some(key) = key.as_deref() {
+        if let Some(key) = identity_key {
             self.put_managed_entry::<T>(key, entry.clone());
-            // Record what the entry was filed under. `persisted_key` stays `None`
-            // — nothing is inserted yet — so without this the removal paths, which
-            // all key off the map entry, would have nothing to evict.
             entry.set_identity_key(Some(key.to_string()));
         }
         Managed::from_entry(entry)
@@ -225,16 +241,13 @@ impl EntityManager {
         }
 
         let snapshot = self.get_by_entity_manager_key::<T>(&key);
-
-        let entry = Arc::new(managed::ManagedEntry::new(
+        Ok(self.file_managed(
             entity,
             snapshot,
             EntityState::Managed,
             Some(key.clone()),
-        ));
-        self.register_managed_entry(entry.clone());
-        self.put_managed_entry::<T>(&key, entry.clone());
-        Ok(Managed::from_entry(entry))
+            Some(&key),
+        ))
     }
 
     /// Schedule `managed` for deletion on the next [`flush`](Self::flush). An
@@ -252,16 +265,7 @@ impl EntityManager {
     where
         T: Send + Sync + 'static,
     {
-        // `identity_key`, not `persisted_key`: an entity `persist`ed with a
-        // client-assigned primary key is in the identity map before any insert,
-        // so keying the eviction off the persisted key left it behind and the
-        // detach silently did nothing.
-        if let Some(key) = managed.entry.identity_key() {
-            self.remove_managed_entry::<T>(&key);
-        }
-        managed.entry.set_identity_key(None);
-
-        managed.entry.mark_detached();
+        managed.entry.evict(self);
         self.remove_managed_ops_entry(managed);
     }
 
@@ -272,31 +276,21 @@ impl EntityManager {
     /// On failure the transaction rolls back and the context is restored to its
     /// state before the flush, as it is when the flush is cancelled part way or
     /// a transaction enclosing it rolls back afterwards. Inside an enclosing
-    /// save or flush it joins that unit of work instead of opening its own.
+    /// save or flush it joins that unit of work instead of opening its own;
+    /// otherwise it waits for one that is running, so two flushes never both
+    /// insert an entity neither has written yet.
     pub async fn flush(self: &Arc<Self>) -> crate::error::Result<()> {
-        if save::in_entity_manager_transaction_scope() {
+        if save::in_entity_manager_transaction_scope(self) {
             return self.flush_in_scope().await;
         }
 
-        let rollback = save::PendingRollback::new(self, Vec::new());
         let entity_manager = self.clone();
-        let transaction_checkpoints = rollback.checkpoints();
-        let transaction_identity_rollback = rollback.identity_rollback();
-        self.db
-            .transaction(move |_| {
-                Box::pin(async move {
-                    save::with_entity_manager_transaction_scope(
-                        transaction_identity_rollback,
-                        entity_manager
-                            .flush_in_scope_with_checkpoints(Some(&transaction_checkpoints)),
-                    )
-                    .await
-                })
-            })
-            .await?;
-        rollback.committed();
-
-        Ok(())
+        save::in_unit_of_work(self, Vec::new, move |checkpoints| async move {
+            entity_manager
+                .flush_in_scope_with_checkpoints(Some(&checkpoints))
+                .await
+        })
+        .await
     }
 
     async fn flush_in_scope(self: &Arc<Self>) -> crate::error::Result<()> {
@@ -322,7 +316,7 @@ impl EntityManager {
             }
 
             if passes >= MAX_FLUSH_PASSES {
-                return Err(crate::error::Error::invalid_query(format!(
+                return Err(crate::error::Error::query(format!(
                     "entity manager flush exceeded {MAX_FLUSH_PASSES} passes while new managed entries kept being registered; check relation sync for cycles"
                 )));
             }
@@ -335,6 +329,7 @@ impl EntityManager {
             // order.
             let order = managed::plan_flush_order(&entries);
             entries.sort_by_key(|entry| managed::flush_sort_key(entry.as_ref(), &order));
+            managed::order_self_references(&mut entries);
 
             for entry in entries {
                 if let Some(checkpoints) = checkpoints {
@@ -410,23 +405,22 @@ impl EntityManager {
         let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
 
+        // Another lookup of the same row finished first: its handle may hold
+        // edits since, which the row as this lookup read it must not undo.
         let key = entity.tide_pk_key();
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
-            existing.entry.overwrite_clean(entity.clone(), Some(key));
-            self.put(entity);
             return existing;
         }
 
-        let entry = Arc::new(managed::ManagedEntry::new(
+        let managed = self.file_managed(
             entity.clone(),
             Some(entity.clone()),
             EntityState::Managed,
             Some(key.clone()),
-        ));
-        self.register_managed_entry(entry.clone());
-        self.put_managed_entry::<T>(&key, entry.clone());
+            Some(&key),
+        );
         self.put(entity);
-        Managed::from_entry(entry)
+        managed
     }
 
     /// File `entity` in the identity map and return the instance the map holds
@@ -452,7 +446,7 @@ impl EntityManager {
             return entity;
         }
 
-        let key = (TypeId::of::<T>(), entity.tide_pk_key());
+        let key = state::identity_key::<T>(entity.tide_pk_key());
 
         if let Some(existing) = self.get_by_key::<T>(&key) {
             return existing;

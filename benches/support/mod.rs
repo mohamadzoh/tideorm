@@ -24,6 +24,22 @@ pub fn postgres_benchmarks_enabled() -> bool {
     enabled
 }
 
+/// `criterion_main!` for a PostgreSQL bench: run the `benches` group only when
+/// a server is configured.
+macro_rules! postgres_bench_main {
+    () => {
+        fn main() {
+            if support::postgres_benchmarks_enabled() {
+                benches();
+                criterion::Criterion::default()
+                    .configure_from_args()
+                    .final_summary();
+            }
+        }
+    };
+}
+pub(crate) use postgres_bench_main;
+
 pub fn runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| Runtime::new().expect("Failed to build benchmark runtime"))
 }

@@ -8,31 +8,31 @@
 //! Run with:
 //! cargo test --test mysql_integration_tests --no-default-features --features mysql,runtime-tokio
 
-#[path = "support/mysql_test_config.rs"]
+#[path = "support/mysql_family_test_config.rs"]
 mod test_config;
+
+static SERVER: test_config::Server = test_config::Server::new("MySQL", "MYSQL");
 
 mod backend {
     use tideorm::TideConfig;
     use tideorm::config::DatabaseType;
 
-    use super::test_config::{mysql_database_url, should_run_mysql_tests};
+    use super::SERVER;
 
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::MySQL;
 
     pub fn database_url() -> &'static str {
-        mysql_database_url()
+        SERVER.database_url()
     }
 
     pub async fn connect() -> bool {
-        if !should_run_mysql_tests() {
-            println!(
-                "Skipping MySQL test: set RUN_MYSQL_TESTS or MYSQL_DATABASE_URL (SKIP_MYSQL_TESTS overrides both)"
-            );
+        if !SERVER.enabled() {
+            println!("{}", SERVER.skipped("test"));
             return false;
         }
         TideConfig::init()
             .database_type(DatabaseType::MySQL)
-            .database(mysql_database_url())
+            .database(SERVER.database_url())
             .max_connections(5)
             .connect()
             .await

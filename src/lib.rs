@@ -100,3 +100,7 @@ pub use inventory;
 pub use serde;
 #[doc(hidden)]
 pub use serde_json;
+
+#[cfg(test)]
+#[path = "../tests/unit/support.rs"]
+mod test_support;

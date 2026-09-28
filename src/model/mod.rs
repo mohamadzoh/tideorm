@@ -3,15 +3,17 @@
 //! nested saves ([`NestedSave`]).
 //!
 //! `find`, `create`, `update`, `save` and `delete` are emitted per model by the
-//! derive. The trait's default methods delegate to `crud` for table-wide reads,
-//! `nested` for relation-aware saves, and `serialization` for `to_json` and the
-//! attachment and translation attribute helpers.
+//! derive. The trait's default methods delegate to `internal::QueryExecutor`
+//! for table-wide reads, `nested` for relation-aware saves, and
+//! `serialization` for `to_json`.
 
 mod api;
 mod batch;
 mod builders;
 mod crud;
-pub(crate) use crud::find_including_trashed;
+pub(crate) use crud::reload_by_key;
+#[doc(hidden)]
+pub use crud::{__delete_row, __insert_row, __update_row};
 #[cfg(feature = "dirty-tracking")]
 mod dirty_tracking;
 #[cfg(feature = "encrypted-fields")]
@@ -19,12 +21,15 @@ mod encryption;
 mod meta;
 mod nested;
 mod serialization;
+mod upsert;
 
 pub use api::Model;
 pub use batch::{BatchUpdateBuilder, UpdateValue};
 pub use builders::OnConflictBuilder;
 pub use meta::{IndexDefinition, ModelMeta, RelationPayloadFilter};
 pub use nested::{NestedSave, NestedSaveBuilder, SavedRelation};
+#[doc(hidden)]
+pub use upsert::__upsert;
 
 #[doc(hidden)]
 #[cfg(feature = "encrypted-fields")]
@@ -84,6 +89,35 @@ where
     }
 }
 
+/// The model's encrypted fields, each paired with its column.
+///
+/// The two `ModelMeta` lists are declared independently, so a mismatched length
+/// is possible in hand-written metadata. Zipping them would silently drop the
+/// trailing entries, and a dropped entry looks exactly like "this column is not
+/// encrypted" — which would write plaintext into an encrypted column, or read
+/// ciphertext back as the value. Refuse instead.
+pub(crate) fn encrypted_field_columns<M: ModelMeta>()
+-> crate::error::Result<Vec<(&'static str, &'static str)>> {
+    let encrypted_fields = M::encrypted_fields();
+    let encrypted_columns = M::encrypted_column_names();
+
+    if encrypted_fields.len() != encrypted_columns.len() {
+        return Err(crate::error::Error::configuration(format!(
+            "Model '{}' declares {} encrypted field name(s) but {} encrypted column name(s); \
+             encrypted_fields() and encrypted_column_names() must describe the same columns in \
+             the same order, otherwise an encrypted column can be written as plaintext",
+            M::table_name(),
+            encrypted_fields.len(),
+            encrypted_columns.len()
+        )));
+    }
+
+    Ok(encrypted_fields
+        .into_iter()
+        .zip(encrypted_columns)
+        .collect())
+}
+
 /// Decrypt, in rows a query of `M` read as JSON, each output holding one of
 /// `M`'s encrypted columns: `pluck`, `value`, `get_json` and `get_as` return
 /// what `get()` does, not the stored ciphertext.
@@ -102,17 +136,14 @@ pub(crate) fn decrypt_json_rows<M: ModelMeta>(
         return Ok(());
     }
     let mut encrypted_outputs: Vec<(String, &str, &str)> = Vec::new();
-    for (field, column) in M::encrypted_fields()
-        .into_iter()
-        .zip(M::encrypted_column_names())
-    {
+    for (field, column) in encrypted_field_columns::<M>()? {
         let mut named_by_a_column = false;
         for (name, source) in outputs {
             let Some((table, source_column)) = source else {
                 continue;
             };
             named_by_a_column |= name == column;
-            let source_column = M::canonical_column_name(source_column).unwrap_or(source_column);
+            let source_column = M::column_named(source_column);
             if table == M::table_name() && source_column == column {
                 encrypted_outputs.push((name.clone(), field, column));
             }
@@ -244,16 +275,6 @@ pub async fn __soft_delete_by_primary_key<M: Model>(
 pub fn __forget_dirty_snapshot<M: Model>(model: &M) {
     #[cfg(feature = "dirty-tracking")]
     warn_on_snapshot_error("forget", dirty_tracking::forget_model(model));
-}
-
-#[doc(hidden)]
-#[cfg_attr(not(feature = "dirty-tracking"), allow(unused_variables))]
-pub fn __forget_dirty_snapshot_by_pk<M: Model>(primary_key: &M::PrimaryKey) {
-    #[cfg(feature = "dirty-tracking")]
-    warn_on_snapshot_error(
-        "forget",
-        dirty_tracking::forget_primary_key::<M>(primary_key),
-    );
 }
 
 #[doc(hidden)]

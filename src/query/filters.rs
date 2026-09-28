@@ -59,29 +59,23 @@ macro_rules! condition_methods {
             [where_like, or_where_like, and_where_like]
                 "Match rows against a raw `LIKE` pattern, used as written: `%` and `_` stay wildcards."
                 (pattern: &str)
-                => Like, $crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string()));
+                => Like, $crate::query::ConditionValue::text(pattern);
             [where_not_like, or_where_not_like, and_where_not_like]
                 "Exclude rows matching a raw `LIKE` pattern, used as written."
                 (pattern: &str)
-                => NotLike, $crate::query::ConditionValue::Single(serde_json::Value::String(pattern.to_string()));
+                => NotLike, $crate::query::ConditionValue::text(pattern);
             [where_contains, or_where_contains, and_where_contains]
                 "Match rows where `column` contains `value` literally; its `%` and `_` are escaped, so it is safe for user input."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::Single(serde_json::Value::String(
-                    format!("%{}%", $crate::columns::escape_like_literal(value)),
-                ));
+                => LikeEscaped, $crate::query::ConditionValue::contains(value);
             [where_starts_with, or_where_starts_with, and_where_starts_with]
                 "Match rows where `column` starts with `value` literally; its `%` and `_` are escaped."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::Single(serde_json::Value::String(
-                    format!("{}%", $crate::columns::escape_like_literal(value)),
-                ));
+                => LikeEscaped, $crate::query::ConditionValue::starts_with(value);
             [where_ends_with, or_where_ends_with, and_where_ends_with]
                 "Match rows where `column` ends with `value` literally; its `%` and `_` are escaped."
                 (value: &str)
-                => LikeEscaped, $crate::query::ConditionValue::Single(serde_json::Value::String(
-                    format!("%{}", $crate::columns::escape_like_literal(value)),
-                ));
+                => LikeEscaped, $crate::query::ConditionValue::ends_with(value);
             [where_in, or_where_in, and_where_in] <V: serde::Serialize>
                 "Match rows where `column` is one of `values` — a `Vec`, an array, `&ids`, a set — each bound as its own parameter."
                 (values: impl IntoIterator<Item = V>)
@@ -159,19 +153,19 @@ macro_rules! condition_methods {
             [where_json_key_exists, or_where_json_key_exists, and_where_json_key_exists]
                 "Match rows whose JSON `column` has the top-level `key`, one holding JSON `null` included; a NULL column matches neither this nor `where_json_key_not_exists`."
                 (key: &str)
-                => JsonKeyExists, $crate::query::ConditionValue::Single(serde_json::Value::String(key.to_string()));
+                => JsonKeyExists, $crate::query::ConditionValue::text(key);
             [where_json_key_not_exists, or_where_json_key_not_exists, and_where_json_key_not_exists]
                 "Match rows whose JSON `column` lacks the top-level `key`; a NULL column matches neither this nor `where_json_key_exists`."
                 (key: &str)
-                => JsonKeyNotExists, $crate::query::ConditionValue::Single(serde_json::Value::String(key.to_string()));
+                => JsonKeyNotExists, $crate::query::ConditionValue::text(key);
             [where_json_path_exists, or_where_json_path_exists, and_where_json_path_exists]
                 "Match rows whose JSON `column` has a member at `path` (`a.b.c`), one holding JSON `null` included."
                 (path: &str)
-                => JsonPathExists, $crate::query::ConditionValue::Single(serde_json::Value::String(path.to_string()));
+                => JsonPathExists, $crate::query::ConditionValue::text(path);
             [where_json_path_not_exists, or_where_json_path_not_exists, and_where_json_path_not_exists]
                 "Match rows whose JSON `column` has no member at `path`; a NULL column matches neither this nor `where_json_path_exists`."
                 (path: &str)
-                => JsonPathNotExists, $crate::query::ConditionValue::Single(serde_json::Value::String(path.to_string()));
+                => JsonPathNotExists, $crate::query::ConditionValue::text(path);
             [where_array_contains, or_where_array_contains, and_where_array_contains] <V: serde::Serialize>
                 "Match rows whose array `column` holds every one of `values` (`@>`), any list of any serializable value."
                 (values: impl IntoIterator<Item = V>)
@@ -338,6 +332,29 @@ pub(crate) use finite::checked_filter_value;
 pub use or_branch_builder::OrBranchBuilder;
 pub use or_group::OrGroup;
 
+impl OrGroup {
+    /// Add every condition of the group, its nested groups' included, to
+    /// `conditions`.
+    fn collect_conditions<'a>(&'a self, conditions: &mut Vec<&'a WhereCondition>) {
+        conditions.extend(&self.conditions);
+        for nested in &self.nested_groups {
+            nested.collect_conditions(conditions);
+        }
+    }
+}
+
+impl<M: Model> QueryBuilder<M> {
+    /// Every condition of the query: its own, then each OR group's, nested
+    /// ones included.
+    pub(crate) fn all_conditions(&self) -> Vec<&WhereCondition> {
+        let mut conditions: Vec<&WhereCondition> = self.clauses.conditions.iter().collect();
+        for group in &self.clauses.or_groups {
+            group.collect_conditions(&mut conditions);
+        }
+        conditions
+    }
+}
+
 /// Sort order for queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Order {
@@ -389,8 +406,6 @@ pub enum Operator {
     ArrayContainedBy,
     ArrayOverlaps,
     Raw,
-    EqAny,
-    NeAll,
 }
 
 /// A single where condition
@@ -399,22 +414,6 @@ pub struct WhereCondition {
     pub column: String,
     pub operator: Operator,
     pub value: ConditionValue,
-}
-
-impl WhereCondition {
-    /// A condition of a query of `M`, which names another model's typed
-    /// column with that model's table.
-    pub(crate) fn of<M: Model>(
-        column: impl crate::columns::IntoColumnName,
-        operator: Operator,
-        value: ConditionValue,
-    ) -> Self {
-        Self {
-            column: crate::columns::column_reference(&column, Some(M::table_name())),
-            operator,
-            value,
-        }
-    }
 }
 
 /// A filter or assignment value as the JSON the builders carry.
@@ -514,6 +513,26 @@ impl ConditionValue {
             (Err(reason), _) | (_, Err(reason)) => Self::Invalid(reason),
         }
     }
+
+    /// One text value: a `LIKE` pattern, a JSON key or path.
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Self::Single(serde_json::Value::String(text.into()))
+    }
+
+    /// The `LIKE` pattern matching text that contains `value` literally.
+    pub(crate) fn contains(value: &str) -> Self {
+        Self::text(format!("%{}%", crate::columns::escape_like_literal(value)))
+    }
+
+    /// The `LIKE` pattern matching text that starts with `value` literally.
+    pub(crate) fn starts_with(value: &str) -> Self {
+        Self::text(format!("{}%", crate::columns::escape_like_literal(value)))
+    }
+
+    /// The `LIKE` pattern matching text that ends with `value` literally.
+    pub(crate) fn ends_with(value: &str) -> Self {
+        Self::text(format!("%{}", crate::columns::escape_like_literal(value)))
+    }
 }
 
 /// Logical operator for combining conditions
@@ -542,7 +561,7 @@ impl LogicalOp {
 /// only NULLs counts too: it renders `col IS NOT NULL`, which keeps every row of
 /// a `NOT NULL` column, as does `where_not(col, None)`, which renders the same test.
 ///
-/// Their positive duals (`IN ()`, `= ANY ()`, `&& ()`) render constant-*false*
+/// Their positive duals (`IN ()`, `&& ()`) render constant-*false*
 /// and are deliberately absent: a mutation that matches nothing is safe.
 ///
 /// The check is structural on purpose. Inspecting the rendered SQL cannot
@@ -552,7 +571,7 @@ impl LogicalOp {
 /// shape survives a comparison against a fixed set of constant-true spellings.
 pub(crate) fn condition_is_vacuous(condition: &WhereCondition) -> bool {
     match (&condition.operator, &condition.value) {
-        (Operator::NotIn | Operator::NeAll, ConditionValue::List(values)) => {
+        (Operator::NotIn, ConditionValue::List(values)) => {
             values.iter().all(serde_json::Value::is_null)
         }
         // `where_not(col, None)` renders the same `col IS NOT NULL`.

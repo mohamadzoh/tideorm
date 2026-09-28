@@ -93,44 +93,54 @@ impl TableSchemaBuilder {
     }
 }
 
-impl ColumnSchema {
-    /// Create a new column schema
-    pub fn new(name: impl Into<String>, sql_type: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            sql_type: sql_type.into(),
-            nullable: true,
-            default: None,
-            primary_key: false,
-            auto_increment: false,
+/// The constructor and builder methods of a column declaration, shared by
+/// [`ColumnSchema`] (an SQL type) and sync's `ColumnDef` (a Rust type): a
+/// column is nullable until told otherwise, and a primary key is `NOT NULL`.
+macro_rules! column_declaration_methods {
+    ($declaration:ident, $type_field:ident) => {
+        impl $declaration {
+            /// Declare a nullable column named `name`.
+            pub fn new(name: impl Into<String>, $type_field: impl Into<String>) -> Self {
+                Self {
+                    name: name.into(),
+                    $type_field: $type_field.into(),
+                    nullable: true,
+                    default: None,
+                    primary_key: false,
+                    auto_increment: false,
+                }
+            }
+
+            /// Make the column the primary key, which also makes it `NOT NULL`.
+            pub fn primary_key(mut self) -> Self {
+                self.primary_key = true;
+                self.nullable = false;
+                self
+            }
+
+            /// Make the column auto-increment.
+            pub fn auto_increment(mut self) -> Self {
+                self.auto_increment = true;
+                self
+            }
+
+            /// Make the column `NOT NULL`.
+            pub fn not_null(mut self) -> Self {
+                self.nullable = false;
+                self
+            }
+
+            /// Set the column's default, an SQL expression.
+            pub fn default(mut self, value: impl Into<String>) -> Self {
+                self.default = Some(value.into());
+                self
+            }
         }
-    }
-
-    /// Mark as primary key
-    pub fn primary_key(mut self) -> Self {
-        self.primary_key = true;
-        self.nullable = false;
-        self
-    }
-
-    /// Mark as auto increment
-    pub fn auto_increment(mut self) -> Self {
-        self.auto_increment = true;
-        self
-    }
-
-    /// Mark as not nullable
-    pub fn not_null(mut self) -> Self {
-        self.nullable = false;
-        self
-    }
-
-    /// Set default value
-    pub fn default(mut self, value: impl Into<String>) -> Self {
-        self.default = Some(value.into());
-        self
-    }
+    };
 }
+pub(crate) use column_declaration_methods;
+
+column_declaration_methods!(ColumnSchema, sql_type);
 
 /// Map a Rust type spelling onto TideORM's logical column type.
 ///

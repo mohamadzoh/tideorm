@@ -50,7 +50,8 @@ fn serialized_id(id: i64) -> String {
 }
 
 fn encode_payload(id: i64, model_name: &str) -> String {
-    TokenConfig::encode(&serialized_id(id), model_name).expect("Failed to encode benchmark token")
+    TokenConfig::get_encoder()(&serialized_id(id), model_name)
+        .expect("Failed to encode benchmark token")
 }
 
 fn tamper_token(token: &str) -> String {
@@ -71,8 +72,8 @@ fn bench_token_config_encoding(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("encode", id), &payload, |b, payload| {
             b.iter(|| {
                 black_box(
-                    TokenConfig::encode(black_box(payload), black_box(MODEL_NAME))
-                        .expect("TokenConfig::encode failed"),
+                    TokenConfig::get_encoder()(black_box(payload), black_box(MODEL_NAME))
+                        .expect("encoding failed"),
                 )
             })
         });
@@ -91,8 +92,8 @@ fn bench_token_config_decoding(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("decode", id), &token, |b, token| {
             b.iter(|| {
                 black_box(
-                    TokenConfig::decode(black_box(token), black_box(MODEL_NAME))
-                        .expect("TokenConfig::decode failed"),
+                    TokenConfig::get_decoder()(black_box(token), black_box(MODEL_NAME))
+                        .expect("decoding failed"),
                 )
             })
         });
@@ -106,13 +107,13 @@ fn bench_tokenizable_helpers(c: &mut Criterion) {
 
     let model = TokenBenchModel { id: 4242 };
     let token = model
-        .tokenize()
+        .to_token()
         .expect("Failed to build token for helper bench");
 
     let mut group = c.benchmark_group("tokenizable_helpers");
 
     group.bench_function("instance_tokenize", |b| {
-        b.iter(|| black_box(model.tokenize().expect("tokenize failed")))
+        b.iter(|| black_box(model.to_token().expect("tokenize failed")))
     });
 
     group.bench_function("static_tokenize_id", |b| {
@@ -127,10 +128,6 @@ fn bench_tokenizable_helpers(c: &mut Criterion) {
                 TokenBenchModel::decode_token(black_box(&token)).expect("decode_token failed"),
             )
         })
-    });
-
-    group.bench_function("regenerate_token", |b| {
-        b.iter(|| black_box(model.regenerate_token().expect("regenerate_token failed")))
     });
 
     group.finish();
@@ -156,7 +153,7 @@ fn bench_invalid_token_handling(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("decode", name), &token, |b, token| {
             b.iter(|| {
                 black_box(
-                    TokenConfig::decode(black_box(token), black_box(MODEL_NAME))
+                    TokenConfig::get_decoder()(black_box(token), black_box(MODEL_NAME))
                         .expect("Invalid-token decode path should not error"),
                 )
             })
@@ -166,7 +163,7 @@ fn bench_invalid_token_handling(c: &mut Criterion) {
     group.bench_function("wrong_model", |b| {
         b.iter(|| {
             black_box(
-                TokenConfig::decode(black_box(&valid_token), black_box("OtherTokenModel"))
+                TokenConfig::get_decoder()(black_box(&valid_token), black_box("OtherTokenModel"))
                     .expect("Wrong-model decode path should not error"),
             )
         })

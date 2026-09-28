@@ -100,15 +100,6 @@ impl Config {
         super::state::global_file_url_generator().unwrap_or(Self::default_file_url_generator)
     }
 
-    /// Install the attachment URL generator process-wide.
-    ///
-    /// Takes effect immediately for every model. `TideConfig::file_url_generator`
-    /// is the builder-style spelling of this.
-    #[cfg(feature = "attachments")]
-    pub fn set_file_url_generator(generator: FileUrlGenerator) {
-        super::state::set_global_file_url_generator(Some(generator));
-    }
-
     /// The URL generator used when none was installed.
     ///
     /// Joins the base URL that applies to `field_name` with the file's storage
@@ -127,19 +118,6 @@ impl Config {
         } else {
             file.key.clone()
         }
-    }
-
-    /// Build the public URL for one attachment through the installed generator.
-    ///
-    /// This is what `to_json()` calls; reach for it directly when rendering an
-    /// attachment outside of TideORM's own serialization.
-    #[inline]
-    #[cfg(feature = "attachments")]
-    pub fn generate_file_url(
-        field_name: &str,
-        file: &crate::attachments::FileAttachment,
-    ) -> String {
-        Self::get_file_url_generator()(field_name, file)
     }
 }
 

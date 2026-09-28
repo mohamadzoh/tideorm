@@ -10,30 +10,30 @@
 //! Run with:
 //! cargo test --test mariadb_integration_tests --no-default-features --features mysql,runtime-tokio
 
-#[path = "support/mariadb_test_config.rs"]
+#[path = "support/mysql_family_test_config.rs"]
 mod test_config;
+
+static SERVER: test_config::Server = test_config::Server::new("MariaDB", "MARIADB");
 
 mod backend {
     use tideorm::TideConfig;
     use tideorm::config::DatabaseType;
 
-    use super::test_config::{mariadb_database_url, should_run_mariadb_tests};
+    use super::SERVER;
 
     pub const DATABASE_TYPE: DatabaseType = DatabaseType::MariaDB;
 
     pub fn database_url() -> &'static str {
-        mariadb_database_url()
+        SERVER.database_url()
     }
 
     pub async fn connect() -> bool {
-        if !should_run_mariadb_tests() {
-            println!(
-                "Skipping MariaDB test: set RUN_MARIADB_TESTS or MARIADB_DATABASE_URL (SKIP_MARIADB_TESTS overrides both)"
-            );
+        if !SERVER.enabled() {
+            println!("{}", SERVER.skipped("test"));
             return false;
         }
         TideConfig::init()
-            .database(mariadb_database_url())
+            .database(SERVER.database_url())
             .max_connections(5)
             .connect()
             .await

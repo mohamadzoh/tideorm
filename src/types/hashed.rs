@@ -88,17 +88,18 @@ impl From<String> for Hashed {
     }
 }
 
+/// What a hash is shown and serialized as, so it never leaves the process.
+const REDACTED: &str = "***HASHED***";
+
 impl fmt::Debug for Hashed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Hashed")
-            .field("hash", &"***HASHED***")
-            .finish()
+        f.debug_struct("Hashed").field("hash", &REDACTED).finish()
     }
 }
 
 impl fmt::Display for Hashed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "***HASHED***")
+        f.write_str(REDACTED)
     }
 }
 
@@ -107,7 +108,7 @@ impl Serialize for Hashed {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str("***HASHED***")
+        serializer.serialize_str(REDACTED)
     }
 }
 
@@ -117,7 +118,7 @@ impl<'de> Deserialize<'de> for Hashed {
         D: serde::Deserializer<'de>,
     {
         let hash = String::deserialize(deserializer)?;
-        if hash == "***HASHED***" {
+        if hash == REDACTED {
             return Err(serde::de::Error::custom(
                 "Hashed values use a redacted serialization format and cannot be deserialized from ***HASHED***",
             ));

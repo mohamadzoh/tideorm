@@ -1,16 +1,54 @@
 use super::*;
 
-use std::collections::HashSet;
-
 use crate::parse::{RelationKind, is_utc_datetime_type, option_inner_type};
 
-pub(super) fn split_csv(value: Option<&String>) -> Option<Vec<String>> {
-    value.map(|value| {
-        value
-            .split(',')
-            .map(|part| part.trim().to_string())
-            .collect()
-    })
+/// The names a comma-separated attribute lists, trimmed; an empty one, such as
+/// a trailing comma leaves, is an error.
+pub(super) fn split_csv(
+    struct_ident: &Ident,
+    attribute: &str,
+    value: Option<&String>,
+) -> syn::Result<Option<Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let names: Vec<String> = value
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .collect();
+    if names.iter().any(String::is_empty) {
+        // The names come from an attribute string, so there is no token of their
+        // own to span; the struct is the closest real location.
+        return Err(syn::Error::new_spanned(
+            struct_ident,
+            format!("#[tideorm({attribute} = \"{value}\")] lists an empty name"),
+        ));
+    }
+    Ok(Some(names))
+}
+
+/// The fields a field-list attribute names, by field or column name, each once.
+pub(super) fn resolve_field_list<'a>(
+    struct_ident: &Ident,
+    attribute: &str,
+    fields: &'a [ModelField],
+    names: &[String],
+) -> syn::Result<Vec<&'a ModelField>> {
+    let mut resolved: Vec<&ModelField> = Vec::new();
+    for name in names {
+        let field = find_db_field(fields, name).ok_or_else(|| {
+            syn::Error::new_spanned(
+                struct_ident,
+                format!(
+                    "#[tideorm({attribute} = ...)] references unknown field or column '{name}'"
+                ),
+            )
+        })?;
+        if !resolved.iter().any(|seen| seen.name() == field.name()) {
+            resolved.push(field);
+        }
+    }
+    Ok(resolved)
 }
 
 fn combine_error(errors: &mut Option<syn::Error>, error: syn::Error) {
@@ -164,22 +202,8 @@ pub(super) fn resolve_encrypted_fields<'a>(
     fields: &'a [ModelField],
     requested: &[String],
 ) -> syn::Result<Vec<&'a ModelField>> {
-    let mut resolved = Vec::new();
-    let mut seen = HashSet::new();
-
-    for requested_name in requested {
-        let field = find_db_field(fields, requested_name).ok_or_else(|| {
-            // The name comes from an attribute string, so there is no token of its
-            // own to span; the struct is the closest real location.
-            syn::Error::new_spanned(
-                struct_ident,
-                format!(
-                    "#[tideorm(encrypted = ...)] references unknown field or column '{}'",
-                    requested_name
-                ),
-            )
-        })?;
-
+    let resolved = resolve_field_list(struct_ident, "encrypted", fields, requested)?;
+    for field in &resolved {
         if !field.supports_encryption() {
             return Err(syn::Error::new_spanned(
                 &field.ty,
@@ -195,10 +219,6 @@ pub(super) fn resolve_encrypted_fields<'a>(
                 "#[tideorm(encrypted = ...)] cannot name a primary key field: its stored \
                  ciphertext changes on every write, so no lookup by the key could match it",
             ));
-        }
-
-        if seen.insert(field.name()) {
-            resolved.push(field);
         }
     }
 
@@ -236,12 +256,11 @@ pub(super) fn resolve_soft_delete_field(
 /// definitions that reference columns the model does not declare.
 pub(super) fn validate_index_definitions(
     indexes: &[IndexDef],
-    unique_indexes: &[IndexDef],
     db_fields: &[ModelField],
 ) -> syn::Result<()> {
     let mut errors = None;
 
-    for index in indexes.iter().chain(unique_indexes) {
+    for index in indexes {
         if let Some(error) = &index.error {
             combine_error(&mut errors, error.clone());
             continue;
@@ -260,6 +279,8 @@ pub(super) fn validate_index_definitions(
     into_result(errors)
 }
 
+/// The model's unique indexes, or its other ones: named as declared, or by the
+/// runtime as a migration names them, over the columns the table knows.
 pub(super) fn build_index_impls(
     table_name: &str,
     indexes: &[IndexDef],
@@ -268,13 +289,17 @@ pub(super) fn build_index_impls(
 ) -> Vec<TokenStream2> {
     indexes
         .iter()
+        .filter(|index| index.unique == unique)
         .map(|index| {
-            let name = index.get_name(table_name);
             // An index may name a field; the table knows its column.
             let columns = index.columns.iter().map(|column| {
                 find_db_field(db_fields, column).map_or_else(|| column.clone(), ModelField::column_name)
             });
-            quote!(::tideorm::model::IndexDefinition::new(#name, vec![#(#columns.to_string()),*], #unique))
+            let columns = quote!(vec![#(#columns.to_string()),*]);
+            match &index.name {
+                Some(name) => quote!(::tideorm::model::IndexDefinition::new(#name, #columns, #unique)),
+                None => quote!(::tideorm::model::IndexDefinition::__generated(#table_name, #columns, #unique)),
+            }
         })
         .collect()
 }

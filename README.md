@@ -138,7 +138,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust
@@ -184,31 +184,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.12.0", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.12.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.12.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.13.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -233,7 +233,7 @@ works without it.
 | `attachments` | Compile-time-only feature gate for the attachments API and attachment-specific benchmarks/tests; adds no extra dependencies |
 | `translations` | Compile-time-only feature gate for the translations API and translation-specific benchmarks/tests; adds no extra dependencies |
 | `fulltext` | Compile-time-only feature gate for the full-text search API and fulltext-specific benchmarks/tests; adds no extra dependencies |
-| `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), plus `save_with_entity_manager`, `find_in_entity_manager`, entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
+| `entity-manager` | Enables the `EntityManager` facade (`find`, `find_managed`, `load`, `save`, `persist`, `merge`, `remove`, `detach`, `flush`), entity-manager-aware relation loads, and aggregate synchronization for loaded `HasOne`, `HasMany`, and `HasManyThrough` relations |
 | `dirty-tracking` | Enables the model-level `changed_fields()` and `original_value()` helpers and their persisted-state tracking hooks |
 | `encrypted-fields` | Enables `#[tideorm(encrypted = "...")]` model auto-encrypt/decrypt hooks for persisted string columns |
 
@@ -243,7 +243,7 @@ Translations are opt-in. Enable the `translations` feature when you want to use 
 
 Full-text search is opt-in. Enable the `fulltext` feature when you want to use `tideorm::fulltext`, `FullTextSearch`, or the highlighting helpers. This is a compile-time API gate only; it does not pull in additional crates.
 
-The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. The compatibility entry points `find_in_entity_manager`, `load_in_entity_manager`, and `save_with_entity_manager()` remain available too. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
+The entity manager is opt-in. Enable the `entity-manager` feature when you want an explicit persistence context for aggregate workflows: `entity_manager.find::<Model>(...)`, `entity_manager.find_managed::<Model>(...)`, `entity_manager.load(&mut relation)`, `entity_manager.save(&model)`, and managed lifecycle operations such as `persist`, `merge`, `remove`, `detach`, and `flush`. See [docs/entity-manager.md](docs/entity-manager.md) for the full workflow.
 
 Dirty tracking is opt-in. Enable the `dirty-tracking` feature when you want model instances to expose `changed_fields()` and `original_value()` based on the latest persisted snapshot TideORM loaded or saved.
 

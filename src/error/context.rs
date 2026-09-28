@@ -15,27 +15,34 @@ pub struct ErrorContext {
 
 impl std::fmt::Display for ErrorContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts = Vec::new();
-        if let Some(ref table) = self.table {
-            parts.push(format!("table: {}", table));
-        }
-        if let Some(ref column) = self.column {
-            parts.push(format!("column: {}", column));
-        }
-        if !self.conditions.is_empty() {
-            parts.push(format!("conditions: {}", self.conditions.join(" | ")));
-        }
-        if let Some(ref operator_chain) = self.operator_chain {
-            parts.push(format!("operator_chain: {}", operator_chain));
-        }
-        if let Some(ref query) = self.query {
-            parts.push(format!("query: {}", query));
-        }
+        let parts: Vec<String> = self
+            .entries()
+            .into_iter()
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect();
         write!(f, "{}", parts.join(", "))
     }
 }
 
 impl ErrorContext {
+    /// The fields that are set, as `(field name, rendered value)`, in the
+    /// order every rendering lists them.
+    pub(crate) fn entries(&self) -> Vec<(&'static str, String)> {
+        [
+            ("table", self.table.clone()),
+            ("column", self.column.clone()),
+            (
+                "conditions",
+                (!self.conditions.is_empty()).then(|| self.conditions.join(" | ")),
+            ),
+            ("operator_chain", self.operator_chain.clone()),
+            ("query", self.query.clone()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect()
+    }
+
     /// Start building extra table, column, and query details for an error.
     pub fn new() -> Self {
         Self::default()

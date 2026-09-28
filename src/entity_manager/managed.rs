@@ -110,31 +110,109 @@ pub(super) fn plan_flush_order(entries: &[Arc<dyn ManagedOps>]) -> FlushOrder {
         }
     }
 
-    let mut ordered: Vec<&'static str> = Vec::with_capacity(tables.len());
-    let mut remaining = tables;
-    while !remaining.is_empty() {
-        let next = remaining.iter().position(|table| {
-            !edges
-                .iter()
-                .any(|(parent, child)| child == table && remaining.contains(parent))
-        });
-        let Some(next) = next else {
-            break;
-        };
-
-        ordered.push(remaining.remove(next));
-    }
-
-    let unordered = remaining.clone();
-    ordered.extend(remaining);
+    let index_of = |table: &str| {
+        tables
+            .iter()
+            .position(|known| *known == table)
+            .expect("edges only join tables of this pass")
+    };
+    let edges: Vec<(usize, usize)> = edges
+        .iter()
+        .map(|(parent, child)| (index_of(parent), index_of(child)))
+        .collect();
+    let (mut ordered, cycle) =
+        crate::internal::topological_order(tables.len(), &edges, |index| index);
+    let unordered: Vec<&'static str> = cycle.iter().map(|&index| tables[index]).collect();
+    ordered.extend(cycle);
 
     let ranks = ordered
         .into_iter()
         .enumerate()
-        .map(|(rank, table)| (table, rank))
+        .map(|(rank, index)| (tables[index], rank))
         .collect();
 
     FlushOrder { ranks, unordered }
+}
+
+/// One self-referencing foreign key as it applies to one row: the value this
+/// row holds in the referenced column, and the value its foreign key holds,
+/// each as key text; `None` for a NULL, or a key the database has not assigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RowLink {
+    pub(crate) foreign_key: &'static str,
+    pub(crate) referenced: &'static str,
+    pub(crate) provides: Option<String>,
+    pub(crate) requires: Option<String>,
+}
+
+/// Order the rows of one table that reference each other through a
+/// self-referencing foreign key (`nodes.parent_id -> nodes.id`): inserts
+/// referenced row first, deletes referencing row first.
+///
+/// The table order cannot express it, since the table depends on itself;
+/// `entries` is already sorted by [`flush_sort_key`], so the inserts and the
+/// deletes of each table are adjacent, and each such run is reordered on its
+/// own. Rows in a cycle keep registration order.
+pub(super) fn order_self_references(entries: &mut [Arc<dyn ManagedOps>]) {
+    let mut start = 0;
+    while start < entries.len() {
+        let state = entries[start].current_state();
+        let table = entries[start].table_name();
+        let end = start
+            + entries[start..]
+                .iter()
+                .take_while(|entry| entry.current_state() == state && entry.table_name() == table)
+                .count();
+        if matches!(state, EntityState::New | EntityState::Removed) && end - start > 1 {
+            order_rows(&mut entries[start..end], state == EntityState::Removed);
+        }
+        start = end;
+    }
+}
+
+/// Topologically order `rows`, referenced rows first, or last when
+/// `referencing_first`.
+fn order_rows(rows: &mut [Arc<dyn ManagedOps>], referencing_first: bool) {
+    let links: Vec<Vec<RowLink>> = rows.iter().map(|row| row.row_links()).collect();
+    // The rows holding each referenced value, so a batch of one table pairs
+    // in linear time.
+    let mut providers: HashMap<(&str, &str, &str), Vec<usize>> = HashMap::new();
+    for (index, row_links) in links.iter().enumerate() {
+        for link in row_links {
+            if let Some(provided) = &link.provides {
+                providers
+                    .entry((link.foreign_key, link.referenced, provided))
+                    .or_default()
+                    .push(index);
+            }
+        }
+    }
+    let mut edges = Vec::new();
+    for (referencing, row_links) in links.iter().enumerate() {
+        for link in row_links {
+            let Some(required) = &link.requires else {
+                continue;
+            };
+            let referenced_rows = providers.get(&(link.foreign_key, link.referenced, required));
+            for &referenced in referenced_rows.into_iter().flatten() {
+                if referenced != referencing {
+                    edges.push(if referencing_first {
+                        (referencing, referenced)
+                    } else {
+                        (referenced, referencing)
+                    });
+                }
+            }
+        }
+    }
+    if edges.is_empty() {
+        return;
+    }
+    let (mut order, cycle) = crate::internal::topological_order(rows.len(), &edges, |index| index);
+    order.extend(cycle);
+    let ordered: Vec<Arc<dyn ManagedOps>> =
+        order.into_iter().map(|index| rows[index].clone()).collect();
+    rows.clone_from_slice(&ordered);
 }
 
 /// Stable sort key placing an entry inside its operation kind.
@@ -241,6 +319,12 @@ pub(crate) trait ManagedOps: Send + Sync {
     /// Tables holding rows that reference this entry.
     fn child_tables(&self) -> Vec<&'static str>;
 
+    /// The links a self-referencing foreign key makes between this entry's
+    /// row and other rows of its table.
+    fn row_links(&self) -> Vec<RowLink> {
+        Vec::new()
+    }
+
     async fn flush(
         self: Arc<Self>,
         entity_manager: &Arc<EntityManager>,
@@ -292,10 +376,6 @@ impl<T> ManagedEntry<T> {
         *self.identity_key.write() = key;
     }
 
-    pub(crate) fn identity_key(&self) -> Option<String> {
-        self.identity_key.read().clone()
-    }
-
     pub(crate) fn state(&self) -> EntityState {
         *self.state.read()
     }
@@ -314,16 +394,6 @@ impl<T> ManagedEntry<T> {
 
     pub(crate) fn replace(&self, entity: T) {
         *self.current.write() = entity;
-    }
-
-    pub(crate) fn overwrite_clean(&self, entity: T, persisted_key: Option<String>)
-    where
-        T: Clone,
-    {
-        *self.current.write() = entity.clone();
-        *self.snapshot.write() = Some(entity);
-        *self.persisted_key.write() = persisted_key;
-        *self.state.write() = EntityState::Managed;
     }
 
     /// Hand the entry `entity` to write, taking back a pending removal. A row
@@ -359,15 +429,7 @@ impl<T> ManagedEntry<T> {
         };
         let mut current = self.current.write();
         let previous = current.clone();
-        let mut rebased = previous.clone();
-        for field in <T as crate::model::ModelMeta>::field_names() {
-            if loaded.field_json_value(field)? == previous.field_json_value(field)?
-                && let Some(stored) = saved.field_json_value(field)?
-            {
-                rebased.set_field_json(field, stored)?;
-            }
-        }
-        *current = rebased;
+        merge_fields(&mut *current, &previous, &loaded, saved)?;
         *snapshot = Some(saved.clone());
 
         let entry = Arc::clone(self);
@@ -384,6 +446,18 @@ impl<T> ManagedEntry<T> {
 
     pub(crate) fn mark_detached(&self) {
         *self.state.write() = EntityState::Detached;
+    }
+}
+
+impl<T: Send + Sync + 'static> ManagedEntry<T> {
+    /// Take the entry out of the managed map, under the key it was filed as,
+    /// and detach it. `identity_key`, not `persisted_key`: an entity
+    /// `persist`ed with a client-assigned key is filed before any insert.
+    pub(crate) fn evict(&self, entity_manager: &EntityManager) {
+        if let Some(key) = self.identity_key.write().take() {
+            entity_manager.remove_managed_entry::<T>(&key);
+        }
+        self.mark_detached();
     }
 }
 
@@ -410,15 +484,42 @@ where
         <T as TideEntityManagerMeta>::tide_child_tables()
     }
 
-    fn detach_from_context(&self, entity_manager: &EntityManager) {
-        // `identity_key`, not `persisted_key`: an entity given to `persist` with a
-        // client-assigned primary key is in the map without having been inserted.
-        if let Some(key) = self.identity_key.read().as_ref() {
-            entity_manager.remove_managed_entry::<T>(key);
-        }
-        *self.identity_key.write() = None;
+    fn row_links(&self) -> Vec<RowLink> {
+        let table = <T as TideEntityManagerMeta>::tide_table_name();
+        let current = self.current.read();
+        // A key the database has not numbered yet is no row's to reference.
+        let unnumbered = current.tide_pk_is_new();
+        let key_text = |name: &str| {
+            <T as crate::internal::InternalModel>::field_json_value(&current, name)
+                .ok()
+                .flatten()
+                .filter(|value| !value.is_null())
+                .map(|value| crate::relations::__relation_key(&value))
+        };
+        <T as TideEntityManagerMeta>::tide_row_references()
+            .into_iter()
+            .filter(|(related, _, _)| *related == table)
+            .map(|(_, foreign_key, referenced)| {
+                let is_key = <T as crate::model::ModelMeta>::canonical_column_name(referenced)
+                    .is_some_and(|column| {
+                        <T as crate::model::ModelMeta>::primary_key_names().contains(&column)
+                    });
+                RowLink {
+                    foreign_key,
+                    referenced,
+                    provides: if unnumbered && is_key {
+                        None
+                    } else {
+                        key_text(referenced)
+                    },
+                    requires: key_text(foreign_key),
+                }
+            })
+            .collect()
+    }
 
-        self.mark_detached();
+    fn detach_from_context(&self, entity_manager: &EntityManager) {
+        self.evict(entity_manager);
     }
 
     fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint> {
@@ -460,14 +561,9 @@ where
                     entity_manager.remove_by_entity_manager_key::<T>(&key);
                 }
 
-                if let Some(key) = self.identity_key.read().as_ref() {
-                    entity_manager.remove_managed_entry::<T>(key);
-                }
-
                 *self.snapshot.write() = None;
                 *self.persisted_key.write() = None;
-                *self.identity_key.write() = None;
-                self.mark_detached();
+                self.evict(entity_manager);
                 Ok(())
             }
             EntityState::New | EntityState::Managed => {
@@ -477,7 +573,7 @@ where
                 if let Some(persisted) = self.persisted_key.read().as_deref() {
                     let key = current.tide_pk_key();
                     if key != persisted {
-                        return Err(crate::error::Error::invalid_query(format!(
+                        return Err(crate::error::Error::query(format!(
                             "the primary key of a managed {} row changed from {persisted} to \
                              {key}; a managed entity keeps its key, so detach it and persist \
                              a new one",
@@ -512,16 +608,44 @@ where
                     entity_manager.put_managed_entry::<T>(key, self.clone());
                 }
 
-                *self.current.write() = saved.clone();
+                // Edits made while the row was being written stay, over the
+                // row as stored, and leave the entry dirty for the next flush.
+                {
+                    let mut live = self.current.write();
+                    let mut stored = saved.clone();
+                    merge_fields(&mut stored, &*live, &current, &saved)?;
+                    *live = stored;
+                }
                 *self.snapshot.write() = Some(saved.clone());
                 *self.identity_key.write() = next_key.clone();
                 *self.persisted_key.write() = next_key;
                 *self.state.write() = EntityState::Managed;
-                entity_manager.put(saved);
                 Ok(())
             }
         }
     }
+}
+
+/// Give `target` each field of `holder` merged with `saved`, the row as
+/// stored: a field `holder` still holds as in `base` takes the stored value,
+/// and one changed since `base` keeps the change. Relation wrappers are
+/// `target`'s own.
+fn merge_fields<T>(target: &mut T, holder: &T, base: &T, saved: &T) -> crate::error::Result<()>
+where
+    T: crate::model::Model,
+{
+    for field in <T as crate::model::ModelMeta>::field_names() {
+        let held = holder.field_json_value(field)?;
+        let value = if held == base.field_json_value(field)? {
+            saved.field_json_value(field)?
+        } else {
+            held
+        };
+        if let Some(value) = value {
+            target.set_field_json(field, value)?;
+        }
+    }
+    Ok(())
 }
 
 struct ManagedEntryCheckpoint<T> {

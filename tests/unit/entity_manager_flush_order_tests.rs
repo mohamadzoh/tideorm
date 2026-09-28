@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
-    EntityManager, EntityState, ManagedCheckpoint, ManagedOps, explain_flush_ordering_failure,
-    flush_sort_key, plan_flush_order,
+    EntityManager, EntityState, ManagedCheckpoint, ManagedOps, RowLink,
+    explain_flush_ordering_failure, flush_sort_key, order_self_references, plan_flush_order,
 };
 use crate::error::{DbFailure, DbFailureKind, Error};
 
@@ -23,6 +23,7 @@ struct OrderingEntry {
     parents: Vec<&'static str>,
     children: Vec<&'static str>,
     state: EntityState,
+    links: Vec<RowLink>,
 }
 
 impl OrderingEntry {
@@ -32,7 +33,22 @@ impl OrderingEntry {
             parents: Vec::new(),
             children: Vec::new(),
             state,
+            links: Vec::new(),
         }
+    }
+
+    /// A row whose `id` is `id` and whose `parent_id` is `parent`.
+    fn node(id: &str, parent: Option<&str>, state: EntityState) -> Self {
+        let mut entry = Self::new("nodes", state)
+            .with_parents(&["nodes"])
+            .with_children(&["nodes"]);
+        entry.links.push(RowLink {
+            foreign_key: "parent_id",
+            referenced: "id",
+            provides: Some(id.to_string()),
+            requires: parent.map(str::to_string),
+        });
+        entry
     }
 
     fn with_parents(mut self, parents: &[&'static str]) -> Self {
@@ -72,6 +88,10 @@ impl ManagedOps for OrderingEntry {
 
     fn child_tables(&self) -> Vec<&'static str> {
         self.children.clone()
+    }
+
+    fn row_links(&self) -> Vec<RowLink> {
+        self.links.clone()
     }
 
     async fn flush(
@@ -197,7 +217,7 @@ fn a_dependency_on_a_table_outside_the_flush_is_not_a_cycle() {
 
 #[test]
 fn ordering_failures_leave_non_foreign_key_errors_alone() {
-    let error = explain_flush_ordering_failure(Error::invalid_query("boom"), "posts", &[]);
+    let error = explain_flush_ordering_failure(Error::query("boom"), "posts", &[]);
 
     assert_eq!(error.to_string(), "Query error: boom");
 }
@@ -226,4 +246,49 @@ fn a_foreign_key_violation_without_a_cycle_says_the_relation_was_not_declared() 
     let message = explain_flush_ordering_failure(violation, "posts", &[]).to_string();
 
     assert!(message.contains("declares no relation"));
+}
+
+/// The row order a flush writes `entries` in, by each node's `id`.
+fn flush_rows_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<String> {
+    let order = plan_flush_order(entries);
+    let mut sorted = entries.to_vec();
+    sorted.sort_by_key(|entry| flush_sort_key(entry.as_ref(), &order));
+    order_self_references(&mut sorted);
+    sorted
+        .iter()
+        .map(|entry| entry.row_links()[0].provides.clone().unwrap_or_default())
+        .collect()
+}
+
+#[test]
+fn rows_of_a_self_referencing_table_insert_parents_first() {
+    let entries = vec![
+        OrderingEntry::node("3", Some("2"), EntityState::New).shared(),
+        OrderingEntry::node("2", Some("1"), EntityState::New).shared(),
+        OrderingEntry::node("1", None, EntityState::New).shared(),
+        OrderingEntry::node("4", None, EntityState::New).shared(),
+    ];
+
+    assert_eq!(flush_rows_in_order(&entries), ["1", "2", "3", "4"]);
+}
+
+#[test]
+fn rows_of_a_self_referencing_table_delete_children_first() {
+    let entries = vec![
+        OrderingEntry::node("1", None, EntityState::Removed).shared(),
+        OrderingEntry::node("2", Some("1"), EntityState::Removed).shared(),
+        OrderingEntry::node("3", Some("2"), EntityState::Removed).shared(),
+    ];
+
+    assert_eq!(flush_rows_in_order(&entries), ["3", "2", "1"]);
+}
+
+#[test]
+fn rows_in_a_reference_cycle_keep_registration_order() {
+    let entries = vec![
+        OrderingEntry::node("1", Some("2"), EntityState::New).shared(),
+        OrderingEntry::node("2", Some("1"), EntityState::New).shared(),
+    ];
+
+    assert_eq!(flush_rows_in_order(&entries), ["1", "2"]);
 }

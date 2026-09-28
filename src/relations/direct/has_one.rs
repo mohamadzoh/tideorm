@@ -49,12 +49,7 @@ pub struct HasOne<E: Model> {
     /// Table of the model owning the relation.
     #[cfg(feature = "entity-manager")]
     pub owner_table: &'static str,
-    cached: Option<Box<E>>,
-    loaded: bool,
-    parent_pk: Option<serde_json::Value>,
-    #[cfg(feature = "entity-manager")]
-    owner_key: Option<String>,
-    source: QuerySource,
+    state: RelationState<Box<E>>,
 }
 
 impl<E: Model> HasOne<E> {
@@ -64,13 +59,13 @@ impl<E: Model> HasOne<E> {
 
     fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
         self.ensure_configured()?;
-        required_key(&self.parent_pk, "Parent primary key", context)
+        required_key(&self.state.key, "Parent primary key", context)
     }
 
     /// The query for the related row.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let pk = self.parent_key(context)?;
-        Ok(where_key(self.source.query(), self.foreign_key, pk))
+        Ok(where_key(self.state.source.query(), self.foreign_key, pk))
     }
 
     /// Declare the relation's key pair.
@@ -95,16 +90,15 @@ impl<E: Model> HasOne<E> {
     /// wrapper is inert — every load method errors with "Parent primary key not
     /// set for relation".
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.parent_pk = Some(pk);
+        self.state.key = Some(pk);
         self
     }
 
     /// Record the names the entity manager keys its relation snapshots by.
     ///
     /// Only meaningful together with [`with_owner_key`](Self::with_owner_key);
-    /// without both, [`load_in_entity_manager`](Self::load_in_entity_manager)
-    /// cannot record which related rows this owner held and errors out. The
-    /// related table the derive passes third is not used.
+    /// without both, loading the relation through an entity manager cannot
+    /// record which related rows this owner held and errors out.
     #[cfg(feature = "entity-manager")]
     pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
         self.relation_name = relation_name;
@@ -119,50 +113,36 @@ impl<E: Model> HasOne<E> {
     /// the owner's own map entry agree on one spelling.
     #[cfg(feature = "entity-manager")]
     pub fn with_owner_key(mut self, owner_key: String) -> Self {
-        self.owner_key = Some(owner_key);
+        self.state.owner_key = Some(owner_key);
         self
     }
 
     #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.source.database = Some(database.clone());
+        self.state.source.database = Some(database.clone());
     }
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, model: Option<E>) {
-        self.cached = model.map(Box::new);
-        self.loaded = true;
+        self.state.set_cached(model.map(Box::new));
     }
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
         let same_relation = self.foreign_key == previous.foreign_key
             && self.local_key == previous.local_key
-            && self.parent_pk == previous.parent_pk;
+            && self.state.key == previous.state.key;
         #[cfg(feature = "entity-manager")]
         let same_relation = same_relation
             && self.relation_name == previous.relation_name
             && self.owner_table == previous.owner_table;
 
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            owner_is_unsaved(&previous.parent_pk),
+        self.state.preserve_from(
+            &previous.state,
             same_relation,
+            owner_is_unsaved(&previous.state.key),
         );
-
-        if (same_relation || previous.parent_pk.is_none()) && !self.loaded {
-            self.loaded = previous.loaded;
-        }
-
-        #[cfg(feature = "entity-manager")]
-        if same_relation {
-            self.source.preserve_from(&previous.source);
-            if self.owner_key.is_none() {
-                self.owner_key = previous.owner_key.clone();
-            }
-        }
     }
 
     /// Fetch the related row, returning `Ok(None)` when there is none.
@@ -174,11 +154,9 @@ impl<E: Model> HasOne<E> {
     /// parent key (a bare `Default` or a deserialized model that was never
     /// refreshed).
     pub async fn load(&self) -> Result<Option<E>> {
-        let can_query = self.source.prefers_database()
-            && self.parent_pk.is_some()
-            && self.ensure_configured().is_ok();
-        if self.loaded && !can_query {
-            return Ok(self.cached.as_deref().cloned());
+        let can_query = self.state.can_query(self.ensure_configured().is_ok());
+        if let Some(cached) = self.state.served(can_query) {
+            return Ok(cached.map(|model| (**model).clone()));
         }
 
         self.query("HasOne::load")?.first().await
@@ -217,7 +195,7 @@ impl<E: Model> HasOne<E> {
     /// [`load`](Self::load) will not see them. Persist by calling `save()` on
     /// the related model itself.
     pub fn as_mut(&mut self) -> Option<&mut E> {
-        self.cached.as_deref_mut()
+        self.state.cached_mut().map(|model| &mut **model)
     }
 
     /// Whether the cache has been populated — by an eager load, by
@@ -228,7 +206,7 @@ impl<E: Model> HasOne<E> {
     /// related row" is a loaded state. Deserializing a `null` payload is the
     /// opposite case and leaves this `false`.
     pub fn is_loaded(&self) -> bool {
-        self.loaded
+        self.state.is_loaded()
     }
 
     /// Drop the cached row and mark the relation as *loaded and empty*.
@@ -238,8 +216,7 @@ impl<E: Model> HasOne<E> {
     /// [`load`](Self::load) will report `Ok(None)` from the cache rather than
     /// querying. Use it to record a deliberate detach, not to invalidate.
     pub fn clear(&mut self) {
-        self.cached = None;
-        self.loaded = true;
+        self.state.set_cached(None);
     }
 
     /// The eagerly-loaded row, if one is cached. Never queries and never awaits.
@@ -247,45 +224,7 @@ impl<E: Model> HasOne<E> {
     /// Returns `None` both when nothing was ever loaded and when the relation is
     /// known to be empty; [`is_loaded`](Self::is_loaded) distinguishes them.
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
-    }
-
-    /// Load the relation into `entity_manager`'s identity map and cache it here.
-    ///
-    /// Unlike [`load`](Self::load) this is `&mut self` and memoizing: the row is
-    /// resolved from the manager's map when it is already there, registered into
-    /// it when it is not, and a repeat call returns the cached instance rather
-    /// than re-querying. An already cached row gives way to the instance the
-    /// manager tracks. It also records a relation snapshot, which is how the
-    /// manager later detects that the relation was reassigned — so it requires
-    /// [`with_metadata`](Self::with_metadata) and
-    /// [`with_owner_key`](Self::with_owner_key) to have been supplied.
-    #[cfg(feature = "entity-manager")]
-    pub async fn load_in_entity_manager(
-        &mut self,
-        entity_manager: &Arc<EntityManager>,
-    ) -> Result<Option<&E>>
-    where
-        E: TideEntityManagerMeta,
-    {
-        const CONTEXT: &str = "HasOne::load_in_entity_manager";
-
-        let owner = SnapshotOwner::new(self.owner_table, &self.owner_key, self.relation_name)?;
-        self.source.entity_manager = Some(entity_manager.clone());
-
-        if !self.loaded {
-            let tracked =
-                entity_manager.find_by_field::<E>(self.foreign_key, self.parent_key(CONTEXT)?)?;
-            let related = match tracked {
-                Some(related) => Some(related),
-                None => self.query(CONTEXT)?.first().await?,
-            };
-            self.cached = related.map(Box::new);
-            self.loaded = true;
-        }
-
-        register_loaded(entity_manager, self.cached.as_deref_mut(), Some(owner)).await?;
-        Ok(self.cached.as_deref())
+        self.state.cached().map(|model| &**model)
     }
 }
 
@@ -298,40 +237,18 @@ impl<E: Model> Default for HasOne<E> {
             relation_name: "",
             #[cfg(feature = "entity-manager")]
             owner_table: "",
-            cached: None,
-            loaded: false,
-            parent_pk: None,
-            #[cfg(feature = "entity-manager")]
-            owner_key: None,
-            source: QuerySource::default(),
+            state: RelationState::default(),
         }
     }
 }
 
-impl<E: Model> Serialize for HasOne<E> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
+relation_serde!(HasOne<E>);
 
-impl<'de, E: Model> Deserialize<'de> for HasOne<E> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<E>::deserialize(deserializer)?;
-        let loaded = cached.is_some();
-        Ok(Self {
-            cached: cached.map(Box::new),
-            loaded,
-            ..Self::default()
-        })
-    }
-}
-
+/// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
+/// resolves the row from the manager's identity map when it is there,
+/// registers it when it is not, and records a relation snapshot, which is how
+/// the manager later detects that the relation was reassigned. A repeat load
+/// serves the cached instance.
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for HasOne<E>
 where
@@ -346,6 +263,15 @@ where
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
     ) -> Result<Self::Output<'a>> {
-        self.load_in_entity_manager(entity_manager).await
+        const CONTEXT: &str = "HasOne::load";
+
+        let owner =
+            SnapshotOwner::new(self.owner_table, &self.state.owner_key, self.relation_name)?;
+        self.state.source.entity_manager = Some(entity_manager.clone());
+        let lookup = self
+            .parent_key(CONTEXT)
+            .cloned()
+            .and_then(|key| Ok((self.foreign_key, key, self.query(CONTEXT)?)));
+        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, Some(owner)).await
     }
 }

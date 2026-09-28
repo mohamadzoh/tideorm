@@ -6,7 +6,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use tideorm::config::DatabaseType;
-use tideorm::fulltext::{FullTextIndex, PgFullTextIndexType, SearchWeights};
+use tideorm::fulltext::{FullTextIndex, PgFullTextIndexType};
 
 fn bench_index_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("fulltext_index_generation");
@@ -117,13 +117,6 @@ fn bench_index_generation(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_search_weights(c: &mut Criterion) {
-    let weights = SearchWeights::new(1.0, 0.5, 0.25, 0.1);
-    c.bench_function("search_weights_to_pg_array", |b| {
-        b.iter(|| weights.to_pg_array())
-    });
-}
-
-criterion_group!(benches, bench_index_generation, bench_search_weights);
+criterion_group!(benches, bench_index_generation);
 
 criterion_main!(benches);

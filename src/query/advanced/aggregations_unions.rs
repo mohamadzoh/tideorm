@@ -233,7 +233,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a GROUP BY clause
     #[must_use]
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.group_by.push(crate::columns::column_reference(
+        self.clauses.group_by.push(crate::columns::column_reference(
             &column,
             Some(M::table_name()),
         ));
@@ -263,14 +263,7 @@ impl<M: Model> QueryBuilder<M> {
                 // The model's own columns are written with its table, so a
                 // join added after this call cannot make them ambiguous.
                 let expression = condition.aggregate.render(&|column| {
-                    let column = match M::canonical_column_parts(column.trim()) {
-                        (None, name) if M::column_names().contains(&name) => {
-                            format!("{}.{}", M::table_name(), name)
-                        }
-                        (Some(table), name) => format!("{}.{}", table, name),
-                        (None, name) => name.to_string(),
-                    };
-                    db_sql::format_column(db_type, &column)
+                    db_sql::format_column(db_type, &self.model_identifier(column.trim(), true))
                 });
                 // A count is a number; a sum, an average, a minimum or a
                 // maximum compares as the column it aggregates.
@@ -300,37 +293,17 @@ impl<M: Model> QueryBuilder<M> {
                     self.invalidate_query(reason);
                 }
 
-                self.having_conditions.push(condition);
-                self.having_bindings.push(Vec::new());
+                self.clauses.having_conditions.push(condition);
+                self.clauses.having_bindings.push(Vec::new());
                 self
             }
         }
     }
 
     fn having_with_params(mut self, sql_template: String, params: Vec<Value>) -> Self {
-        self.having_conditions.push(sql_template);
-        self.having_bindings.push(params);
+        self.clauses.having_conditions.push(sql_template);
+        self.clauses.having_bindings.push(params);
         self
-    }
-
-    /// Keep the groups of more than `value` rows; `having(Aggregate::count().gt(value))`.
-    #[must_use]
-    pub fn having_count_gt(self, value: i64) -> Self {
-        self.having(Aggregate::count().gt(value))
-    }
-
-    /// Keep the groups whose sum of `column` exceeds `value`;
-    /// `having(Aggregate::sum(column).gt(value))`.
-    #[must_use]
-    pub fn having_sum_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
-        self.having(Aggregate::sum(column).gt(value))
-    }
-
-    /// Keep the groups whose average of `column` exceeds `value`;
-    /// `having(Aggregate::avg(column).gt(value))`.
-    #[must_use]
-    pub fn having_avg_gt(self, column: impl crate::columns::IntoColumnName, value: f64) -> Self {
-        self.having(Aggregate::avg(column).gt(value))
     }
 
     /// Render a column reference used inside an aggregate or HAVING expression.
@@ -348,14 +321,39 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
-    /// The name a derived table exposes a projected column under: its
-    /// database column name, without a table qualifier.
-    pub(in crate::query) fn derived_output_name(&self, column: &str) -> String {
-        let canonical = self.canonical_model_identifier(column.trim());
-        let name = canonical
-            .rsplit_once('.')
-            .map_or(canonical.as_ref(), |(_, name)| name);
-        name.to_string()
+    /// The name a derived table over this query exposes `column` under, or
+    /// `None` when the query's projection leaves it out.
+    ///
+    /// A selected column is exposed under the name it is selected as
+    /// (`amount AS total` exposes `amount` as `total`), and a result column
+    /// can be named directly. A query that keeps the model's projection, or
+    /// selects a wildcard, exposes a model column under its database name.
+    pub(in crate::query) fn derived_output_name(&self, column: &str) -> Option<String> {
+        let column = column.trim();
+        let (table, name) = match M::canonical_column_parts(column) {
+            (Some(table), name) => (table, name),
+            (None, name) => (M::table_name(), name),
+        };
+        let outputs = self.projection_outputs();
+        let selected = outputs.iter().find(|(_, source)| {
+            source
+                .as_ref()
+                .is_some_and(|(source_table, source_column)| {
+                    let source_column = match source_table == M::table_name() {
+                        true => M::column_named(source_column),
+                        false => source_column,
+                    };
+                    source_table == table && source_column == name
+                })
+        });
+        if let Some((output, _)) = selected.or_else(|| {
+            outputs
+                .iter()
+                .find(|(output, _)| output == column || output == name)
+        }) {
+            return Some(output.clone());
+        }
+        (!self.projection_is_closed() && table == M::table_name()).then(|| name.to_string())
     }
 
     /// Reject builder state that a single-scalar aggregate cannot represent.
@@ -366,17 +364,17 @@ impl<M: Model> QueryBuilder<M> {
     /// name the incompatible modifier and fail loudly rather than silently
     /// answering with the ungrouped aggregate.
     fn ensure_scalar_aggregate_is_representable(&self, terminal: &str) -> Result<()> {
-        let modifier = if !self.group_by.is_empty() {
+        let modifier = if !self.clauses.group_by.is_empty() {
             "group_by()"
-        } else if !self.having_conditions.is_empty() {
+        } else if !self.clauses.having_conditions.is_empty() {
             "having()"
-        } else if !self.window_functions.is_empty() {
+        } else if !self.clauses.window_functions.is_empty() {
             "window()"
         } else {
             return Ok(());
         };
 
-        Err(Error::invalid_query(format!(
+        Err(Error::query(format!(
             "{} returns a single scalar and does not support {}; that modifier produces one row per group or per input row, so read those rows with select_raw() and get() instead",
             terminal, modifier
         )))
@@ -390,11 +388,11 @@ impl<M: Model> QueryBuilder<M> {
     /// rows before they are counted, as `count()` does, and UNION/CTE bodies
     /// cannot be expressed by a plain `FROM <table>` aggregate at all.
     fn aggregate_needs_derived_table(&self) -> bool {
-        !self.unions.is_empty()
-            || !self.ctes.is_empty()
-            || self.limit_value.is_some()
-            || self.offset_value.is_some()
-            || self.lock_for_update
+        !self.clauses.unions.is_empty()
+            || !self.clauses.ctes.is_empty()
+            || self.clauses.limit_value.is_some()
+            || self.clauses.offset_value.is_some()
+            || self.clauses.lock_for_update
             || self.is_distinct()
     }
 
@@ -434,24 +432,24 @@ impl<M: Model> QueryBuilder<M> {
         projections: impl FnOnce(&dyn Fn(&str) -> String) -> Vec<String>,
     ) -> Result<(String, Vec<Value>)> {
         if !self.aggregate_needs_derived_table() {
-            let (where_sql, params) = self.build_where_clause_with_condition_for_db(db_type);
             let select_list = projections(&|column| self.format_aggregate_column(db_type, column));
-            let mut sql = format!("SELECT {} ", select_list.join(", "));
-            self.append_from_and_join_sql(&mut sql, db_type);
-            if !where_sql.is_empty() {
-                sql.push_str(&format!("WHERE {}", where_sql));
-            }
-            return Ok((sql.trim_end().to_string(), params));
+            return Ok(self.build_plain_select_sql(db_type, &select_list.join(", ")));
         }
 
-        let rows_fixed_by_projection = self.is_distinct() || !self.unions.is_empty();
+        let rows_fixed_by_projection = self.is_distinct() || !self.clauses.unions.is_empty();
         let input_alias = |index: usize| format!("tideorm_aggregate_input_{index}");
         let inputs = std::cell::RefCell::new(Vec::<String>::new());
+        let unselected = std::cell::RefCell::new(None::<String>);
         let select_list = projections(&|column| {
             let column = column.trim();
             if rows_fixed_by_projection {
-                inputs.borrow_mut().push(column.to_string());
-                return db_sql::quote_ident(db_type, &self.derived_output_name(column));
+                let Some(name) = self.derived_output_name(column) else {
+                    unselected
+                        .borrow_mut()
+                        .get_or_insert_with(|| column.to_string());
+                    return String::new();
+                };
+                return db_sql::quote_ident(db_type, &name);
             }
             let mut inputs = inputs.borrow_mut();
             let index = inputs
@@ -463,24 +461,19 @@ impl<M: Model> QueryBuilder<M> {
                 });
             db_sql::quote_ident(db_type, &input_alias(index))
         });
+        if let Some(column) = unselected.into_inner() {
+            return Err(Error::query(format!(
+                "an aggregate over a distinct() or union() query reads the columns the query selects, and '{}' is not one of them; select() it, or aggregate before distinct()/union()",
+                column
+            )));
+        }
         let inputs = inputs.into_inner();
 
         let mut inner = self.clone();
-        if rows_fixed_by_projection {
-            let selected = self.select_columns.as_deref().unwrap_or_default();
-            if let Some(column) = inputs.iter().find(|column| {
-                matches!(M::canonical_column_parts(column), (Some(table), _) if table != M::table_name())
-                    && !selected.iter().any(|selected| selected.trim() == column.as_str())
-            }) {
-                return Err(Error::invalid_query(format!(
-                    "an aggregate over a distinct() or union() query reads the columns the query selects, and '{}' is not one of them; select() it, or aggregate before distinct()/union()",
-                    column
-                )));
-            }
-        } else if !inputs.is_empty() {
-            inner.select_columns = None;
-            inner.subquery_select_expressions.clear();
-            inner.raw_select_expressions = inputs
+        if !rows_fixed_by_projection && !inputs.is_empty() {
+            inner.clauses.select_columns = None;
+            inner.clauses.subquery_select_expressions.clear();
+            inner.clauses.raw_select_expressions = inputs
                 .iter()
                 .enumerate()
                 .map(|(index, column)| {
@@ -495,11 +488,11 @@ impl<M: Model> QueryBuilder<M> {
 
         let (inner_sql, params) = inner.build_select_sql_with_params_for_db(db_type);
         Ok((
-            format!(
-                "SELECT {} FROM ({}) AS {}",
-                select_list.join(", "),
-                inner_sql,
-                db_sql::quote_ident(db_type, AGGREGATE_SUBQUERY_ALIAS)
+            db_sql::select_from_derived(
+                db_type,
+                &select_list.join(", "),
+                &inner_sql,
+                AGGREGATE_SUBQUERY_ALIAS,
             ),
             params,
         ))
@@ -518,7 +511,6 @@ impl<M: Model> QueryBuilder<M> {
     async fn execute_scalar_aggregate(
         &self,
         terminal: &str,
-        db_type: DatabaseType,
         column: &str,
         alias: &str,
         reads_as_column: bool,
@@ -527,8 +519,12 @@ impl<M: Model> QueryBuilder<M> {
         self.ensure_query_is_executable()?;
         self.ensure_scalar_aggregate_is_representable(terminal)?;
 
-        let (sql, params) =
-            self.build_aggregate_sql_with_params_for_db(db_type, column, alias, render_expression)?;
+        let (sql, params) = self.build_aggregate_sql_with_params_for_db(
+            self.db_type_for_sql(),
+            column,
+            alias,
+            render_expression,
+        )?;
         let output_types = if reads_as_column {
             self.extreme_output_type(alias, column)
         } else {
@@ -560,17 +556,14 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<T> {
-        let value = self
-            .scalar_aggregate(
-                "sum()",
-                &crate::columns::column_reference(&column, Some(M::table_name())),
-                AGGREGATE_RESULT_ALIAS,
-                false,
-                sum_expression,
-            )
-            .await?;
-        let retry = number_from_text(&value);
-        decode_aggregate(value, retry, "sum()")
+        self.decoded_aggregate(
+            "sum()",
+            &Self::aggregated_column(&column),
+            AGGREGATE_RESULT_ALIAS,
+            false,
+            sum_expression,
+        )
+        .await
     }
 
     /// Average a column, read as `T` (usually `f64`); `None` over no rows.
@@ -580,17 +573,14 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        let value = self
-            .scalar_aggregate(
-                "avg()",
-                &crate::columns::column_reference(&column, Some(M::table_name())),
-                AGGREGATE_RESULT_ALIAS,
-                false,
-                |column| format!("AVG({})", column),
-            )
-            .await?;
-        let retry = number_from_text(&value);
-        decode_aggregate(value, retry, "avg()")
+        self.decoded_aggregate(
+            "avg()",
+            &Self::aggregated_column(&column),
+            AGGREGATE_RESULT_ALIAS,
+            false,
+            |column| format!("AVG({})", column),
+        )
+        .await
     }
 
     /// The smallest value of a column, read as `T`; `None` over no rows.
@@ -607,11 +597,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.extreme(
-            "MIN",
-            &crate::columns::column_reference(&column, Some(M::table_name())),
-        )
-        .await
+        self.extreme("MIN", &Self::aggregated_column(&column)).await
     }
 
     /// The largest value of a column, read as `T`; `None` over no rows.
@@ -621,11 +607,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.extreme(
-            "MAX",
-            &crate::columns::column_reference(&column, Some(M::table_name())),
-        )
-        .await
+        self.extreme("MAX", &Self::aggregated_column(&column)).await
     }
 
     /// Run a `MIN` or `MAX`, aliased as the model column it reads so the
@@ -639,13 +621,10 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Result<Option<T>> {
         let terminal = format!("{}()", function.to_ascii_lowercase());
         let alias = Self::extreme_alias(column).unwrap_or(AGGREGATE_RESULT_ALIAS);
-        let value = self
-            .scalar_aggregate(&terminal, column, alias, true, |column| {
-                format!("{}({})", function, column)
-            })
-            .await?;
-        let retry = number_from_text(&value);
-        decode_aggregate(value, retry, &terminal)
+        self.decoded_aggregate(&terminal, column, alias, true, |column| {
+            format!("{}({})", function, column)
+        })
+        .await
     }
 
     /// The type a `MIN`/`MAX` of `column`, selected as `alias`, is decoded by:
@@ -666,34 +645,35 @@ impl<M: Model> QueryBuilder<M> {
     /// decoded by that column's type.
     fn extreme_alias(column: &str) -> Option<&'static str> {
         crate::internal::column_type_of::<M>(column)?;
-        let name = column.rsplit_once('.').map_or(column, |(_, name)| name);
-        M::canonical_column_name(name.trim())
+        M::own_column_name(column)
     }
 
-    /// Run a scalar aggregate selected as `alias` and return its value.
-    async fn scalar_aggregate(
+    /// The column a terminal aggregates: another model's typed column is
+    /// qualified with its table.
+    fn aggregated_column(column: &impl crate::columns::IntoColumnName) -> String {
+        crate::columns::column_reference(column, Some(M::table_name()))
+    }
+
+    /// Run a scalar aggregate selected as `alias` and decode its value as `T`.
+    async fn decoded_aggregate<T: serde::de::DeserializeOwned>(
         &self,
         terminal: &str,
         column: &str,
         alias: &str,
         reads_as_column: bool,
         render_expression: impl Fn(&str) -> String,
-    ) -> Result<serde_json::Value> {
-        self.execute_scalar_aggregate(
-            terminal,
-            self.db_type_for_sql(),
-            column,
-            alias,
-            reads_as_column,
-            render_expression,
-        )
-        .await?
-        .ok_or_else(|| {
-            Error::query(format!(
-                "Database returned no '{}' column for {}",
-                alias, terminal
-            ))
-        })
+    ) -> Result<T> {
+        let value = self
+            .execute_scalar_aggregate(terminal, column, alias, reads_as_column, render_expression)
+            .await?
+            .ok_or_else(|| {
+                Error::query(format!(
+                    "Database returned no '{}' column for {}",
+                    alias, terminal
+                ))
+            })?;
+        let retry = number_from_text(&value);
+        decode_aggregate(value, retry, terminal)
     }
 
     /// Count distinct values of a column
@@ -703,8 +683,7 @@ impl<M: Model> QueryBuilder<M> {
         let value = self
             .execute_scalar_aggregate(
                 "count_distinct()",
-                self.db_type_for_sql(),
-                &crate::columns::column_reference(&column, Some(M::table_name())),
+                &Self::aggregated_column(&column),
                 COUNT_RESULT_ALIAS,
                 false,
                 |column_sql| format!("COUNT(DISTINCT {})", column_sql),
@@ -839,12 +818,11 @@ impl<M: Model> QueryBuilder<M> {
         method: &str,
         other: &QueryBuilder<N>,
     ) -> Self {
-        if let Err(err) = other.ensure_query_is_executable() {
-            self.invalidate_query(format!("invalid operand for {}(): {}", method, err));
-        }
+        self.absorb_operand_error("operand", method, other);
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
-        self.unions
+        self.clauses
+            .unions
             .push(UnionClause::with_params(union_type, query_sql, params));
         self
     }
@@ -870,14 +848,8 @@ impl<M: Model> QueryBuilder<M> {
     /// Trusted SQL only. Do not pass user-controlled input; prefer `union()` with a
     /// `QueryBuilder` whenever possible.
     #[must_use]
-    pub fn union_raw(mut self, sql: &str) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
-            self.invalidate_query(format!("invalid subquery for union_raw(): {}", reason));
-        }
-
-        self.unions
-            .push(UnionClause::new(UnionType::Union, sql.to_string()));
-        self
+    pub fn union_raw(self, sql: &str) -> Self {
+        self.push_raw_union(UnionType::Union, "union_raw", sql)
     }
 
     /// Add a raw UNION ALL query
@@ -885,13 +857,18 @@ impl<M: Model> QueryBuilder<M> {
     /// Trusted SQL only. Do not pass user-controlled input; prefer `union_all()` with a
     /// `QueryBuilder` whenever possible.
     #[must_use]
-    pub fn union_all_raw(mut self, sql: &str) -> Self {
+    pub fn union_all_raw(self, sql: &str) -> Self {
+        self.push_raw_union(UnionType::UnionAll, "union_all_raw", sql)
+    }
+
+    fn push_raw_union(mut self, union_type: UnionType, method: &str, sql: &str) -> Self {
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(sql) {
-            self.invalidate_query(format!("invalid subquery for union_all_raw(): {}", reason));
+            self.invalidate_query(format!("invalid subquery for {method}(): {reason}"));
         }
 
-        self.unions
-            .push(UnionClause::new(UnionType::UnionAll, sql.to_string()));
+        self.clauses
+            .unions
+            .push(UnionClause::new(union_type, sql.to_string()));
         self
     }
 }

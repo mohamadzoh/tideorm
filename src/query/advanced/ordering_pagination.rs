@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::query::builder::{contains_raw_order_by_marker, raw_order_by_entry};
+use crate::query::builder::{contains_raw_order_by_marker, raw_order_by_entry, split_direction};
 
 impl<M: Model> QueryBuilder<M> {
     /// Add an ORDER BY clause.
@@ -42,7 +42,7 @@ impl<M: Model> QueryBuilder<M> {
             return self;
         }
 
-        self.order_by.push((column, direction));
+        self.clauses.order_by.push((column, direction));
         self
     }
 
@@ -89,7 +89,7 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         direction: Order,
     ) -> Self {
-        self.order_by.clear();
+        self.clauses.order_by.clear();
         self.order_by(column, direction)
     }
 
@@ -112,7 +112,8 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     #[must_use]
     pub fn order_by_raw(mut self, expression: &str, direction: Order) -> Self {
-        self.order_by
+        self.clauses
+            .order_by
             .push((raw_order_by_entry(expression), direction));
         self
     }
@@ -144,7 +145,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Limit the number of results
     #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
-        self.limit_value = Some(n);
+        self.clauses.limit_value = Some(n);
         self
     }
 
@@ -155,7 +156,7 @@ impl<M: Model> QueryBuilder<M> {
     /// backend-appropriate open-ended `LIMIT` for them.
     #[must_use]
     pub fn offset(mut self, n: u64) -> Self {
-        self.offset_value = Some(n);
+        self.clauses.offset_value = Some(n);
         self
     }
 
@@ -175,38 +176,13 @@ impl<M: Model> QueryBuilder<M> {
         match page_offset(page, per_page) {
             Ok(offset) => self.limit(per_page).offset(offset),
             Err(refusal) => {
-                if self.invalid_page.is_none() {
-                    self.invalid_page = Some(refusal);
+                if self.clauses.invalid_page.is_none() {
+                    self.clauses.invalid_page = Some(refusal);
                 }
                 self
             }
         }
     }
-
-    /// Take only the first N records
-    #[must_use]
-    pub fn take(self, n: u64) -> Self {
-        self.limit(n)
-    }
-
-    /// Skip the first N records
-    #[must_use]
-    pub fn skip(self, n: u64) -> Self {
-        self.offset(n)
-    }
-}
-
-/// A column reference and the `ASC`/`DESC` written after it, if one is.
-fn split_direction(term: &str) -> Option<(&str, Order)> {
-    let (column, direction) = term.trim().rsplit_once(char::is_whitespace)?;
-    let direction = if direction.eq_ignore_ascii_case("asc") {
-        Order::Asc
-    } else if direction.eq_ignore_ascii_case("desc") {
-        Order::Desc
-    } else {
-        return None;
-    };
-    Some((column.trim_end(), direction))
 }
 
 /// The offset of page `page` (1-based) of `per_page` rows, or the field it

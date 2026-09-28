@@ -73,10 +73,7 @@ pub trait ApplyTranslations: HasTranslations {
 
         for (field, translations) in input.fields {
             self.validate_field(&field)?;
-            for (lang, value) in translations {
-                self.validate_language(&lang)?;
-                data.set(&field, &lang, value);
-            }
+            super::put_translations(self, &mut data, &field, translations)?;
         }
 
         self.set_translations_data(data)

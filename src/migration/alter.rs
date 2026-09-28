@@ -13,8 +13,20 @@ pub struct AlterTableBuilder {
     database_type: DatabaseType,
     operations: Vec<AlterOperation>,
     /// What MySQL's `MODIFY COLUMN` would drop from a column whose type
-    /// changes — its NOT NULL, DEFAULT, AUTO_INCREMENT, COMMENT — by column.
-    kept_attributes: std::collections::HashMap<String, String>,
+    /// changes, by column.
+    kept_attributes: std::collections::HashMap<String, KeptAttributes>,
+}
+
+/// A MySQL column's declaration besides its type, as `SHOW CREATE TABLE`
+/// writes it.
+#[derive(Debug, Default, PartialEq)]
+struct KeptAttributes {
+    /// Its `CHARACTER SET` and `COLLATE` clauses, which `SHOW CREATE TABLE`
+    /// writes only where they differ from the table's defaults, as written.
+    character: String,
+    /// Everything after them: `NOT NULL DEFAULT '5'`, `AUTO_INCREMENT`,
+    /// `DEFAULT NULL COMMENT '..'`.
+    rest: String,
 }
 
 impl AlterTableBuilder {
@@ -80,15 +92,45 @@ impl AlterTableBuilder {
     }
 
     /// Keep what `create_table`, the table's `SHOW CREATE TABLE`, declares
-    /// for each column whose type changes, besides the type.
+    /// for each column whose type changes, besides the type. A column renamed
+    /// earlier in the same alteration is looked up by the name the table
+    /// still gives it; one added or dropped earlier has no stored definition.
     pub(crate) fn keep_column_attributes(&mut self, create_table: &str) {
+        // By the name a column has at this point of the alteration, the name
+        // the table stores it under, or `None` for one it does not store.
+        let mut stored_names: std::collections::HashMap<&str, Option<&str>> =
+            std::collections::HashMap::new();
         for operation in &self.operations {
-            if let AlterOperation::ChangeColumnType(name, _) = operation
-                && let Some(attributes) = mysql_column_attributes(create_table, name)
-            {
-                self.kept_attributes.insert(name.clone(), attributes);
+            match operation {
+                AlterOperation::RenameColumn(from, to) => {
+                    let stored = stored_names.remove(from.as_str()).unwrap_or(Some(from));
+                    stored_names.insert(to, stored);
+                }
+                AlterOperation::AddColumn(column) => {
+                    stored_names.insert(&column.name, None);
+                }
+                AlterOperation::DropColumn(name) => {
+                    stored_names.insert(name, None);
+                }
+                AlterOperation::ChangeColumnType(name, _) => {
+                    if let Some(stored) = stored_names
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or(Some(name))
+                        && let Some(attributes) = mysql_column_attributes(create_table, stored)
+                    {
+                        self.kept_attributes.insert(name.clone(), attributes);
+                    }
+                }
             }
         }
+    }
+
+    /// The statements this alteration renders, for the CLI's migration
+    /// generator, which writes them into a migration file.
+    #[doc(hidden)]
+    pub fn __statements(&self) -> Result<Vec<String>> {
+        self.build()
     }
 
     pub(crate) fn build(&self) -> Result<Vec<String>> {
@@ -137,13 +179,24 @@ impl AlterTableBuilder {
                             quote_ident(db_type, name),
                             type_sql
                         );
-                        if let Some(attributes) = self
-                            .kept_attributes
-                            .get(name)
-                            .filter(|kept| !kept.is_empty())
-                        {
-                            sql.push(' ');
-                            sql.push_str(attributes);
+                        if let Some(kept) = self.kept_attributes.get(name) {
+                            // A character set or collation stays with a
+                            // column that still holds text, which would
+                            // otherwise take the table's; any other type
+                            // refuses one.
+                            let attributes = [
+                                if holds_text(&type_sql) {
+                                    kept.character.as_str()
+                                } else {
+                                    ""
+                                },
+                                kept.rest.as_str(),
+                            ];
+                            for attribute in attributes.into_iter().filter(|text| !text.is_empty())
+                            {
+                                sql.push(' ');
+                                sql.push_str(attribute);
+                            }
                         }
                         sql
                     }
@@ -169,11 +222,33 @@ impl AlterTableBuilder {
     }
 }
 
+/// Whether a MySQL column of type `type_sql` holds text, and so takes a
+/// character set and a collation.
+fn holds_text(type_sql: &str) -> bool {
+    let type_sql = type_sql.trim().to_ascii_uppercase();
+    [
+        "CHAR",
+        "VARCHAR",
+        "NCHAR",
+        "NVARCHAR",
+        "NATIONAL",
+        "TINYTEXT",
+        "TEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "ENUM",
+        "SET(",
+        "SET (",
+    ]
+    .iter()
+    .any(|prefix| type_sql.starts_with(prefix))
+}
+
 /// What `create_table`, a MySQL or MariaDB `SHOW CREATE TABLE`, declares for
-/// `column` after its type, character set and collation: `NOT NULL DEFAULT '5'`,
-/// `NOT NULL AUTO_INCREMENT`, `DEFAULT NULL COMMENT '..'`. `None` when the table
-/// has no such column.
-fn mysql_column_attributes(create_table: &str, column: &str) -> Option<String> {
+/// `column` besides its type: its character set and collation, and after
+/// them `NOT NULL DEFAULT '5'`, `NOT NULL AUTO_INCREMENT`,
+/// `DEFAULT NULL COMMENT '..'`. `None` when the table has no such column.
+fn mysql_column_attributes(create_table: &str, column: &str) -> Option<KeptAttributes> {
     // The first word of a column's definition that is not part of its type.
     const ATTRIBUTES: [&str; 17] = [
         "NOT",
@@ -195,17 +270,25 @@ fn mysql_column_attributes(create_table: &str, column: &str) -> Option<String> {
         "REFERENCES",
     ];
 
-    let quoted = format!("`{}`", column.replace('`', "``"));
+    let quoted = quote_ident(DatabaseType::MySQL, column);
     let definition = create_table.lines().map(str::trim).find_map(|line| {
         let head = line.get(..quoted.len())?;
         let rest = line.get(quoted.len()..)?;
         (head.eq_ignore_ascii_case(&quoted) && rest.starts_with(' ')).then_some(rest)
     })?;
     let mut rest = definition.trim().trim_end_matches(',');
+    let mut character: Vec<&str> = Vec::new();
+    // How many of the next words belong to a CHARACTER SET or COLLATE clause.
+    let mut clause_words = 0;
 
     loop {
         rest = rest.trim_start();
-        let first = rest.chars().next()?;
+        let Some(first) = rest.chars().next() else {
+            return Some(KeptAttributes {
+                character: character.join(" "),
+                rest: String::new(),
+            });
+        };
         // A quoted literal or a parenthesized group is one word.
         let end = match first {
             '\'' | '"' | '`' => rest[1..].find(first).map_or(rest.len(), |end| end + 2),
@@ -227,14 +310,23 @@ fn mysql_column_attributes(create_table: &str, column: &str) -> Option<String> {
                 .unwrap_or(rest.len()),
         };
         let word = &rest[..end];
-        if ATTRIBUTES
+        if clause_words > 0 {
+            character.push(word);
+            clause_words -= 1;
+        } else if word.eq_ignore_ascii_case("CHARACTER") {
+            character.push(word);
+            clause_words = 2;
+        } else if word.eq_ignore_ascii_case("CHARSET") || word.eq_ignore_ascii_case("COLLATE") {
+            character.push(word);
+            clause_words = 1;
+        } else if ATTRIBUTES
             .iter()
             .any(|attribute| word.eq_ignore_ascii_case(attribute))
         {
-            return Some(rest.to_string());
-        }
-        if end == rest.len() {
-            return Some(String::new());
+            return Some(KeptAttributes {
+                character: character.join(" "),
+                rest: rest.to_string(),
+            });
         }
         rest = &rest[end..];
     }

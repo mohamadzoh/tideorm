@@ -12,7 +12,7 @@ use super::*;
 ))]
 #[tokio::test]
 async fn loaded_model_reports_changed_fields_and_original_values() {
-    let _guard = model_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -52,7 +52,7 @@ async fn loaded_model_reports_changed_fields_and_original_values() {
         Some(Some(serde_json::json!("Alice")))
     );
 
-    cleanup_model_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(
@@ -62,7 +62,7 @@ async fn loaded_model_reports_changed_fields_and_original_values() {
 ))]
 #[tokio::test]
 async fn update_refreshes_dirty_tracking_baseline() {
-    let _guard = model_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -94,7 +94,7 @@ async fn update_refreshes_dirty_tracking_baseline() {
         Some(Some(serde_json::json!("Bob")))
     );
 
-    cleanup_model_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(
@@ -104,7 +104,7 @@ async fn update_refreshes_dirty_tracking_baseline() {
 ))]
 #[tokio::test]
 async fn cache_hits_restore_dirty_tracking_snapshots() {
-    let _guard = model_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     AutoIncrementModel {
@@ -147,7 +147,7 @@ async fn cache_hits_restore_dirty_tracking_snapshots() {
         Some(Some(serde_json::json!("Alice")))
     );
 
-    cleanup_model_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(
@@ -157,7 +157,7 @@ async fn cache_hits_restore_dirty_tracking_snapshots() {
 ))]
 #[tokio::test]
 async fn updated_model_can_continue_tracking_after_baseline_refresh() {
-    let _guard = model_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -213,7 +213,7 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
         Some(Some(serde_json::json!("Bob")))
     );
 
-    cleanup_model_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 /// A baseline recorded inside a transaction that rolls back is withdrawn:
@@ -227,7 +227,7 @@ async fn updated_model_can_continue_tracking_after_baseline_refresh() {
 ))]
 #[tokio::test]
 async fn a_rolled_back_update_restores_the_baseline() {
-    let _guard = model_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let db = setup_model_cache_test_db().await;
 
     let saved = AutoIncrementModel {
@@ -250,7 +250,7 @@ async fn a_rolled_back_update_restores_the_baseline() {
         .transaction(|_| {
             Box::pin(async move {
                 edited.update().await?;
-                Err(crate::error::Error::invalid_query("roll it back"))
+                Err(crate::error::Error::query("roll it back"))
             })
         })
         .await;
@@ -267,5 +267,5 @@ async fn a_rolled_back_update_restores_the_baseline() {
         Some(Some(serde_json::json!("Alice")))
     );
 
-    cleanup_model_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }

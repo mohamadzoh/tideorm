@@ -2,7 +2,6 @@ use super::HasManyThrough;
 use crate::database::{__in_db_scope, Database};
 use crate::entity_manager::EntityManager;
 use crate::model::Model as _;
-use crate::postgres_test_config::test_database_url;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -43,35 +42,21 @@ struct ManyToManyEntityManagerPostTag {
 }
 
 async fn setup_database() -> crate::error::Result<Option<Arc<Database>>> {
-    if !crate::postgres_test_config::should_run_postgres_tests() {
-        println!("{}", crate::postgres_test_config::SKIPPED);
-        return Ok(None);
-    }
-    let db = Arc::new(Database::connect(test_database_url()).await?);
-
-    __in_db_scope(db.as_ref(), async {
-        Database::execute(&format!("DROP TABLE IF EXISTS {PIVOT_TABLE} CASCADE")).await?;
-        Database::execute(&format!("DROP TABLE IF EXISTS {TAG_TABLE} CASCADE")).await?;
-        Database::execute(&format!("DROP TABLE IF EXISTS {POST_TABLE} CASCADE")).await?;
-
-        Database::execute(&format!(
-            "CREATE TABLE {POST_TABLE} (id BIGSERIAL PRIMARY KEY, title VARCHAR(255) NOT NULL)"
-        ))
-        .await?;
-        Database::execute(&format!(
-            "CREATE TABLE {TAG_TABLE} (id BIGSERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL)"
-        ))
-        .await?;
-        Database::execute(&format!(
-            "CREATE TABLE {PIVOT_TABLE} (id BIGSERIAL PRIMARY KEY, post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL)"
-        ))
-        .await?;
-
-        Ok(())
-    })
-    .await?;
-
-    Ok(Some(db))
+    crate::test_support::fresh_postgres_tables(&[
+        (
+            POST_TABLE,
+            "id BIGSERIAL PRIMARY KEY, title VARCHAR(255) NOT NULL",
+        ),
+        (
+            TAG_TABLE,
+            "id BIGSERIAL PRIMARY KEY, name VARCHAR(255) NOT NULL",
+        ),
+        (
+            PIVOT_TABLE,
+            "id BIGSERIAL PRIMARY KEY, post_id BIGINT NOT NULL, tag_id BIGINT NOT NULL",
+        ),
+    ])
+    .await
 }
 
 async fn seed_relations(
@@ -153,7 +138,8 @@ async fn has_many_through_helpers_query_via_parent_entity_manager_database_witho
     let (post, tag, _pivot) = seed_relations(db.as_ref()).await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let post = ManyToManyEntityManagerPost::find_in_entity_manager(post.id, &entity_manager)
+    let post = entity_manager
+        .find::<ManyToManyEntityManagerPost>(post.id)
         .await?
         .expect("entity-manager post should exist");
 
@@ -189,7 +175,8 @@ async fn has_many_through_entity_manager_load_collapses_duplicate_pivot_rows()
     .await?;
     let entity_manager = EntityManager::new(db.clone());
 
-    let mut post = ManyToManyEntityManagerPost::find_in_entity_manager(post.id, &entity_manager)
+    let mut post = entity_manager
+        .find::<ManyToManyEntityManagerPost>(post.id)
         .await?
         .expect("entity-manager post should exist");
 
@@ -229,7 +216,7 @@ async fn has_many_through_cached_load_keeps_the_tracked_instance() -> crate::err
         name: "stale-eager-copy".to_string(),
     }]);
 
-    let loaded = relation.load_in_entity_manager(&entity_manager).await?;
+    let loaded = entity_manager.load(&mut relation).await?;
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].name, "edited-in-memory");
 

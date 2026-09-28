@@ -1,5 +1,5 @@
 use tideorm::error::Error;
-use tideorm::validation::{ValidatableValue, ValidationErrors, ValidationRule, Validator};
+use tideorm::validation::{ValidatableValue, ValidationErrors, ValidationRule};
 
 #[test]
 fn test_validation_rule_required() {
@@ -20,18 +20,7 @@ fn test_validation_rule_email() {
     assert!(rule.validate(&"invalid".to_string()).is_err());
     assert!(rule.validate(&"@nodomain.com".to_string()).is_err());
     assert!(rule.validate(&"noat.com".to_string()).is_err());
-}
-
-#[test]
-fn test_validation_rule_url() {
-    let rule = ValidationRule::Url;
-    assert!(rule.validate(&"https://example.com".to_string()).is_ok());
-    assert!(
-        rule.validate(&"http://localhost:8080/path".to_string())
-            .is_ok()
-    );
-    assert!(rule.validate(&"not-a-url".to_string()).is_err());
-    assert!(rule.validate(&"example.com".to_string()).is_err());
+    assert!(rule.validate(&"test@".to_string()).is_err());
 }
 
 #[test]
@@ -155,22 +144,6 @@ fn test_validation_rule_not_in() {
 }
 
 #[test]
-fn test_validation_errors_collection() {
-    let mut errors = ValidationErrors::new();
-    assert!(errors.is_empty());
-
-    errors.add("email", "Invalid email format");
-    assert!(!errors.is_empty());
-    assert!(errors.has_errors());
-
-    errors.add("email", "Email already taken");
-    errors.add("password", "Too short");
-
-    let all_errors = errors.errors();
-    assert_eq!(all_errors.len(), 3);
-}
-
-#[test]
 fn test_validation_errors_field_errors() {
     let mut errors = ValidationErrors::new();
     errors.add("email", "Invalid format");
@@ -198,16 +171,6 @@ fn test_validation_errors_display() {
     let mut parts: Vec<&str> = display.split("; ").collect();
     parts.sort_unstable();
     assert_eq!(parts, ["email: Invalid email", "password: Too short"]);
-}
-
-#[test]
-fn test_validator_validate_rule() {
-    let rule = ValidationRule::Email;
-    let result = Validator::validate_rule(&"test@example.com".to_string(), &rule, "email");
-    assert!(result.is_none());
-
-    let result = Validator::validate_rule(&"invalid".to_string(), &rule, "email");
-    assert!(result.is_some());
 }
 
 #[test]

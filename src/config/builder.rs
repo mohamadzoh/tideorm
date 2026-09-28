@@ -2,7 +2,6 @@ use std::time::Duration;
 
 #[cfg(feature = "attachments")]
 use super::FileUrlGenerator;
-use super::database::rewrite_driver_url;
 use super::state::{
     global_db_type, global_schema_file_path, set_global_db_type, set_global_schema_file_path,
     with_global_config_mut,
@@ -319,7 +318,7 @@ impl TideConfig {
     #[cfg(feature = "attachments")]
     #[must_use]
     pub fn file_url_generator(self, generator: FileUrlGenerator) -> Self {
-        Config::set_file_url_generator(generator);
+        super::state::set_global_file_url_generator(Some(generator));
         self
     }
 
@@ -418,13 +417,8 @@ impl TideConfig {
         };
 
         let db = Database::builder()
-            .url(rewrite_driver_url(&url))
-            .max_connections(self.pool.max_connections)
-            .min_connections(self.pool.min_connections)
-            .connect_timeout(self.pool.connect_timeout)
-            .idle_timeout(self.pool.idle_timeout)
-            .max_lifetime(self.pool.max_lifetime)
-            .acquire_timeout(self.pool.acquire_timeout)
+            .url(url)
+            .pool(&self.pool)
             .build()
             .await?;
 

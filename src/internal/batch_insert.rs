@@ -7,7 +7,7 @@ use std::iter::Peekable;
 use super::{
     ActiveModelTrait, Backend, ColumnTrait, Condition, ConnectionTrait, EntityTrait, Executor,
     InternalModel, IntoActiveModel, Iterable, ModelTrait, QueryFilter, Value,
-    ensure_fields_storable, model_error_context, translate_error,
+    ensure_fields_storable, model_error_context, run_profiled, translate_error,
 };
 use crate::error::{Error, ErrorContext, Result};
 
@@ -285,10 +285,7 @@ where
 {
     let count = active_models.len();
     let insert = M::Entity::insert_many(active_models).exec_with_returning(conn);
-    let rows = crate::profiling::__profile_future(insert)
-        .await
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(error_context.clone()))?;
+    let rows = run_profiled(insert, || error_context.clone()).await?;
     // A trigger can skip rows (PostgreSQL routing one to another table,
     // SQLite's `RAISE(IGNORE)`), which would leave the rest out of line with
     // the models they came from.
@@ -369,10 +366,7 @@ where
     C: ConnectionTrait,
 {
     let insert = M::Entity::insert_many(active_models).exec_without_returning(conn);
-    crate::profiling::__profile_future(insert)
-        .await
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(error_context.clone()))?;
+    run_profiled(insert, || error_context.clone()).await?;
 
     let columns = M::primary_key_columns();
     let condition = match columns.as_slice() {
@@ -389,10 +383,7 @@ where
         }),
     };
     let select = M::Entity::find().filter(condition).all(conn);
-    let rows = crate::profiling::__profile_future(select)
-        .await
-        .map_err(translate_error)
-        .map_err(|err| err.with_context(error_context.clone()))?;
+    let rows = run_profiled(select, || error_context.clone()).await?;
 
     order_by_keys::<M>(rows, keys)?
         .into_iter()
@@ -416,10 +407,7 @@ where
 {
     let mut results = Vec::with_capacity(active_models.len());
     for active in active_models {
-        let result = crate::profiling::__profile_future(async move { active.insert(conn).await })
-            .await
-            .map_err(translate_error)
-            .map_err(|err| err.with_context(error_context.clone()))?;
+        let result = run_profiled(active.insert(conn), || error_context.clone()).await?;
         results.push(M::try_from_entity_model(result)?);
     }
     Ok(results)

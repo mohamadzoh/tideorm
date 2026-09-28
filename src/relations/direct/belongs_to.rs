@@ -1,9 +1,6 @@
 use super::*;
 
-// `HasMany` is re-exported from `crate::relations` rather than `super`: with the
-// `entity-manager` feature on, `direct::HasMany` is crate-private and the public
-// name resolves to `TrackedHasMany`.
-/// The inverse of [`HasOne`](super::HasOne)/[`HasMany`](crate::relations::HasMany): the
+/// The inverse of [`HasOne`](super::HasOne)/[`HasMany`](super::HasMany): the
 /// foreign key lives on *this* model and points at a row of `E`.
 ///
 /// Declared as a struct field; the derive reads the foreign-key column off the
@@ -45,10 +42,7 @@ pub struct BelongsTo<E: Model> {
     /// with [`HasOne`](super::HasOne), whose second key names a column on the
     /// *declaring* model.
     pub owner_key: &'static str,
-    cached: Option<Box<E>>,
-    loaded: bool,
-    fk_value: Option<serde_json::Value>,
-    source: QuerySource,
+    state: RelationState<Box<E>>,
 }
 
 impl<E: Model> BelongsTo<E> {
@@ -58,21 +52,19 @@ impl<E: Model> BelongsTo<E> {
 
     fn foreign_key_value(&self, context: &str) -> Result<&serde_json::Value> {
         self.ensure_configured()?;
-        required_key(&self.fk_value, "Foreign key value", context)
+        required_key(&self.state.key, "Foreign key value", context)
     }
 
     /// The query for the owning row.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let fk = self.foreign_key_value(context)?;
-        Ok(where_key(self.source.query(), self.owner_key, fk))
+        Ok(where_key(self.state.source.query(), self.owner_key, fk))
     }
 
-    /// Declare the relation's key pair.
+    /// Declare the foreign-key column and the owner column it points at.
     ///
-    /// Both names must be non-empty; every method rejects a wrapper built by
-    /// [`Default`] (which leaves them `""`) with "BelongsTo relation is not
-    /// configured". Pair with [`with_fk_value`](Self::with_fk_value) to make it
-    /// loadable — normally the derive does both for you.
+    /// Both must be non-empty; every method rejects a wrapper built by
+    /// [`Default`] with "BelongsTo relation is not configured".
     pub fn new(foreign_key: &'static str, owner_key: &'static str) -> Self {
         Self {
             foreign_key,
@@ -86,47 +78,35 @@ impl<E: Model> BelongsTo<E> {
     ///
     /// Must be a scalar; composite keys are rejected at load time. Without this
     /// the wrapper is inert — every query method errors with "Foreign key value
-    /// not set for relation". A nullable foreign key is fine: a JSON `null` is
-    /// not short-circuited but renders as `WHERE owner_key IS NULL`, which for a
-    /// primary key matches nothing and yields `Ok(None)`.
+    /// not set for relation". A nullable foreign key is fine: a JSON `null`
+    /// relates to no row, so `load` yields `Ok(None)`.
     pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
-        self.fk_value = Some(fk);
+        self.state.key = Some(fk);
         self
     }
 
     #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.source.database = Some(database.clone());
+        self.state.source.database = Some(database.clone());
     }
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, model: Option<E>) {
-        self.cached = model.map(Box::new);
-        self.loaded = true;
+        self.state.set_cached(model.map(Box::new));
     }
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        let same_relation = self.foreign_key == previous.foreign_key
-            && self.owner_key == previous.owner_key
-            && self.fk_value == previous.fk_value;
-
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            previous.fk_value.is_none(),
-            same_relation,
+        // The cache holds the owner, which a row not given a foreign key yet
+        // is the caller's to link.
+        self.state.preserve_from(
+            &previous.state,
+            self.foreign_key == previous.foreign_key
+                && self.owner_key == previous.owner_key
+                && self.state.key == previous.state.key,
+            previous.state.key.is_none(),
         );
-
-        if (same_relation || previous.fk_value.is_none()) && !self.loaded {
-            self.loaded = previous.loaded;
-        }
-
-        #[cfg(feature = "entity-manager")]
-        if same_relation {
-            self.source.preserve_from(&previous.source);
-        }
     }
 
     /// Fetch the owning row, returning `Ok(None)` when the foreign key matches
@@ -138,11 +118,9 @@ impl<E: Model> BelongsTo<E> {
     /// the wrapper carries no foreign-key value (a bare `Default`, or a
     /// deserialized model that was never refreshed).
     pub async fn load(&self) -> Result<Option<E>> {
-        let can_query = self.source.prefers_database()
-            && self.fk_value.is_some()
-            && self.ensure_configured().is_ok();
-        if self.loaded && !can_query {
-            return Ok(self.cached.as_deref().cloned());
+        let can_query = self.state.can_query(self.ensure_configured().is_ok());
+        if let Some(cached) = self.state.served(can_query) {
+            return Ok(cached.map(|model| (**model).clone()));
         }
 
         self.query("BelongsTo::load")?.first().await
@@ -177,14 +155,14 @@ impl<E: Model> BelongsTo<E> {
     /// [`load`](Self::load) will not see them. Persist by calling `save()` on the
     /// owner itself.
     pub fn as_mut(&mut self) -> Option<&mut E> {
-        self.cached.as_deref_mut()
+        self.state.cached_mut().map(|model| &mut **model)
     }
 
     /// Whether the cache has been populated — by an eager load, by `set_cached`,
     /// or by deserializing a non-`null` payload. Deserializing `null` leaves this
     /// `false`.
     pub fn is_loaded(&self) -> bool {
-        self.loaded
+        self.state.is_loaded()
     }
 
     /// The eagerly-loaded owner, if one is cached. Never queries and never
@@ -193,42 +171,7 @@ impl<E: Model> BelongsTo<E> {
     /// Returns `None` both when nothing was ever loaded and when the owner is
     /// known to be absent; [`is_loaded`](Self::is_loaded) distinguishes them.
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
-    }
-
-    /// Load the owner into `entity_manager`'s identity map and cache it here.
-    ///
-    /// Unlike [`load`](Self::load) this is `&mut self` and memoizing: the owner
-    /// is resolved from the manager's map when it is already there, registered
-    /// into it when it is not, and a repeat call returns the cached instance
-    /// rather than re-querying. An already cached owner gives way to the
-    /// instance the manager tracks, so two models pointing at the same owner
-    /// end up sharing one instance.
-    #[cfg(feature = "entity-manager")]
-    pub async fn load_in_entity_manager(
-        &mut self,
-        entity_manager: &Arc<EntityManager>,
-    ) -> Result<Option<&E>>
-    where
-        E: TideEntityManagerMeta,
-    {
-        const CONTEXT: &str = "BelongsTo::load_in_entity_manager";
-
-        self.source.entity_manager = Some(entity_manager.clone());
-
-        if !self.loaded {
-            let tracked = entity_manager
-                .find_by_field::<E>(self.owner_key, self.foreign_key_value(CONTEXT)?)?;
-            let owner = match tracked {
-                Some(owner) => Some(owner),
-                None => self.query(CONTEXT)?.first().await?,
-            };
-            self.cached = owner.map(Box::new);
-            self.loaded = true;
-        }
-
-        register_loaded(entity_manager, self.cached.as_deref_mut(), None).await?;
-        Ok(self.cached.as_deref())
+        self.state.cached().map(|model| &**model)
     }
 }
 
@@ -237,38 +180,17 @@ impl<E: Model> Default for BelongsTo<E> {
         Self {
             foreign_key: "",
             owner_key: "",
-            cached: None,
-            loaded: false,
-            fk_value: None,
-            source: QuerySource::default(),
+            state: RelationState::default(),
         }
     }
 }
 
-impl<E: Model> Serialize for BelongsTo<E> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
+relation_serde!(BelongsTo<E>);
 
-impl<'de, E: Model> Deserialize<'de> for BelongsTo<E> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<E>::deserialize(deserializer)?;
-        let loaded = cached.is_some();
-        Ok(Self {
-            cached: cached.map(Box::new),
-            loaded,
-            ..Self::default()
-        })
-    }
-}
-
+/// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
+/// resolves the owner from the manager's identity map when it is there and
+/// registers it when it is not, so two models pointing at one owner share
+/// one instance. A repeat load serves the cached instance.
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for BelongsTo<E>
 where
@@ -283,6 +205,13 @@ where
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
     ) -> Result<Self::Output<'a>> {
-        self.load_in_entity_manager(entity_manager).await
+        const CONTEXT: &str = "BelongsTo::load";
+
+        self.state.source.entity_manager = Some(entity_manager.clone());
+        let lookup = self
+            .foreign_key_value(CONTEXT)
+            .cloned()
+            .and_then(|key| Ok((self.owner_key, key, self.query(CONTEXT)?)));
+        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, None).await
     }
 }

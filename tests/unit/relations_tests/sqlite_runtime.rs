@@ -6,7 +6,7 @@ use crate::model::Model as _;
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn direct_relation_load_refreshes_stale_cached_values() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -130,13 +130,13 @@ async fn direct_relation_load_refreshes_stale_cached_values() {
         1
     );
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_builder_with_batch_loads_direct_relations() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -227,13 +227,13 @@ async fn query_builder_with_batch_loads_direct_relations() {
     assert!(posts.iter().any(|post| post.title == "Second Post"));
     assert!(!posts.iter().any(|post| post.title == "Filtered Post"));
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn eager_loading_records_relation_payloads() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -279,7 +279,7 @@ async fn eager_loading_records_relation_payloads() {
     .await
     .expect("inserting posts should succeed");
 
-    let users = DirectRelationUser::eager()
+    let users = DirectRelationUser::query()
         .with("posts")
         .get()
         .await
@@ -299,13 +299,13 @@ async fn eager_loading_records_relation_payloads() {
 
     assert!(!users[0].has_relation("profile"));
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn eager_loading_resolves_morph_one_relations() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -347,7 +347,7 @@ async fn eager_loading_resolves_morph_one_relations() {
     .await
     .expect("inserting images should succeed");
 
-    let employees = RelationTestEmployee::eager()
+    let employees = RelationTestEmployee::query()
         .with("avatar")
         .get()
         .await
@@ -372,13 +372,13 @@ async fn eager_loading_resolves_morph_one_relations() {
         .expect("employee 2 should be loaded");
     assert!(without_avatar.model.avatar.get_cached().is_none());
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn eager_loading_names_the_self_referencing_limitation() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -395,7 +395,7 @@ async fn eager_loading_names_the_self_referencing_limitation() {
     .await
     .expect("inserting employee should succeed");
 
-    let error = RelationTestEmployee::eager()
+    let error = RelationTestEmployee::query()
         .with("manager")
         .get()
         .await
@@ -406,13 +406,13 @@ async fn eager_loading_names_the_self_referencing_limitation() {
     assert!(message.contains("manager"), "{message}");
     assert!(!message.contains("Unknown relation"), "{message}");
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn has_many_through_attach_uses_backend_specific_placeholders() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -444,13 +444,13 @@ async fn has_many_through_attach_uses_backend_specific_placeholders() {
     assert_eq!(pivots[0].left_id, 1);
     assert_eq!(pivots[0].right_id, 2);
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn direct_relation_load_preserves_cached_payloads_without_query_context() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let _db = setup_direct_relation_test_db().await;
 
@@ -499,13 +499,13 @@ async fn direct_relation_load_preserves_cached_payloads_without_query_context() 
         "Cached User"
     );
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn self_referencing_load_does_not_serve_a_deserialized_payload() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -560,13 +560,13 @@ async fn self_referencing_load_does_not_serve_a_deserialized_payload() {
         vec![3]
     );
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn morph_load_does_not_serve_a_deserialized_payload() {
-    let _guard = direct_relation_db_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
 
     let db = setup_direct_relation_test_db().await;
 
@@ -616,5 +616,5 @@ async fn morph_load_does_not_serve_a_deserialized_payload() {
         vec![7]
     );
 
-    cleanup_direct_relation_test_db();
+    crate::test_support::reset_globals();
 }

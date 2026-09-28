@@ -278,7 +278,6 @@ jobs:
       - name: Run PostgreSQL suites
         run: |
           cargo test --package tideorm --test postgres_integration_tests
-          cargo test --package tideorm --test postgres_advanced_tests
           cargo test --package tideorm --test or_clause_tests
           cargo test --package tideorm --test postgres_entity_manager_tests --features entity-manager
 

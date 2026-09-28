@@ -24,18 +24,46 @@ enum ComparisonOperator {
     Lte,
 }
 
+impl ComparisonOperator {
+    fn of(operator: &Operator) -> Option<Self> {
+        Some(match operator {
+            Operator::Eq => Self::Eq,
+            Operator::NotEq => Self::NotEq,
+            Operator::Gt => Self::Gt,
+            Operator::Gte => Self::Gte,
+            Operator::Lt => Self::Lt,
+            Operator::Lte => Self::Lte,
+            _ => return None,
+        })
+    }
+
+    /// `left <operator> right`.
+    fn apply(self, left: SimpleExpr, right: impl Into<SimpleExpr>) -> SimpleExpr {
+        match self {
+            Self::Eq => left.eq(right),
+            Self::NotEq => left.ne(right),
+            Self::Gt => left.gt(right),
+            Self::Gte => left.gte(right),
+            Self::Lt => left.lt(right),
+            Self::Lte => left.lte(right),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum ListOperator {
     In,
     NotIn,
-    EqAny,
-    NeAll,
 }
 
-#[derive(Clone, Copy)]
-enum JsonValueOperator {
-    Contains,
-    ContainedBy,
+impl ListOperator {
+    fn of(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::In => Some(Self::In),
+            Operator::NotIn => Some(Self::NotIn),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +71,17 @@ enum ArrayOperator {
     Contains,
     ContainedBy,
     Overlaps,
+}
+
+impl ArrayOperator {
+    fn of(operator: &Operator) -> Option<Self> {
+        match operator {
+            Operator::ArrayContains => Some(Self::Contains),
+            Operator::ArrayContainedBy => Some(Self::ContainedBy),
+            Operator::ArrayOverlaps => Some(Self::Overlaps),
+            _ => None,
+        }
+    }
 }
 
 /// The rendering a condition's operator/value pair calls for.
@@ -84,7 +123,7 @@ enum ConditionSpec<'a> {
         negated: bool,
     },
     JsonValue {
-        operator: JsonValueOperator,
+        containment: db_sql::JsonContainment,
         value: &'a serde_json::Value,
     },
     JsonExists {

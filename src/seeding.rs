@@ -6,8 +6,7 @@
 //! If a seed does not run when expected, check its stored name, dependency list,
 //! and whether it was already recorded as executed.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::database::{Database, require_db};
@@ -101,12 +100,10 @@ impl Seeder {
     /// Each seed runs in one transaction with its ledger entry, so a seed that fails part
     /// way leaves neither rows nor an entry behind and can be fixed and run again.
     pub async fn run(&self) -> Result<SeedResult> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, ledger) = open_ledger().await?;
 
         let executed = ledger.keys(&database).await?;
-        let mut result = SeedResult::new();
+        let mut result = SeedResult::default();
 
         for seed in self.sort_seeds_by_priority_and_deps()? {
             let name = seed.name();
@@ -145,9 +142,7 @@ impl Seeder {
     ///
     /// This will force-run the seed regardless of whether it's been executed before.
     pub async fn run_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, ledger) = open_ledger().await?;
 
         let seed = self.find(seed_name)?;
 
@@ -161,7 +156,7 @@ impl Seeder {
         apply(seed, &database, !recorded).await?;
         log_seed("Seed completed", seed_name);
 
-        let mut result = SeedResult::new();
+        let mut result = SeedResult::default();
         result.executed.push(SeedInfo {
             name: seed_name.to_string(),
         });
@@ -174,11 +169,9 @@ impl Seeder {
     /// removed since it ran, is an error: it cannot be reverted, and skipping
     /// it would leave every seed before it recorded as well.
     pub async fn rollback(&self) -> Result<SeedResult> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, ledger) = open_ledger().await?;
 
-        let mut result = SeedResult::new();
+        let mut result = SeedResult::default();
         let Some(last_name) = ledger.keys(&database).await?.pop() else {
             return Ok(result);
         };
@@ -196,20 +189,18 @@ impl Seeder {
 
     /// Rollback a specific seed by name
     pub async fn rollback_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, _) = open_ledger().await?;
 
         let seed = self.find(seed_name)?;
 
-        let mut result = SeedResult::new();
+        let mut result = SeedResult::default();
         result.rolled_back.push(revert(seed, &database).await?);
         Ok(result)
     }
 
     /// Rollback multiple seeds
     pub async fn rollback_steps(&self, steps: usize) -> Result<SeedResult> {
-        let mut result = SeedResult::new();
+        let mut result = SeedResult::default();
 
         for _ in 0..steps {
             let step_result = self.rollback().await?;
@@ -228,9 +219,7 @@ impl Seeder {
     /// returns an empty result instead of failing on a missing `_seeds` table -
     /// which is what makes "reset then run" usable as a bootstrap.
     pub async fn reset(&self) -> Result<SeedResult> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, ledger) = open_ledger().await?;
 
         let executed = ledger.keys(&database).await?;
         self.rollback_steps(executed.len()).await
@@ -250,9 +239,7 @@ impl Seeder {
 
     /// Get seed status
     pub async fn status(&self) -> Result<Vec<SeedStatus>> {
-        let database = require_db()?;
-        let ledger = Ledger::seeds();
-        ledger.ensure(&database).await?;
+        let (database, ledger) = open_ledger().await?;
 
         let executed = ledger.keys(&database).await?;
 
@@ -288,43 +275,27 @@ impl Seeder {
             .enumerate()
             .map(|(index, seed)| (seed.name(), index))
             .collect();
-
-        let mut unmet = vec![0usize; seeds.len()];
-        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); seeds.len()];
-        for (index, seed) in seeds.iter().enumerate() {
-            for dependency in seed.depends_on() {
-                if let Some(&dependency_index) = index_by_name.get(dependency) {
-                    dependents[dependency_index].push(index);
-                    unmet[index] += 1;
-                }
-            }
-        }
-
-        // Kahn's algorithm over a min-heap of (priority, registration index).
-        let mut ready: BinaryHeap<Reverse<(u32, usize)>> = (0..seeds.len())
-            .filter(|&index| unmet[index] == 0)
-            .map(|index| Reverse((seeds[index].priority(), index)))
+        let edges: Vec<(usize, usize)> = seeds
+            .iter()
+            .enumerate()
+            .flat_map(|(index, seed)| {
+                seed.depends_on()
+                    .into_iter()
+                    .filter_map(|dependency| index_by_name.get(dependency).copied())
+                    .map(move |dependency| (dependency, index))
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        let mut sorted = Vec::with_capacity(seeds.len());
 
-        while let Some(Reverse((_, index))) = ready.pop() {
-            sorted.push(Arc::clone(&seeds[index]));
-
-            for &dependent in &dependents[index] {
-                unmet[dependent] -= 1;
-                if unmet[dependent] == 0 {
-                    ready.push(Reverse((seeds[dependent].priority(), dependent)));
-                }
-            }
-        }
+        let (sorted, mut cycle) =
+            crate::internal::topological_order(seeds.len(), &edges, |index| {
+                (seeds[index].priority(), index)
+            });
 
         // A seed that never became ready is on, or behind, a dependency cycle.
-        if sorted.len() < seeds.len() {
-            let mut remaining: Vec<usize> =
-                (0..seeds.len()).filter(|&index| unmet[index] > 0).collect();
-            remaining.sort_by_key(|&index| seeds[index].priority());
-
-            let cycle_names = remaining
+        if !cycle.is_empty() {
+            cycle.sort_by_key(|&index| seeds[index].priority());
+            let cycle_names = cycle
                 .into_iter()
                 .map(|index| seeds[index].name())
                 .collect::<Vec<_>>()
@@ -336,8 +307,19 @@ impl Seeder {
             )));
         }
 
-        Ok(sorted)
+        Ok(sorted
+            .into_iter()
+            .map(|index| Arc::clone(&seeds[index]))
+            .collect())
     }
+}
+
+/// The seed ledger on the global database, created if it is missing.
+async fn open_ledger() -> Result<(Database, Ledger<'static>)> {
+    let database = require_db()?;
+    let ledger = Ledger::seeds();
+    ledger.ensure(&database).await?;
+    Ok((database, ledger))
 }
 
 impl Default for Seeder {

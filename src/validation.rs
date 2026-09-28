@@ -45,14 +45,25 @@ impl ValidationErrors {
         self.errors.entry(field).or_default().push(message.into());
     }
 
+    /// Apply each of `rules` to `field`'s `value`, recording every failure; a
+    /// generated `Validate` impl checks each field with one call.
+    #[doc(hidden)]
+    pub fn __check<T: ValidatableValue>(
+        &mut self,
+        field: &str,
+        value: &T,
+        rules: &[ValidationRule],
+    ) {
+        for rule in rules {
+            if let Some(message) = Validator::validate_rule(value, rule, field) {
+                self.add(field, message);
+            }
+        }
+    }
+
     /// True when no field errors have been collected.
     pub fn is_empty(&self) -> bool {
         self.errors.is_empty()
-    }
-
-    /// True when at least one field has an error.
-    pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
     }
 
     /// Number of fields that currently have at least one error.
@@ -244,62 +255,19 @@ impl Validator {
         rule: &ValidationRule,
         field: &str,
     ) -> Option<String> {
-        match rule {
-            ValidationRule::Required => {
-                if value.is_empty_value() {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Email => {
-                if let Some(s) = value.as_str_value()
-                    && !Self::is_valid_email(s)
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Url => {
-                if let Some(s) = value.as_str_value()
-                    && !Self::is_valid_url(s)
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::MinLength(min) => {
-                if let Some(s) = value.as_str_value()
-                    && s.chars().count() < *min
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::MaxLength(max) => {
-                if let Some(s) = value.as_str_value()
-                    && s.chars().count() > *max
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Length(len) => {
-                if let Some(s) = value.as_str_value()
-                    && s.chars().count() != *len
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Min(min) => {
-                if below_bound(value, *min) == Some(true) {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Max(max) => {
-                if above_bound(value, *max) == Some(true) {
-                    return Some(rule.message(field));
-                }
-            }
+        // A text rule checks a text value and passes any other.
+        let text_fails = |fails: &dyn Fn(&str) -> bool| value.as_str_value().is_some_and(fails);
+        let fails = match rule {
+            ValidationRule::Required => value.is_empty_value(),
+            ValidationRule::Email => text_fails(&|s| !Self::is_valid_email(s)),
+            ValidationRule::Url => text_fails(&|s| !Self::is_valid_url(s)),
+            ValidationRule::MinLength(min) => text_fails(&|s| s.chars().count() < *min),
+            ValidationRule::MaxLength(max) => text_fails(&|s| s.chars().count() > *max),
+            ValidationRule::Length(len) => text_fails(&|s| s.chars().count() != *len),
+            ValidationRule::Min(min) => below_bound(value, *min) == Some(true),
+            ValidationRule::Max(max) => above_bound(value, *max) == Some(true),
             ValidationRule::Range(min, max) => {
-                if below_bound(value, *min) == Some(true) || above_bound(value, *max) == Some(true)
-                {
-                    return Some(rule.message(field));
-                }
+                below_bound(value, *min) == Some(true) || above_bound(value, *max) == Some(true)
             }
             ValidationRule::Regex(pattern) => {
                 // A pattern that does not compile fails for every value: letting
@@ -310,58 +278,17 @@ impl Validator {
                         field, pattern
                     ));
                 };
-
-                if let Some(s) = value.as_str_value()
-                    && !re.is_match(s)
-                {
-                    return Some(rule.message(field));
-                }
+                text_fails(&|s| !re.is_match(s))
             }
-            ValidationRule::Alpha => {
-                if let Some(s) = value.as_str_value()
-                    && !s.chars().all(|c| c.is_alphabetic())
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Alphanumeric => {
-                if let Some(s) = value.as_str_value()
-                    && !s.chars().all(|c| c.is_alphanumeric())
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Numeric => {
-                // `parse` also reads "NaN", "inf" and an overflowing "1e999".
-                if let Some(s) = value.as_str_value()
-                    && !s.parse::<f64>().is_ok_and(f64::is_finite)
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::Uuid => {
-                if let Some(s) = value.as_str_value()
-                    && uuid::Uuid::parse_str(s).is_err()
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::In(values) => {
-                if let Some(s) = value.as_str_value()
-                    && !values.iter().any(|v| v == s)
-                {
-                    return Some(rule.message(field));
-                }
-            }
-            ValidationRule::NotIn(values) => {
-                if let Some(s) = value.as_str_value()
-                    && values.iter().any(|v| v == s)
-                {
-                    return Some(rule.message(field));
-                }
-            }
-        }
-        None
+            ValidationRule::Alpha => text_fails(&|s| !s.chars().all(char::is_alphabetic)),
+            ValidationRule::Alphanumeric => text_fails(&|s| !s.chars().all(char::is_alphanumeric)),
+            // `parse` also reads "NaN", "inf" and an overflowing "1e999".
+            ValidationRule::Numeric => text_fails(&|s| !s.parse::<f64>().is_ok_and(f64::is_finite)),
+            ValidationRule::Uuid => text_fails(&|s| uuid::Uuid::parse_str(s).is_err()),
+            ValidationRule::In(values) => text_fails(&|s| !values.iter().any(|v| v == s)),
+            ValidationRule::NotIn(values) => text_fails(&|s| values.iter().any(|v| v == s)),
+        };
+        fails.then(|| rule.message(field))
     }
 
     /// Minimal email-shape check used by the built-in email rule.

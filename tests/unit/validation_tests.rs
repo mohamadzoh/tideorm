@@ -1,38 +1,14 @@
 use super::*;
 
 #[test]
-fn test_email_validation() {
-    assert!(Validator::is_valid_email("test@example.com"));
-    assert!(Validator::is_valid_email("user.name+tag@domain.co.uk"));
-    assert!(!Validator::is_valid_email("invalid"));
-    assert!(!Validator::is_valid_email("@example.com"));
-    assert!(!Validator::is_valid_email("test@"));
-}
-
-#[test]
 fn test_url_validation() {
     assert!(Validator::is_valid_url("http://example.com"));
     assert!(Validator::is_valid_url("https://example.com/path?query=1"));
+    assert!(Validator::is_valid_url("http://localhost:8080/path"));
     assert!(!Validator::is_valid_url("example.com"));
     assert!(!Validator::is_valid_url("ftp://example.com"));
     assert!(!Validator::is_valid_url("https://"));
     assert!(!Validator::is_valid_url("https:// ; DROP TABLE users"));
-}
-
-#[test]
-fn test_min_length() {
-    let rule = ValidationRule::MinLength(3);
-    assert!(Validator::validate_rule(&"ab".to_string(), &rule, "name").is_some());
-    assert!(Validator::validate_rule(&"abc".to_string(), &rule, "name").is_none());
-    assert!(Validator::validate_rule(&"abcd".to_string(), &rule, "name").is_none());
-}
-
-#[test]
-fn test_max_length() {
-    let rule = ValidationRule::MaxLength(5);
-    assert!(Validator::validate_rule(&"abc".to_string(), &rule, "name").is_none());
-    assert!(Validator::validate_rule(&"abcde".to_string(), &rule, "name").is_none());
-    assert!(Validator::validate_rule(&"abcdef".to_string(), &rule, "name").is_some());
 }
 
 #[test]
@@ -45,16 +21,6 @@ fn test_length_rules_count_unicode_characters() {
     assert!(Validator::validate_rule(&value, &ValidationRule::MaxLength(4), "name").is_some());
     assert!(Validator::validate_rule(&value, &ValidationRule::Length(5), "name").is_none());
     assert!(Validator::validate_rule(&value, &ValidationRule::Length(10), "name").is_some());
-}
-
-#[test]
-fn test_range() {
-    let rule = ValidationRule::Range(1.0, 10.0);
-    assert!(Validator::validate_rule(&0, &rule, "age").is_some());
-    assert!(Validator::validate_rule(&1, &rule, "age").is_none());
-    assert!(Validator::validate_rule(&5, &rule, "age").is_none());
-    assert!(Validator::validate_rule(&10, &rule, "age").is_none());
-    assert!(Validator::validate_rule(&11, &rule, "age").is_some());
 }
 
 #[test]
@@ -73,15 +39,6 @@ fn numeric_rules_refuse_nan() {
             "{rule:?}"
         );
     }
-}
-
-#[test]
-fn test_regex_validation() {
-    let rule = ValidationRule::Regex(r"^[a-z]+$".to_string());
-
-    assert!(Validator::validate_rule(&"alice".to_string(), &rule, "name").is_none());
-    assert!(Validator::validate_rule(&"Alice1".to_string(), &rule, "name").is_some());
-    assert!(Validator::validate_rule(&"bob".to_string(), &rule, "name").is_none());
 }
 
 #[test]

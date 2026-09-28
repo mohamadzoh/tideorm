@@ -401,24 +401,6 @@ fn a_transaction_replays_its_invalidations_when_it_commits() {
 }
 
 #[test]
-fn test_prepared_statement_cache() {
-    let cache = PreparedStatementCache::new();
-    cache.enable();
-
-    let sql = "SELECT * FROM users WHERE id = $1";
-
-    let (_, cached) = cache.get_or_prepare(sql);
-    assert!(!cached);
-
-    let (_, cached) = cache.get_or_prepare(sql);
-    assert!(cached);
-
-    let stats = cache.stats();
-    assert_eq!(stats.hits, 1);
-    assert_eq!(stats.misses, 1);
-}
-
-#[test]
 fn test_prepared_statement_cache_reset_stats_preserves_cached_count() {
     let cache = PreparedStatementCache::new();
     cache.enable();
@@ -530,6 +512,7 @@ fn test_cache_key_builder() {
         .condition("role", "admin")
         .order("created_at", "desc")
         .limit(10)
+        .offset(20)
         .build();
 
     assert!(key.contains("t:users"));
@@ -537,6 +520,30 @@ fn test_cache_key_builder() {
     assert!(key.contains("role=admin"));
     assert!(key.contains("o:created_at:desc"));
     assert!(key.contains("l:10"));
+    assert!(key.contains("off:20"));
+}
+
+#[test]
+fn cache_keys_of_different_parts_never_coincide() {
+    let pairs = [
+        (
+            CacheKeyBuilder::new().condition("name", "alice:o:id:ASC"),
+            CacheKeyBuilder::new()
+                .condition("name", "alice")
+                .order("id", "ASC"),
+        ),
+        (
+            CacheKeyBuilder::new().condition("a", "b=c"),
+            CacheKeyBuilder::new().condition("a=b", "c"),
+        ),
+        (
+            CacheKeyBuilder::new().raw("t").raw("users"),
+            CacheKeyBuilder::new().table("users"),
+        ),
+    ];
+    for (one, other) in pairs {
+        assert_ne!(one.build(), other.build());
+    }
 }
 
 #[test]

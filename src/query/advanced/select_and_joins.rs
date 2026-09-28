@@ -17,7 +17,7 @@ impl<M: Model> QueryBuilder<M> {
     /// because the models it built would carry defaults in their place.
     #[must_use]
     pub fn select(mut self, columns: Vec<&str>) -> Self {
-        self.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
+        self.clauses.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
         self
     }
 
@@ -39,13 +39,14 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// PostgreSQL requires every `ORDER BY` expression of a `SELECT DISTINCT` to
     /// appear in the select list. A query that breaks that rule is rejected by
-    /// validation with an `invalid_query` error naming the column, rather than
+    /// validation with a query error naming the column, rather than
     /// being sent to the server; ordering by an expression supplied through
     /// `order_by_raw()` cannot be checked and stays the caller's responsibility.
     #[must_use]
     pub fn distinct(mut self) -> Self {
         if !self.is_distinct() {
-            self.raw_select_expressions
+            self.clauses
+                .raw_select_expressions
                 .push(crate::query::builder::DISTINCT_SELECT_MARKER.to_string());
         }
         self
@@ -89,7 +90,7 @@ impl<M: Model> QueryBuilder<M> {
     /// instead of racing.
     #[must_use]
     pub fn lock_for_update(mut self) -> Self {
-        self.lock_for_update = true;
+        self.clauses.lock_for_update = true;
         self
     }
 
@@ -127,7 +128,7 @@ impl<M: Model> QueryBuilder<M> {
             &format!("{}.{}", table_name, local_fk),
             &format!("{}.{}", linked_table, remote_pk),
         );
-        query.select_columns = Some(all_columns);
+        query.clauses.select_columns = Some(all_columns);
         query
     }
 
@@ -262,7 +263,7 @@ impl<M: Model> QueryBuilder<M> {
             return self;
         }
 
-        self.joins.push(JoinClause {
+        self.clauses.joins.push(JoinClause {
             join_type,
             table: table.to_string(),
             alias: alias.map(|s| s.to_string()),

@@ -318,7 +318,7 @@ fn test_subquery_carrying_a_like_escape_clause_stays_parameterized() {
 #[test]
 fn test_bound_raw_expression_uses_question_mark_placeholders_on_mysql() {
     let mut query = QueryBuilder::<QueryTestUser>::new();
-    query.conditions.push(crate::query::WhereCondition {
+    query.clauses.conditions.push(crate::query::WhereCondition {
         column: String::new(),
         operator: crate::query::Operator::Raw,
         value: crate::query::ConditionValue::RawExprWithValues {
@@ -530,9 +530,7 @@ fn test_build_select_sql_with_params_renders_valid_empty_postgres_array_predicat
     let empty: Vec<&str> = Vec::new();
     let query = QueryBuilder::<QueryTestUser>::new()
         .where_array_contains("tags", empty.clone())
-        .where_array_contains_all("tags", empty.clone())
         .where_array_overlaps("tags", empty.clone())
-        .where_array_contains_any("tags", empty.clone())
         .where_array_contained_by("tags", empty);
 
     let (sql, params) = query.build_select_sql_with_params_for_db(DatabaseType::Postgres);
@@ -759,28 +757,29 @@ fn test_consolidate_preserves_full_query_fragment_state() {
     let fragment = original.consolidate();
 
     assert_eq!(fragment.condition_count(), 2);
-    assert_eq!(fragment.or_groups.len(), 1);
+    assert_eq!(fragment.clauses.or_groups.len(), 1);
     assert_eq!(
-        fragment.select_columns.as_deref(),
+        fragment.clauses.select_columns.as_deref(),
         Some(&["id".to_string(), "name".to_string()][..])
     );
     assert_eq!(
-        fragment.raw_select_expressions,
+        fragment.clauses.raw_select_expressions,
         vec!["COUNT(*) AS total_count"]
     );
-    assert_eq!(fragment.limit_value, Some(5));
-    assert_eq!(fragment.offset_value, Some(10));
-    assert_eq!(fragment.unions.len(), 1);
-    assert_eq!(fragment.window_functions.len(), 1);
-    assert_eq!(fragment.ctes.len(), 1);
-    assert_eq!(fragment.cache_key.as_deref(), Some("fragment-key"));
+    assert_eq!(fragment.clauses.limit_value, Some(5));
+    assert_eq!(fragment.clauses.offset_value, Some(10));
+    assert_eq!(fragment.clauses.unions.len(), 1);
+    assert_eq!(fragment.clauses.window_functions.len(), 1);
+    assert_eq!(fragment.clauses.ctes.len(), 1);
+    assert_eq!(fragment.clauses.cache_key.as_deref(), Some("fragment-key"));
     let cache_options = fragment
+        .clauses
         .cache_options
         .as_ref()
         .expect("cache options should be preserved");
     assert_eq!(cache_options.ttl, Duration::from_secs(30));
 
-    let rebuilt = QueryBuilder::<QueryTestUser>::from_fragment(&fragment);
+    let rebuilt = QueryBuilder::<QueryTestUser>::new().apply(&fragment);
 
     assert_eq!(rebuilt.build_sql_preview(), original.build_sql_preview());
 }
@@ -941,14 +940,14 @@ fn test_apply_merges_fragment_order_limit_offset_select_and_cache() {
         .apply(&fragment);
 
     // ORDER BY appends, single-value slots are last-wins.
-    assert_eq!(merged.order_by.len(), 2);
-    assert_eq!(merged.limit_value, Some(10));
-    assert_eq!(merged.offset_value, Some(5));
+    assert_eq!(merged.clauses.order_by.len(), 2);
+    assert_eq!(merged.clauses.limit_value, Some(10));
+    assert_eq!(merged.clauses.offset_value, Some(5));
     assert_eq!(
-        merged.select_columns.as_deref(),
+        merged.clauses.select_columns.as_deref(),
         Some(&["id".to_string()][..])
     );
-    assert_eq!(merged.cache_key.as_deref(), Some("fragment-key"));
+    assert_eq!(merged.clauses.cache_key.as_deref(), Some("fragment-key"));
 
     let sql = merged.build_select_sql_for_db(DatabaseType::Postgres);
     assert!(
@@ -970,10 +969,10 @@ fn test_apply_keeps_builder_slots_the_fragment_does_not_set() {
         .select(vec!["name"])
         .apply(&fragment);
 
-    assert_eq!(merged.limit_value, Some(3));
-    assert_eq!(merged.offset_value, Some(7));
+    assert_eq!(merged.clauses.limit_value, Some(3));
+    assert_eq!(merged.clauses.offset_value, Some(7));
     assert_eq!(
-        merged.select_columns.as_deref(),
+        merged.clauses.select_columns.as_deref(),
         Some(&["name".to_string()][..])
     );
 }
@@ -982,15 +981,18 @@ fn test_apply_keeps_builder_slots_the_fragment_does_not_set() {
 fn test_consolidate_keeps_having_parameters_bound() {
     let fragment = QueryBuilder::<QueryTestUser>::new()
         .group_by("name")
-        .having_count_gt(3)
+        .having(crate::Aggregate::count().gt(3))
         .consolidate();
 
     // The template survives verbatim instead of being flattened to a literal.
-    assert_eq!(fragment.having_conditions, vec!["COUNT(*) > ?".to_string()]);
-    assert_eq!(fragment.having_bindings.len(), 1);
-    assert_eq!(fragment.having_bindings[0].len(), 1);
+    assert_eq!(
+        fragment.clauses.having_conditions,
+        vec!["COUNT(*) > ?".to_string()]
+    );
+    assert_eq!(fragment.clauses.having_bindings.len(), 1);
+    assert_eq!(fragment.clauses.having_bindings[0].len(), 1);
 
-    let rebuilt = QueryBuilder::<QueryTestUser>::from_fragment(&fragment);
+    let rebuilt = QueryBuilder::<QueryTestUser>::new().apply(&fragment);
     rebuilt
         .ensure_query_is_valid()
         .expect("round-tripped HAVING clause should still validate");
@@ -1005,8 +1007,11 @@ fn test_consolidate_keeps_having_parameters_bound() {
 #[test]
 fn test_having_placeholder_count_mismatch_is_rejected() {
     let mut query = QueryBuilder::<QueryTestUser>::new().group_by("name");
-    query.having_conditions.push("COUNT(*) > ?".to_string());
-    query.having_bindings.push(Vec::new());
+    query
+        .clauses
+        .having_conditions
+        .push("COUNT(*) > ?".to_string());
+    query.clauses.having_bindings.push(Vec::new());
 
     let err = query
         .ensure_query_is_valid()
@@ -1050,7 +1055,7 @@ fn test_or_where_calls_share_one_or_group() {
         .or_where_gt("price", 1000)
         .or_where_lt("price", 50);
 
-    assert_eq!(query.or_groups.len(), 1);
+    assert_eq!(query.clauses.or_groups.len(), 1);
     assert_eq!(query.where_preview(), "\"price\" > 1000 OR \"price\" < 50");
 }
 
@@ -1112,8 +1117,9 @@ fn test_fragment_or_where_conditions_join_the_builders_or_group() {
 
     // Replaying a fragment onto an empty builder reproduces the query exactly,
     // including where later `or_where_*` calls land.
-    let rebuilt =
-        QueryBuilder::<QueryTestUser>::from_fragment(&fragment).or_where_eq("name", "erin");
+    let rebuilt = QueryBuilder::<QueryTestUser>::new()
+        .apply(&fragment)
+        .or_where_eq("name", "erin");
     assert_eq!(
         rebuilt.where_preview(),
         "(\"name\" = 'carol' OR \"name\" = 'erin') AND (\"id\" = 1 OR \"id\" = 2)"

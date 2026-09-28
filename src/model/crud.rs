@@ -6,30 +6,6 @@ use crate::error::{Error, Result};
 
 use super::Model;
 
-pub(crate) async fn all<M>() -> Result<Vec<M>>
-where
-    M: Model,
-{
-    let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::find_all::<M, _>(&connection.executor()).await
-}
-
-pub(crate) async fn count<M>() -> Result<u64>
-where
-    M: Model,
-{
-    let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::count::<M, _>(&connection.executor()).await
-}
-
-pub(crate) async fn exists_any<M>() -> Result<bool>
-where
-    M: Model,
-{
-    let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::exists_any::<M, _>(&connection.executor()).await
-}
-
 pub(crate) async fn insert_all<M>(models: Vec<M>) -> Result<Vec<M>>
 where
     M: Model,
@@ -42,20 +18,16 @@ where
 
     for (index, model) in models.iter().enumerate() {
         if let Err(errors) = model.validate() {
-            let (field, message) = errors
-                .first()
-                .map(|(field, message)| (field.clone(), message.clone()))
-                .unwrap_or_else(|| ("unknown".to_string(), "Validation failed".to_string()));
-            return Err(Error::validation(
-                field,
-                format!("{message} (model {index} of the batch)"),
-            ));
+            return Err(match Error::from(errors) {
+                Error::Validation { field, message } => {
+                    Error::validation(field, format!("{message} (model {index} of the batch)"))
+                }
+                other => other,
+            });
         }
     }
 
-    let connection = crate::database::__current_connection()?;
-    let inserted =
-        crate::internal::QueryExecutor::insert_many::<M>(&connection.executor(), models).await?;
+    let inserted = crate::internal::QueryExecutor::insert_many::<M>(models).await?;
     // New rows leave every loaded model as it was, so only cached reads go:
     // the dirty-tracking baselines stay, the inserted models' among them, as
     // `create()` leaves its own.
@@ -63,6 +35,85 @@ where
         crate::QueryCache::global().invalidate_model(M::table_name());
     }
     Ok(inserted)
+}
+
+type EntityModel<M> =
+    <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model;
+
+/// Insert `active` as a new row of `M` and return the row as stored, with no
+/// callback: `create()` runs its own around it, and an upsert runs none.
+#[doc(hidden)]
+pub async fn __insert_row<M>(active: M::ActiveModel) -> Result<M>
+where
+    M: Model,
+    EntityModel<M>: crate::internal::IntoActiveModel<M::ActiveModel>,
+{
+    use crate::internal::ActiveModelTrait;
+
+    let connection = crate::database::__current_connection()?;
+    let executor = connection.executor();
+    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    let row = crate::internal::run_profiled(active.insert(&executor), || {
+        crate::internal::model_error_context::<M>(format!("insert into {}", M::table_name()))
+    })
+    .await?;
+    let model = M::try_from_entity_model(row)?;
+    crate::QueryCache::global().invalidate_model(M::table_name());
+    Ok(model)
+}
+
+/// Write `active` over the row `primary_key` names and return the row as
+/// stored, with no callback: `update()` runs its own around it.
+#[doc(hidden)]
+pub async fn __update_row<M>(active: M::ActiveModel, primary_key: &M::PrimaryKey) -> Result<M>
+where
+    M: Model,
+    EntityModel<M>: crate::internal::IntoActiveModel<M::ActiveModel>,
+{
+    use crate::internal::ActiveModelTrait;
+
+    let connection = crate::database::__current_connection()?;
+    let executor = connection.executor();
+    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    let row = crate::internal::run_profiled(active.update(&executor), || {
+        crate::internal::primary_key_error_context::<M>(
+            primary_key,
+            format!("update where {}", M::primary_key_display(primary_key)),
+        )
+    })
+    .await?;
+    let model = M::try_from_entity_model(row)?;
+    crate::QueryCache::global().invalidate_model(M::table_name());
+    Ok(model)
+}
+
+/// Remove `model`'s row for good and report how many rows went, with no
+/// callback: `__force_delete()` runs its own around it.
+#[doc(hidden)]
+pub async fn __delete_row<M: Model>(model: &M) -> Result<u64> {
+    use crate::internal::{EntityTrait, InternalModel, QueryFilter};
+
+    let primary_key = model.primary_key();
+    let connection = crate::database::__current_connection()?;
+    // The key condition binds a `u64` past `i64::MAX` as a decimal, where the
+    // model's own value would panic the driver.
+    let result = crate::internal::run_profiled(
+        <M as InternalModel>::Entity::delete_many()
+            .filter(M::primary_key_condition(&primary_key))
+            .exec(&connection.executor()),
+        || {
+            crate::internal::primary_key_error_context::<M>(
+                &primary_key,
+                format!("delete where {}", M::primary_key_display(&primary_key)),
+            )
+        },
+    )
+    .await?;
+    if result.rows_affected > 0 {
+        crate::QueryCache::global().invalidate_model(M::table_name());
+        super::__forget_dirty_snapshot(model);
+    }
+    Ok(result.rows_affected)
 }
 
 pub(crate) async fn transaction<F, T>(f: F) -> Result<T>
@@ -76,79 +127,29 @@ where
     crate::database::__current_db()?.transaction(f).await
 }
 
-pub(crate) async fn first<M>() -> Result<Option<M>>
+/// The row `primary_key` names, trashed or not, as `reload()` and
+/// `soft_delete()` read back the record in hand.
+pub(crate) async fn reload_by_key<M>(primary_key: M::PrimaryKey) -> Result<M>
 where
     M: Model,
 {
     let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::first::<M, _>(&connection.executor()).await
-}
-
-pub(crate) async fn last<M>() -> Result<Option<M>>
-where
-    M: Model,
-{
-    let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::last::<M, _>(&connection.executor()).await
-}
-
-pub(crate) async fn paginate<M>(page: u64, per_page: u64) -> Result<Vec<M>>
-where
-    M: Model,
-{
-    // The same check `QueryBuilder::page` makes, so both refuse alike. Every
-    // backend takes LIMIT and OFFSET as signed 64-bit integers, which it
-    // already bounds both by.
-    let offset = crate::query::page_offset(page, per_page)
-        .map_err(|(field, message)| Error::validation(field, message))?;
-    let (limit, offset) = (per_page as i64, offset as i64);
-
-    let connection = crate::database::__current_connection()?;
-    crate::internal::QueryExecutor::paginate::<M, _>(&connection.executor(), limit, offset).await
-}
-
-/// Read the row with this primary key whether or not it is soft-deleted, for
-/// `reload` and `soft_delete`, whose record is the one in hand.
-pub(crate) async fn find_including_trashed<M>(id: M::PrimaryKey) -> Result<Option<M>>
-where
-    M: Model,
-{
-    use crate::internal::{EntityTrait, InternalModel, QueryFilter};
-
-    // Resolved outside the profiled statement so an outage keeps its
-    // `Error::Connection` class, exactly as it does for `find`. A key matches
-    // at most one row; `all` reads it without the bound `LIMIT` that `one`
-    // adds, which recent SQLite releases recompile on every run.
-    let connection = crate::database::__current_connection()?;
-    let rows = crate::profiling::__profile_future(
-        <M as InternalModel>::Entity::find()
-            .filter(<M as InternalModel>::primary_key_condition(&id))
-            .all(&connection.executor()),
-    )
-    .await?;
-
-    rows.into_iter()
-        .next()
-        .map(M::try_from_entity_model)
-        .transpose()
+    crate::internal::find_by_primary_key::<M>(&connection, &primary_key, true, "reload")
+        .await?
+        .ok_or_else(|| {
+            Error::not_found(format!(
+                "{} with {} no longer exists",
+                M::table_name(),
+                M::primary_key_display(&primary_key)
+            ))
+        })
 }
 
 pub(crate) async fn reload<M>(model: &M) -> Result<M>
 where
     M: Model,
 {
-    let primary_key = model.primary_key();
-    let id_display = M::primary_key_display(&primary_key);
-
-    find_including_trashed::<M>(primary_key)
-        .await?
-        .ok_or_else(|| {
-            Error::not_found(format!(
-                "{} with {} no longer exists",
-                M::table_name(),
-                id_display
-            ))
-        })
+    reload_by_key::<M>(model.primary_key()).await
 }
 
 pub(crate) fn is_new<M>(model: &M) -> bool

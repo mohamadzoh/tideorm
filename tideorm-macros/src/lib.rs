@@ -35,26 +35,23 @@ use validation_gen::generate_validation_impl;
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let existing_derives = detect_existing_derives(&input.attrs);
-    let (mut indexes, mut unique_indexes) = parse_index_attributes(&input.attrs);
-    let (field_indexes, field_unique_indexes) = parse_field_index_attributes(&input.data);
-    indexes.extend(field_indexes);
-    unique_indexes.extend(field_unique_indexes);
+    let mut indexes = parse_index_attributes(&input.attrs);
+    indexes.extend(parse_field_index_attributes(&input.data));
 
     let model_input = match ModelInput::from_derive_input(&input) {
         Ok(value) => value,
         Err(error) => return error.write_errors().into(),
     };
 
-    generate_model_impl(&model_input, indexes, unique_indexes, &existing_derives).into()
+    generate_model_impl(&model_input, indexes, &existing_derives).into()
 }
 
 fn generate_model_impl(
     input: &ModelInput,
     indexes: Vec<parse::IndexDef>,
-    unique_indexes: Vec<parse::IndexDef>,
     existing_derives: &ExistingDerives,
 ) -> TokenStream2 {
-    match BuildContext::new(input, indexes, unique_indexes, existing_derives) {
+    match BuildContext::new(input, indexes, existing_derives) {
         Ok(ctx) => {
             let entity_support = match generate_entity_support(&ctx) {
                 Ok(tokens) => tokens,

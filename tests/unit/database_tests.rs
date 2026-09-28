@@ -66,7 +66,7 @@ fn debug_reports_disconnected_database_state() {
 async fn global_database_round_trips_through_set_and_reset() {
     Database::reset_global();
     assert!(!crate::database::has_global_db());
-    assert!(super::try_db().is_none());
+    assert!(super::require_db().is_err());
 
     let db = Database::connect("sqlite::memory:")
         .await
@@ -75,13 +75,13 @@ async fn global_database_round_trips_through_set_and_reset() {
     Database::set_global(db.clone()).expect("setting global database should succeed");
 
     assert!(crate::database::has_global_db());
-    assert!(super::try_db().is_some());
-    assert!(format!("{:?}", Database::global()).contains("connected: true"));
+    assert!(super::require_db().is_ok());
+    assert!(format!("{:?}", super::db()).contains("connected: true"));
 
     Database::reset_global();
 
     assert!(!crate::database::has_global_db());
-    assert!(super::try_db().is_none());
+    assert!(super::require_db().is_err());
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -335,15 +335,38 @@ fn database_builder_debug_masks_the_url_credentials() {
     assert!(debug.contains("postgres://***@db:5432/app"), "{debug}");
 }
 
+/// A transaction is joined by the handles of its own database only: inside
+/// one on `first`, a statement through `second` runs on `second`.
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
-async fn database_builder_forwards_the_acquire_timeout_to_connect_options() {
-    let db = Database::builder()
-        .url("sqlite::memory:")
-        .acquire_timeout(std::time::Duration::from_millis(500))
-        .build()
+async fn a_transaction_is_joined_only_by_its_own_database() {
+    let first = Database::connect("sqlite::memory:").await.unwrap();
+    let second = Database::connect("sqlite::memory:").await.unwrap();
+    for (db, name) in [(&first, "first"), (&second, "second")] {
+        db.__execute_with_params("CREATE TABLE which_database (name TEXT NOT NULL)", vec![])
+            .await
+            .unwrap();
+        db.__execute_with_params(
+            "INSERT INTO which_database (name) VALUES (?)",
+            vec![crate::internal::Value::String(Some(name.to_string()))],
+        )
         .await
-        .expect("an in-memory sqlite connection with an acquire timeout should succeed");
+        .unwrap();
+    }
 
-    drop(db);
+    let (own, other) = (first.clone(), second.clone());
+    let (own_rows, other_rows) = first
+        .transaction(move |_| {
+            Box::pin(async move {
+                let sql = "SELECT name FROM which_database";
+                let own_rows = own.__raw_json_with_params(sql, vec![]).await?;
+                let other_rows = other.__raw_json_with_params(sql, vec![]).await?;
+                Ok((own_rows, other_rows))
+            })
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(own_rows, vec![serde_json::json!({"name": "first"})]);
+    assert_eq!(other_rows, vec![serde_json::json!({"name": "second"})]);
 }

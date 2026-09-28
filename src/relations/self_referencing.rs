@@ -11,16 +11,14 @@
 //! load — because an arbitrary-depth self-join has no fixed number of levels to
 //! batch.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
 use crate::error::Result;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
 use super::helpers::{
-    build_self_ref_tree_sql, has_active_database, owner_is_unsaved, preserve_cached_value,
-    require_scalar_relation_key, required_key, where_key,
+    build_self_ref_tree_sql, owner_is_unsaved, require_scalar_relation_key, required_key, where_key,
 };
+use super::state::{RelationState, relation_serde};
 
 /// The upward half of a self-referencing relation: the single row of the same
 /// table that this row points at, such as a node's parent.
@@ -49,8 +47,7 @@ pub struct SelfRef<E: Model> {
     /// Column the foreign key is matched against, on the same table. Defaults to
     /// `id`.
     pub local_key: &'static str,
-    cached: Option<Box<E>>,
-    fk_value: Option<serde_json::Value>,
+    state: RelationState<Box<E>>,
 }
 
 impl<E: Model> SelfRef<E> {
@@ -71,28 +68,40 @@ impl<E: Model> SelfRef<E> {
     /// root row terminate cleanly. Leaving this unset entirely does the same.
     /// Must be a scalar; composite keys are rejected at load time.
     pub fn with_fk_value(mut self, fk: serde_json::Value) -> Self {
-        self.fk_value = Some(fk);
+        self.state.key = Some(fk);
         self
+    }
+
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.state.source.database = Some(database.clone());
     }
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            previous.fk_value.is_none(),
+        // The cache holds the parent, which a row not given a foreign key yet
+        // is the caller's to link.
+        self.state.preserve_from(
+            &previous.state,
             self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.fk_value == previous.fk_value,
+                && self.state.key == previous.state.key,
+            previous.state.key.is_none(),
         );
     }
 
     /// The query for the parent row, or `None` at a root.
     fn query(&self, context: &str) -> Result<Option<QueryBuilder<E>>> {
-        match &self.fk_value {
+        match &self.state.key {
             Some(fk) if !fk.is_null() => {
                 let fk = require_scalar_relation_key(fk, context)?;
-                Ok(Some(E::query().where_eq(self.local_key, fk.clone())))
+                Ok(Some(
+                    self.state
+                        .source
+                        .query()
+                        .where_eq(self.local_key, fk.clone()),
+                ))
             }
             _ => Ok(None),
         }
@@ -106,11 +115,8 @@ impl<E: Model> SelfRef<E> {
     /// ancestor chain costs one query per level — for a subtree use
     /// [`SelfRefMany::load_tree`], which does it in one.
     pub async fn load(&self) -> Result<Option<E>> {
-        let Some(fk) = &self.fk_value else {
-            return Ok(self.cached.as_deref().cloned());
-        };
-        if !fk.is_null() && self.cached.is_some() && !has_active_database() {
-            return Ok(self.cached.as_deref().cloned());
+        if let Some(cached) = self.state.served(self.state.can_query(true)) {
+            return Ok(cached.map(|model| (**model).clone()));
         }
 
         match self.query("SelfRef::load")? {
@@ -147,7 +153,7 @@ impl<E: Model> SelfRef<E> {
 
     /// The cached parent, if one is present. Never queries and never awaits.
     pub fn get_cached(&self) -> Option<&E> {
-        self.cached.as_deref()
+        self.state.cached().map(|model| &**model)
     }
 }
 
@@ -156,33 +162,12 @@ impl<E: Model> Default for SelfRef<E> {
         Self {
             foreign_key: "parent_id",
             local_key: "id",
-            cached: None,
-            fk_value: None,
+            state: RelationState::default(),
         }
     }
 }
 
-impl<E: Model> Serialize for SelfRef<E> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
-
-impl<'de, E: Model> Deserialize<'de> for SelfRef<E> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<E>::deserialize(deserializer)?;
-        Ok(Self {
-            cached: cached.map(Box::new),
-            ..Self::default()
-        })
-    }
-}
+relation_serde!(SelfRef<E>);
 
 /// The downward half of a self-referencing relation: every row of the same table
 /// that points at this one, such as a node's direct children.
@@ -207,8 +192,7 @@ pub struct SelfRefMany<E: Model> {
     /// Column on this row that the children's foreign key matches. Defaults to
     /// `id`.
     pub local_key: &'static str,
-    cached: Option<Vec<E>>,
-    parent_pk: Option<serde_json::Value>,
+    state: RelationState<Vec<E>>,
 }
 
 impl<E: Model> SelfRefMany<E> {
@@ -228,30 +212,35 @@ impl<E: Model> SelfRefMany<E> {
     /// null-means-root short circuit here: leaving it unset makes every method
     /// error with "Parent primary key not set for relation".
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.parent_pk = Some(pk);
+        self.state.key = Some(pk);
         self
+    }
+
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+        self.state.source.database = Some(database.clone());
     }
 
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            owner_is_unsaved(&previous.parent_pk),
+        self.state.preserve_from(
+            &previous.state,
             self.foreign_key == previous.foreign_key
                 && self.local_key == previous.local_key
-                && self.parent_pk == previous.parent_pk,
+                && self.state.key == previous.state.key,
+            owner_is_unsaved(&previous.state.key),
         );
     }
 
     fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
-        required_key(&self.parent_pk, "Parent primary key", context)
+        required_key(&self.state.key, "Parent primary key", context)
     }
 
     /// The query for the direct children.
     fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         let pk = self.parent_key(context)?;
-        Ok(where_key(E::query(), self.foreign_key, pk))
+        Ok(where_key(self.state.source.query(), self.foreign_key, pk))
     }
 
     /// Fetch the direct children — one level only, in no particular order.
@@ -261,11 +250,8 @@ impl<E: Model> SelfRefMany<E> {
     /// with this is one query per node; use [`load_tree`](Self::load_tree)
     /// instead.
     pub async fn load(&self) -> Result<Vec<E>> {
-        let can_query = self.parent_pk.is_some() && has_active_database();
-        if let Some(cached) = &self.cached
-            && !can_query
-        {
-            return Ok(cached.clone());
+        if let Some(cached) = self.state.served(self.state.can_query(true)) {
+            return Ok(cached.cloned().unwrap_or_default());
         }
 
         self.query("SelfRefMany::load")?.get().await
@@ -299,7 +285,7 @@ impl<E: Model> SelfRefMany<E> {
     /// `Some(&[])` means "loaded, and this is a leaf"; `None` means nothing was
     /// ever loaded.
     pub fn get_cached(&self) -> Option<&[E]> {
-        self.cached.as_deref()
+        self.state.cached().map(Vec::as_slice)
     }
 
     /// Fetch the whole subtree below this row in one recursive-CTE query,
@@ -323,7 +309,7 @@ impl<E: Model> SelfRefMany<E> {
         }
 
         let pk = self.parent_key("SelfRefMany::load_tree")?;
-        let db = crate::database::__current_db()?;
+        let db = self.state.source.database()?;
         let (sql, params) = build_self_ref_tree_sql::<E>(
             self.foreign_key,
             self.local_key,
@@ -341,30 +327,9 @@ impl<E: Model> Default for SelfRefMany<E> {
         Self {
             foreign_key: "parent_id",
             local_key: "id",
-            cached: None,
-            parent_pk: None,
+            state: RelationState::default(),
         }
     }
 }
 
-impl<E: Model> Serialize for SelfRefMany<E> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
-
-impl<'de, E: Model> Deserialize<'de> for SelfRefMany<E> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<Vec<E>>::deserialize(deserializer)?;
-        Ok(Self {
-            cached,
-            ..Self::default()
-        })
-    }
-}
+relation_serde!(SelfRefMany<E>);

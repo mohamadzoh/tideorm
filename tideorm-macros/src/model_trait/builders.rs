@@ -16,50 +16,34 @@ pub(super) fn build_primary_key_value_impl(ctx: &BuildContext) -> TokenStream2 {
 /// matches nothing instead of panicking the SQLite and PostgreSQL drivers.
 pub(super) fn build_primary_key_condition_impl(ctx: &BuildContext) -> TokenStream2 {
     let internal_entity_mod = &ctx.internal_entity_mod;
-    if let [pk_column_variant] = ctx.pk_column_variants.as_slice() {
-        return quote! {
-            use ::tideorm::orm::ColumnTrait;
-            ::tideorm::orm::Condition::all().add(
-                #internal_entity_mod::Column::#pk_column_variant
-                    .eq(::tideorm::internal::bindable_value(primary_key.clone())),
-            )
-        };
-    }
-
-    let bindings = ctx.primary_key_bindings();
+    let (bind, components) = ctx.primary_key_components();
     let pk_column_variants = &ctx.pk_column_variants;
 
     quote! {
         use ::tideorm::orm::ColumnTrait;
-        let (#(#bindings),*) = primary_key.clone();
+        #bind
         ::tideorm::orm::Condition::all()
             #(.add(#internal_entity_mod::Column::#pk_column_variants
-                .eq(::tideorm::internal::bindable_value(#bindings))))*
+                .eq(::tideorm::internal::bindable_value(#components.clone()))))*
     }
 }
 
-/// One `match` pattern per persisted column, accepting its field name and — when
-/// `#[tideorm(column = "..")]` renames it — its column name.
+/// One `match` pattern per persisted field, accepting its field name and —
+/// when `#[tideorm(column = "..")]` renames it — its column name, unless
+/// another field is named so: a field name wins over a column name spelled
+/// alike, as `ModelMeta::canonical_field_name` has it.
 pub(super) fn build_name_patterns(ctx: &BuildContext) -> Vec<TokenStream2> {
     ctx.field_names
         .iter()
         .zip(&ctx.column_names)
         .map(|(field_name, column_name)| {
-            if field_name == column_name {
+            if field_name == column_name || ctx.field_names.contains(column_name) {
                 quote!(#field_name)
             } else {
                 quote!(#field_name | #column_name)
             }
         })
         .collect()
-}
-
-/// `matches!` on whether the string `value` names a primary-key column.
-pub(super) fn build_is_pk_column(ctx: &BuildContext, value: TokenStream2) -> TokenStream2 {
-    let pk_column_names = &ctx.pk_column_names;
-    quote! {
-        matches!(#value.as_str(), #(#pk_column_names)|*)
-    }
 }
 
 /// A conversion between the model and its generated entity types.

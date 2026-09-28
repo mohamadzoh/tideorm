@@ -1,19 +1,13 @@
-use parking_lot::RwLock;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::logging::{DEFAULT_SLOW_QUERY_THRESHOLD_MS, QueryStats};
+use crate::logging::{DEFAULT_SLOW_QUERY_THRESHOLD_MS, QueryStats, StatsCounters};
 
 /// Global flag controlling process-wide profiling collection.
 static GLOBAL_PROFILING_ENABLED: AtomicBool = AtomicBool::new(false);
 
-static GLOBAL_STATS: RwLock<QueryStats> = RwLock::new(QueryStats {
-    total_queries: 0,
-    slow_queries: 0,
-    total_time_ns: 0,
-    slow_threshold_ms: DEFAULT_SLOW_QUERY_THRESHOLD_MS,
-});
+static GLOBAL_STATS: StatsCounters = StatsCounters::new(DEFAULT_SLOW_QUERY_THRESHOLD_MS);
 
 /// Aggregate counters collected by [`GlobalProfiler`].
 ///
@@ -47,38 +41,28 @@ impl GlobalProfiler {
     /// Add one query duration to the global counters when profiling is enabled.
     pub fn record(duration: Duration) {
         if Self::is_enabled() {
-            let mut stats = GLOBAL_STATS.write();
-
-            stats.total_queries += 1;
-            stats.total_time_ns += duration.as_nanos() as u64;
-
-            if duration.as_millis() as u64 >= stats.slow_threshold_ms {
-                stats.slow_queries += 1;
-            }
+            GLOBAL_STATS.record(Some(duration));
         }
     }
 
     /// Snapshot the current global counters.
     pub fn stats() -> GlobalStats {
-        *GLOBAL_STATS.read()
+        GLOBAL_STATS.snapshot()
     }
 
     /// Clear all global counters.
     pub fn reset() {
-        let mut stats = GLOBAL_STATS.write();
-        stats.total_queries = 0;
-        stats.slow_queries = 0;
-        stats.total_time_ns = 0;
+        GLOBAL_STATS.reset();
     }
 
     /// Change the duration, in milliseconds, used to classify slow queries.
     pub fn set_slow_threshold(ms: u64) {
-        GLOBAL_STATS.write().slow_threshold_ms = ms;
+        GLOBAL_STATS.set_slow_threshold_ms(ms);
     }
 
     /// The duration at or above which a query counts as slow.
     pub(super) fn slow_threshold() -> Duration {
-        Duration::from_millis(GLOBAL_STATS.read().slow_threshold_ms)
+        Duration::from_millis(GLOBAL_STATS.slow_threshold_ms())
     }
 }
 

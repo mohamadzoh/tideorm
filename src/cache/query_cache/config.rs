@@ -20,6 +20,16 @@ pub struct CacheConfig {
     pub key_prefix: Option<String>,
 }
 
+impl crate::cache::toggle::Switchable for CacheConfig {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {

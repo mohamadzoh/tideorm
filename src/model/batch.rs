@@ -86,8 +86,8 @@ pub enum UpdateValue {
     ArrayRemove(serde_json::Value),
     /// Set one path inside a JSON column, leaving the rest of the document alone.
     ///
-    /// The path is restricted to `$.field` / `$.field.subfield` form with plain
-    /// identifier segments; anything else is rejected when the SQL is built.
+    /// The path is `$` followed by `.key`, `."any key"`, `['any key']` or
+    /// `[index]` steps; anything else is rejected when the SQL is built.
     JsonSet(String, serde_json::Value),
     /// Replace the column only where it is currently `NULL` (`col = COALESCE(col, default)`).
     ///

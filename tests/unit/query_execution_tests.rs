@@ -136,9 +136,9 @@ fn test_empty_negative_list_does_not_count_as_an_explicit_filter() {
     // model appends `deleted_at IS NULL` to whatever the caller declared.
     for query in [
         CacheKeyTestUser::query().where_not_in("id", Vec::<i64>::new()),
-        CacheKeyTestUser::query().ne_all("name", Vec::<&str>::new()),
+        CacheKeyTestUser::query().where_not_in("name", Vec::<&str>::new()),
         CacheKeyTestUser::query()
-            .ne_all("name", Vec::<&str>::new())
+            .where_not_in("name", Vec::<&str>::new())
             .where_not_in("id", Vec::<i64>::new()),
     ] {
         let err = query
@@ -354,7 +354,7 @@ fn test_union_bound_values_participate_in_the_cache_key() {
     let tenant_two = CacheKeyTestPost::query().union(CacheKeyTestUser::query().where_eq("id", 2));
 
     assert_eq!(
-        tenant_one.unions[0].query_sql, tenant_two.unions[0].query_sql,
+        tenant_one.clauses.unions[0].query_sql, tenant_two.clauses.unions[0].query_sql,
         "a parameterized union operand renders the same SQL for either bound value"
     );
     assert_ne!(
@@ -372,7 +372,7 @@ fn test_cte_bound_values_participate_in_the_cache_key() {
         .with_query("tenant_users", CacheKeyTestUser::query().where_eq("id", 2));
 
     assert_eq!(
-        tenant_one.ctes[0].query_sql, tenant_two.ctes[0].query_sql,
+        tenant_one.clauses.ctes[0].query_sql, tenant_two.clauses.ctes[0].query_sql,
         "a parameterized CTE body renders the same SQL for either bound value"
     );
     assert_ne!(
@@ -465,7 +465,7 @@ fn test_soft_delete_stamp_renders_for_the_statement_backend() {
 #[test]
 fn test_unrepresentable_condition_is_rejected_instead_of_dropped() {
     let mut query = CacheKeyTestUser::query();
-    query.conditions.push(WhereCondition {
+    query.clauses.conditions.push(WhereCondition {
         column: "id".to_string(),
         operator: Operator::Between,
         value: ConditionValue::Single(serde_json::json!(1)),
@@ -521,8 +521,8 @@ fn test_select_subquery_bound_values_participate_in_the_cache_key() {
     );
 
     assert_eq!(
-        tenant_one.subquery_select_expressions[0].query_sql,
-        tenant_two.subquery_select_expressions[0].query_sql,
+        tenant_one.clauses.subquery_select_expressions[0].query_sql,
+        tenant_two.clauses.subquery_select_expressions[0].query_sql,
         "a parameterized scalar subquery renders the same SQL for either bound value"
     );
     assert_ne!(

@@ -75,6 +75,19 @@ fn placeholders_match_values(db_type: DatabaseType, sql: &str, bound: usize) -> 
     }
 }
 
+/// A fragment rendered on its own, spliced behind `offset` values already
+/// bound in the surrounding statement.
+///
+/// PostgreSQL's `$n` markers are numbered, so they are shifted past those
+/// values; MySQL and SQLite's `?` markers depend only on the order values are
+/// bound in, so their fragment is spliced in unchanged.
+pub(crate) fn rebase_placeholders(db_type: DatabaseType, sql: &str, offset: usize) -> String {
+    match db_type {
+        DatabaseType::Postgres => offset_postgres_placeholders(sql, offset),
+        DatabaseType::MySQL | DatabaseType::MariaDB | DatabaseType::SQLite => sql.to_string(),
+    }
+}
+
 /// Shift every `$n` placeholder in `sql` up by `offset`.
 ///
 /// Fragments rendered on their own number their placeholders from `$1`; spliced
@@ -82,7 +95,7 @@ fn placeholders_match_values(db_type: DatabaseType, sql: &str, bound: usize) -> 
 /// to continue that numbering instead. Quoted literals, quoted identifiers,
 /// comments and dollar-quoted strings are skipped, so a `$5` inside any of them
 /// is left alone.
-pub(crate) fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
+fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
     if offset == 0 {
         return sql.to_string();
     }
@@ -277,30 +290,77 @@ pub(crate) fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
 /// identifier with `next()`, keeping the rest as written. A `?` inside quotes
 /// is text, such as a LIKE pattern, not a parameter; so is one inside `[..]`,
 /// which the engine's statement tokenizer reads as quoted too and would never
-/// bind.
+/// bind, and one inside a PostgreSQL dollar-quoted string (`$$?$$`,
+/// `$tag$?$tag$`).
 pub(crate) fn map_template_placeholders(
     template: &str,
     mut next: impl FnMut() -> String,
 ) -> String {
     let mut rendered = String::with_capacity(template.len());
-    // The character that closes the quoted run the scan is inside.
-    let mut quote: Option<char> = None;
-    for ch in template.chars() {
-        match quote {
-            // A doubled quote re-enters the literal on its next character.
-            Some(close) if ch == close => quote = None,
-            Some(_) => {}
-            None if matches!(ch, '\'' | '"' | '`') => quote = Some(ch),
-            None if ch == '[' => quote = Some(']'),
+    let mut rest = template;
+    let mut previous: Option<char> = None;
+    while let Some(ch) = rest.chars().next() {
+        let quoted = match ch {
+            '\'' | '"' | '`' | '[' => {
+                let close = if ch == '[' { ']' } else { ch };
+                // A doubled quote closes the run and opens the next one, so
+                // the literal goes on.
+                Some(rest[1..].find(close).map_or(rest.len(), |end| end + 2))
+            }
+            '$' if !previous.is_some_and(|previous| {
+                previous == '_' || previous == '$' || previous.is_alphanumeric()
+            }) =>
+            {
+                dollar_quoted_len(rest)
+            }
+            _ => None,
+        };
+        let taken = match quoted {
+            Some(length) => {
+                rendered.push_str(&rest[..length]);
+                length
+            }
             None if ch == '?' => {
                 rendered.push_str(&next());
-                continue;
+                1
             }
-            None => {}
-        }
-        rendered.push(ch);
+            None => {
+                rendered.push(ch);
+                ch.len_utf8()
+            }
+        };
+        previous = rest[..taken].chars().next_back();
+        rest = &rest[taken..];
     }
     rendered
+}
+
+/// `template` with each `?` placeholder turned into the backend's marker,
+/// numbered from `first`.
+pub(crate) fn render_template(db_type: DatabaseType, template: &str, first: usize) -> String {
+    let mut index = first;
+    map_template_placeholders(template, || {
+        let marker = placeholder(db_type, index);
+        index += 1;
+        marker
+    })
+}
+
+/// The length of the dollar-quoted string `text` starts with: an opening
+/// `$$` or `$tag$`, the text, and the same tag again. `None` when `text` does
+/// not open one or it never closes, so a lone `$` stays text, as it is on
+/// MySQL and SQLite. A tag cannot start with a digit: `$1` is a parameter.
+fn dollar_quoted_len(text: &str) -> Option<usize> {
+    let tag_body = text[1..]
+        .find(|ch: char| !(ch == '_' || ch.is_alphanumeric()))
+        .unwrap_or(text.len() - 1);
+    let tag_end = 1 + tag_body;
+    if !text[tag_end..].starts_with('$') || text[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
+        return None;
+    }
+    let tag = &text[..=tag_end];
+    let body = &text[tag.len()..];
+    body.find(tag).map(|end| tag.len() + end + tag.len())
 }
 
 /// How many parameters a template takes: its `?`s outside quotes.

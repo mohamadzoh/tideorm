@@ -3,9 +3,56 @@ use syn::meta::ParseNestedMeta;
 use syn::punctuated::Punctuated;
 use syn::{Expr, ExprLit, Lit, Meta, Token, UnOp};
 
-/// Rule names accepted inside `#[validate(..)]`, reported in diagnostics.
-const SUPPORTED_RULES: &str = "required, email, url, alpha, alphanumeric, numeric, uuid, \
-     min_length, max_length, length, min, max, range, regex";
+/// What a rule takes after its name.
+#[derive(Clone, Copy)]
+enum Arity {
+    /// Nothing: `email`.
+    Flag,
+    /// A non-negative integer: `min_length = 3`.
+    Count,
+    /// A finite number: `min = 18`.
+    Number,
+    /// A string literal: `regex = ".."`.
+    Text,
+    /// Two finite bounds: `range(1, 10)`.
+    Range,
+}
+
+/// What kind of field a rule checks.
+#[derive(Clone, Copy)]
+enum Applies {
+    Any,
+    Text,
+    Number,
+}
+
+/// Every rule `#[validate(..)]` accepts: its name, its `ValidationRule`
+/// variant, what it takes, and what it checks.
+const RULES: &[(&str, &str, Arity, Applies)] = &[
+    ("required", "Required", Arity::Flag, Applies::Any),
+    ("email", "Email", Arity::Flag, Applies::Text),
+    ("url", "Url", Arity::Flag, Applies::Text),
+    ("alpha", "Alpha", Arity::Flag, Applies::Text),
+    ("alphanumeric", "Alphanumeric", Arity::Flag, Applies::Text),
+    ("numeric", "Numeric", Arity::Flag, Applies::Text),
+    ("uuid", "Uuid", Arity::Flag, Applies::Text),
+    ("min_length", "MinLength", Arity::Count, Applies::Text),
+    ("max_length", "MaxLength", Arity::Count, Applies::Text),
+    ("length", "Length", Arity::Count, Applies::Text),
+    ("min", "Min", Arity::Number, Applies::Number),
+    ("max", "Max", Arity::Number, Applies::Number),
+    ("range", "Range", Arity::Range, Applies::Number),
+    ("regex", "Regex", Arity::Text, Applies::Text),
+];
+
+/// The rule names, as diagnostics list them.
+fn supported_rules() -> String {
+    RULES
+        .iter()
+        .map(|(name, ..)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 pub(crate) fn parse_validation_attributes(field: &ModelField) -> syn::Result<Vec<TokenStream2>> {
     let mut rules = Vec::new();
@@ -27,7 +74,8 @@ pub(crate) fn parse_validation_attributes(field: &ModelField) -> syn::Result<Vec
             return Err(syn::Error::new_spanned(
                 attr,
                 format!(
-                    "#[validate(..)] expects a parenthesized rule list; supported rules: {SUPPORTED_RULES}"
+                    "#[validate(..)] expects a parenthesized rule list; supported rules: {}",
+                    supported_rules()
                 ),
             ));
         }
@@ -46,72 +94,17 @@ fn parse_rule(
     let rule_ident = meta.path.get_ident().cloned().ok_or_else(|| {
         syn::Error::new_spanned(
             &meta.path,
-            format!("unknown validation rule; supported rules: {SUPPORTED_RULES}"),
+            format!(
+                "unknown validation rule; supported rules: {}",
+                supported_rules()
+            ),
         )
     })?;
     let rule = unraw_ident(&rule_ident);
-    ensure_validation_compatibility(field, &rule_ident, &rule)?;
-
-    let tokens = match rule.as_str() {
-        "required" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Required)
-        }
-        "email" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Email)
-        }
-        "url" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Url)
-        }
-        "alpha" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Alpha)
-        }
-        "alphanumeric" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Alphanumeric)
-        }
-        "numeric" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Numeric)
-        }
-        "uuid" => {
-            expect_flag(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Uuid)
-        }
-        "min_length" => {
-            let value = parse_usize_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::MinLength(#value))
-        }
-        "max_length" => {
-            let value = parse_usize_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::MaxLength(#value))
-        }
-        "length" => {
-            let value = parse_usize_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Length(#value))
-        }
-        "min" => {
-            let value = parse_f64_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Min(#value))
-        }
-        "max" => {
-            let value = parse_f64_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Max(#value))
-        }
-        "range" => {
-            let (min, max) = parse_range_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Range(#min, #max))
-        }
-        "regex" => {
-            let pattern = parse_string_rule(meta, &rule_ident)?;
-            quote!(::tideorm::validation::ValidationRule::Regex(#pattern.to_string()))
-        }
+    let Some(&(_, variant, arity, applies)) = RULES.iter().find(|(name, ..)| *name == rule) else {
         // A field rule cannot run model code, so `custom` used to compile to a
         // marker nothing evaluated and silently accepted every value.
-        "custom" => {
+        if rule == "custom" {
             return Err(syn::Error::new_spanned(
                 &rule_ident,
                 "`#[validate(custom = ..)]` is not supported: implement \
@@ -119,11 +112,50 @@ fn parse_rule(
                  and return `Err(tideorm::Error::validation(field, message))` from it",
             ));
         }
-        unknown => {
-            return Err(syn::Error::new_spanned(
+        return Err(syn::Error::new_spanned(
+            &rule_ident,
+            format!(
+                "unknown validation rule '{rule}'; supported rules: {}",
+                supported_rules()
+            ),
+        ));
+    };
+    ensure_validation_compatibility(field, &rule_ident, &rule, applies)?;
+
+    let variant = format_ident!("{}", variant);
+    let rule_path = quote!(::tideorm::validation::ValidationRule::#variant);
+    let tokens = match arity {
+        Arity::Flag => {
+            expect_flag(meta, &rule_ident)?;
+            rule_path
+        }
+        Arity::Count => {
+            let value = parse_single(
+                meta,
                 &rule_ident,
-                format!("unknown validation rule '{unknown}'; supported rules: {SUPPORTED_RULES}"),
-            ));
+                expr_to_usize,
+                "a non-negative integer",
+                "3",
+            )?;
+            quote!(#rule_path(#value))
+        }
+        Arity::Number => {
+            let value = parse_single(meta, &rule_ident, expr_to_f64, "a finite number", "18")?;
+            quote!(#rule_path(#value))
+        }
+        Arity::Text => {
+            let value = parse_single(
+                meta,
+                &rule_ident,
+                expr_to_string,
+                "a string literal",
+                "\"...\"",
+            )?;
+            quote!(#rule_path(#value.to_string()))
+        }
+        Arity::Range => {
+            let (min, max) = parse_range_rule(meta, &rule_ident)?;
+            quote!(#rule_path(#min, #max))
         }
     };
 
@@ -135,41 +167,19 @@ fn ensure_validation_compatibility(
     field: &ModelField,
     rule_ident: &Ident,
     rule: &str,
+    applies: Applies,
 ) -> syn::Result<()> {
-    let expects_string = matches!(
-        rule,
-        "email"
-            | "url"
-            | "alpha"
-            | "alphanumeric"
-            | "numeric"
-            | "uuid"
-            | "min_length"
-            | "max_length"
-            | "length"
-            | "regex"
-    );
-    let expects_numeric = matches!(rule, "min" | "max" | "range");
-
-    let compatible = if expects_string {
-        field.supports_string_validations()
-    } else if expects_numeric {
-        field.supports_numeric_validations()
-    } else {
-        true
+    let (compatible, expected) = match applies {
+        Applies::Any => return Ok(()),
+        Applies::Text => (field.supports_string_validations(), "a string field"),
+        Applies::Number => (
+            field.supports_numeric_validations(),
+            "a numeric field or string field",
+        ),
     };
-
     if compatible {
         return Ok(());
     }
-
-    let expected = if expects_string {
-        "a string field"
-    } else if expects_numeric {
-        "a numeric field or string field"
-    } else {
-        "a compatible field"
-    };
 
     Err(syn::Error::new_spanned(
         rule_ident,
@@ -231,40 +241,22 @@ fn single_value<'a>(values: &'a [Expr], rule_ident: &Ident) -> syn::Result<&'a E
     }
 }
 
-fn parse_usize_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<usize> {
+/// The one value a rule takes, read by `convert`; `expected` and `example`
+/// describe it when it does not read.
+fn parse_single<T>(
+    meta: &ParseNestedMeta,
+    rule_ident: &Ident,
+    convert: fn(&Expr) -> Option<T>,
+    expected: &str,
+    example: &str,
+) -> syn::Result<T> {
     let values = rule_values(meta, rule_ident)?;
     let value = single_value(&values, rule_ident)?;
-    expr_to_usize(value).ok_or_else(|| {
+    convert(value).ok_or_else(|| {
         syn::Error::new_spanned(
             value,
             format!(
-                "validation rule '{rule_ident}' expects a non-negative integer, e.g. `{rule_ident} = 3`"
-            ),
-        )
-    })
-}
-
-fn parse_f64_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<f64> {
-    let values = rule_values(meta, rule_ident)?;
-    let value = single_value(&values, rule_ident)?;
-    expr_to_f64(value).ok_or_else(|| {
-        syn::Error::new_spanned(
-            value,
-            format!(
-                "validation rule '{rule_ident}' expects a finite number, e.g. `{rule_ident} = 18`"
-            ),
-        )
-    })
-}
-
-fn parse_string_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<String> {
-    let values = rule_values(meta, rule_ident)?;
-    let value = single_value(&values, rule_ident)?;
-    expr_to_string(value).ok_or_else(|| {
-        syn::Error::new_spanned(
-            value,
-            format!(
-                "validation rule '{rule_ident}' expects a string literal, e.g. `{rule_ident} = \"...\"`"
+                "validation rule '{rule_ident}' expects {expected}, e.g. `{rule_ident} = {example}`"
             ),
         )
     })

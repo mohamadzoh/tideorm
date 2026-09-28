@@ -45,6 +45,7 @@ mod logger;
 
 pub use self::debug::QueryDebugInfo;
 pub(crate) use self::engine::{log_engine_statement, log_statement, logged_by_caller};
+pub(crate) use self::entry::StatsCounters;
 pub use self::entry::{LogLevel, QueryLogEntry, QueryOperation, QueryStats, QueryTimer};
 pub(crate) use self::logger::DEFAULT_SLOW_QUERY_THRESHOLD_MS;
 pub use self::logger::{QueryLogger, QueryLoggerBuilder};

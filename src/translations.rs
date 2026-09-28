@@ -237,10 +237,7 @@ pub trait HasTranslations {
         self.validate_field(field)?;
 
         let mut data = self.get_translations_data()?;
-        for (lang, value) in translations {
-            self.validate_language(lang)?;
-            data.set(field, lang, value);
-        }
+        put_translations(self, &mut data, field, translations)?;
         self.set_translations_data(data)
     }
 
@@ -254,10 +251,7 @@ pub trait HasTranslations {
 
         let mut data = self.get_translations_data()?;
         data.remove_field(field);
-        for (lang, value) in translations {
-            self.validate_language(lang)?;
-            data.set(field, lang, value);
-        }
+        put_translations(self, &mut data, field, translations)?;
         self.set_translations_data(data)
     }
 
@@ -427,6 +421,26 @@ pub trait HasTranslations {
         }
         Ok(())
     }
+}
+
+/// Check each language of `translations` against `model`'s and store its
+/// value for `field` in `data`.
+pub(crate) fn put_translations<M, L, V>(
+    model: &M,
+    data: &mut TranslationsData,
+    field: &str,
+    translations: impl IntoIterator<Item = (L, V)>,
+) -> Result<(), TranslationError>
+where
+    M: HasTranslations + ?Sized,
+    L: AsRef<str>,
+    V: Into<serde_json::Value>,
+{
+    for (lang, value) in translations {
+        model.validate_language(lang.as_ref())?;
+        data.set(field, lang.as_ref(), value);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

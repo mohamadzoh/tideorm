@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Log level for query logging
@@ -286,6 +287,67 @@ impl QueryStats {
         } else {
             (self.slow_queries as f64 / self.total_queries as f64) * 100.0
         }
+    }
+}
+
+/// Query counters kept with atomics against a slow-query threshold; the
+/// logger and the global profiler keep one each.
+#[derive(Debug)]
+pub(crate) struct StatsCounters {
+    total_queries: AtomicU64,
+    slow_queries: AtomicU64,
+    total_time_ns: AtomicU64,
+    slow_threshold_ms: AtomicU64,
+}
+
+impl StatsCounters {
+    pub(crate) const fn new(slow_threshold_ms: u64) -> Self {
+        Self {
+            total_queries: AtomicU64::new(0),
+            slow_queries: AtomicU64::new(0),
+            total_time_ns: AtomicU64::new(0),
+            slow_threshold_ms: AtomicU64::new(slow_threshold_ms),
+        }
+    }
+
+    /// Count one query, and its time when it has one. Returns whether it
+    /// reached the threshold, which a query without a duration never does.
+    pub(crate) fn record(&self, duration: Option<Duration>) -> bool {
+        self.total_queries.fetch_add(1, Ordering::SeqCst);
+        let Some(duration) = duration else {
+            return false;
+        };
+        self.total_time_ns
+            .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
+        let slow = duration.as_millis() as u64 >= self.slow_threshold_ms();
+        if slow {
+            self.slow_queries.fetch_add(1, Ordering::SeqCst);
+        }
+        slow
+    }
+
+    pub(crate) fn slow_threshold_ms(&self) -> u64 {
+        self.slow_threshold_ms.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_slow_threshold_ms(&self, ms: u64) {
+        self.slow_threshold_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub(crate) fn snapshot(&self) -> QueryStats {
+        QueryStats {
+            total_queries: self.total_queries.load(Ordering::SeqCst),
+            slow_queries: self.slow_queries.load(Ordering::SeqCst),
+            total_time_ns: self.total_time_ns.load(Ordering::SeqCst),
+            slow_threshold_ms: self.slow_threshold_ms(),
+        }
+    }
+
+    /// Zero the counters, keeping the threshold.
+    pub(crate) fn reset(&self) {
+        self.total_queries.store(0, Ordering::SeqCst);
+        self.slow_queries.store(0, Ordering::SeqCst);
+        self.total_time_ns.store(0, Ordering::SeqCst);
     }
 }
 

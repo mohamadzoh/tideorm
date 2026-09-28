@@ -1,6 +1,6 @@
 use crate::database::Database;
 use crate::error::{Error, ErrorContext, Result};
-use crate::internal::sql_safety::quote_ident_for_backend;
+use crate::internal::sql_safety::quote_ident;
 use crate::internal::{
     Backend, ConnectionTrait, OrmConnection, QueryResult, build_statement,
     build_statement_with_values, translate_error,
@@ -30,44 +30,7 @@ pub struct ColumnDef {
     pub default: Option<String>,
 }
 
-impl ColumnDef {
-    /// Create a new column definition
-    pub fn new(name: impl Into<String>, col_type: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            col_type: col_type.into(),
-            nullable: true,
-            primary_key: false,
-            auto_increment: false,
-            default: None,
-        }
-    }
-
-    /// Set as primary key
-    pub fn primary_key(mut self) -> Self {
-        self.primary_key = true;
-        self.nullable = false;
-        self
-    }
-
-    /// Set as auto-increment
-    pub fn auto_increment(mut self) -> Self {
-        self.auto_increment = true;
-        self
-    }
-
-    /// Set as not nullable
-    pub fn not_null(mut self) -> Self {
-        self.nullable = false;
-        self
-    }
-
-    /// Set default value
-    pub fn default(mut self, expr: impl Into<String>) -> Self {
-        self.default = Some(expr.into());
-        self
-    }
-}
+crate::schema::column_declaration_methods!(ColumnDef, col_type);
 
 /// Model schema definition for TideORM synchronization
 #[derive(Debug, Clone)]
@@ -186,7 +149,15 @@ async fn sync_indexes(
 ) -> Result<()> {
     for index in &model.indexes {
         // MySQL has no `CREATE INDEX IF NOT EXISTS`, so ask the catalog first.
-        if backend == Backend::MySql && mysql_index_exists(conn, model, &index.name).await? {
+        if backend == Backend::MySql
+            && ddl::mysql_index_exists(
+                conn,
+                mysql_database(&model.schema_name),
+                &model.table_name,
+                &index.name,
+            )
+            .await?
+        {
             continue;
         }
 
@@ -216,31 +187,6 @@ async fn sync_indexes(
     }
 
     Ok(())
-}
-
-async fn mysql_index_exists(
-    conn: &OrmConnection,
-    model: &ModelSchema,
-    index: &str,
-) -> Result<bool> {
-    let statement = build_statement_with_values(
-        Backend::MySql,
-        "SELECT COUNT(*) > 0 FROM information_schema.statistics \
-         WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
-        vec![
-            mysql_database(&model.schema_name).into(),
-            model.table_name.as_str().into(),
-            index.into(),
-        ],
-    );
-    let row = conn.query_one_raw(statement).await.map_err(|error| {
-        translate_error(error).with_context(ErrorContext::new().table(model.table_name.as_str()))
-    })?;
-
-    match row {
-        Some(row) => decode_table_exists(&row, &model.table_name),
-        None => Ok(false),
-    }
 }
 
 /// Run one DDL statement against `model`'s table, keeping the statement and
@@ -283,10 +229,11 @@ fn qualifying_schema(model: &ModelSchema, backend: Backend) -> Option<&str> {
 
 /// The model's table as every statement sync issues names it.
 fn table_reference(model: &ModelSchema, backend: Backend) -> String {
-    let table = quote_ident_for_backend(backend, &model.table_name);
+    let db_type = backend.as_database_type();
+    let table = quote_ident(db_type, &model.table_name);
 
     match qualifying_schema(model, backend) {
-        Some(schema) => format!("{}.{}", quote_ident_for_backend(backend, schema), table),
+        Some(schema) => format!("{}.{}", quote_ident(db_type, schema), table),
         None => table,
     }
 }
@@ -497,7 +444,7 @@ async fn check_table_exists(
 /// the decode fail on MySQL. A failure must surface rather than be read as
 /// "table absent": swallowing it makes `force_sync` skip its `DROP` and turns
 /// the whole run into a silent no-op.
-fn decode_table_exists(row: &QueryResult, table: &str) -> Result<bool> {
+pub(crate) fn decode_table_exists(row: &QueryResult, table: &str) -> Result<bool> {
     if let Ok(value) = row.try_get_by_index::<bool>(0) {
         return Ok(value);
     }

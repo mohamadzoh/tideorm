@@ -4,12 +4,12 @@
 //! Import this when you want the common model, query, migration, and relation
 //! types in scope without pulling each module in separately.
 
-pub use crate::callbacks::{CallbackRunner, Callbacks};
+pub use crate::callbacks::Callbacks;
 #[cfg(feature = "attachments")]
 pub use crate::config::FileUrlGenerator;
 pub use crate::config::{Config, DatabaseType, PoolConfig, TideConfig};
 pub use crate::database::{Database, DatabaseBuilder, Transaction};
-pub use crate::database::{db, has_global_db, require_db, try_db};
+pub use crate::database::{db, has_global_db, require_db};
 // Bound parameter values for `Database::raw_with_params` and friends. Exported
 // here so raw SQL never sends callers into the hidden `internal` module.
 pub use crate::internal::DbValue;
@@ -42,9 +42,8 @@ pub use crate::migration::{
 // Relations. `relations::EagerLoadModel` is left out on purpose: it is
 // `#[doc(hidden)]` machinery that generated code names by its full path.
 pub use crate::relations::{
-    BelongsTo, EagerLoadExt, EagerQueryBuilder, HasMany, HasManyThrough, HasOne, MorphMany,
-    MorphOne, MorphTo, RelationExt, RelationPath, RelationTree, SelfRef, SelfRefMany,
-    WithRelations,
+    BelongsTo, EagerQueryBuilder, HasMany, HasManyThrough, HasOne, MorphMany, MorphOne, MorphTo,
+    RelationPath, RelationTree, SelfRef, SelfRefMany, WithRelations,
 };
 
 // File Attachments
@@ -104,7 +103,6 @@ pub use crate::columns::{
 #[cfg(feature = "entity-manager")]
 pub use crate::entity_manager::{
     EntityManager, EntityManagerLoad, EntityState, Managed, TideEntityManagerMeta,
-    save_with_entity_manager,
 };
 
 // Derive macro

@@ -27,31 +27,6 @@ fn test_query_complexity() {
     ));
 }
 
-#[test]
-fn test_profiler() {
-    let mut profiler = Profiler::start();
-    profiler.record("SELECT 1", Duration::from_millis(10));
-    profiler.record("SELECT 2", Duration::from_millis(20));
-
-    let report = profiler.stop();
-    assert_eq!(report.query_count(), 2);
-}
-
-#[test]
-fn test_global_stats() {
-    GlobalProfiler::enable();
-    GlobalProfiler::reset();
-
-    GlobalProfiler::record(Duration::from_millis(50));
-    GlobalProfiler::record(Duration::from_millis(150));
-
-    let stats = GlobalProfiler::stats();
-    assert_eq!(stats.total_queries, 2);
-    assert_eq!(stats.slow_queries, 1);
-
-    GlobalProfiler::disable();
-}
-
 #[tokio::test]
 async fn test_profile_future_records_enabled_queries() {
     GlobalProfiler::enable();
@@ -129,11 +104,16 @@ fn test_report_slow_query_suggestion_uses_the_profiler_threshold() {
 }
 
 #[test]
-fn test_missing_where_detection() {
-    let suggestions = QueryAnalyzer::analyze("DELETE FROM users");
+fn a_leading_newline_does_not_hide_a_missing_where() {
+    let suggestions = QueryAnalyzer::analyze("\n  DELETE FROM users");
     assert!(
         suggestions
             .iter()
-            .any(|s| s.level == SuggestionLevel::Critical)
+            .any(|suggestion| suggestion.title == "Missing WHERE clause"),
+        "{suggestions:?}"
+    );
+    assert_eq!(
+        QueryAnalyzer::estimate_complexity("\n  DELETE FROM users"),
+        QueryAnalyzer::estimate_complexity("DELETE FROM users")
     );
 }

@@ -1,12 +1,11 @@
 use super::*;
-use crate::database::Database;
-use crate::internal::{EntityTrait, FromQueryResult, QueryResult, translate_error};
+use crate::internal::{EntityTrait, FromQueryResult, translate_error};
 
 mod mysql_sqlite;
 mod postgres;
 
 /// The predicate of a search whose text holds no word to search for.
-const MATCH_NOTHING: &str = "1 = 0";
+use crate::query::db_sql::MATCH_NOTHING;
 
 /// Builder for full-text search queries
 pub struct FullTextSearchBuilder<T: Model> {
@@ -178,7 +177,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
 
         let pattern = term_pattern(&self.highlight_terms());
-        query_rows(&db, &sql, params)
+        db.fetch_rows(&sql, params)
             .await?
             .iter()
             .map(|row| {
@@ -207,7 +206,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_count_sql(db.execution_backend())?;
 
-        let rows = query_rows(&db, &sql, params).await?;
+        let rows = db.fetch_rows(&sql, params).await?;
         let row = rows
             .first()
             .ok_or_else(|| Error::query("Database returned no row for the full-text count"))?;
@@ -247,7 +246,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Whether the search text holds a word to search for.
     fn has_search_terms(&self) -> bool {
-        self.query_text().chars().any(char::is_alphanumeric)
+        has_searchable_char(&self.query_text())
     }
 
     /// The words to mark in a result: the search terms without their
@@ -257,11 +256,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
         search_tokens(&self.query_text())
             .into_iter()
             .filter(|token| !(boolean && token.starts_with('-')))
-            .flat_map(|token| {
-                token.split(|character: char| character == '"' || character.is_whitespace())
-            })
+            .flat_map(search_words)
             .map(|word| word.trim_matches(|character: char| !character.is_alphanumeric()))
-            .filter(|word| !word.is_empty())
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -311,19 +307,14 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// `predicate` restricted to the rows the soft-delete scope keeps, with
     /// the deleted-at column qualified by `table` when one is given.
     fn scoped(&self, db_type: DatabaseType, predicate: String, table: Option<&str>) -> String {
-        if !T::soft_delete_enabled() || self.trashed == TrashedRows::Included {
+        if self.trashed == TrashedRows::Included {
             return predicate;
         }
-        let column = quote_ident(db_type, T::deleted_at_column());
-        let column = match table {
-            Some(table) => format!("{table}.{column}"),
-            None => column,
-        };
-        let test = match self.trashed {
-            TrashedRows::Only => "IS NOT NULL",
-            TrashedRows::Excluded | TrashedRows::Included => "IS NULL",
-        };
-        format!("{predicate} AND {column} {test}")
+        let only_trashed = self.trashed == TrashedRows::Only;
+        match crate::relations::soft_delete_clause::<T>(db_type, table, only_trashed) {
+            Some(test) => format!("{predicate} AND {test}"),
+            None => predicate,
+        }
     }
 
     /// The searched columns as the database names them, so a Rust field name
@@ -344,33 +335,39 @@ impl<T: Model> FullTextSearchBuilder<T> {
         db_type: DatabaseType,
         sql: &mut String,
         params: &mut Vec<Value>,
-    ) -> Result<()> {
-        // The limit is written into the SQL, where SQLite 3.50+ would recompile
-        // a statement with a bound LIMIT every time it runs; the offset stays
-        // bound, so paging reuses one statement.
-        if let Some(limit) = self.limit {
-            let limit_value = i64::try_from(limit)
-                .map_err(|_| Error::query("Full-text search limit exceeds i64 range"))?;
-            sql.push_str(" LIMIT ");
-            sql.push_str(&limit_value.to_string());
-        } else if self.offset.is_some() {
-            // MySQL, MariaDB and SQLite have no bare `OFFSET`.
-            match db_type {
-                DatabaseType::Postgres => {}
-                DatabaseType::SQLite => sql.push_str(" LIMIT -1"),
-                DatabaseType::MySQL | DatabaseType::MariaDB => {
-                    sql.push_str(" LIMIT 18446744073709551615")
-                }
-            }
-        }
-        if let Some(offset) = self.offset {
-            let offset_value = i64::try_from(offset)
-                .map_err(|_| Error::query("Full-text search offset exceeds i64 range"))?;
-            let placeholder = push_param(db_type, params, Value::BigInt(Some(offset_value)));
-            sql.push_str(" OFFSET ");
-            sql.push_str(&placeholder);
-        }
-        Ok(())
+    ) {
+        crate::query::db_sql::append_limit_offset(sql, db_type, self.limit, self.offset, params);
+    }
+
+    /// `SELECT <model columns> FROM <table> WHERE <predicate>`, paged.
+    fn select_where(
+        &self,
+        db_type: DatabaseType,
+        predicate: &str,
+        mut params: Vec<Value>,
+    ) -> (String, Vec<Value>) {
+        let mut sql = format!(
+            "SELECT {} FROM {} WHERE {}",
+            crate::query::db_sql::model_columns_sql::<T>(db_type, None),
+            crate::query::db_sql::quote_table::<T>(db_type),
+            predicate
+        );
+        self.append_limit_offset(db_type, &mut sql, &mut params);
+        (sql, params)
+    }
+
+    /// `SELECT COUNT(*) as count FROM <table> WHERE <predicate>`.
+    fn count_where(
+        db_type: DatabaseType,
+        predicate: &str,
+        params: Vec<Value>,
+    ) -> (String, Vec<Value>) {
+        let sql = format!(
+            "SELECT COUNT(*) as count FROM {} WHERE {}",
+            crate::query::db_sql::quote_table::<T>(db_type),
+            predicate
+        );
+        (sql, params)
     }
 }
 
@@ -396,15 +393,4 @@ fn search_tokens(text: &str) -> Vec<&str> {
         tokens.push(&text[begin..]);
     }
     tokens
-}
-
-/// Run a statement a search builder rendered and return its raw rows, for the
-/// results that carry more than the model's own columns.
-async fn query_rows(db: &Database, sql: &str, params: Vec<Value>) -> Result<Vec<QueryResult>> {
-    let connection = db.__get_connection()?;
-    let executor = connection.executor();
-    let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
-    crate::profiling::__profile_future(executor.query_all_raw(statement))
-        .await
-        .map_err(translate_error)
 }

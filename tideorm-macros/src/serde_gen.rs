@@ -36,6 +36,7 @@ fn generate_default_impl(ctx: &BuildContext) -> TokenStream2 {
 }
 
 fn generate_debug_impl(ctx: &BuildContext) -> TokenStream2 {
+    let struct_name_str = &ctx.struct_name_str;
     if !ctx.should_gen_debug {
         return quote! {};
     }
@@ -45,7 +46,7 @@ fn generate_debug_impl(ctx: &BuildContext) -> TokenStream2 {
     quote! {
         impl ::std::fmt::Debug for #struct_name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.debug_struct(stringify!(#struct_name))
+                f.debug_struct(#struct_name_str)
                     #(.field(#field_names, &self.#field_idents))*
                     .finish()
             }
@@ -69,6 +70,7 @@ fn generate_clone_impl(ctx: &BuildContext) -> TokenStream2 {
 }
 
 fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
+    let struct_name_str = &ctx.struct_name_str;
     if !ctx.should_gen_serialize {
         return quote! {};
     }
@@ -99,7 +101,7 @@ fn generate_serialize_impl(ctx: &BuildContext) -> TokenStream2 {
                     0usize #( + usize::from(self.#relation_idents.get_cached().is_some()))*
                 };
                 let mut state = serializer.serialize_struct(
-                    stringify!(#struct_name),
+                    #struct_name_str,
                     #base_field_count + relation_field_count,
                 )?;
                 #(state.serialize_field(#other_names, &self.#other_idents)?;)*
@@ -122,6 +124,7 @@ fn serialized_fields(ctx: &BuildContext) -> (Vec<&ModelField>, Vec<&ModelField>)
 }
 
 fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
+    let struct_name_str = &ctx.struct_name_str;
     if !ctx.should_gen_deserialize {
         return quote! {};
     }
@@ -233,7 +236,7 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 impl<'de> ::tideorm::serde::de::Visitor<'de> for __Visitor {
                     type Value = #struct_name;
                     fn expecting(&self, formatter: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-                        formatter.write_str(concat!("struct ", stringify!(#struct_name)))
+                        formatter.write_str(concat!("struct ", #struct_name_str))
                     }
                     fn visit_map<A>(self, mut map: A) -> ::std::result::Result<#struct_name, A::Error>
                     where
@@ -272,7 +275,7 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
                 }
 
                 const FIELDS: &'static [&'static str] = &[#(#field_names),*];
-                deserializer.deserialize_struct(stringify!(#struct_name), FIELDS, __Visitor)
+                deserializer.deserialize_struct(#struct_name_str, FIELDS, __Visitor)
             }
         }
     }

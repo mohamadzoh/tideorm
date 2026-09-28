@@ -10,6 +10,7 @@
 //! Run with: cargo test --test postgres_integration_tests
 
 use tideorm::Database;
+use tideorm::prelude::Model;
 
 #[path = "support/postgres_test_config.rs"]
 mod test_config;
@@ -111,4 +112,137 @@ async fn raw_json_preserves_postgres_types() {
                 .expect("uuid should serialize to JSON"),
         })]
     );
+}
+
+#[tideorm::model(table = "test_array_documents")]
+struct TestArrayDocument {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    title: String,
+    tags: Vec<String>,
+    ratings: Vec<i32>,
+}
+
+/// Native `TEXT[]` and `INTEGER[]` columns, which only PostgreSQL has; the
+/// parity scenarios run the array filters over JSON arrays.
+#[tokio::test]
+async fn array_filters_read_native_array_columns() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS test_array_documents")
+        .await
+        .expect("failed to drop test_array_documents");
+    Database::execute(
+        "CREATE TABLE test_array_documents (
+            id BIGSERIAL PRIMARY KEY,
+            title TEXT NOT NULL,
+            tags TEXT[] NOT NULL,
+            ratings INTEGER[] NOT NULL
+        )",
+    )
+    .await
+    .expect("failed to create test_array_documents");
+
+    for (title, tags, ratings) in [
+        ("User Profile", ["user", "admin"], [5, 4, 5]),
+        ("Guest Profile", ["user", "guest"], [3, 3, 4]),
+        ("Moderator Profile", ["user", "moderator"], [4, 5, 4]),
+    ] {
+        TestArrayDocument {
+            id: 0,
+            title: title.to_string(),
+            tags: tags.map(String::from).to_vec(),
+            ratings: ratings.to_vec(),
+        }
+        .save()
+        .await
+        .expect("failed to save a document");
+    }
+
+    let titles = |docs: Vec<TestArrayDocument>| {
+        let mut titles: Vec<String> = docs.into_iter().map(|doc| doc.title).collect();
+        titles.sort();
+        titles
+    };
+
+    let docs = TestArrayDocument::query()
+        .where_array_contains("tags", vec!["admin".to_string()])
+        .get()
+        .await
+        .expect("array contains failed");
+    assert_eq!(titles(docs), ["User Profile"]);
+
+    let docs = TestArrayDocument::query()
+        .where_array_overlaps("tags", vec!["moderator".to_string(), "guest".to_string()])
+        .get()
+        .await
+        .expect("array overlap failed");
+    assert_eq!(titles(docs), ["Guest Profile", "Moderator Profile"]);
+
+    let docs = TestArrayDocument::query()
+        .where_array_contains("ratings", vec![5])
+        .get()
+        .await
+        .expect("integer array contains failed");
+    assert_eq!(titles(docs), ["Moderator Profile", "User Profile"]);
+
+    Database::execute("DROP TABLE test_array_documents")
+        .await
+        .expect("failed to drop test_array_documents");
+}
+
+#[tideorm::model(table = "test_nulls_not_distinct_contacts")]
+struct NullsNotDistinctContact {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    email: Option<String>,
+    name: String,
+}
+
+/// Whether a NULL conflict value conflicts is the constraint's to decide: under
+/// `NULLS NOT DISTINCT` a second NULL email is the stored row's, and the upsert
+/// updates it rather than failing on a plain insert.
+#[tokio::test]
+async fn an_upsert_follows_a_nulls_not_distinct_constraint() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS test_nulls_not_distinct_contacts")
+        .await
+        .expect("failed to drop test_nulls_not_distinct_contacts");
+    Database::execute(
+        "CREATE TABLE test_nulls_not_distinct_contacts (
+            id BIGSERIAL PRIMARY KEY,
+            email TEXT UNIQUE NULLS NOT DISTINCT,
+            name TEXT NOT NULL
+        )",
+    )
+    .await
+    .expect("failed to create test_nulls_not_distinct_contacts");
+
+    let contact = |name: &str| NullsNotDistinctContact {
+        id: 0,
+        email: None,
+        name: name.to_string(),
+    };
+    let first = NullsNotDistinctContact::insert_or_update(contact("first"), vec!["email"])
+        .await
+        .expect("the first upsert inserts");
+    let second = NullsNotDistinctContact::insert_or_update(contact("second"), vec!["email"])
+        .await
+        .expect("the second upsert updates the row holding NULL");
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.name, "second");
+    assert_eq!(
+        NullsNotDistinctContact::count()
+            .await
+            .expect("count failed"),
+        1
+    );
+
+    Database::execute("DROP TABLE test_nulls_not_distinct_contacts")
+        .await
+        .expect("failed to drop test_nulls_not_distinct_contacts");
 }

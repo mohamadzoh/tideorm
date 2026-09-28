@@ -36,57 +36,26 @@ fn test_config_builder() {
 }
 
 #[test]
-fn test_tide_config_models_matching_registers_models_from_exact_source_file() {
-    SyncRegistry::clear();
-    TideConfig::reset();
+fn test_tide_config_models_matching_registers_models_by_file_folder_and_recursive_globs() {
+    for pattern in [
+        "**/config_tests/model_pattern_fixture.rs",
+        "**/config_tests/*",
+        "**/config_tests/**/*.rs",
+    ] {
+        SyncRegistry::clear();
+        TideConfig::reset();
 
-    let _ = TideConfig::init().models_matching("**/config_tests/model_pattern_fixture.rs");
+        let _ = TideConfig::init().models_matching(pattern);
 
-    assert_eq!(
-        registered_sync_table_names(),
-        vec![
-            "config_path_match_posts".to_string(),
-            "config_path_match_users".to_string(),
-        ]
-    );
-
-    SyncRegistry::clear();
-    TideConfig::reset();
-}
-
-#[test]
-fn test_tide_config_models_matching_supports_folder_globs() {
-    SyncRegistry::clear();
-    TideConfig::reset();
-
-    let _ = TideConfig::init().models_matching("**/config_tests/*");
-
-    assert_eq!(
-        registered_sync_table_names(),
-        vec![
-            "config_path_match_posts".to_string(),
-            "config_path_match_users".to_string(),
-        ]
-    );
-
-    SyncRegistry::clear();
-    TideConfig::reset();
-}
-
-#[test]
-fn test_tide_config_models_matching_supports_recursive_globs_for_direct_children() {
-    SyncRegistry::clear();
-    TideConfig::reset();
-
-    let _ = TideConfig::init().models_matching("**/config_tests/**/*.rs");
-
-    assert_eq!(
-        registered_sync_table_names(),
-        vec![
-            "config_path_match_posts".to_string(),
-            "config_path_match_users".to_string(),
-        ]
-    );
+        assert_eq!(
+            registered_sync_table_names(),
+            vec![
+                "config_path_match_posts".to_string(),
+                "config_path_match_users".to_string(),
+            ],
+            "{pattern}"
+        );
+    }
 
     SyncRegistry::clear();
     TideConfig::reset();
@@ -155,14 +124,6 @@ fn test_rewrite_driver_url_leaves_malformed_mariadb_urls_unchanged() {
 }
 
 #[test]
-fn test_database_type_supports_json() {
-    assert!(DatabaseType::Postgres.supports_json());
-    assert!(DatabaseType::MySQL.supports_json());
-    assert!(DatabaseType::MariaDB.supports_json());
-    assert!(DatabaseType::SQLite.supports_json());
-}
-
-#[test]
 fn test_database_type_supports_arrays() {
     assert!(DatabaseType::Postgres.supports_arrays());
     assert!(!DatabaseType::MySQL.supports_arrays());
@@ -179,43 +140,11 @@ fn test_database_type_supports_returning() {
 }
 
 #[test]
-fn test_database_type_supports_upsert() {
-    assert!(DatabaseType::Postgres.supports_upsert());
-    assert!(DatabaseType::MySQL.supports_upsert());
-    assert!(DatabaseType::MariaDB.supports_upsert());
-    assert!(DatabaseType::SQLite.supports_upsert());
-}
-
-#[test]
-fn test_database_type_supports_window_functions() {
-    assert!(DatabaseType::Postgres.supports_window_functions());
-    assert!(DatabaseType::MySQL.supports_window_functions());
-    assert!(DatabaseType::MariaDB.supports_window_functions());
-    assert!(DatabaseType::SQLite.supports_window_functions());
-}
-
-#[test]
-fn test_database_type_supports_cte() {
-    assert!(DatabaseType::Postgres.supports_cte());
-    assert!(DatabaseType::MySQL.supports_cte());
-    assert!(DatabaseType::MariaDB.supports_cte());
-    assert!(DatabaseType::SQLite.supports_cte());
-}
-
-#[test]
 fn test_database_type_optimal_batch_size() {
     assert_eq!(DatabaseType::Postgres.optimal_batch_size(), 1000);
     assert_eq!(DatabaseType::MySQL.optimal_batch_size(), 500);
     assert_eq!(DatabaseType::MariaDB.optimal_batch_size(), 500);
     assert_eq!(DatabaseType::SQLite.optimal_batch_size(), 100);
-}
-
-#[test]
-fn test_database_type_param_style() {
-    assert_eq!(DatabaseType::Postgres.param_style(), "$");
-    assert_eq!(DatabaseType::MySQL.param_style(), "?");
-    assert_eq!(DatabaseType::MariaDB.param_style(), "?");
-    assert_eq!(DatabaseType::SQLite.param_style(), "?");
 }
 
 #[test]
@@ -497,5 +426,29 @@ fn test_rewrite_driver_url_reads_the_scheme_in_any_case() {
     assert_eq!(
         rewrite_driver_url("postgres://localhost/mariadb://"),
         "postgres://localhost/mariadb://"
+    );
+}
+
+#[test]
+fn a_table_of_the_same_name_in_another_schema_registers_for_sync() {
+    use crate::sync::ModelSchema;
+
+    SyncRegistry::clear();
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_a"));
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_b"));
+    SyncRegistry::register_schema(ModelSchema::new("users").schema("tenant_a"));
+
+    let mut registered: Vec<(String, String)> = SyncRegistry::get_all_schemas()
+        .into_iter()
+        .map(|schema| (schema.schema_name, schema.table_name))
+        .collect();
+    registered.sort();
+    SyncRegistry::clear();
+    assert_eq!(
+        registered,
+        [
+            ("tenant_a".to_string(), "users".to_string()),
+            ("tenant_b".to_string(), "users".to_string()),
+        ]
     );
 }

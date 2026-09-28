@@ -9,8 +9,6 @@
 
 use std::cell::Cell;
 use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use super::{QueryLogEntry, QueryLogger, query_logging_enabled};
@@ -27,19 +25,6 @@ thread_local! {
 /// across an await, so it follows the future across a work-stealing runtime's
 /// threads the way the scoped connection overrides do.
 pub(crate) fn logged_by_caller<F: Future>(future: F) -> impl Future<Output = F::Output> {
-    struct LoggedByCaller<F> {
-        future: Pin<Box<F>>,
-    }
-
-    impl<F: Future> Future for LoggedByCaller<F> {
-        type Output = F::Output;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let _restore = Restore(LOGGED_BY_CALLER.replace(true));
-            self.get_mut().future.as_mut().poll(cx)
-        }
-    }
-
     /// Puts the flag back when the poll ends, even by a panic, which would
     /// otherwise leave every later statement on the thread unlogged.
     struct Restore(bool);
@@ -50,9 +35,7 @@ pub(crate) fn logged_by_caller<F: Future>(future: F) -> impl Future<Output = F::
         }
     }
 
-    LoggedByCaller {
-        future: Box::pin(future),
-    }
+    crate::internal::per_poll(future, || Restore(LOGGED_BY_CALLER.replace(true)))
 }
 
 /// The per-statement callback installed on every connection.

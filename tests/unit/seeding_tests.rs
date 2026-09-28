@@ -27,7 +27,7 @@ impl Seed for TestSeed {
 
 #[test]
 fn test_seed_result_new() {
-    let result = SeedResult::new();
+    let result = SeedResult::default();
     assert!(result.executed.is_empty());
     assert!(result.skipped.is_empty());
     assert!(result.rolled_back.is_empty());
@@ -36,7 +36,7 @@ fn test_seed_result_new() {
 
 #[test]
 fn test_seed_result_has_executed() {
-    let mut result = SeedResult::new();
+    let mut result = SeedResult::default();
     result.executed.push(SeedInfo {
         name: "test_seed".to_string(),
     });
@@ -45,7 +45,7 @@ fn test_seed_result_has_executed() {
 
 #[test]
 fn test_seed_result_display() {
-    let mut result = SeedResult::new();
+    let mut result = SeedResult::default();
     result.executed.push(SeedInfo {
         name: "user_seeder".to_string(),
     });

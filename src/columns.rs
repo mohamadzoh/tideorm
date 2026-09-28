@@ -119,17 +119,10 @@ impl<T> Column<T> {
 }
 
 /// A type-safe column condition for WHERE clauses, applied with
-/// [`QueryBuilder::where_col`](crate::query::QueryBuilder::where_col).
-#[derive(Debug, Clone)]
-pub struct ColumnCondition {
-    /// The column name
-    pub column: String,
-    /// The comparison to apply
-    pub operator: crate::query::Operator,
-    /// The value compared with: one value, a list for `In`/`NotIn`, a range
-    /// for `Between`, and none for the NULL checks.
-    pub value: crate::query::ConditionValue,
-}
+/// [`QueryBuilder::where_col`](crate::query::QueryBuilder::where_col): the
+/// condition a query's `where_*` methods build, with the column qualified by
+/// its model's table.
+pub type ColumnCondition = crate::query::WhereCondition;
 
 /// The escape character used by every generated `LIKE ... ESCAPE` clause.
 ///

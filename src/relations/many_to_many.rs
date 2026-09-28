@@ -1,6 +1,5 @@
 //! Many-to-many relations reached through a pivot table.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
 
 use crate::error::Result;
@@ -11,9 +10,10 @@ use crate::query::QueryBuilder;
 mod entity_manager_support;
 
 use super::helpers::{
-    QuerySource, ensure_relation_configured, linkable_key, owner_is_unsaved, preserve_cached_value,
-    quote_ident, require_scalar_relation_key, required_key, where_key,
+    ensure_relation_configured, linkable_key, owner_is_unsaved, quote_ident,
+    require_scalar_relation_key, required_key, where_key,
 };
+use super::state::{RelationState, relation_serde};
 
 /// A many-to-many relation: rows of `Related` reached by joining `Pivot`'s
 /// table.
@@ -83,11 +83,7 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
     /// Table of the model owning the relation.
     #[cfg(feature = "entity-manager")]
     pub owner_table: &'static str,
-    cached: Option<Vec<Related>>,
-    parent_pk: Option<serde_json::Value>,
-    #[cfg(feature = "entity-manager")]
-    owner_key: Option<String>,
-    source: QuerySource,
+    state: RelationState<Vec<Related>>,
     _pivot: PhantomData<Pivot>,
 }
 
@@ -102,12 +98,23 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                 self.related_local_key,
                 self.pivot_table,
             ],
-        )
+        )?;
+        // The pivot rows are read, deleted and loaded eagerly through the
+        // `Pivot` model, whose table another name would not be.
+        if self.pivot_table != Pivot::table_name() {
+            return Err(crate::error::Error::query(format!(
+                "HasManyThrough pivot table '{}' is not the table of its pivot model, '{}'; \
+                 the relation reads and writes its pivot rows through that model, so name its table",
+                self.pivot_table,
+                Pivot::table_name()
+            )));
+        }
+        Ok(())
     }
 
     fn parent_key(&self, context: &str) -> Result<&serde_json::Value> {
         self.ensure_configured()?;
-        required_key(&self.parent_pk, "Parent primary key", context)
+        required_key(&self.state.key, "Parent primary key", context)
     }
 
     /// Declare the four columns and the join table.
@@ -142,13 +149,13 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// primary key not set for relation", so an unsaved model cannot
     /// `attach()`.
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.parent_pk = Some(pk);
+        self.state.key = Some(pk);
         self
     }
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, models: Vec<Related>) {
-        self.cached = Some(models);
+        self.state.set_cached(Some(models));
     }
 
     #[doc(hidden)]
@@ -158,26 +165,17 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             && self.local_key == previous.local_key
             && self.related_local_key == previous.related_local_key
             && self.pivot_table == previous.pivot_table
-            && self.parent_pk == previous.parent_pk;
+            && self.state.key == previous.state.key;
         #[cfg(feature = "entity-manager")]
         let same_relation = same_relation
             && self.relation_name == previous.relation_name
             && self.owner_table == previous.owner_table;
 
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            owner_is_unsaved(&previous.parent_pk),
+        self.state.preserve_from(
+            &previous.state,
             same_relation,
+            owner_is_unsaved(&previous.state.key),
         );
-
-        #[cfg(feature = "entity-manager")]
-        if same_relation {
-            self.source.preserve_from(&previous.source);
-            if self.owner_key.is_none() {
-                self.owner_key = previous.owner_key.clone();
-            }
-        }
     }
 
     /// Apply the pivot join and the owner filter `load_with` reads the
@@ -194,12 +192,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let pivot_related_column = format!(
             "{}.{}",
             self.pivot_table,
-            pivot_column::<Pivot>(self.related_key)
+            Pivot::column_named(self.related_key)
         );
         let related_local_column = format!("{}.{}", Related::table_name(), self.related_local_key);
 
-        let query = query.bind_columns_of::<Pivot>().inner_join(
-            &self.pivot_table_reference(),
+        let query = query.inner_join(
+            &Self::pivot_table_reference(),
             &pivot_related_column,
             &related_local_column,
         );
@@ -208,7 +206,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             format!(
                 "{}.{}",
                 self.pivot_table,
-                pivot_column::<Pivot>(self.foreign_key)
+                Pivot::column_named(self.foreign_key)
             ),
             pk,
         );
@@ -224,14 +222,12 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         }
     }
 
-    /// The pivot table as a statement names it: with the `Pivot` model's schema
-    /// when the relation's pivot is that model's table.
-    fn pivot_table_reference(&self) -> String {
+    /// The pivot table as a statement names it, with the `Pivot` model's
+    /// schema.
+    fn pivot_table_reference() -> String {
         match Pivot::schema_name() {
-            Some(schema) if self.pivot_table == Pivot::table_name() => {
-                format!("{}.{}", schema, self.pivot_table)
-            }
-            _ => self.pivot_table.to_string(),
+            Some(schema) => format!("{}.{}", schema, Pivot::table_name()),
+            None => Pivot::table_name().to_string(),
         }
     }
 
@@ -245,9 +241,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// `json` column. The pivot's own query leaves its trashed rows out.
     fn load_query(&self, context: &str) -> Result<QueryBuilder<Related>> {
         let pk = self.parent_key(context)?;
-        let links = where_key(self.source.query::<Pivot>(), self.foreign_key, pk)
-            .select(vec![pivot_column::<Pivot>(self.related_key)]);
+        let links = where_key(self.state.source.query::<Pivot>(), self.foreign_key, pk)
+            .select(vec![Pivot::column_named(self.related_key)]);
         Ok(self
+            .state
             .source
             .query()
             .where_in_subquery(self.related_local_key, links))
@@ -264,13 +261,9 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// [`load_with`](Self::load_with) when you need ordering, paging, or the
     /// pivot's own columns.
     pub async fn load(&self) -> Result<Vec<Related>> {
-        let can_query = self.source.prefers_database()
-            && self.parent_pk.is_some()
-            && self.ensure_configured().is_ok();
-        if let Some(cached) = &self.cached
-            && !can_query
-        {
-            return Ok(cached.clone());
+        let can_query = self.state.can_query(self.ensure_configured().is_ok());
+        if let Some(cached) = self.state.served(can_query) {
+            return Ok(cached.cloned().unwrap_or_default());
         }
 
         self.load_query("HasManyThrough::load")?.get().await
@@ -287,7 +280,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         F: FnOnce(QueryBuilder<Related>) -> QueryBuilder<Related> + Send,
     {
         let pk = self.parent_key("HasManyThrough::load_with")?;
-        constraint_fn(self.scope_to_pivot(self.source.query(), pk))
+        constraint_fn(self.scope_to_pivot(self.state.source.query(), pk))
             .get()
             .await
     }
@@ -323,46 +316,23 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         )?;
         let related_id = crate::query::filter_value(related_id);
         let related_id = require_scalar_relation_key(&related_id, "HasManyThrough::attach")?;
-        let db = self.source.database()?;
+        let db = self.state.source.database()?;
         let db_type = db.execution_backend();
 
-        if Pivot::soft_delete_enabled()
-            && self
-                .source
-                .query::<Pivot>()
-                .where_eq(self.foreign_key, pk.clone())
-                .where_eq(self.related_key, related_id.clone())
-                .restore()
-                .await?
-                > 0
-        {
+        let pair = || self.pair(self.state.source.query(), pk, related_id);
+        if Pivot::soft_delete_enabled() && pair().restore().await? > 0 {
             return Ok(());
         }
 
         if matches!(
             db_type,
             crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB
-        ) && self
-            .source
-            .query::<Pivot>()
-            .with_trashed()
-            .where_eq(self.foreign_key, pk.clone())
-            .where_eq(self.related_key, related_id.clone())
-            .exists()
-            .await?
+        ) && pair().with_trashed().exists().await?
         {
             return Ok(());
         }
 
-        insert_pivot_pair::<Pivot>(
-            &db,
-            self.pivot_table,
-            self.foreign_key,
-            self.related_key,
-            pk,
-            related_id,
-        )
-        .await?;
+        insert_pivot_pair::<Pivot>(&db, self.foreign_key, self.related_key, pk, related_id).await?;
         // The pivot row is written as raw SQL, which carries no model context, so
         // the cache has to be told which table changed. `detach` needs no
         // equivalent: it goes through `Pivot::query().delete()`, which invalidates
@@ -382,12 +352,21 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             "HasManyThrough::detach",
         )?;
 
-        self.source
-            .query::<Pivot>()
-            .where_eq(self.foreign_key, pk.clone())
-            .where_eq(self.related_key, related_id)
+        let related_id = crate::query::filter_value(related_id);
+        self.pair(self.state.source.query(), pk, &related_id)
             .delete()
             .await
+    }
+
+    /// `query` narrowed to the pivot rows linking the owner key `parent` with
+    /// `related`.
+    fn pair(
+        &self,
+        query: QueryBuilder<Pivot>,
+        parent: &serde_json::Value,
+        related: &serde_json::Value,
+    ) -> QueryBuilder<Pivot> {
+        pivot_pair(query, self.foreign_key, self.related_key, parent, related)
     }
 
     /// Replace the whole association set with exactly `related_ids`.
@@ -419,8 +398,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             }
         }
 
-        let db = self.source.database()?;
-        let pivot_table = self.pivot_table;
+        let db = self.state.source.database()?;
         let foreign_key = self.foreign_key;
         let related_key = self.related_key;
         let scoped_db = db.clone();
@@ -438,15 +416,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
                     .await?;
 
                 for id in &wanted {
-                    insert_pivot_pair::<Pivot>(
-                        &scoped_db,
-                        pivot_table,
-                        foreign_key,
-                        related_key,
-                        &pk,
-                        id,
-                    )
-                    .await?;
+                    insert_pivot_pair::<Pivot>(&scoped_db, foreign_key, related_key, &pk, id)
+                        .await?;
                 }
 
                 Ok(())
@@ -470,7 +441,7 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// contained the key — not by [`load`](Self::load), which does not write its
     /// result back.
     pub fn get_cached(&self) -> Option<&[Related]> {
-        self.cached.as_deref()
+        self.state.cached().map(Vec::as_slice)
     }
 
     /// Mutable access to the cached rows.
@@ -480,21 +451,14 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
     /// [`detach`](Self::detach) or [`sync`](Self::sync) to change the
     /// association itself.
     pub fn as_mut(&mut self) -> Option<&mut Vec<Related>> {
-        self.cached.as_mut()
+        self.state.cached_mut()
     }
 
     /// Whether the cache has been populated. `true` for a loaded-but-empty
     /// relation.
     pub fn is_loaded(&self) -> bool {
-        self.cached.is_some()
+        self.state.is_loaded()
     }
-}
-
-/// The pivot column `name` stands for: a key may name the field of a
-/// renamed column, which SQL naming the pivot by hand has to spell as the
-/// column.
-fn pivot_column<Pivot: Model>(name: &str) -> &str {
-    Pivot::canonical_column_name(name).unwrap_or(name)
 }
 
 /// Insert the pivot row linking `parent_pk` and `related_id` unless it is
@@ -507,7 +471,6 @@ fn pivot_column<Pivot: Model>(name: &str) -> &str {
 /// so there the pair is always read back.
 async fn insert_pivot_pair<Pivot: Model>(
     db: &crate::database::Database,
-    pivot_table: &str,
     foreign_key: &str,
     related_key: &str,
     parent_pk: &serde_json::Value,
@@ -516,30 +479,42 @@ async fn insert_pivot_pair<Pivot: Model>(
     use crate::config::DatabaseType;
 
     let db_type = db.execution_backend();
-    let (sql, params) = build_pivot_insert::<Pivot>(
-        db_type,
-        pivot_table,
-        foreign_key,
-        related_key,
-        parent_pk,
-        related_id,
-    );
+    let (sql, params) =
+        build_pivot_insert::<Pivot>(db_type, foreign_key, related_key, parent_pk, related_id);
     let written = db.__execute_with_params(&sql, params).await?;
     let unconfirmed =
         written == 0 || matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB);
     if unconfirmed
-        && !Pivot::query_with(db)
-            .where_eq(foreign_key, parent_pk.clone())
-            .where_eq(related_key, related_id.clone())
-            .exists()
-            .await?
+        && !pivot_pair(
+            Pivot::query_with(db),
+            foreign_key,
+            related_key,
+            parent_pk,
+            related_id,
+        )
+        .exists()
+        .await?
     {
+        let table = Pivot::table_name();
         return Err(crate::error::Error::query(format!(
-            "no {pivot_table} row links {parent_pk} with {related_id}: another unique key of \
-             {pivot_table} refused it"
+            "no {table} row links {parent_pk} with {related_id}: another unique key of \
+             {table} refused it"
         )));
     }
     Ok(())
+}
+
+/// `query` narrowed to the pivot rows linking `parent` with `related`.
+fn pivot_pair<Pivot: Model>(
+    query: QueryBuilder<Pivot>,
+    foreign_key: &str,
+    related_key: &str,
+    parent: &serde_json::Value,
+    related: &serde_json::Value,
+) -> QueryBuilder<Pivot> {
+    query
+        .where_eq(foreign_key, parent.clone())
+        .where_eq(related_key, related.clone())
 }
 
 /// Build the parameterized pivot-row INSERT shared by `attach` and `sync`, with
@@ -551,7 +526,6 @@ async fn insert_pivot_pair<Pivot: Model>(
 /// `INSERT .. SELECT`, which two concurrent attaches turn into a deadlock.
 fn build_pivot_insert<Pivot: Model>(
     db_type: crate::config::DatabaseType,
-    pivot_table: &str,
     foreign_key: &str,
     related_key: &str,
     parent_pk: &serde_json::Value,
@@ -571,14 +545,9 @@ fn build_pivot_insert<Pivot: Model>(
     let related = key_value(related_key, related_id);
     let new_parent = push_param(db_type, &mut params, parent.clone());
     let new_related = push_param(db_type, &mut params, related.clone());
-    let table = if pivot_table == Pivot::table_name() {
-        crate::query::db_sql::quote_table::<Pivot>(db_type)
-    } else {
-        crate::internal::sql_safety::format_identifier_reference(db_type, pivot_table)
-            .unwrap_or_else(|| quote_ident(db_type, pivot_table))
-    };
-    let foreign_key = quote_ident(db_type, pivot_column::<Pivot>(foreign_key));
-    let related_key = quote_ident(db_type, pivot_column::<Pivot>(related_key));
+    let table = crate::query::db_sql::quote_table::<Pivot>(db_type);
+    let foreign_key = quote_ident(db_type, Pivot::column_named(foreign_key));
+    let related_key = quote_ident(db_type, Pivot::column_named(related_key));
     let sql = match db_type {
         // The conflict clause makes losing a race on a unique key a no-op
         // instead of an error.
@@ -614,37 +583,13 @@ impl<Related: Model, Pivot: Model> Default for HasManyThrough<Related, Pivot> {
             relation_name: "",
             #[cfg(feature = "entity-manager")]
             owner_table: "",
-            cached: None,
-            parent_pk: None,
-            #[cfg(feature = "entity-manager")]
-            owner_key: None,
-            source: QuerySource::default(),
+            state: RelationState::default(),
             _pivot: PhantomData,
         }
     }
 }
 
-impl<Related: Model, Pivot: Model> Serialize for HasManyThrough<Related, Pivot> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
-
-impl<'de, Related: Model, Pivot: Model> Deserialize<'de> for HasManyThrough<Related, Pivot> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<Vec<Related>>::deserialize(deserializer)?;
-        Ok(Self {
-            cached,
-            ..Self::default()
-        })
-    }
-}
+relation_serde!(HasManyThrough<Related, Pivot>);
 
 #[cfg(test)]
 #[path = "../../tests/unit/many_to_many_tests.rs"]

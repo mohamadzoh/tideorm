@@ -217,7 +217,7 @@ impl FileAttachment {
     /// intended prefix or at another host entirely.
     #[inline]
     pub fn url(&self, field_name: &str) -> String {
-        crate::config::Config::generate_file_url(field_name, self)
+        crate::config::Config::get_file_url_generator()(field_name, self)
     }
 
     /// Generate a public URL using a one-off generator function.

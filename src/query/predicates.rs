@@ -2,7 +2,6 @@ use super::structure::SubquerySelect;
 use super::{ConditionValue, Operator, QueryBuilder, WhereCondition};
 use crate::columns::IntoColumnName;
 use crate::config::DatabaseType;
-use crate::internal::Value;
 use crate::model::Model;
 use crate::query::db_sql;
 
@@ -17,7 +16,7 @@ pub(in crate::query) fn related_alias(depth: usize) -> String {
 
 impl<M: Model> QueryBuilder<M> {
     fn push_condition(mut self, condition: WhereCondition) -> Self {
-        self.conditions.push(condition);
+        self.clauses.conditions.push(condition);
         self
     }
 
@@ -37,37 +36,61 @@ impl<M: Model> QueryBuilder<M> {
         keyword: &str,
         subquery: &QueryBuilder<N>,
     ) -> Self {
-        if let Err(err) = subquery.ensure_query_is_executable() {
-            self.invalidate_query(format!("invalid subquery for {}(): {}", method, err));
-        }
+        self.absorb_operand_error("subquery", method, subquery);
 
         let db_type = self.db_type_for_sql();
-        let (mut sql, values) = subquery.to_subquery_sql_with_params(db_type);
+        let (mut sql, values) = subquery.build_select_sql_with_params_for_db(db_type);
         // MySQL and MariaDB take no LIMIT in an IN subquery, but do one level
         // further down.
         if keyword.ends_with("IN")
             && matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB)
-            && (subquery.limit_value.is_some() || subquery.offset_value.is_some())
+            && (subquery.clauses.limit_value.is_some() || subquery.clauses.offset_value.is_some())
         {
-            sql = format!(
-                "SELECT * FROM ({}) AS {}",
-                sql,
-                db_sql::quote_ident(db_type, "tideorm_in_subquery")
-            );
+            sql = db_sql::select_from_derived(db_type, "*", &sql, "tideorm_in_subquery");
         }
         if let Err(reason) = db_sql::validate_compound_subquery_sql(&sql) {
             self.invalidate_query(format!("invalid subquery for {}(): {}", method, reason));
         }
 
-        self.conditions.push(WhereCondition {
+        self.push_bound_raw(column, format!("{} ({})", keyword, sql), values)
+    }
+
+    /// Push `sql`, a builder-rendered fragment with its bound `values`, as a
+    /// condition on `column` (empty for a whole predicate).
+    fn push_bound_raw(
+        self,
+        column: &str,
+        sql: String,
+        values: Vec<crate::internal::Value>,
+    ) -> Self {
+        self.push_condition(WhereCondition {
             column: column.to_string(),
             operator: Operator::Raw,
-            value: ConditionValue::RawExprWithValues {
-                sql: format!("{} ({})", keyword, sql),
-                values,
-            },
-        });
-        self
+            value: ConditionValue::RawExprWithValues { sql, values },
+        })
+    }
+
+    /// `[NOT ]EXISTS (SELECT 1 FROM <from> WHERE <related>.<fk> = <own>.<lk>`,
+    /// correlating the related rows with this query's row; the caller adds
+    /// its conditions and closes the parenthesis.
+    fn correlated_exists_head(
+        &self,
+        db_type: DatabaseType,
+        negated: bool,
+        from: &str,
+        related: &str,
+        foreign_key: &str,
+        local_key: &str,
+    ) -> String {
+        format!(
+            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
+            if negated { "NOT " } else { "" },
+            from,
+            related,
+            db_sql::quote_ident(db_type, foreign_key),
+            db_sql::quote_ident(db_type, &self.own_table_ref()),
+            db_sql::quote_ident(db_type, local_key),
+        )
     }
 
     /// Add a WHERE IN (subquery) condition.
@@ -154,15 +177,8 @@ impl<M: Model> QueryBuilder<M> {
         } else {
             (table.clone(), table)
         };
-        let mut sql = format!(
-            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
-            if negated { "NOT " } else { "" },
-            from,
-            related,
-            db_sql::quote_ident(db_type, foreign_key),
-            db_sql::quote_ident(db_type, &self.own_table_ref()),
-            db_sql::quote_ident(db_type, local_key),
-        );
+        let mut sql =
+            self.correlated_exists_head(db_type, negated, &from, &related, foreign_key, local_key);
         let mut values = Vec::new();
 
         if let Some((condition_column, value)) = condition {
@@ -194,13 +210,7 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         sql.push(')');
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExprWithValues { sql, values },
-        });
-        self
+        self.push_bound_raw("", sql, values)
     }
 
     /// Check if related records exist matching a condition.
@@ -336,9 +346,7 @@ impl<M: Model> QueryBuilder<M> {
         local_key: &str,
         related: &QueryBuilder<R>,
     ) -> Self {
-        if let Err(err) = related.ensure_query_is_executable() {
-            self.invalidate_query(format!("invalid related query for {}(): {}", method, err));
-        }
+        self.absorb_operand_error("related query", method, related);
         if let Some(part) = related.update_blocker() {
             self.invalidate_query(format!(
                 "{}() correlates the related rows through their filters only; the related query cannot hold {}",
@@ -346,8 +354,8 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
         let keys = (
-            Self::own_key_column::<R>(foreign_key),
-            Self::own_key_column::<M>(local_key),
+            R::own_column_name(foreign_key),
+            M::own_column_name(local_key),
         );
         let (Some(foreign_key), Some(local_key)) = keys else {
             self.invalidate_query(format!(
@@ -372,26 +380,19 @@ impl<M: Model> QueryBuilder<M> {
         } else {
             db_sql::quote_table::<R>(db_type)
         };
-        let mut sql = format!(
-            "{}EXISTS (SELECT 1 FROM {} WHERE {}.{} = {}.{}",
-            if negated { "NOT " } else { "" },
-            from,
-            related_ref,
-            db_sql::quote_ident(db_type, foreign_key),
-            db_sql::quote_ident(db_type, &self.own_table_ref()),
-            db_sql::quote_ident(db_type, local_key),
+        let mut sql = self.correlated_exists_head(
+            db_type,
+            negated,
+            &from,
+            &related_ref,
+            foreign_key,
+            local_key,
         );
         if !where_sql.is_empty() {
             sql.push_str(&format!(" AND ({})", where_sql));
         }
         sql.push(')');
-
-        self.conditions.push(WhereCondition {
-            column: String::new(),
-            operator: Operator::Raw,
-            value: ConditionValue::RawExprWithValues { sql, values },
-        });
-        self
+        self.push_bound_raw("", sql, values)
     }
 
     /// The query `where_has` hands its closure. Over this query's own table
@@ -404,17 +405,6 @@ impl<M: Model> QueryBuilder<M> {
             related.self_join_depth = self.self_join_depth + 1;
         }
         related
-    }
-
-    /// `name` as a column of `N`, a field name or column name, bare or
-    /// qualified with `N`'s table; `None` when `N` has no such column.
-    fn own_key_column<N: Model>(name: &str) -> Option<&'static str> {
-        let name = match name.split_once('.') {
-            Some((table, column)) if table == N::table_name() => column,
-            Some(_) => return None,
-            None => name,
-        };
-        N::canonical_column_name(name)
     }
 
     /// Check if any related records exist (without condition).
@@ -462,73 +452,9 @@ impl<M: Model> QueryBuilder<M> {
     /// Render this query with its bound values inlined, for display only.
     ///
     /// This is the statement [`build_sql_preview()`](Self::build_sql_preview)
-    /// shows, without the banner. Use
-    /// [`to_subquery_sql_with_params`](Self::to_subquery_sql_with_params) for
-    /// anything that ends up being executed.
+    /// shows, without the banner, for display only.
     pub fn to_subquery_sql(&self) -> String {
         self.build_select_sql_for_db(self.db_type_for_sql())
-    }
-
-    /// Convert this query builder to a parameterized subquery operand.
-    ///
-    /// Returns the SQL together with the values bound to it. The placeholders
-    /// use `db_type`'s own marker (`$1..$n` on PostgreSQL, `?` elsewhere), which
-    /// is what `Expr::cust_with_values` renumbers into a surrounding statement,
-    /// so the operand must be rendered for the same backend that will execute
-    /// it.
-    pub fn to_subquery_sql_with_params(&self, db_type: DatabaseType) -> (String, Vec<Value>) {
-        self.build_select_sql_with_params_for_db(db_type)
-    }
-
-    /// Add a raw WHERE condition.
-    ///
-    /// **Trusted SQL only.** The fragment is checked by the shared raw-fragment
-    /// validator as soon as it is added, and a rejected fragment invalidates the
-    /// query.
-    #[must_use]
-    pub fn where_raw(mut self, raw_sql: &str) -> Self {
-        if let Err(reason) = db_sql::validate_raw_sql_fragment("WHERE raw SQL", raw_sql) {
-            self.invalidate_query(reason);
-        }
-
-        self.push_condition(WhereCondition::of::<M>(
-            "",
-            Operator::Raw,
-            ConditionValue::RawExpr(raw_sql.to_string()),
-        ))
-    }
-
-    /// Add a raw WHERE condition whose `?` placeholders bind `params`, in
-    /// order.
-    ///
-    /// The fragment is **trusted SQL**, checked like [`where_raw`](Self::where_raw)'s;
-    /// the values are bound, never written into it, so they may come from a
-    /// request:
-    ///
-    /// ```ignore
-    /// User::query()
-    ///     .where_raw_with("LOWER(email) = LOWER(?)", vec![email.into()])
-    ///     .where_raw_with("age BETWEEN ? AND ?", vec![18.into(), 65.into()])
-    ///     .get()
-    ///     .await?;
-    /// ```
-    ///
-    /// Write `?` on every backend: each becomes the backend's own marker when
-    /// the statement is rendered. A `?` inside a quoted literal is text, and a
-    /// count of placeholders other than `params.len()` fails the query.
-    #[must_use]
-    pub fn where_raw_with(self, raw_sql: &str, params: Vec<crate::internal::DbValue>) -> Self {
-        self.push_condition(WhereCondition::of::<M>(
-            "",
-            Operator::Raw,
-            ConditionValue::RawTemplate {
-                sql: raw_sql.to_string(),
-                values: params
-                    .into_iter()
-                    .map(crate::internal::bindable_value)
-                    .collect(),
-            },
-        ))
     }
 
     /// Add a raw SELECT expression.
@@ -538,7 +464,9 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(reason);
         }
 
-        self.raw_select_expressions.push(raw_select.to_string());
+        self.clauses
+            .raw_select_expressions
+            .push(raw_select.to_string());
         self
     }
 
@@ -548,96 +476,34 @@ impl<M: Model> QueryBuilder<M> {
     /// query's backend.
     #[must_use]
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
-        if let Err(err) = subquery.ensure_query_is_executable() {
-            self.invalidate_query(format!("invalid subquery for select_subquery(): {}", err));
-        }
+        self.absorb_operand_error("subquery", "select_subquery", &subquery);
 
         if let Err(reason) = db_sql::validate_identifier("SELECT alias", alias) {
             self.invalidate_query(reason);
         }
 
-        let (query_sql, params) = subquery.to_subquery_sql_with_params(self.db_type_for_sql());
-        self.subquery_select_expressions.push(SubquerySelect {
-            query_sql,
-            alias: alias.to_string(),
-            params,
-        });
+        let (query_sql, params) =
+            subquery.build_select_sql_with_params_for_db(self.db_type_for_sql());
+        self.clauses
+            .subquery_select_expressions
+            .push(SubquerySelect {
+                query_sql,
+                alias: alias.to_string(),
+                params,
+            });
         self
-    }
-
-    /// Add a WHERE column = ANY(array) condition.
-    ///
-    /// Rendered as `column IN (..)`, which is what `= ANY(ARRAY[..])` means and
-    /// which binds correctly on every backend.
-    #[must_use]
-    pub fn eq_any<V: serde::Serialize>(
-        self,
-        column: impl IntoColumnName,
-        values: impl IntoIterator<Item = V>,
-    ) -> Self {
-        self.push_condition(WhereCondition::of::<M>(
-            column,
-            Operator::EqAny,
-            ConditionValue::list(values),
-        ))
-    }
-
-    /// Add a WHERE column <> ALL(array) condition, rendered as `column NOT IN (..)`.
-    #[must_use]
-    pub fn ne_all<V: serde::Serialize>(
-        self,
-        column: impl IntoColumnName,
-        values: impl IntoIterator<Item = V>,
-    ) -> Self {
-        self.push_condition(WhereCondition::of::<M>(
-            column,
-            Operator::NeAll,
-            ConditionValue::list(values),
-        ))
     }
 
     /// Add a WHERE condition using a strongly-typed column.
     #[must_use]
-    pub fn where_col(mut self, condition: crate::columns::ColumnCondition) -> Self {
-        let crate::columns::ColumnCondition {
-            column,
-            operator,
-            value,
-        } = condition;
+    pub fn where_col(self, mut condition: crate::columns::ColumnCondition) -> Self {
         // A column of this query's own model needs no qualifier.
-        let column = match column.split_once('.') {
-            Some((table, name)) if table == M::table_name() => name.to_string(),
-            _ => column,
-        };
-
-        self.conditions.push(WhereCondition {
-            column,
-            operator,
-            value,
-        });
-        self
-    }
-
-    /// Add an array contains any element condition; the same test as
-    /// [`where_array_overlaps`](Self::where_array_overlaps).
-    #[must_use]
-    pub fn where_array_contains_any<V: serde::Serialize>(
-        self,
-        column: impl IntoColumnName,
-        value: impl IntoIterator<Item = V>,
-    ) -> Self {
-        self.where_array_overlaps(column, value)
-    }
-
-    /// Add an array contains all elements condition; the same test as
-    /// [`where_array_contains`](Self::where_array_contains).
-    #[must_use]
-    pub fn where_array_contains_all<V: serde::Serialize>(
-        self,
-        column: impl IntoColumnName,
-        value: impl IntoIterator<Item = V>,
-    ) -> Self {
-        self.where_array_contains(column, value)
+        if let Some((table, name)) = condition.column.split_once('.')
+            && table == M::table_name()
+        {
+            condition.column = name.to_string();
+        }
+        self.push_condition(condition)
     }
 }
 
@@ -649,7 +515,7 @@ impl<M: Model> crate::columns::ConditionOwner for QueryBuilder<M> {
 
 crate::query::condition_methods! {
     impl[M: Model] QueryBuilder<M> {
-        where => push_condition,
+        where + raw => push_condition,
             "Accepts a column name, a Rust field name, or a typed column; the condition is ANDed with the query's other filters.";
     }
 }

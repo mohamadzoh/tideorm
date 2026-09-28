@@ -16,12 +16,23 @@ fn sync_renders_the_shared_rust_type_table() {
     // rendered for the backend, is what the column gets.
     for rust_type in [
         "i64",
+        "u8",
+        "u16",
         "u32",
+        "u64",
+        "Option<u16>",
+        "i128",
         "Decimal",
+        "rust_decimal::Decimal",
         "String",
         "Uuid",
         "NaiveDateTime",
+        "chrono::NaiveDateTime",
+        "Option<NaiveDateTime>",
         "DateTime<Utc>",
+        "chrono::DateTime<chrono::Utc>",
+        "NaiveDate",
+        "NaiveTime",
         "Vec<u8>",
         "Vec<String>",
         "serde_json::Value",
@@ -67,83 +78,6 @@ fn a_synced_table_matches_the_migration_that_declares_it() {
             "sync and migrations disagree on {backend:?}"
         );
     }
-}
-
-#[test]
-fn naive_timestamps_are_not_swallowed_by_the_date_time_arm() {
-    // "NaiveDateTime" contains "DateTime", so a broader arm ordered first would
-    // give naive columns a TIMESTAMPTZ type that shifts by session timezone.
-    for spelling in [
-        "NaiveDateTime",
-        "chrono::NaiveDateTime",
-        "Option<NaiveDateTime>",
-    ] {
-        assert_eq!(sync_column_type(spelling, Backend::Postgres), "TIMESTAMP");
-        // MySQL's TIMESTAMP is the tz-converting type there; a naive value
-        // belongs in DATETIME.
-        assert_eq!(sync_column_type(spelling, Backend::MySql), "DATETIME(6)");
-    }
-}
-
-#[test]
-fn aware_and_date_only_types_keep_their_own_mapping() {
-    assert_eq!(
-        sync_column_type("DateTime<Utc>", Backend::Postgres),
-        "TIMESTAMPTZ"
-    );
-    assert_eq!(
-        sync_column_type("chrono::DateTime<chrono::Utc>", Backend::Postgres),
-        "TIMESTAMPTZ"
-    );
-    assert_eq!(sync_column_type("NaiveDate", Backend::Postgres), "DATE");
-    assert_eq!(sync_column_type("NaiveTime", Backend::Postgres), "TIME");
-}
-
-#[test]
-fn unsigned_integers_land_in_the_column_the_driver_reads_back() {
-    // PostgreSQL has no unsigned column type. sea-orm decodes a `u32` as an
-    // `Oid` and then as an `i32`, so a BIGINT column is unreadable however well
-    // it would hold the range.
-    assert_eq!(sync_column_type("u8", Backend::Postgres), "SMALLINT");
-    assert_eq!(sync_column_type("u16", Backend::Postgres), "INTEGER");
-    assert_eq!(sync_column_type("u32", Backend::Postgres), "INTEGER");
-    assert_eq!(sync_column_type("u64", Backend::Postgres), "BIGINT");
-    assert_eq!(
-        sync_column_type("Option<u16>", Backend::Postgres),
-        "INTEGER"
-    );
-
-    // MySQL does have them, so nothing widens there.
-    assert_eq!(sync_column_type("u32", Backend::MySql), "INT UNSIGNED");
-}
-
-#[test]
-fn decimals_land_in_a_column_sea_orm_can_decode() {
-    // sea-orm reads Decimal/BigDecimal on SQLite through
-    // `try_get::<Option<f64>>`, and sqlx only yields an f64 from REAL affinity,
-    // so a DB_SYNC-built TEXT column would fail every read.
-    assert_eq!(sync_column_type("Decimal", Backend::Sqlite), "REAL");
-    assert_eq!(sync_column_type("Decimal", Backend::Postgres), "DECIMAL");
-    assert_eq!(
-        sync_column_type("rust_decimal::Decimal", Backend::Sqlite),
-        "REAL"
-    );
-    // i128/u128 ride the same decimal mapping.
-    assert_eq!(sync_column_type("i128", Backend::Sqlite), "REAL");
-    assert_eq!(
-        sync_column_type("i128", Backend::Postgres),
-        "DECIMAL(39, 0)"
-    );
-}
-
-#[test]
-fn uuid_columns_match_what_the_driver_binds() {
-    // sqlx-mysql encodes a Uuid as 16 raw bytes and refuses to decode anything
-    // else, so a CHAR(36) column rejects every insert with error 1366. The
-    // other two backends keep their native/text form.
-    assert_eq!(sync_column_type("Uuid", Backend::MySql), "BINARY(16)");
-    assert_eq!(sync_column_type("Uuid", Backend::Postgres), "UUID");
-    assert_eq!(sync_column_type("Uuid", Backend::Sqlite), "TEXT");
 }
 
 #[test]

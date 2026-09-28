@@ -2,13 +2,7 @@ use super::BatchUpdateBuilder;
 use crate::model::Model as ModelTrait;
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use crate::{Database, QueryCache, TideConfig};
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::sync::OnceLock;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use std::time::Duration;
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-use tokio::sync::Mutex;
+use crate::Database;
 
 #[tideorm::model(table = "batch_update_guard_users")]
 struct BatchUpdateGuardUser {
@@ -18,47 +12,12 @@ struct BatchUpdateGuardUser {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn batch_cache_test_guard() -> &'static Mutex<()> {
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn prepare_batch_cache_test_state() {
-    Database::reset_global();
-    TideConfig::reset();
-
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.enable();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn cleanup_batch_cache_test_state() {
-    let query_cache = QueryCache::global();
-    query_cache.clear();
-    query_cache.disable();
-
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_batch_cache_test_db() -> Database {
-    prepare_batch_cache_test_state();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed for batch cache tests");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    db.__execute_with_params(
+    let db = crate::test_support::install_sqlite_global(&[
         "CREATE TABLE batch_update_guard_users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)",
-        vec![],
-    )
-    .await
-    .expect("creating batch cache test schema should succeed");
-
+    ])
+    .await;
+    crate::test_support::set_query_cache(true);
     db
 }
 
@@ -127,20 +86,16 @@ fn batch_update_guard_rejects_limit_without_where() {
 }
 
 #[test]
-fn batch_update_set_if_applies_update_when_condition_is_true() {
-    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", true);
-
+fn batch_update_when_sets_only_when_the_condition_holds() {
+    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
+        .when(true, |update| update.set("name", "updated"));
     assert!(matches!(
         builder.updates.get("name"),
         Some(super::UpdateValue::Value(value)) if *value == serde_json::json!("updated")
     ));
-}
 
-#[test]
-fn batch_update_set_if_skips_update_when_condition_is_false() {
-    let builder =
-        BatchUpdateBuilder::<BatchUpdateGuardUser>::new().set_if("name", "updated", false);
-
+    let builder = BatchUpdateBuilder::<BatchUpdateGuardUser>::new()
+        .when(false, |update| update.set("name", "updated"));
     assert!(!builder.updates.contains_key("name"));
 }
 
@@ -229,7 +184,7 @@ fn batch_execute_returning_uses_backend_returning_capability() {
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_invalidates_cached_queries() {
-    let _guard = batch_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_batch_cache_test_db().await;
 
     let saved = BatchUpdateGuardUser {
@@ -240,14 +195,9 @@ async fn batch_execute_invalidates_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before = BatchUpdateGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before batch execute should succeed");
+    let cached_before = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
     assert_eq!(cached_before[0].name, "Alice");
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let rows_affected = BatchUpdateGuardUser::update_all()
         .set("name", "Bob")
@@ -257,23 +207,18 @@ async fn batch_execute_invalidates_cached_queries() {
         .expect("batch execute should succeed");
 
     assert_eq!(rows_affected, 1);
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    let fresh = BatchUpdateGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("fresh query should succeed after batch execute");
+    let fresh = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
     assert_eq!(fresh[0].name, "Bob");
 
-    cleanup_batch_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn batch_execute_returning_invalidates_cached_queries() {
-    let _guard = batch_cache_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let _db = setup_batch_cache_test_db().await;
 
     let saved = BatchUpdateGuardUser {
@@ -284,14 +229,9 @@ async fn batch_execute_returning_invalidates_cached_queries() {
     .await
     .expect("seed save should succeed");
 
-    let cached_before = BatchUpdateGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("cached query before batch execute_returning should succeed");
+    let cached_before = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
     assert_eq!(cached_before[0].name, "Alice");
-    assert_eq!(QueryCache::global().stats().entries, 1);
+    assert_eq!(crate::test_support::cached_entries(), 1);
 
     let returned = BatchUpdateGuardUser::update_all()
         .set("name", "Bob")
@@ -302,15 +242,10 @@ async fn batch_execute_returning_invalidates_cached_queries() {
 
     assert_eq!(returned.len(), 1);
     assert_eq!(returned[0].name, "Bob");
-    assert_eq!(QueryCache::global().stats().entries, 0);
+    assert_eq!(crate::test_support::cached_entries(), 0);
 
-    let fresh = BatchUpdateGuardUser::query()
-        .order_by("id", crate::query::Order::Asc)
-        .cache(Duration::from_secs(60))
-        .get()
-        .await
-        .expect("fresh query should succeed after batch execute_returning");
+    let fresh = crate::test_support::cached_rows::<BatchUpdateGuardUser>().await;
     assert_eq!(fresh[0].name, "Bob");
 
-    cleanup_batch_cache_test_state();
+    crate::test_support::reset_globals_and_cache();
 }

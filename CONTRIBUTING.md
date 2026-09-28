@@ -76,7 +76,7 @@ Gate semantics differ per backend, so read them literally:
   `SKIP_MARIADB_TESTS`. `mariadb_integration_tests` and `mariadb_entity_manager_tests` run the same
   scenarios as the MySQL suites, and check that `connect()` recognizes the server behind a
   `mysql://` URL.
-- **PostgreSQL** is opt-**in** too: `postgres_integration_tests`, `postgres_advanced_tests`,
+- **PostgreSQL** is opt-**in** too: `postgres_integration_tests`,
   `postgres_entity_manager_tests`, the PostgreSQL scenario test in `or_clause_tests`, the entity-manager
   relation unit tests under `--features entity-manager` and the PostgreSQL benches run only when
   `TEST_DATABASE_URL`, `POSTGRESQL_DATABASE_URL` or `RUN_POSTGRES_TESTS` is set.
@@ -137,7 +137,6 @@ Backend-specific integration suites:
 ```bash
 cargo test --test sqlite_integration_tests --features "sqlite runtime-tokio" --no-default-features
 cargo test --test postgres_integration_tests
-cargo test --test postgres_advanced_tests
 cargo test --test mysql_integration_tests --features mysql
 cargo test --test mariadb_integration_tests --features mysql
 ```

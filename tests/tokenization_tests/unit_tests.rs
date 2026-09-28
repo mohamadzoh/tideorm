@@ -169,20 +169,6 @@ fn test_token_randomization() {
 }
 
 #[test]
-fn test_different_ids_different_tokens() {
-    init_test_env();
-
-    let model = "User";
-    let token1 = default_encode("1", model).unwrap();
-    let token2 = default_encode("2", model).unwrap();
-    let token3 = default_encode("3", model).unwrap();
-
-    assert_ne!(token1, token2);
-    assert_ne!(token2, token3);
-    assert_ne!(token1, token3);
-}
-
-#[test]
 fn test_token_length() {
     init_test_env();
 

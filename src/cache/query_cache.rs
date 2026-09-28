@@ -1,9 +1,10 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::toggle::Toggle;
 use crate::error::{Error, Result};
 
 mod config;
@@ -27,9 +28,7 @@ use store::{CacheEntry, CacheStore};
 #[derive(Debug)]
 pub struct QueryCache {
     /// Cache configuration
-    config: RwLock<CacheConfig>,
-    /// `config.enabled`, readable on every query without taking the lock.
-    enabled: AtomicBool,
+    config: Toggle<CacheConfig>,
     /// The actual cache storage
     cache: RwLock<CacheStore>,
     /// Monotonic sequence for eviction indexes.
@@ -53,8 +52,7 @@ impl QueryCache {
     /// Create a new query cache with custom configuration
     pub fn with_config(config: CacheConfig) -> Self {
         Self {
-            enabled: AtomicBool::new(config.enabled),
-            config: RwLock::new(config),
+            config: Toggle::new(config),
             cache: RwLock::new(CacheStore::default()),
             order_counter: AtomicU64::new(1),
             hits: AtomicU64::new(0),
@@ -340,9 +338,7 @@ impl QueryCache {
     /// change. This is what lets a late `QueryCache::init_global` still take
     /// effect after the global cache has already been created with defaults.
     pub fn apply_config(&self, config: CacheConfig) {
-        let enabled = config.enabled;
-        *self.config.write() = config;
-        self.enabled.store(enabled, Ordering::Release);
+        self.config.apply(config);
     }
 
     /// Get the number of entries in the cache

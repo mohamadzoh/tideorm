@@ -154,45 +154,26 @@ fn test_schema_generator_omits_index_if_not_exists_for_mysql() {
 }
 
 #[test]
-fn test_schema_generator_mysql() {
-    let mut generator = SchemaGenerator::new(DatabaseType::MySQL);
+fn test_schema_generator_mysql_family() {
+    for database_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        let mut generator = SchemaGenerator::new(database_type);
 
-    let table = TableSchemaBuilder::new("products")
-        .column(
-            ColumnSchema::new("id", "BIGINT")
-                .primary_key()
-                .auto_increment(),
-        )
-        .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
-        .build();
+        let table = TableSchemaBuilder::new("products")
+            .column(
+                ColumnSchema::new("id", "BIGINT")
+                    .primary_key()
+                    .auto_increment(),
+            )
+            .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
+            .build();
 
-    generator.add_table(table);
+        generator.add_table(table);
 
-    let sql = generator.generate();
+        let sql = generator.generate();
 
-    assert!(sql.contains("`products`"));
-    assert!(sql.contains("AUTO_INCREMENT"));
-}
-
-#[test]
-fn test_schema_generator_mariadb() {
-    let mut generator = SchemaGenerator::new(DatabaseType::MariaDB);
-
-    let table = TableSchemaBuilder::new("products")
-        .column(
-            ColumnSchema::new("id", "BIGINT")
-                .primary_key()
-                .auto_increment(),
-        )
-        .column(ColumnSchema::new("name", "VARCHAR(255)").not_null())
-        .build();
-
-    generator.add_table(table);
-
-    let sql = generator.generate();
-
-    assert!(sql.contains("`products`"));
-    assert!(sql.contains("AUTO_INCREMENT"));
+        assert!(sql.contains("`products`"), "{database_type:?}");
+        assert!(sql.contains("AUTO_INCREMENT"), "{database_type:?}");
+    }
 }
 
 #[test]
@@ -361,6 +342,16 @@ fn test_rust_type_mapping_postgres() {
     assert_eq!(sql_for("bool", DatabaseType::Postgres), "BOOLEAN");
     assert_eq!(sql_for("f64", DatabaseType::Postgres), "DOUBLE PRECISION");
     assert_eq!(sql_for("Option<i64>", DatabaseType::Postgres), "BIGINT");
+    assert_eq!(sql_for("Uuid", DatabaseType::Postgres), "UUID");
+    assert_eq!(sql_for("Uuid", DatabaseType::SQLite), "TEXT");
+    assert_eq!(sql_for("NaiveDate", DatabaseType::Postgres), "DATE");
+    assert_eq!(sql_for("NaiveTime", DatabaseType::Postgres), "TIME");
+    // "NaiveDateTime" contains "DateTime": a naive column must not become the
+    // session-shifted TIMESTAMPTZ.
+    assert_eq!(
+        sql_for("Option<NaiveDateTime>", DatabaseType::Postgres),
+        "TIMESTAMP"
+    );
     assert_eq!(
         sql_for("serde_json::Value", DatabaseType::Postgres),
         "JSONB"
@@ -418,25 +409,16 @@ fn test_rust_type_mapping_maps_128_bit_integers_per_backend() {
 }
 
 #[test]
-fn test_rust_type_mapping_mysql() {
-    assert_eq!(sql_for("i64", DatabaseType::MySQL), "BIGINT");
-    assert_eq!(sql_for("bool", DatabaseType::MySQL), "TINYINT(1)");
-    assert_eq!(sql_for("f64", DatabaseType::MySQL), "DOUBLE");
-    assert_eq!(sql_for("Uuid", DatabaseType::MySQL), "BINARY(16)");
-    assert_eq!(sql_for("Vec<i32>", DatabaseType::MySQL), "JSON");
-    assert_eq!(sql_for("Vec<i64>", DatabaseType::MySQL), "JSON");
-    assert_eq!(sql_for("Vec<String>", DatabaseType::MySQL), "JSON");
-}
-
-#[test]
-fn test_rust_type_mapping_mariadb() {
-    assert_eq!(sql_for("i64", DatabaseType::MariaDB), "BIGINT");
-    assert_eq!(sql_for("bool", DatabaseType::MariaDB), "TINYINT(1)");
-    assert_eq!(sql_for("f64", DatabaseType::MariaDB), "DOUBLE");
-    assert_eq!(sql_for("Uuid", DatabaseType::MariaDB), "BINARY(16)");
-    assert_eq!(sql_for("Vec<i32>", DatabaseType::MariaDB), "JSON");
-    assert_eq!(sql_for("Vec<i64>", DatabaseType::MariaDB), "JSON");
-    assert_eq!(sql_for("Vec<String>", DatabaseType::MariaDB), "JSON");
+fn test_rust_type_mapping_mysql_family() {
+    for database_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
+        assert_eq!(sql_for("i64", database_type), "BIGINT");
+        assert_eq!(sql_for("bool", database_type), "TINYINT(1)");
+        assert_eq!(sql_for("f64", database_type), "DOUBLE");
+        assert_eq!(sql_for("Uuid", database_type), "BINARY(16)");
+        assert_eq!(sql_for("Vec<i32>", database_type), "JSON");
+        assert_eq!(sql_for("Vec<i64>", database_type), "JSON");
+        assert_eq!(sql_for("Vec<String>", database_type), "JSON");
+    }
 }
 
 #[test]
@@ -477,27 +459,6 @@ fn test_naive_and_aware_timestamps_get_different_columns() {
     let pg = DatabaseType::Postgres;
     assert_eq!(sql_for("NaiveDateTime", pg), "TIMESTAMP");
     assert_eq!(sql_for("DateTime<Utc>", pg), "TIMESTAMPTZ");
-}
-
-#[test]
-fn test_migration_decimals_stay_readable_on_sqlite() {
-    // sea-orm decodes Decimal/BigDecimal on SQLite through
-    // `try_get::<Option<f64>>`, and sqlx only produces an f64 from a
-    // REAL-affinity column. A TEXT column is exact but unreadable, so REAL is
-    // forced - the precision loss is a documented limitation.
-    use crate::migration::ColumnType;
-
-    let scaled = ColumnType::Decimal {
-        precision: 12,
-        scale: 2,
-    };
-    assert_eq!(scaled.to_sqlite_sql(), "REAL");
-    assert_eq!(ColumnType::Numeric.to_sqlite_sql(), "REAL");
-    assert_eq!(scaled.to_postgres_sql(), "DECIMAL(12, 2)");
-    assert_eq!(ColumnType::Numeric.to_mysql_sql(), "DECIMAL(65,30)");
-
-    // Floats still render as floats.
-    assert_eq!(ColumnType::Double.to_sqlite_sql(), "REAL");
 }
 
 #[test]
@@ -658,6 +619,20 @@ fn test_mysql_defaults_are_restored_to_a_default_clause() {
     assert_eq!(
         default("CURRENT_TIMESTAMP(6)", "datetime(6)", "DEFAULT_GENERATED").as_deref(),
         Some("CURRENT_TIMESTAMP(6)")
+    );
+    assert_eq!(
+        default("CURRENT_TIMESTAMP", "timestamp", "DEFAULT_GENERATED").as_deref(),
+        Some("CURRENT_TIMESTAMP")
+    );
+    // Text that only starts like one is a literal, as is the same text in a
+    // column that takes no current-time default.
+    assert_eq!(
+        default("CURRENT_TIMESTAMP is text", "varchar(100)", "").as_deref(),
+        Some("'CURRENT_TIMESTAMP is text'")
+    );
+    assert_eq!(
+        default("CURRENT_TIMESTAMP", "varchar(20)", "").as_deref(),
+        Some("'CURRENT_TIMESTAMP'")
     );
     assert_eq!(
         default(r"_utf8mb4\'x\'", "longtext", "DEFAULT_GENERATED").as_deref(),

@@ -15,10 +15,8 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
             let ident = field.ident();
             quote!(#ident: Default::default())
         });
-    let relation_state_refreshes = &ctx.relation_state_refreshes;
     let pk_column_variants = &ctx.pk_column_variants;
     let name_patterns = build_name_patterns(ctx);
-    let column_variants = &ctx.column_variants;
     let field_idents = &ctx.field_idents;
     let primary_key_condition_impl = build_primary_key_condition_impl(ctx);
     // The trait's defaults bridge the fallible conversions to the plaintext ones,
@@ -73,13 +71,6 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                 }
             }
 
-            fn column_from_str(name: &str) -> Option<<Self::Entity as ::tideorm::orm::EntityTrait>::Column> {
-                match name {
-                    #(#name_patterns => Some(#internal_entity_mod::Column::#column_variants),)*
-                    _ => None,
-                }
-            }
-
             fn primary_key_columns() -> Vec<<Self::Entity as ::tideorm::orm::EntityTrait>::Column> {
                 vec![#(#internal_entity_mod::Column::#pk_column_variants),*]
             }
@@ -95,7 +86,7 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
             }
 
             fn refresh_runtime_relations_from(&mut self, previous: &Self) {
-                #(#relation_state_refreshes)*
+                self.__wire_relations(Some(previous));
             }
 
             fn field_json_value(&self, field: &str) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {

@@ -5,7 +5,7 @@
 //! three created the table.
 
 use crate::config::DatabaseType;
-use crate::internal::sql_safety::quote_ident;
+use crate::internal::sql_safety::{column_list, quote_ident};
 
 use super::ColumnType;
 
@@ -170,6 +170,16 @@ pub(crate) fn bounded_index_name(name: String) -> String {
     format!("{}_{:08x}", &name[..cut], hash)
 }
 
+/// The name an index on `table`'s `columns` gets when none is given:
+/// `idx_<table>_<columns>`, with `_unique` for a unique one, shortened past
+/// [`MAX_IDENTIFIER_BYTES`]. Migrations and models name an index alike, so
+/// sync finds the index a migration created.
+pub(crate) fn index_name(table: &str, columns: &[impl AsRef<str>], unique: bool) -> String {
+    let columns: Vec<&str> = columns.iter().map(AsRef::as_ref).collect();
+    let suffix = if unique { "_unique" } else { "" };
+    bounded_index_name(format!("idx_{}_{}{}", table, columns.join("_"), suffix))
+}
+
 /// Whether `default` is the current timestamp in one of the spellings the
 /// backends share between them.
 fn is_current_timestamp(default: &str) -> bool {
@@ -208,15 +218,6 @@ fn postgres_serial_type(sql_type: &str) -> Option<&'static str> {
     }
 }
 
-/// Quote `columns` and join them for a key or index column list.
-pub(crate) fn column_list(db_type: DatabaseType, columns: &[impl AsRef<str>]) -> String {
-    columns
-        .iter()
-        .map(|column| quote_ident(db_type, column.as_ref()))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// Render `CREATE TABLE`, one column or table constraint per line.
 ///
 /// `table` arrives quoted, because the callers disagree on what a dotted name
@@ -243,7 +244,7 @@ pub(crate) fn create_table(
     if !primary_key.is_empty() {
         lines.push(format!(
             "PRIMARY KEY ({})",
-            column_list(db_type, primary_key)
+            column_list(db_type, primary_key, "")
         ));
     }
 
@@ -290,7 +291,7 @@ pub(crate) fn create_index(
         exists_clause,
         quote_ident(db_type, name),
         table,
-        column_list(db_type, columns)
+        column_list(db_type, columns, "")
     )
 }
 
@@ -314,5 +315,31 @@ pub(crate) fn rename_table(db_type: DatabaseType, from: &str, to: &str) -> Strin
         DatabaseType::Postgres | DatabaseType::SQLite => {
             format!("ALTER TABLE {from} RENAME TO {to}")
         }
+    }
+}
+
+/// Whether `table` has an index named `index` in the MySQL or MariaDB
+/// database `schema`, or the connection's own without one: MySQL has no
+/// `CREATE INDEX IF NOT EXISTS`, so a create checks first.
+pub(crate) async fn mysql_index_exists<C: crate::internal::ConnectionTrait>(
+    conn: &C,
+    schema: Option<&str>,
+    table: &str,
+    index: &str,
+) -> crate::error::Result<bool> {
+    let statement = crate::internal::build_statement_with_values(
+        crate::internal::Backend::MySql,
+        "SELECT COUNT(*) > 0 FROM information_schema.statistics \
+         WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? AND index_name = ?",
+        vec![schema.into(), table.into(), index.into()],
+    );
+    let row = conn.query_one_raw(statement).await.map_err(|error| {
+        crate::internal::translate_error(error)
+            .with_context(crate::error::ErrorContext::new().table(table))
+    })?;
+
+    match row {
+        Some(row) => crate::sync::decode_table_exists(&row, table),
+        None => Ok(false),
     }
 }

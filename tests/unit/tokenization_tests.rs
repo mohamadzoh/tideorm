@@ -47,29 +47,6 @@ fn test_base64_url_various_lengths() {
 }
 
 #[test]
-fn test_default_encode_decode() {
-    init_test_key();
-
-    let record_id = "12345";
-    let model_name = "User";
-
-    let token = default_encode(record_id, model_name).unwrap();
-    let decoded = default_decode(&token, model_name).unwrap();
-
-    assert_eq!(decoded, Some(record_id.to_string()));
-}
-
-#[test]
-fn test_token_config_encode_decode() {
-    init_test_key();
-
-    let token = TokenConfig::encode("123", "TestModel").unwrap();
-    let decoded = TokenConfig::decode(&token, "TestModel").unwrap();
-
-    assert_eq!(decoded, Some("123".to_string()));
-}
-
-#[test]
 fn test_token_config_setters_overwrite_previous_values() {
     TokenConfig::reset();
 
@@ -98,10 +75,10 @@ fn test_token_config_setters_overwrite_previous_values() {
     TokenConfig::set_decoder(decoder_one);
     TokenConfig::set_decoder(decoder_two);
 
-    let token = TokenConfig::encode("7", "User").unwrap();
+    let token = TokenConfig::get_encoder()("7", "User").unwrap();
     assert_eq!(token, "two-7");
     assert_eq!(
-        TokenConfig::decode(&token, "User").unwrap(),
+        TokenConfig::get_decoder()(&token, "User").unwrap(),
         Some("7".to_string())
     );
 }
@@ -155,7 +132,7 @@ fn test_token_config_reset_clears_state_set_on_another_thread() {
             .send((
                 TokenConfig::has_encryption_key(),
                 TokenConfig::get_encryption_key(),
-                TokenConfig::encode("7", "User"),
+                TokenConfig::get_encoder()("7", "User"),
             ))
             .expect("worker should report token state after reset");
     });

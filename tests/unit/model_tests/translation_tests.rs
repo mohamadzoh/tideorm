@@ -3,26 +3,7 @@ use super::*;
 
 #[cfg(feature = "translations")]
 #[test]
-fn test_load_language_translations_updates_model_fields() {
-    let mut model = TranslationSerializationModel {
-        id: 1,
-        title: "Default Title".to_string(),
-        translations: Some(serde_json::json!({
-            "title": {
-                "en": "English Title",
-                "fr": "French Title"
-            }
-        })),
-    };
-
-    model.load_language_translations("fr").unwrap();
-
-    assert_eq!(model.title, "French Title");
-}
-
-#[cfg(feature = "translations")]
-#[test]
-fn test_load_language_translations_preserves_loaded_relations() {
+fn test_set_field_json_preserves_loaded_relations() {
     let cached_profile = TranslationRelationProfile {
         id: 10,
         user_id: 1,
@@ -54,7 +35,12 @@ fn test_load_language_translations_preserves_loaded_relations() {
     model.profile.set_cached(Some(cached_profile));
     model.posts.set_cached(vec![cached_post]);
 
-    model.load_language_translations("fr").unwrap();
+    crate::internal::InternalModel::set_field_json(
+        &mut model,
+        "title",
+        serde_json::json!("French Title"),
+    )
+    .unwrap();
 
     assert_eq!(model.title, "French Title");
     assert_eq!(
@@ -67,7 +53,7 @@ fn test_load_language_translations_preserves_loaded_relations() {
 
 #[cfg(feature = "translations")]
 #[test]
-fn test_load_language_translations_preserves_loaded_has_many_through_relations() {
+fn test_set_field_json_preserves_loaded_has_many_through_relations() {
     let cached_role = TranslationRelationRole {
         id: 30,
         name: "Cached role".to_string(),
@@ -90,7 +76,12 @@ fn test_load_language_translations_preserves_loaded_has_many_through_relations()
     .with_relations();
     model.roles.set_cached(vec![cached_role]);
 
-    model.load_language_translations("fr").unwrap();
+    crate::internal::InternalModel::set_field_json(
+        &mut model,
+        "title",
+        serde_json::json!("French Title"),
+    )
+    .unwrap();
 
     assert_eq!(model.title, "French Title");
     assert_eq!(model.roles.get_cached().map(|roles| roles.len()), Some(1));

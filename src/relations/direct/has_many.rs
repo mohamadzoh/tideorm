@@ -15,10 +15,6 @@ use super::*;
 /// [`BelongsTo`](super::BelongsTo). For a relation reached through a join table
 /// use [`HasManyThrough`](crate::relations::HasManyThrough) instead.
 ///
-/// Enabling the `entity-manager` feature re-points the `HasMany` name exported
-/// from this crate at `TrackedHasMany`, which adds change tracking on top of the
-/// same key-based loading.
-///
 /// # Runtime-only state
 ///
 /// The parent primary key and any scoped connection are runtime state that serde
@@ -35,7 +31,9 @@ use super::*;
 /// [`load`](Self::load) re-queries whenever a connection is reachable, even with
 /// rows cached — deliberately, so a deserialized payload cannot pass itself off
 /// as database state. It serves the cache only when there is nothing to query
-/// through. [`get_cached`](Self::get_cached) never queries and never awaits.
+/// through. Under the `entity-manager` feature an attached manager is the
+/// exception: it owns the instances (identity map), so its cache wins.
+/// [`get_cached`](Self::get_cached) never queries and never awaits.
 #[derive(Debug, Clone)]
 pub struct HasMany<E: Model> {
     /// Column on `E`'s table holding this model's key.
@@ -43,9 +41,14 @@ pub struct HasMany<E: Model> {
     /// Column on *this* model whose value the foreign key matches — the primary
     /// key unless `local_key = ".."` overrides it.
     pub local_key: &'static str,
-    pub(crate) cached: Option<Vec<E>>,
-    parent_pk: Option<serde_json::Value>,
-    source: QuerySource,
+    /// Name of the model field this relation was declared on, used as the
+    /// entity manager's relation-snapshot key.
+    #[cfg(feature = "entity-manager")]
+    pub relation_name: &'static str,
+    /// Table of the model owning the relation.
+    #[cfg(feature = "entity-manager")]
+    pub owner_table: &'static str,
+    state: RelationState<Vec<E>>,
 }
 
 impl<E: Model> HasMany<E> {
@@ -54,17 +57,10 @@ impl<E: Model> HasMany<E> {
     }
 
     /// The query for the related rows.
-    pub(crate) fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
+    fn query(&self, context: &str) -> Result<QueryBuilder<E>> {
         self.ensure_configured()?;
-        let pk = required_key(&self.parent_pk, "Parent primary key", context)?;
-        Ok(where_key(self.source.query(), self.foreign_key, pk))
-    }
-
-    /// Whether `other` describes the same relation of the same owner.
-    pub(crate) fn same_relation(&self, other: &Self) -> bool {
-        self.foreign_key == other.foreign_key
-            && self.local_key == other.local_key
-            && self.parent_pk == other.parent_pk
+        let pk = required_key(&self.state.key, "Parent primary key", context)?;
+        Ok(where_key(self.state.source.query(), self.foreign_key, pk))
     }
 
     /// Declare the relation's key pair.
@@ -89,36 +85,53 @@ impl<E: Model> HasMany<E> {
     /// wrapper is inert — every query method errors with "Parent primary key not
     /// set for relation".
     pub fn with_parent_pk(mut self, pk: serde_json::Value) -> Self {
-        self.parent_pk = Some(pk);
+        self.state.key = Some(pk);
         self
     }
 
-    #[doc(hidden)]
-    pub fn set_cached(&mut self, models: Vec<E>) {
-        self.cached = Some(models);
+    /// Record the names the entity manager keys its relation snapshots by;
+    /// see [`HasOne::with_metadata`](super::HasOne::with_metadata).
+    #[cfg(feature = "entity-manager")]
+    pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
+        self.relation_name = relation_name;
+        self.owner_table = owner_table;
+        self
     }
 
-    #[doc(hidden)]
-    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        let same_relation = self.same_relation(previous);
-
-        preserve_cached_value(
-            &mut self.cached,
-            &previous.cached,
-            owner_is_unsaved(&previous.parent_pk),
-            same_relation,
-        );
-
-        #[cfg(feature = "entity-manager")]
-        if same_relation {
-            self.source.preserve_from(&previous.source);
-        }
+    /// Record the owning model's entity-manager identity key; see
+    /// [`HasOne::with_owner_key`](super::HasOne::with_owner_key).
+    #[cfg(feature = "entity-manager")]
+    pub fn with_owner_key(mut self, owner_key: String) -> Self {
+        self.state.owner_key = Some(owner_key);
+        self
     }
 
     #[cfg(feature = "entity-manager")]
     #[doc(hidden)]
     pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.source.database = Some(database.clone());
+        self.state.source.database = Some(database.clone());
+    }
+
+    #[doc(hidden)]
+    pub fn set_cached(&mut self, models: Vec<E>) {
+        self.state.set_cached(Some(models));
+    }
+
+    #[doc(hidden)]
+    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+        let same_relation = self.foreign_key == previous.foreign_key
+            && self.local_key == previous.local_key
+            && self.state.key == previous.state.key;
+        #[cfg(feature = "entity-manager")]
+        let same_relation = same_relation
+            && self.relation_name == previous.relation_name
+            && self.owner_table == previous.owner_table;
+
+        self.state.preserve_from(
+            &previous.state,
+            same_relation,
+            owner_is_unsaved(&previous.state.key),
+        );
     }
 
     /// Fetch all related rows, in no particular order — add one with
@@ -131,13 +144,9 @@ impl<E: Model> HasMany<E> {
     /// carries no parent key (a bare `Default`, or a deserialized model that was
     /// never refreshed).
     pub async fn load(&self) -> Result<Vec<E>> {
-        let can_query = self.source.prefers_database()
-            && self.parent_pk.is_some()
-            && self.ensure_configured().is_ok();
-        if let Some(cached) = &self.cached
-            && !can_query
-        {
-            return Ok(cached.clone());
+        let can_query = self.state.can_query(self.ensure_configured().is_ok());
+        if let Some(cached) = self.state.served(can_query) {
+            return Ok(cached.cloned().unwrap_or_default());
         }
 
         self.query("HasMany::load")?.get().await
@@ -176,6 +185,18 @@ impl<E: Model> HasMany<E> {
         self.query("HasMany::exists")?.exists().await
     }
 
+    /// Mutable access to the cached rows, if any are cached. Edits are local
+    /// to the cache; persist them by saving the models.
+    pub fn as_mut(&mut self) -> Option<&mut Vec<E>> {
+        self.state.cached_mut()
+    }
+
+    /// Whether the cache holds a load: an eager load, a load through an
+    /// entity manager, or a deserialized non-`null` payload.
+    pub fn is_loaded(&self) -> bool {
+        self.state.is_loaded()
+    }
+
     /// The eagerly-loaded rows, if this relation was populated. Never queries
     /// and never awaits.
     ///
@@ -184,7 +205,15 @@ impl<E: Model> HasMany<E> {
     /// deserializing a payload that contained the key — not by
     /// [`load`](Self::load), which does not write its result back.
     pub fn get_cached(&self) -> Option<&[E]> {
-        self.cached.as_deref()
+        self.state.cached().map(Vec::as_slice)
+    }
+
+    /// The entity-manager identity keys of the cached rows, skipping those not
+    /// stored yet.
+    #[cfg(feature = "entity-manager")]
+    #[doc(hidden)]
+    pub fn current_keys(&self) -> Result<Vec<String>> {
+        identity_keys(self.state.cached())
     }
 }
 
@@ -193,31 +222,38 @@ impl<E: Model> Default for HasMany<E> {
         Self {
             foreign_key: "",
             local_key: "",
-            cached: None,
-            parent_pk: None,
-            source: QuerySource::default(),
+            #[cfg(feature = "entity-manager")]
+            relation_name: "",
+            #[cfg(feature = "entity-manager")]
+            owner_table: "",
+            state: RelationState::default(),
         }
     }
 }
 
-impl<E: Model> Serialize for HasMany<E> {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.cached.serialize(serializer)
-    }
-}
+relation_serde!(HasMany<E>);
 
-impl<'de, E: Model> Deserialize<'de> for HasMany<E> {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+/// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
+/// keeps the rows cached already, or reads them, hands each to the manager's
+/// identity map and records a relation snapshot.
+#[cfg(feature = "entity-manager")]
+impl<E> crate::entity_manager::EntityManagerLoad for HasMany<E>
+where
+    E: Model + TideEntityManagerMeta,
+{
+    type Output<'a>
+        = &'a Vec<E>
     where
-        D: Deserializer<'de>,
-    {
-        let cached = Option::<Vec<E>>::deserialize(deserializer)?;
-        Ok(Self {
-            cached,
-            ..Self::default()
-        })
+        Self: 'a;
+
+    async fn load_with_entity_manager<'a>(
+        &'a mut self,
+        entity_manager: &'a Arc<EntityManager>,
+    ) -> Result<Self::Output<'a>> {
+        let owner =
+            SnapshotOwner::new(self.owner_table, &self.state.owner_key, self.relation_name)?;
+        self.state.source.entity_manager = Some(entity_manager.clone());
+        let query = self.query("HasMany::load");
+        load_many_in_entity_manager(&mut self.state, entity_manager, query, owner).await
     }
 }

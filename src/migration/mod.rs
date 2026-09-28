@@ -22,7 +22,10 @@ pub use alter::{AlterColumnBuilder, AlterTableBuilder};
 pub use api::{Migration, MigrationInfo, MigrationResult, MigrationStatus};
 pub use async_trait::async_trait;
 pub(crate) use ledger::{Ledger, write_report_section};
-pub use migrator::Migrator;
+pub use migrator::{
+    __ensure_migration_ledger, __ensure_seed_ledger, __mark_migration, __run_sql_migration,
+    Migrator,
+};
 pub use schema::Schema;
 pub use table::{ColumnBuilder, TableBuilder};
 pub use types::{ColumnType, DefaultValue};

@@ -85,17 +85,6 @@ async fn direct_relation_helpers_reject_composite_keys() {
 }
 
 #[test]
-fn eager_query_builder_accepts_typed_columns() {
-    let builder = RelationTestNode::eager()
-        .with("owner")
-        .where_eq(RelationTestNode::columns.slug, "root")
-        .where_in(RelationTestNode::columns.id, vec![1, 2])
-        .order_by(RelationTestNode::columns.slug, crate::query::Order::Asc);
-
-    assert_eq!(builder.relation_tree.roots(), vec!["owner".to_string()]);
-}
-
-#[test]
 fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
     let (sql, _params) = build_self_ref_tree_sql::<RelationTestNode>(
         "parent_slug",
@@ -119,7 +108,7 @@ fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
 
 #[test]
 fn self_ref_tree_sql_renders_a_field_name_as_its_column() {
-    let (sql, _params) = build_self_ref_tree_sql::<RelationExtLookupModel>(
+    let (sql, _params) = build_self_ref_tree_sql::<AliasedKeyModel>(
         "account_id",
         "id",
         &json!(1),

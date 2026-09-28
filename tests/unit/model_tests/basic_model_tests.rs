@@ -69,7 +69,7 @@ fn test_macro_generated_tokenization_round_trips_string_primary_key() {
         id: "user:\"alpha\"\n42".to_string(),
     };
 
-    let token = model.tokenize().expect("tokenization should succeed");
+    let token = model.to_token().expect("tokenization should succeed");
     let decoded = TokenizedStringKeyModel::decode_token(&token)
         .expect("generated tokenization should decode complex string keys");
 
@@ -82,7 +82,7 @@ fn test_macro_generated_tokenization_round_trips_u64_primary_key() {
 
     let model = TokenizedU64KeyModel { id: u64::MAX };
 
-    let token = model.tokenize().expect("tokenization should succeed");
+    let token = model.to_token().expect("tokenization should succeed");
     let decoded = TokenizedU64KeyModel::decode_token(&token)
         .expect("generated tokenization should decode u64 keys");
 
@@ -103,7 +103,7 @@ fn test_macro_generated_tokenization_round_trips_uuid_primary_key() {
     let id = uuid::Uuid::new_v4();
     let model = TokenizedUuidKeyModel { id };
 
-    let token = model.tokenize().expect("tokenization should succeed");
+    let token = model.to_token().expect("tokenization should succeed");
     let decoded = TokenizedUuidKeyModel::decode_token(&token)
         .expect("generated tokenization should decode uuid keys");
 
@@ -174,46 +174,17 @@ fn test_canonical_field_name_accepts_field_and_column_names() {
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn aliased_column_test_guard() -> &'static tokio::sync::Mutex<()> {
-    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    GUARD.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn prepare_aliased_column_test_state() {
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
-fn cleanup_aliased_column_test_state() {
-    Database::reset_global();
-    TideConfig::reset();
-}
-
-#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_aliased_column_test_db() -> Database {
-    prepare_aliased_column_test_state();
-
-    let db = Database::connect("sqlite::memory:")
-        .await
-        .expect("sqlite in-memory connection should succeed for aliased-column tests");
-    Database::set_global(db.clone()).expect("setting global database should succeed");
-
-    db.__execute_with_params(
+    crate::test_support::install_sqlite_global(&[
         "CREATE TABLE model_test_custom_pk_column (user_id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
-        vec![],
-    )
+    ])
     .await
-    .expect("creating aliased-column test schema should succeed");
-
-    db
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 #[tokio::test]
 async fn query_filters_accept_field_names_for_aliased_columns() {
-    let _guard = aliased_column_test_guard().lock().await;
+    let _guard = crate::test_support::global_db_lock().lock().await;
     let db = setup_aliased_column_test_db().await;
 
     db.__execute_with_params(
@@ -236,7 +207,7 @@ async fn query_filters_accept_field_names_for_aliased_columns() {
     assert_eq!(loaded.id, 7);
     assert_eq!(loaded.name, "Alice");
 
-    cleanup_aliased_column_test_state();
+    crate::test_support::reset_globals();
 }
 
 #[test]

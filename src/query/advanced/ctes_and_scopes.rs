@@ -15,20 +15,14 @@ impl<M: Model> QueryBuilder<M> {
             self.invalidate_query(format!("invalid CTE for {}(): {}", method, reason));
         }
 
-        self.ctes.push(cte);
+        self.clauses.ctes.push(cte);
         self
     }
 
     /// Add a CTE from another query builder
     #[must_use]
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
-            self.invalidate_query(reason);
-        }
-
-        if let Err(err) = query.ensure_query_is_executable() {
-            self.invalidate_query(format!("invalid subquery for with_query(): {}", err));
-        }
+        self.absorb_operand_error("subquery", "with_query", &query);
 
         // The body is spliced into the outer statement and executed, so it goes
         // through the parameterized renderer instead of the debug preview
@@ -37,20 +31,7 @@ impl<M: Model> QueryBuilder<M> {
         // body may carry on every backend.
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = query.build_select_sql_with_params_for_db(db_type);
-        self.ctes.push(CTE::with_params(name, query_sql, params));
-        self
-    }
-
-    /// Add a CTE with column aliases
-    ///
-    /// Trusted SQL only. Do not pass user-controlled input; prefer `with_query()` when the
-    /// subquery can be expressed with `QueryBuilder`.
-    #[must_use]
-    pub fn with_cte_columns(self, name: &str, columns: Vec<&str>, sql: &str) -> Self {
-        self.push_cte(
-            "with_cte_columns",
-            CTE::with_columns(name, columns, sql.to_string()),
-        )
+        self.push_cte("with_query", CTE::with_params(name, query_sql, params))
     }
 
     /// Add a recursive CTE
@@ -64,17 +45,8 @@ impl<M: Model> QueryBuilder<M> {
         base_case: &str,
         recursive_case: &str,
     ) -> Self {
-        if let Err(reason) = crate::query::db_sql::validate_identifier("CTE name", name) {
-            self.invalidate_query(reason);
-        }
-
-        for column in &columns {
-            if let Err(reason) = crate::query::db_sql::validate_identifier("CTE column", column) {
-                self.invalidate_query(reason);
-                break;
-            }
-        }
-
+        // Each half is checked as a plain query; the CTE as a whole then as
+        // every other CTE is.
         if let Err(reason) = crate::query::db_sql::validate_subquery_sql(base_case) {
             self.invalidate_query(format!(
                 "invalid subquery for with_recursive_cte() base query: {}",
@@ -90,9 +62,10 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let full_sql = format!("{} UNION ALL {}", base_case, recursive_case);
-        let cte = CTE::with_columns(name, columns, full_sql).recursive();
-        self.ctes.push(cte);
-        self
+        self.push_cte(
+            "with_recursive_cte",
+            CTE::with_columns(name, columns, full_sql).recursive(),
+        )
     }
 
     /// Include soft-deleted records in the query results
@@ -101,8 +74,8 @@ impl<M: Model> QueryBuilder<M> {
     /// Use this method to include them.
     #[must_use]
     pub fn with_trashed(mut self) -> Self {
-        self.include_trashed = true;
-        self.only_trashed = false;
+        self.clauses.include_trashed = true;
+        self.clauses.only_trashed = false;
         self
     }
 
@@ -111,20 +84,8 @@ impl<M: Model> QueryBuilder<M> {
     /// Returns only records where `deleted_at` is not NULL.
     #[must_use]
     pub fn only_trashed(mut self) -> Self {
-        self.only_trashed = true;
-        self.include_trashed = false;
+        self.clauses.only_trashed = true;
+        self.clauses.include_trashed = false;
         self
-    }
-
-    /// Apply a scope function to modify the query
-    ///
-    /// Scopes are reusable query fragments that can be applied to any query.
-    /// Use scopes to define common query patterns once and reuse them.
-    #[must_use]
-    pub fn scope<F>(self, f: F) -> Self
-    where
-        F: FnOnce(Self) -> Self,
-    {
-        f(self)
     }
 }

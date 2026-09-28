@@ -1,10 +1,11 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::GLOBAL_STMT_CACHE;
+use super::toggle::{Switchable, Toggle, hit_ratio};
 
 /// A tracked SQL statement and its execution statistics
 #[derive(Debug, Clone)]
@@ -59,12 +60,7 @@ pub struct PreparedStatementStats {
 impl PreparedStatementStats {
     /// Calculate the cache hit ratio
     pub fn hit_ratio(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
-            0.0
-        } else {
-            self.hits as f64 / total as f64
-        }
+        hit_ratio(self.hits, self.misses)
     }
 }
 
@@ -78,6 +74,16 @@ pub struct PreparedStatementConfig {
     /// Maximum age of a cached statement; an older one is dropped and
     /// registered afresh on its next use
     pub max_age: Duration,
+}
+
+impl Switchable for PreparedStatementConfig {
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
 }
 
 impl Default for PreparedStatementConfig {
@@ -106,9 +112,7 @@ impl Default for PreparedStatementConfig {
 #[derive(Debug)]
 pub struct PreparedStatementCache {
     /// Cache configuration
-    config: RwLock<PreparedStatementConfig>,
-    /// `config.enabled`, readable on every query without taking the lock.
-    enabled: AtomicBool,
+    config: Toggle<PreparedStatementConfig>,
     /// Cached statements keyed by SQL hash
     statements: RwLock<HashMap<u64, PreparedStatement>>,
     /// Cache hit counter.
@@ -130,8 +134,7 @@ impl PreparedStatementCache {
     /// Create with custom configuration
     pub fn with_config(config: PreparedStatementConfig) -> Self {
         Self {
-            enabled: AtomicBool::new(config.enabled),
-            config: RwLock::new(config),
+            config: Toggle::new(config),
             statements: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -165,28 +168,24 @@ impl PreparedStatementCache {
     /// Cached statements are kept; only the configuration and the enabled flag
     /// change.
     pub fn apply_config(&self, config: PreparedStatementConfig) {
-        let enabled = config.enabled;
-        *self.config.write() = config;
-        self.enabled.store(enabled, Ordering::Release);
+        self.config.apply(config);
     }
 
     /// Enable the cache
     pub fn enable(&self) -> &Self {
-        self.config.write().enabled = true;
-        self.enabled.store(true, Ordering::Release);
+        self.config.set_enabled(true);
         self
     }
 
     /// Disable the cache
     pub fn disable(&self) -> &Self {
-        self.config.write().enabled = false;
-        self.enabled.store(false, Ordering::Release);
+        self.config.set_enabled(false);
         self
     }
 
     /// Check if cache is enabled
     pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Acquire)
+        self.config.is_enabled()
     }
 
     /// Set the maximum number of cached statements

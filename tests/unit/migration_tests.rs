@@ -36,6 +36,7 @@ fn test_column_type_mysql() {
 
 #[test]
 fn test_column_type_sqlite() {
+    assert_eq!(ColumnType::Double.to_sqlite_sql(), "REAL");
     assert_eq!(ColumnType::Integer.to_sqlite_sql(), "INTEGER");
     assert_eq!(ColumnType::BigInteger.to_sqlite_sql(), "INTEGER");
     assert_eq!(ColumnType::String.to_sqlite_sql(), "TEXT");
@@ -552,6 +553,58 @@ fn test_change_column_keeps_what_a_mysql_modify_would_drop() {
 }
 
 #[test]
+fn test_change_column_keeps_a_text_columns_character_set_and_collation() {
+    // MySQL writes both clauses where they differ from the table's; MariaDB
+    // may write the collation alone.
+    let create_table = "CREATE TABLE `users` (
+  `code` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `tag` varchar(20) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`code`)
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::MySQL);
+    builder
+        .change_column("code", ColumnType::Varchar(50))
+        .change_column("tag", ColumnType::Text);
+    builder.keep_column_attributes(create_table);
+
+    assert_eq!(
+        builder.build().unwrap(),
+        [
+            "ALTER TABLE `users` MODIFY COLUMN `code` VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL",
+            "ALTER TABLE `users` MODIFY COLUMN `tag` LONGTEXT COLLATE utf8mb4_bin DEFAULT NULL",
+        ]
+    );
+}
+
+#[test]
+fn test_change_column_after_a_rename_keeps_the_renamed_columns_attributes() {
+    let create_table = "CREATE TABLE `users` (
+  `old` int NOT NULL DEFAULT 5 COMMENT 'kept',
+  `gone` int NOT NULL DEFAULT 1,
+  PRIMARY KEY (`old`)
+) ENGINE=InnoDB";
+    let mut builder = AlterTableBuilder::new("users", DatabaseType::MySQL);
+    builder
+        .rename_column("old", "new")
+        .change_column("new", ColumnType::BigInteger)
+        .drop_column("gone");
+    builder.add_column("gone", ColumnType::Integer).nullable();
+    builder.change_column("gone", ColumnType::BigInteger);
+    builder.keep_column_attributes(create_table);
+
+    let statements = builder.build().unwrap();
+    assert_eq!(
+        statements[1],
+        "ALTER TABLE `users` MODIFY COLUMN `new` BIGINT NOT NULL DEFAULT 5 COMMENT 'kept'"
+    );
+    // The column added in its place has none of the dropped one's.
+    assert_eq!(
+        statements.last().unwrap(),
+        "ALTER TABLE `users` MODIFY COLUMN `gone` BIGINT"
+    );
+}
+
+#[test]
 fn test_change_column_type_is_rejected_on_sqlite() {
     let mut builder = AlterTableBuilder::new("users", DatabaseType::SQLite);
     builder.change_column("age", ColumnType::BigInteger);
@@ -736,24 +789,6 @@ fn test_extra_sql_attribute() {
 }
 
 #[test]
-fn test_column_type_mariadb() {
-    assert_eq!(ColumnType::Integer.to_mysql_sql(), "INT");
-    assert_eq!(ColumnType::BigInteger.to_mysql_sql(), "BIGINT");
-    assert_eq!(ColumnType::Boolean.to_mysql_sql(), "TINYINT(1)");
-    assert_eq!(ColumnType::Jsonb.to_mysql_sql(), "JSON");
-    // DATETIME(6): MySQL's TIMESTAMP only spans 1970-2038, and a column without
-    // fractional digits rounds away microseconds.
-    assert_eq!(ColumnType::DateTime.to_mysql_sql(), "DATETIME(6)");
-    assert_eq!(ColumnType::Timestamp.to_mysql_sql(), "DATETIME(6)");
-    assert_eq!(ColumnType::TimestampTz.to_mysql_sql(), "DATETIME(6)");
-    assert_eq!(ColumnType::Date.to_mysql_sql(), "DATE");
-    assert_eq!(ColumnType::Time.to_mysql_sql(), "TIME(6)");
-    // TEXT and BLOB stop at 64 KB.
-    assert_eq!(ColumnType::Text.to_mysql_sql(), "LONGTEXT");
-    assert_eq!(ColumnType::Binary.to_mysql_sql(), "LONGBLOB");
-}
-
-#[test]
 fn test_mariadb_table_builder_create() {
     let mut builder = TableBuilder::new("users", DatabaseType::MariaDB);
     builder.id();
@@ -934,4 +969,32 @@ fn generated_index_names_fit_every_backend() {
     assert!(names.iter().all(|name| name.len() <= 63), "{names:?}");
     // A name that fits is left as it was.
     assert_eq!(names[3], "idx_organization_membership_invitations_email");
+}
+
+/// A model's unnamed index is named as a migration names it, so sync finds
+/// the index a migration created instead of adding a second one.
+#[test]
+fn a_model_names_its_indexes_as_a_migration_does() {
+    let table = "organization_membership_invitations";
+    let mut builder = TableBuilder::new(table, DatabaseType::Postgres);
+    builder.unique_index(&["organization_id", "invited_email"]);
+    builder.index(&["email"]);
+    let migration_names: Vec<String> = builder
+        .build_indexes(true)
+        .into_iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+
+    let columns = |columns: &[&str]| columns.iter().map(|column| column.to_string()).collect();
+    let model_names = [
+        crate::model::IndexDefinition::__generated(
+            table,
+            columns(&["organization_id", "invited_email"]),
+            true,
+        )
+        .name,
+        crate::model::IndexDefinition::__generated(table, columns(&["email"]), false).name,
+    ];
+
+    assert_eq!(migration_names, model_names);
 }

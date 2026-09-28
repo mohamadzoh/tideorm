@@ -70,13 +70,28 @@ impl Database {
     }
 
     /// The connection statements issued through this handle run on: the
-    /// ambient transaction if there is one, otherwise the handle's own.
+    /// ambient transaction if it runs on this handle's database, otherwise the
+    /// handle's own. Another database's transaction is not joined, or a
+    /// statement meant for one database would run on the other.
     #[doc(hidden)]
     pub fn __get_connection(&self) -> Result<ConnectionRef> {
         match super::__current_connection() {
-            Ok(transaction @ ConnectionRef::Transaction(_)) => Ok(transaction),
+            Ok(transaction @ ConnectionRef::Transaction(_)) if self.shares_scope_pool() => {
+                Ok(transaction)
+            }
             _ => self.own_handle(),
         }
+    }
+
+    /// Whether the ambient transaction runs on this handle's pool. When either
+    /// side's pool is unknown (a handle on a transaction, a scope that did not
+    /// record its pool) it counts as shared, as every transaction was before.
+    fn shares_scope_pool(&self) -> bool {
+        let own = match self.own_handle() {
+            Ok(ConnectionRef::Database(inner)) => super::state::connection_identity(&inner),
+            _ => return true,
+        };
+        super::state::__scope_origin().is_none_or(|scope| scope == own)
     }
 
     /// The connection stored in `self`, ignoring any ambient scope.
@@ -110,8 +125,7 @@ impl Database {
 
     /// Connect to a database using a connection URL
     pub async fn connect(url: &str) -> Result<Self> {
-        let inner = InternalConnection::connect(url).await?;
-        Ok(Self::from_internal_connection(inner))
+        Self::builder().url(url).build().await
     }
 
     /// Initialize the global database connection
@@ -137,14 +151,6 @@ impl Database {
         set_global_connection(None);
         #[cfg(feature = "dirty-tracking")]
         crate::model::__clear_dirty_snapshots();
-    }
-
-    /// Get a reference to the global database connection.
-    ///
-    /// Panics if it has not been initialized; [`crate::try_db`] is the
-    /// non-panicking form.
-    pub fn global() -> &'static Self {
-        super::db()
     }
 
     /// Synchronize database schema with registered models

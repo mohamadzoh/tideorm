@@ -6,6 +6,7 @@ use crate::parse::{ModelField, RelationKind};
 
 pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
+    let struct_name_str = &ctx.struct_name_str;
     let relation_arms = ctx
         .relation_fields
         .iter()
@@ -29,7 +30,7 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                             return Err(::tideorm::Error::query(format!(
                                 "Unknown relation '{}' on {}",
                                 relation_name,
-                                stringify!(#struct_name)
+                                #struct_name_str
                             )));
                         }
                     }
@@ -97,10 +98,19 @@ fn build_relation_arm(ctx: &BuildContext, field: &ModelField) -> TokenStream2 {
     }
 }
 
-/// The related rows of a relation keyed by one column on each side: the
-/// related rows whose key is one of the parents', matched by value, so an `i64`
-/// id finds an `i32` or a text foreign key holding it. A `MorphOne`/`MorphMany`
-/// adds its type discriminator.
+/// Every parent's key, as JSON, in the order of `models`.
+fn parent_keys(parent_key_ident: &Ident) -> TokenStream2 {
+    quote! {
+        &models
+            .iter()
+            .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
+            .collect::<Vec<_>>()
+    }
+}
+
+/// The related rows of a relation keyed by one column on each side, which
+/// `relations::__eager_keyed_many`/`__eager_keyed_one` read: matched by value,
+/// with a `MorphOne`/`MorphMany`'s type discriminator.
 fn keyed_lookup(
     ctx: &BuildContext,
     field: &ModelField,
@@ -133,38 +143,20 @@ fn keyed_lookup(
             quote!(None),
         ),
     };
-    let pick = if matches!(kind, RelationKind::HasMany | RelationKind::MorphMany) {
-        quote!(.cloned().unwrap_or_default())
+    let lookup = if matches!(kind, RelationKind::HasMany | RelationKind::MorphMany) {
+        quote!(__eager_keyed_many)
     } else {
-        quote!(.and_then(|group| group.first().cloned()))
+        quote!(__eager_keyed_one)
     };
+    let parent_keys = parent_keys(&parent_key_ident);
 
     Some(quote! {
-        {
-            let parent_keys: Vec<_> = models
-                .iter()
-                .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
-                .collect();
-            let by_key = <#related_ty as ::tideorm::relations::EagerLoadModel>::__load_grouped_by_key(
-                &parent_keys,
-                #related_key,
-                #morph_type,
-            )
-            .await?;
-            parent_keys
-                .iter()
-                .map(|key| by_key.get(&::tideorm::relations::__relation_key(key)) #pick)
-                .collect::<Vec<_>>()
-        }
+        ::tideorm::relations::#lookup::<#related_ty>(#parent_keys, #related_key, #morph_type).await?
     })
 }
 
-/// The related rows of a `HasManyThrough`: the live pivot rows of every
-/// parent, then the live related rows they link, each step matched by value
-/// as the other relations are, so a pivot key of another integer type than
-/// the owner's or the related model's key still links them. Each step reads
-/// through its model's query, whose soft-delete scope leaves out trashed
-/// pivot and related rows.
+/// The related rows of a `HasManyThrough`, which `relations::__eager_through`
+/// reads through the pivot.
 fn through_lookup(
     ctx: &BuildContext,
     field: &ModelField,
@@ -179,45 +171,16 @@ fn through_lookup(
     let foreign_key = field.foreign_key.as_deref()?;
     let related_key = field.related_key.as_deref()?;
     let related_local_key = field.owner_key.as_deref().unwrap_or("id");
+    let parent_keys = parent_keys(&parent_key_ident);
 
     Some(quote! {
-        {
-            use ::tideorm::relations::{EagerLoadModel, RelationExt, __relation_key};
-
-            let parent_keys: Vec<_> = models
-                .iter()
-                .map(|entry| ::tideorm::prelude::json!(entry.model.#parent_key_ident.clone()))
-                .collect();
-            let links = <#pivot_ty as EagerLoadModel>::__load_grouped_by_key(
-                &parent_keys,
-                #foreign_key,
-                None,
-            )
-            .await?;
-            let mut related_keys = Vec::new();
-            for link in links.values().flatten() {
-                related_keys.push(link.get_field_value(#related_key)?);
-            }
-            let related_by_key = <#related_ty as EagerLoadModel>::__load_grouped_by_key(
-                &related_keys,
-                #related_local_key,
-                None,
-            )
-            .await?;
-            let mut related = Vec::with_capacity(parent_keys.len());
-            for key in &parent_keys {
-                let mut rows = Vec::new();
-                for link in links.get(&__relation_key(key)).into_iter().flatten() {
-                    let related_key = link.get_field_value(#related_key)?;
-                    if let Some(found) = related_by_key.get(&__relation_key(&related_key)) {
-                        rows.extend(found.iter().cloned());
-                    }
-                }
-                // A pair the pivot holds twice is one related row.
-                related.push(::tideorm::relations::__distinct_by_primary_key(rows));
-            }
-            related
-        }
+        ::tideorm::relations::__eager_through::<#related_ty, #pivot_ty>(
+            #parent_keys,
+            #foreign_key,
+            #related_key,
+            #related_local_key,
+        )
+        .await?
     })
 }
 

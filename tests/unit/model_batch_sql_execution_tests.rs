@@ -86,17 +86,18 @@ fn scaling_an_integer_column_stays_integral_on_sqlite() {
             .0
     };
     // SQLite scales in integers, by 11 / 10 and 1 / 2, rounding the quotient
-    // half away from zero; an `f64` would round a value past 2^53 first.
+    // half away from zero; an `f64` would round a value past 2^53 first. The
+    // column is divided before it is multiplied, so no step overflows.
     let sqlite = scaled(DatabaseType::SQLite);
     assert!(
         sqlite.contains(
-            r#""age" = CAST((("age" * ?) + CASE WHEN ("age" * ?) < 0 THEN -? ELSE ? END) / ? AS INTEGER)"#
+            r#""age" = CAST(("age" / ?) * ? + (("age" % ?) * ? + CASE WHEN "age" < 0 THEN ? ELSE ? END) / ? AS INTEGER)"#
         ),
         "{sqlite}"
     );
     assert!(
         sqlite.contains(
-            r#""id" = CAST((("id") + CASE WHEN ("id") < 0 THEN -? ELSE ? END) / ? AS INTEGER)"#
+            r#""id" = CAST(("id" / ?) + (("id" % ?) + CASE WHEN "id" < 0 THEN ? ELSE ? END) / ? AS INTEGER)"#
         ),
         "{sqlite}"
     );
@@ -300,4 +301,38 @@ fn batch_json_set_binds_the_backend_path_then_the_value() {
             crate::internal::Value::String(Some("\"Paris\"".to_string())),
         ]
     );
+}
+
+#[test]
+fn batch_json_set_takes_indexes_and_quoted_keys() {
+    let path = r#"$.items[0]."a \"b\"""#;
+    let bound_path = |db_type| {
+        let (_, params) = BatchUpdateBuilder::<BatchSqlUser>::new()
+            .json_set("name", path, 1)
+            .where_eq("id", 1)
+            .build_update_statement(db_type)
+            .expect("statement should build");
+        params[0].clone()
+    };
+
+    assert_eq!(
+        bound_path(crate::config::DatabaseType::Postgres),
+        crate::internal::Value::String(Some(r#"{"items","0","a \"b\""}"#.to_string()))
+    );
+    assert_eq!(
+        bound_path(crate::config::DatabaseType::SQLite),
+        crate::internal::Value::String(Some(r#"$."items"[0]."a \"b\"""#.to_string()))
+    );
+
+    for path in ["$", "$.*", "$.items[*]", "items"] {
+        let error = BatchUpdateBuilder::<BatchSqlUser>::new()
+            .json_set("name", path, 1)
+            .where_eq("id", 1)
+            .build_update_statement(crate::config::DatabaseType::MySQL)
+            .expect_err("path should be rejected");
+        assert!(
+            error.to_string().contains("unsupported JSON path"),
+            "{path}: {error}"
+        );
+    }
 }

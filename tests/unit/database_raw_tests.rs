@@ -194,3 +194,14 @@ fn non_finite_floats_stay_distinguishable_from_null() {
         serde_json::Value::String("inf".to_string())
     );
 }
+
+#[test]
+fn a_mysql_hash_comment_does_not_hide_a_second_statement() {
+    // MySQL reads everything after `#` as a comment, so the quote in it opens
+    // no string and the `;` ends the first statement.
+    assert!(Database::raw_sql_may_write(
+        "SELECT 1 # it's\n; DELETE FROM users"
+    ));
+    // PostgreSQL's `#` is an operator, read as such too.
+    assert!(!Database::raw_sql_may_write("SELECT 5 # 3"));
+}

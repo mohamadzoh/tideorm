@@ -1,12 +1,7 @@
 use super::*;
 
-/// `check` repeated `count` times, joined by `combine` and parenthesized.
 /// The alias of a SQLite JSON array's `json_each` rows.
 const SQLITE_ELEMENT: &str = "tideorm_element";
-
-fn repeated_check(check: String, count: usize, combine: &str) -> String {
-    format!("({})", vec![check; count].join(combine))
-}
 
 impl<M: Model> QueryBuilder<M> {
     pub(crate) fn build_null_check_expression(
@@ -44,15 +39,10 @@ impl<M: Model> QueryBuilder<M> {
         &self,
         db_type: DatabaseType,
         column_sql: &str,
-        operator: JsonValueOperator,
+        containment: db_sql::JsonContainment,
         value: &serde_json::Value,
     ) -> SimpleExpr {
-        let bound = match operator {
-            JsonValueOperator::Contains => db_sql::json_contains_bound(db_type, column_sql, value),
-            JsonValueOperator::ContainedBy => {
-                db_sql::json_contained_by_bound(db_type, column_sql, value)
-            }
-        };
+        let bound = db_sql::json_containment_bound(db_type, column_sql, value, containment);
 
         self.build_custom_expression(bound.sql, bound.values)
     }
@@ -67,7 +57,7 @@ impl<M: Model> QueryBuilder<M> {
     ) -> SimpleExpr {
         match db_sql::json_exists_bound(db_type, column_sql, existence, target, negated) {
             Some(bound) => self.build_custom_expression(bound.sql, bound.values),
-            None => Expr::cust(db_sql::invalid_json_path_predicate()),
+            None => Expr::cust(db_sql::MATCH_NOTHING),
         }
     }
 
@@ -110,27 +100,35 @@ impl<M: Model> QueryBuilder<M> {
                 };
                 self.build_custom_expression(sql, Self::sea_value_list(&bound))
             }
-            // The JSON text is bound as is: `JSON_CONTAINS` parses it on both
-            // servers, and MariaDB has no `CAST(.. AS JSON)`.
-            DatabaseType::MySQL | DatabaseType::MariaDB => match operator {
-                ArrayOperator::Contains => self.build_custom_expression(
-                    format!("JSON_CONTAINS({}, ?)", column_sql),
-                    vec![db_sql::json_array_parameter(values)],
-                ),
-                ArrayOperator::ContainedBy => self.build_custom_expression(
-                    format!("JSON_CONTAINS(?, {})", column_sql),
-                    vec![db_sql::json_array_parameter(values)],
-                ),
-                ArrayOperator::Overlaps if values.is_empty() => Expr::cust("0 = 1".to_string()),
-                ArrayOperator::Overlaps => self.build_custom_expression(
-                    repeated_check(
-                        format!("JSON_CONTAINS({}, ?)", column_sql),
-                        values.len(),
-                        " OR ",
+            // A JSON array column is contained in or contains the list as a
+            // JSON document, with the guards that make `JSON_CONTAINS` read
+            // as PostgreSQL does: a column holding an object is contained by
+            // no list. An overlap is a containment of any one value.
+            DatabaseType::MySQL | DatabaseType::MariaDB => {
+                let list = serde_json::Value::Array(values.to_vec());
+                let bound = match operator {
+                    ArrayOperator::Contains => db_sql::json_containment_bound(
+                        db_type,
+                        column_sql,
+                        &list,
+                        db_sql::JsonContainment::Contains,
                     ),
-                    values.iter().map(db_sql::json_scalar_parameter).collect(),
-                ),
-            },
+                    ArrayOperator::ContainedBy => db_sql::json_containment_bound(
+                        db_type,
+                        column_sql,
+                        &list,
+                        db_sql::JsonContainment::ContainedBy,
+                    ),
+                    ArrayOperator::Overlaps => {
+                        let check = format!("JSON_CONTAINS({column_sql}, ?)");
+                        db_sql::BoundSql::new(
+                            db_sql::any_element(&vec![check; values.len()]),
+                            values.iter().map(db_sql::json_scalar_parameter).collect(),
+                        )
+                    }
+                };
+                self.build_custom_expression(bound.sql, bound.values)
+            }
             // Elements are compared as JSON values, as `where_eq` compares a
             // document: `1` is not `true`, and the string `"{\"a\":1}"` is not
             // that object. A null in a contained-by list admits null elements,
@@ -144,32 +142,20 @@ impl<M: Model> QueryBuilder<M> {
                     checks.push(equal.sql);
                     bound.extend(equal.values);
                 }
-                let has_element = |equal: &String| {
-                    format!(
-                        "EXISTS (SELECT 1 FROM json_each({column_sql}) AS {SQLITE_ELEMENT} WHERE {equal})"
-                    )
-                };
+                let elements = format!("json_each({column_sql}) AS {SQLITE_ELEMENT}");
+                let has_element =
+                    |equal: &String| format!("EXISTS (SELECT 1 FROM {elements} WHERE {equal})");
                 let sql = match operator {
-                    ArrayOperator::Contains if values.is_empty() => "1 = 1".to_string(),
-                    ArrayOperator::Overlaps if values.is_empty() => "0 = 1".to_string(),
-                    ArrayOperator::Contains | ArrayOperator::Overlaps => {
-                        let combine = if matches!(operator, ArrayOperator::Contains) {
-                            " AND "
-                        } else {
-                            " OR "
-                        };
-                        let checks: Vec<String> = checks.iter().map(has_element).collect();
-                        format!("({})", checks.join(combine))
+                    ArrayOperator::Contains => {
+                        db_sql::all_elements(&checks.iter().map(has_element).collect::<Vec<_>>())
+                    }
+                    ArrayOperator::Overlaps => {
+                        db_sql::any_element(&checks.iter().map(has_element).collect::<Vec<_>>())
                     }
                     ArrayOperator::ContainedBy => {
-                        let offending = if checks.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" WHERE NOT ({})", checks.join(" OR "))
-                        };
-                        format!(
-                            "({column_sql} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM json_each({column_sql}) AS {SQLITE_ELEMENT}{offending}))"
-                        )
+                        let offending =
+                            (!checks.is_empty()).then(|| format!("NOT ({})", checks.join(" OR ")));
+                        db_sql::array_contained_by(column_sql, &elements, offending.as_deref())
                     }
                 };
                 self.build_custom_expression(sql, bound)

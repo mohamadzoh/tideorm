@@ -159,11 +159,6 @@ impl SearchWeights {
         Self { a, b, c, d }
     }
 
-    /// Convert to PostgreSQL weights array format
-    pub fn to_pg_array(&self) -> String {
-        format!("'{}'", self.pg_array())
-    }
-
     /// The `{D,C,B,A}` array `ts_rank_cd` takes, lowest weight first.
     pub(super) fn pg_array(&self) -> String {
         format!("{{{},{},{},{}}}", self.d, self.c, self.b, self.a)
@@ -237,20 +232,6 @@ pub trait FullTextSearch: Model + Sized {
     /// Perform a simple full-text search on specified columns
     fn search(columns: &[&str], query: &str) -> FullTextSearchBuilder<Self> {
         FullTextSearchBuilder::new(columns, query)
-    }
-
-    /// Perform a full-text search with custom configuration
-    fn search_with_config(
-        columns: &[&str],
-        query: &str,
-        config: FullTextConfig,
-    ) -> FullTextSearchBuilder<Self> {
-        FullTextSearchBuilder::new(columns, query).config(config)
-    }
-
-    /// Search with ranking enabled; see [`FullTextSearchBuilder::with_ranking`].
-    fn search_ranked(columns: &[&str], query: &str) -> FullTextSearchBuilder<Self> {
-        FullTextSearchBuilder::new(columns, query).with_ranking()
     }
 }
 

@@ -1,6 +1,6 @@
 use super::{
-    CTE, ConditionValue, Operator, OrGroup, QueryBuilder, QueryFragment, UnionClause,
-    WhereCondition, WindowFunction, WindowFunctionType, db_sql,
+    CTE, ConditionValue, Operator, QueryBuilder, QueryFragment, UnionClause, WhereCondition,
+    WindowFunction, WindowFunctionType, db_sql,
 };
 use crate::error::{Error, Result};
 use crate::model::Model;
@@ -33,6 +33,19 @@ pub(in crate::query) fn raw_order_by_expression(value: &str) -> Option<&str> {
 /// `order_by()` uses this to refuse forged markers before they are stored.
 pub(in crate::query) fn contains_raw_order_by_marker(value: &str) -> bool {
     value.contains(RAW_ORDER_BY_MARKER)
+}
+
+/// A column reference and the `ASC`/`DESC` written after it, if one is.
+pub(in crate::query) fn split_direction(term: &str) -> Option<(&str, super::Order)> {
+    let (column, direction) = term.trim().rsplit_once(char::is_whitespace)?;
+    let direction = if direction.eq_ignore_ascii_case("asc") {
+        super::Order::Asc
+    } else if direction.eq_ignore_ascii_case("desc") {
+        super::Order::Desc
+    } else {
+        return None;
+    };
+    Some((column.trim_end(), direction))
 }
 
 /// Sentinel entry recorded in `raw_select_expressions` by
@@ -86,20 +99,15 @@ impl<M: Model> QueryBuilder<M> {
         )
     }
 
-    fn split_select_alias(value: &str) -> &str {
-        let trimmed = value.trim();
-        match Self::find_top_level_alias(trimmed) {
-            Some((expression, _)) => expression,
-            None => trimmed,
-        }
-    }
-
-    /// Find the last top-level ` AS ` separator in a SELECT expression.
+    /// Split a SELECT expression at its last top-level ` AS `, into the
+    /// expression and its alias, each trimmed; the whole value and `None`
+    /// when it has no alias.
     ///
     /// The scan tracks parenthesis depth and string/identifier quote state, so
     /// an inner `AS` inside `CAST(col AS TEXT)` is ignored and only the outer
     /// alias boundary is returned.
-    fn find_top_level_alias(value: &str) -> Option<(&str, &str)> {
+    pub(in crate::query) fn split_alias(value: &str) -> (&str, Option<&str>) {
+        let value = value.trim();
         let bytes = value.as_bytes();
         let mut depth: i32 = 0;
         let mut quote: Option<u8> = None;
@@ -149,38 +157,23 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
-        let (start, end) = last_as?;
+        let Some((start, end)) = last_as else {
+            return (value, None);
+        };
         let expression = value[..start].trim();
         let alias = value[end..].trim();
         if expression.is_empty() || alias.is_empty() {
-            return None;
+            return (value, None);
         }
-        Some((expression, alias))
+        (expression, Some(alias))
     }
 
     fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
-        let value = Self::split_select_alias(value);
-        if value.is_empty()
-            || value.starts_with('"')
-            || value.ends_with('"')
-            || value.starts_with('`')
-            || value.ends_with('`')
-            || value.contains('(')
-            || value.contains(')')
-            || value.contains('*')
-            || value.contains(' ')
-        {
-            return None;
-        }
-
-        match value.split_once('.') {
-            Some((table, column))
-                if !table.is_empty() && !column.is_empty() && !column.contains('.') =>
-            {
-                Some((table, column))
-            }
-            Some(_) => None,
-            None => Some(("", value)),
+        let (value, _) = Self::split_alias(value);
+        match crate::internal::sql_safety::identifier_reference_parts(value)?.as_slice() {
+            [column] => Some(("", *column)),
+            [table, column] => Some((*table, *column)),
+            _ => None,
         }
     }
 
@@ -260,15 +253,10 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let trimmed = value.trim();
-        let (reference, direction) = match trimmed.split_once(char::is_whitespace) {
-            Some((reference, rest)) => (reference, Some(rest.trim())),
-            None => (trimmed, None),
+        let (reference, direction_is_valid) = match split_direction(trimmed) {
+            Some((reference, _)) => (reference, allow_raw_and_direction),
+            None => (trimmed, true),
         };
-
-        let direction_is_valid = direction.is_none_or(|direction| {
-            allow_raw_and_direction
-                && (direction.eq_ignore_ascii_case("asc") || direction.eq_ignore_ascii_case("desc"))
-        });
 
         if !direction_is_valid || Self::simple_column_reference(reference).is_none() {
             let hint = if allow_raw_and_direction {
@@ -296,10 +284,7 @@ impl<M: Model> QueryBuilder<M> {
         known_qualifiers: Option<&BTreeSet<String>>,
     ) -> std::result::Result<(), String> {
         let trimmed = value.trim();
-        let (expression, alias) = match Self::find_top_level_alias(trimmed) {
-            Some((expression, alias)) => (expression, Some(alias)),
-            None => (trimmed, None),
-        };
+        let (expression, alias) = Self::split_alias(trimmed);
 
         if alias.is_none() {
             if expression == "*" {
@@ -334,14 +319,10 @@ impl<M: Model> QueryBuilder<M> {
     /// columns come back under the same names as the model's (`id`,
     /// `created_at`), and the model would be filled from whichever came last.
     pub(in crate::query) fn ensure_projection_covers_model(&self) -> Result<()> {
-        let Some(columns) = &self.select_columns else {
+        let Some(columns) = &self.clauses.select_columns else {
             return Ok(());
         };
-        if self
-            .raw_select_expressions
-            .iter()
-            .any(|expression| expression != DISTINCT_SELECT_MARKER)
-        {
+        if self.raw_projection().next().is_some() {
             return Ok(());
         }
 
@@ -349,10 +330,10 @@ impl<M: Model> QueryBuilder<M> {
         let mut covers_everything = false;
         for column in columns {
             let column = column.trim();
-            if column == own_wildcard || (column == "*" && self.joins.is_empty()) {
+            if column == own_wildcard || (column == "*" && self.clauses.joins.is_empty()) {
                 covers_everything = true;
             } else if column.ends_with('*') {
-                return Err(Error::invalid_query(format!(
+                return Err(Error::query(format!(
                     "select(\"{}\") also reads a joined table's columns, which get() would fill '{}' from wherever a name repeats; select \"{}\", and read other tables' columns with get_json()",
                     column,
                     M::table_name(),
@@ -367,8 +348,8 @@ impl<M: Model> QueryBuilder<M> {
         let mut covered = BTreeSet::new();
         for column in columns {
             let column = column.trim();
-            let output = match Self::find_top_level_alias(column) {
-                Some((_, alias)) => alias,
+            let output = match Self::split_alias(column).1 {
+                Some(alias) => alias,
                 None => match column.rsplit_once('.') {
                     // Another table's column fills none of the model's.
                     Some((table, _)) if table != M::table_name() => continue,
@@ -389,7 +370,7 @@ impl<M: Model> QueryBuilder<M> {
         if missing.is_empty() {
             return Ok(());
         }
-        Err(Error::invalid_query(format!(
+        Err(Error::query(format!(
             "select() leaves out {} of '{}', which get() would fill with defaults that a later save() writes back; select every column, or read the partial rows with get_json()",
             missing.join(", "),
             M::table_name()
@@ -401,22 +382,22 @@ impl<M: Model> QueryBuilder<M> {
     /// name.
     ///
     /// A plain column is read from its qualifier's table, or the model's when
-    /// unqualified; an expression has no source. Wildcards and unaliased
-    /// expressions name no column and are left out.
+    /// unqualified; an expression, a `select_subquery()` among them, has no
+    /// source. Wildcards and unaliased expressions name no column and are
+    /// left out.
     pub(in crate::query) fn projection_outputs(&self) -> Vec<(String, Option<(String, String)>)> {
-        let typed = self.select_columns.iter().flatten();
-        let raw = self
-            .raw_select_expressions
+        let typed = self.clauses.select_columns.iter().flatten();
+        let raw = self.raw_projection();
+        let subqueries = self
+            .clauses
+            .subquery_select_expressions
             .iter()
-            .filter(|expression| expression.as_str() != DISTINCT_SELECT_MARKER);
+            .map(|subquery| (subquery.alias.clone(), None));
         typed
             .chain(raw)
             .filter_map(|entry| {
                 let entry = entry.trim();
-                let (expression, alias) = match Self::find_top_level_alias(entry) {
-                    Some((expression, alias)) => (expression, Some(alias)),
-                    None => (entry, None),
-                };
+                let (expression, alias) = Self::split_alias(entry);
                 let source = Self::simple_column_reference(expression);
                 let name = match alias {
                     Some(alias) => alias.trim_matches(|c| c == '"' || c == '`').to_string(),
@@ -436,7 +417,25 @@ impl<M: Model> QueryBuilder<M> {
                 });
                 Some((name, source))
             })
+            .chain(subqueries)
             .collect()
+    }
+
+    /// Whether the projection names every column itself: an explicit one
+    /// with no `*` or `table.*` wildcard, whose result columns
+    /// [`projection_outputs`](Self::projection_outputs) lists in full.
+    pub(in crate::query) fn projection_is_closed(&self) -> bool {
+        self.has_explicit_projection()
+            && !self
+                .clauses
+                .select_columns
+                .iter()
+                .flatten()
+                .chain(&self.clauses.raw_select_expressions)
+                .any(|entry| {
+                    let entry = entry.trim();
+                    entry == "*" || entry.ends_with(".*")
+                })
     }
 
     /// Refuse a projection that names one result column twice: rows come back
@@ -458,18 +457,15 @@ impl<M: Model> QueryBuilder<M> {
     /// Whether the caller chose the projection through `select()`,
     /// `select_raw()` or `select_subquery()`.
     pub(in crate::query) fn has_explicit_projection(&self) -> bool {
-        self.select_columns.is_some()
-            || !self.subquery_select_expressions.is_empty()
-            || self
-                .raw_select_expressions
-                .iter()
-                .any(|expression| expression != DISTINCT_SELECT_MARKER)
+        self.clauses.select_columns.is_some()
+            || !self.clauses.subquery_select_expressions.is_empty()
+            || self.raw_projection().next().is_some()
     }
 
     /// This query without its ORDER BY, for a terminal that does not render
     /// one (`count()`, `exists()`), so an ordering it discards cannot fail it.
     pub(in crate::query) fn discarding_order(mut self) -> Self {
-        self.order_by.clear();
+        self.clauses.order_by.clear();
         self
     }
 
@@ -485,11 +481,18 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// The `select_raw()` expressions, without the `distinct()` marker that
+    /// shares their list.
+    pub(in crate::query) fn raw_projection(&self) -> impl Iterator<Item = &String> {
+        self.clauses
+            .raw_select_expressions
+            .iter()
+            .filter(|expression| expression.as_str() != DISTINCT_SELECT_MARKER)
+    }
+
     /// Whether [`distinct()`](Self::distinct) was requested for this query.
     pub(in crate::query) fn is_distinct(&self) -> bool {
-        self.raw_select_expressions
-            .iter()
-            .any(|expression| expression == DISTINCT_SELECT_MARKER)
+        self.clauses.is_distinct()
     }
 
     /// Normalize a split column reference to the `table.column` form the
@@ -506,7 +509,7 @@ impl<M: Model> QueryBuilder<M> {
             qualifier
         };
         let column = if qualifier == table {
-            M::canonical_column_name(column).unwrap_or(column)
+            M::column_named(column)
         } else {
             column
         };
@@ -523,11 +526,8 @@ impl<M: Model> QueryBuilder<M> {
         // A raw expression or a scalar subquery can project anything at all,
         // including the very column an ORDER BY term names, so once one is
         // present nothing can be proven missing.
-        let has_opaque_projection = self
-            .raw_select_expressions
-            .iter()
-            .any(|expression| expression != DISTINCT_SELECT_MARKER)
-            || !self.subquery_select_expressions.is_empty();
+        let has_opaque_projection = self.raw_projection().next().is_some()
+            || !self.clauses.subquery_select_expressions.is_empty();
 
         if has_opaque_projection {
             return None;
@@ -539,6 +539,7 @@ impl<M: Model> QueryBuilder<M> {
         // An absent or empty column list renders as the `table.*` fallback,
         // which exposes every column of the model.
         let Some(columns) = self
+            .clauses
             .select_columns
             .as_ref()
             .filter(|columns| !columns.is_empty())
@@ -550,10 +551,7 @@ impl<M: Model> QueryBuilder<M> {
         };
 
         for column in columns {
-            let (expression, alias) = match Self::find_top_level_alias(column) {
-                Some((expression, alias)) => (expression, Some(alias)),
-                None => (column.trim(), None),
-            };
+            let (expression, alias) = Self::split_alias(column);
 
             if let Some(alias) = alias {
                 references.insert(alias.to_string());
@@ -581,15 +579,13 @@ impl<M: Model> QueryBuilder<M> {
             return Ok(());
         };
 
-        for (column, _) in &self.order_by {
+        for (column, _) in &self.clauses.order_by {
             if raw_order_by_expression(column).is_some() {
                 continue;
             }
 
             let trimmed = column.trim();
-            let reference = trimmed
-                .split_once(char::is_whitespace)
-                .map_or(trimmed, |(reference, _)| reference);
+            let reference = split_direction(trimmed).map_or(trimmed, |(reference, _)| reference);
 
             let Some((qualifier, name)) = Self::simple_column_reference(reference) else {
                 continue;
@@ -673,21 +669,6 @@ impl<M: Model> QueryBuilder<M> {
         Ok(())
     }
 
-    fn validate_or_group(
-        group: &OrGroup,
-        known_qualifiers: Option<&BTreeSet<String>>,
-    ) -> std::result::Result<(), String> {
-        for condition in &group.conditions {
-            Self::validate_condition(condition, known_qualifiers)?;
-        }
-
-        for nested_group in &group.nested_groups {
-            Self::validate_or_group(nested_group, known_qualifiers)?;
-        }
-
-        Ok(())
-    }
-
     pub(super) fn validate_union_clause(union: &UnionClause) -> std::result::Result<(), String> {
         db_sql::validate_subquery_sql(&union.query_sql)
     }
@@ -714,44 +695,39 @@ impl<M: Model> QueryBuilder<M> {
             )?;
         }
 
-        match &window_function.function {
-            WindowFunctionType::Lag(column, _, default)
-            | WindowFunctionType::Lead(column, _, default) => {
-                Self::validate_model_column_reference(
-                    "window function column",
-                    column,
-                    known_qualifiers,
-                )?;
-
-                if let Some(default) = default {
-                    db_sql::validate_raw_sql_fragment("LAG/LEAD default expression", default)?;
-                }
-            }
-            WindowFunctionType::FirstValue(column)
-            | WindowFunctionType::LastValue(column)
-            | WindowFunctionType::NthValue(column, _)
-            | WindowFunctionType::Sum(column)
-            | WindowFunctionType::Avg(column)
-            | WindowFunctionType::Count(Some(column))
-            | WindowFunctionType::Min(column)
-            | WindowFunctionType::Max(column) => {
-                Self::validate_model_column_reference(
-                    "window function column",
-                    column,
-                    known_qualifiers,
-                )?;
+        let function = &window_function.function;
+        if let Some(column) = function.column() {
+            Self::validate_model_column_reference(
+                "window function column",
+                column,
+                known_qualifiers,
+            )?;
+        }
+        match function {
+            WindowFunctionType::Lag(_, _, Some(default))
+            | WindowFunctionType::Lead(_, _, Some(default)) => {
+                db_sql::validate_raw_sql_fragment("LAG/LEAD default expression", default)?;
             }
             WindowFunctionType::Custom(expression) => {
                 db_sql::validate_raw_sql_fragment("window function expression", expression)?;
             }
-            WindowFunctionType::RowNumber
-            | WindowFunctionType::Rank
-            | WindowFunctionType::DenseRank
-            | WindowFunctionType::Ntile(_)
-            | WindowFunctionType::Count(None) => {}
+            _ => {}
         }
 
         Ok(())
+    }
+
+    /// Fail this query when `operand`, a query it embeds through `method`,
+    /// could not run on its own; `what` names the operand in the message.
+    pub(in crate::query) fn absorb_operand_error<N: Model>(
+        &mut self,
+        what: &str,
+        method: &str,
+        operand: &QueryBuilder<N>,
+    ) {
+        if let Err(err) = operand.ensure_query_is_executable() {
+            self.invalidate_query(format!("invalid {what} for {method}(): {err}"));
+        }
     }
 
     pub(super) fn validate_cte_clause(cte: &CTE) -> std::result::Result<(), String> {
@@ -771,30 +747,25 @@ impl<M: Model> QueryBuilder<M> {
         let qualifiers = self.known_qualifiers();
         let qualifiers = Some(&qualifiers);
 
-        for condition in &self.conditions {
-            Self::validate_condition(condition, qualifiers).map_err(Error::invalid_query)?;
+        for condition in self.all_conditions() {
+            Self::validate_condition(condition, qualifiers).map_err(Error::query)?;
         }
 
-        for group in &self.or_groups {
-            Self::validate_or_group(group, qualifiers).map_err(Error::invalid_query)?;
-        }
-
-        for (column, _) in &self.order_by {
+        for (column, _) in &self.clauses.order_by {
             Self::validate_order_or_group_value("ORDER BY column", column, true, qualifiers)
-                .map_err(Error::invalid_query)?;
+                .map_err(Error::query)?;
         }
 
-        for column in &self.group_by {
+        for column in &self.clauses.group_by {
             Self::validate_order_or_group_value("GROUP BY column", column, false, qualifiers)
-                .map_err(Error::invalid_query)?;
+                .map_err(Error::query)?;
         }
 
         for (having, bindings) in self.having_clauses() {
             // Parameterized clauses are validated too: the stored template still
             // has to be a safe HAVING expression, and `?` is an accepted token
             // there, so carrying bindings is no reason to skip the check.
-            db_sql::validate_having_sql_fragment("HAVING raw SQL", having)
-                .map_err(Error::invalid_query)?;
+            db_sql::validate_having_sql_fragment("HAVING raw SQL", having).map_err(Error::query)?;
 
             // The HAVING renderer substitutes every `?` of the template outside
             // quotes, so that count is what has to agree with the bound values. A mismatch would shift PostgreSQL's `$n` numbering
@@ -803,7 +774,7 @@ impl<M: Model> QueryBuilder<M> {
             // `debug_assert!` that disappears in release builds.
             let placeholder_count = db_sql::count_template_placeholders(having);
             if placeholder_count != bindings.len() {
-                return Err(Error::invalid_query(format!(
+                return Err(Error::query(format!(
                     "HAVING clause '{}' has {} placeholder(s) but {} bound value(s)",
                     having,
                     placeholder_count,
@@ -812,30 +783,27 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
-        if let Some(columns) = &self.select_columns {
+        if let Some(columns) = &self.clauses.select_columns {
             for column in columns {
-                Self::validate_select_value(column, qualifiers).map_err(Error::invalid_query)?;
+                Self::validate_select_value(column, qualifiers).map_err(Error::query)?;
             }
         }
-        self.validate_projection_names()
-            .map_err(Error::invalid_query)?;
+        self.validate_projection_names().map_err(Error::query)?;
 
         if self.is_distinct() {
-            self.validate_distinct_order_by()
-                .map_err(Error::invalid_query)?;
+            self.validate_distinct_order_by().map_err(Error::query)?;
         }
 
-        for union in &self.unions {
-            Self::validate_union_clause(union).map_err(Error::invalid_query)?;
+        for union in &self.clauses.unions {
+            Self::validate_union_clause(union).map_err(Error::query)?;
         }
 
-        for window_function in &self.window_functions {
-            Self::validate_window_function(window_function, qualifiers)
-                .map_err(Error::invalid_query)?;
+        for window_function in &self.clauses.window_functions {
+            Self::validate_window_function(window_function, qualifiers).map_err(Error::query)?;
         }
 
-        for cte in &self.ctes {
-            Self::validate_cte_clause(cte).map_err(Error::invalid_query)?;
+        for cte in &self.clauses.ctes {
+            Self::validate_cte_clause(cte).map_err(Error::query)?;
         }
 
         Ok(())
@@ -847,14 +815,9 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query) fn known_qualifiers(&self) -> BTreeSet<String> {
         let mut qualifiers = BTreeSet::new();
         qualifiers.insert(M::table_name().to_string());
-        for join in &self.joins {
-            if let Some(alias) = &join.alias {
-                qualifiers.insert(alias.clone());
-            } else {
-                // A `schema.table` join is referenced by its table name.
-                let table = join.table.rsplit('.').next().unwrap_or(&join.table);
-                qualifiers.insert(table.to_string());
-            }
+        // A `schema.table` join is referenced by its table name.
+        for join in &self.clauses.joins {
+            qualifiers.insert(join.qualifier().to_string());
         }
         qualifiers
     }
@@ -865,41 +828,9 @@ impl<M: Model> QueryBuilder<M> {
         Self {
             _marker: PhantomData,
             database: None,
-            conditions: Vec::new(),
-            or_groups: Vec::new(),
-            simple_or_group: None,
-            order_by: Vec::new(),
-            limit_value: None,
-            offset_value: None,
-            select_columns: None,
-            raw_select_expressions: Vec::new(),
-            subquery_select_expressions: Vec::new(),
-            include_trashed: false,
-            only_trashed: false,
-            lock_for_update: false,
-            joins: Vec::new(),
-            invalid_query_reason: None,
-            invalid_page: None,
-            group_by: Vec::new(),
-            having_conditions: Vec::new(),
-            having_bindings: Vec::new(),
-            unions: Vec::new(),
-            window_functions: Vec::new(),
-            ctes: Vec::new(),
-            cache_options: None,
-            cache_key: None,
-            joined_column_types: Vec::new(),
+            clauses: super::clauses::Clauses::default(),
             self_join_depth: 0,
         }
-    }
-
-    /// Bind filter values on `N`'s table-qualified columns with `N`'s column
-    /// types, for a query that joins `N`'s table.
-    #[must_use]
-    pub(crate) fn bind_columns_of<N: Model>(mut self) -> Self {
-        self.joined_column_types
-            .push(crate::internal::column_type_of::<N>);
-        self
     }
 
     #[must_use]
@@ -930,34 +861,48 @@ impl<M: Model> QueryBuilder<M> {
         crate::model::BatchUpdateBuilder::from_query(self)
     }
 
-    /// The first part of this query an `UPDATE` cannot keep, if any.
+    /// The first part of this query an `UPDATE` cannot keep, if any: one
+    /// that reshapes the rows rather than filters them.
     pub(crate) fn update_blocker(&self) -> Option<&'static str> {
         [
-            (!self.joins.is_empty(), "a join"),
-            (!self.unions.is_empty(), "a union"),
-            (!self.ctes.is_empty(), "a CTE"),
-            (!self.group_by.is_empty(), "group_by()"),
-            (!self.having_conditions.is_empty(), "having()"),
-            (!self.window_functions.is_empty(), "a window function"),
+            (!self.clauses.joins.is_empty(), "a join"),
+            (!self.clauses.unions.is_empty(), "a union"),
+            (!self.clauses.ctes.is_empty(), "a CTE"),
+            (!self.clauses.group_by.is_empty(), "group_by()"),
+            (!self.clauses.having_conditions.is_empty(), "having()"),
             (
-                self.limit_value.is_some() || self.offset_value.is_some(),
-                "limit() or offset() (set the update's own limit())",
+                !self.clauses.window_functions.is_empty(),
+                "a window function",
+            ),
+            (
+                self.clauses.limit_value.is_some() || self.clauses.offset_value.is_some(),
+                "limit() or offset()",
             ),
         ]
         .into_iter()
         .find_map(|(present, part)| present.then_some(part))
     }
 
-    /// This query over live rows only, whatever scope it had.
-    pub(crate) fn live_rows_only(mut self) -> Self {
-        self.include_trashed = false;
-        self.only_trashed = false;
-        self
+    /// The first part of this query a `DELETE` or a trash mutation cannot
+    /// keep: an [`update_blocker`](Self::update_blocker), a projection or an
+    /// ordering.
+    pub(crate) fn mutation_blocker(&self) -> Option<&'static str> {
+        self.update_blocker().or_else(|| {
+            [
+                (self.has_explicit_projection(), "a select()"),
+                (self.is_distinct(), "distinct()"),
+                (!self.clauses.order_by.is_empty(), "an ordering"),
+            ]
+            .into_iter()
+            .find_map(|(present, part)| present.then_some(part))
+        })
     }
 
-    /// The database a `query_with` handle named, if one did.
-    pub(crate) fn named_database(&self) -> Option<crate::database::Database> {
-        self.database.clone()
+    /// This query over live rows only, whatever scope it had.
+    pub(crate) fn live_rows_only(mut self) -> Self {
+        self.clauses.include_trashed = false;
+        self.clauses.only_trashed = false;
+        self
     }
 
     /// Promote this query into the eager-loading builder and batch-load a relation.
@@ -978,12 +923,16 @@ impl<M: Model> QueryBuilder<M> {
         crate::relations::EagerQueryBuilder::from_query(self).with_many(relations)
     }
 
-    pub(super) fn current_db(&self) -> Result<crate::database::Database> {
-        if let Some(database) = &self.database {
-            Ok(database.clone())
-        } else {
-            crate::database::__current_db()
-        }
+    /// The database a `query_with` handle named, if one did.
+    pub(crate) fn named_database(&self) -> Option<crate::database::Database> {
+        self.database.clone()
+    }
+
+    /// The database the query runs on: the one a `query_with` handle named,
+    /// else the scope's.
+    pub(crate) fn current_db(&self) -> Result<crate::database::Database> {
+        self.named_database()
+            .map_or_else(crate::database::__current_db, Ok)
     }
 
     /// Consolidate the current query clauses into a reusable fragment.
@@ -1000,29 +949,7 @@ impl<M: Model> QueryBuilder<M> {
     pub fn consolidate(&self) -> QueryFragment<M> {
         QueryFragment {
             _marker: PhantomData,
-            conditions: self.conditions.clone(),
-            or_groups: self.or_groups.clone(),
-            simple_or_group: self.simple_or_group,
-            order_by: self.order_by.clone(),
-            limit_value: self.limit_value,
-            offset_value: self.offset_value,
-            select_columns: self.select_columns.clone(),
-            raw_select_expressions: self.raw_select_expressions.clone(),
-            subquery_select_expressions: self.subquery_select_expressions.clone(),
-            group_by: self.group_by.clone(),
-            having_conditions: self.having_conditions.clone(),
-            having_bindings: self.having_bindings.clone(),
-            joins: self.joins.clone(),
-            unions: self.unions.clone(),
-            window_functions: self.window_functions.clone(),
-            ctes: self.ctes.clone(),
-            cache_options: self.cache_options.clone(),
-            cache_key: self.cache_key.clone(),
-            invalid_query_reason: self.invalid_query_reason.clone(),
-            invalid_page: self.invalid_page.clone(),
-            include_trashed: self.include_trashed,
-            only_trashed: self.only_trashed,
-            lock_for_update: self.lock_for_update,
+            clauses: self.clauses.clone(),
         }
     }
 
@@ -1030,61 +957,18 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query) fn having_clauses(
         &self,
     ) -> impl Iterator<Item = (&str, &[crate::internal::Value])> {
-        self.having_conditions
+        self.clauses
+            .having_conditions
             .iter()
             .enumerate()
             .map(|(index, clause)| {
                 let bindings = self
+                    .clauses
                     .having_bindings
                     .get(index)
                     .map_or(&[][..], Vec::as_slice);
                 (clause.as_str(), bindings)
             })
-    }
-
-    /// Append a fragment's HAVING clauses, keeping every clause paired with the
-    /// values bound to its `?` placeholders.
-    ///
-    /// `having_bindings` is indexed in lockstep with `having_conditions`, so the
-    /// binding vector is topped up to the current clause count before appending:
-    /// a fragment merged into a builder whose two vectors had drifted apart
-    /// would otherwise shift the pairing for every clause that follows.
-    fn extend_having_from_fragment(&mut self, fragment: &QueryFragment<M>) {
-        self.having_bindings
-            .resize(self.having_conditions.len(), Vec::new());
-
-        for (index, condition) in fragment.having_conditions.iter().enumerate() {
-            self.having_conditions.push(condition.clone());
-            self.having_bindings.push(
-                fragment
-                    .having_bindings
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_default(),
-            );
-        }
-    }
-
-    /// Append a fragment's OR groups, merging the group its `or_where_*` calls
-    /// built into this builder's own.
-    fn extend_or_groups_from_fragment(&mut self, fragment: &QueryFragment<M>) {
-        for (index, group) in fragment.or_groups.iter().enumerate() {
-            if fragment.simple_or_group != Some(index) {
-                self.or_groups.push(group.clone());
-                continue;
-            }
-
-            match self
-                .simple_or_group
-                .and_then(|own| self.or_groups.get_mut(own))
-            {
-                Some(own) => own.conditions.extend_from_slice(&group.conditions),
-                None => {
-                    self.simple_or_group = Some(self.or_groups.len());
-                    self.or_groups.push(group.clone());
-                }
-            }
-        }
     }
 
     /// Apply a reusable fragment to the current query builder.
@@ -1119,85 +1003,21 @@ impl<M: Model> QueryBuilder<M> {
     /// original query.
     #[must_use]
     pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
-        self.conditions.extend_from_slice(&fragment.conditions);
-        self.extend_or_groups_from_fragment(fragment);
-        self.order_by.extend_from_slice(&fragment.order_by);
-
-        if fragment.limit_value.is_some() {
-            self.limit_value = fragment.limit_value;
-        }
-
-        if fragment.offset_value.is_some() {
-            self.offset_value = fragment.offset_value;
-        }
-
-        if fragment.select_columns.is_some() {
-            self.select_columns = fragment.select_columns.clone();
-        }
-
-        // The DISTINCT sentinel is a flag rather than an expression, so a
-        // fragment merged into an already-distinct builder must not append a
-        // second copy of it.
-        let already_distinct = self.is_distinct();
-        self.raw_select_expressions.extend(
-            fragment
-                .raw_select_expressions
-                .iter()
-                .filter(|expression| {
-                    expression.as_str() != DISTINCT_SELECT_MARKER || !already_distinct
-                })
-                .cloned(),
-        );
-        self.subquery_select_expressions
-            .extend_from_slice(&fragment.subquery_select_expressions);
-
-        self.group_by.extend_from_slice(&fragment.group_by);
-        self.extend_having_from_fragment(fragment);
-        self.joins.extend_from_slice(&fragment.joins);
-        self.unions.extend_from_slice(&fragment.unions);
-        self.window_functions
-            .extend_from_slice(&fragment.window_functions);
-        self.ctes.extend_from_slice(&fragment.ctes);
-
-        if fragment.cache_options.is_some() {
-            self.cache_options = fragment.cache_options.clone();
-        }
-
-        if fragment.cache_key.is_some() {
-            self.cache_key = fragment.cache_key.clone();
-        }
-
-        if self.invalid_query_reason.is_none() {
-            self.invalid_query_reason = fragment.invalid_query_reason.clone();
-        }
-        if self.invalid_page.is_none() {
-            self.invalid_page = fragment.invalid_page.clone();
-        }
-
-        if fragment.only_trashed {
-            self.only_trashed = true;
-            self.include_trashed = false;
-        } else if fragment.include_trashed {
-            self.include_trashed = true;
-            self.only_trashed = false;
-        }
-
-        self.lock_for_update |= fragment.lock_for_update;
-
+        self.clauses.merge(&fragment.clauses);
         self
     }
 
     pub(super) fn invalidate_query(&mut self, reason: String) {
-        if self.invalid_query_reason.is_none() {
-            self.invalid_query_reason = Some(reason);
+        if self.clauses.invalid_query_reason.is_none() {
+            self.clauses.invalid_query_reason = Some(reason);
         }
     }
 
     pub(super) fn ensure_query_is_valid(&self) -> Result<()> {
-        if let Some(reason) = &self.invalid_query_reason {
-            return Err(Error::invalid_query(reason));
+        if let Some(reason) = &self.clauses.invalid_query_reason {
+            return Err(Error::query(reason));
         }
-        if let Some((field, message)) = &self.invalid_page {
+        if let Some((field, message)) = &self.clauses.invalid_page {
             return Err(Error::validation(*field, message.clone()));
         }
 

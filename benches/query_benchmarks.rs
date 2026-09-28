@@ -3,10 +3,9 @@
 //! These benchmarks measure the performance of various query operations
 //! against a PostgreSQL database.
 //!
-//! Requirements:
-//! - PostgreSQL running on localhost:5432
-//! - Database: test_tide_orm
-//! - User: postgres / Password: postgres
+//! Opt-in like the PostgreSQL test suites: set `POSTGRESQL_DATABASE_URL`,
+//! `TEST_DATABASE_URL` or `RUN_POSTGRES_TESTS`, or the bench prints a note and
+//! exits.
 //!
 //! Run with: cargo bench --bench query_benchmarks
 
@@ -147,10 +146,4 @@ criterion_group!(
     bench_bulk_delete,
     bench_combined_features
 );
-// `criterion_main!`, run only when a PostgreSQL server is configured.
-fn main() {
-    if support::postgres_benchmarks_enabled() {
-        benches();
-        Criterion::default().configure_from_args().final_summary();
-    }
-}
+support::postgres_bench_main!();

@@ -4,25 +4,25 @@
     feature = "entity-manager"
 ))]
 
-#[path = "support/mariadb_test_config.rs"]
+#[path = "support/mysql_family_test_config.rs"]
 mod test_config;
+
+static SERVER: test_config::Server = test_config::Server::new("MariaDB", "MARIADB");
 
 mod backend {
     use std::sync::Arc;
 
     use tideorm::Database;
 
-    use super::test_config::{mariadb_database_url, should_run_mariadb_tests};
+    use super::SERVER;
 
     pub async fn connect() -> tideorm::Result<Option<Arc<Database>>> {
-        if !should_run_mariadb_tests() {
-            println!(
-                "Skipping MariaDB entity-manager test: set RUN_MARIADB_TESTS or MARIADB_DATABASE_URL (SKIP_MARIADB_TESTS overrides both)"
-            );
+        if !SERVER.enabled() {
+            println!("{}", SERVER.skipped("entity-manager test"));
             return Ok(None);
         }
 
-        let db = Arc::new(Database::connect(mariadb_database_url()).await?);
+        let db = Arc::new(Database::connect(SERVER.database_url()).await?);
         Database::set_global(db.as_ref().clone())?;
         Ok(Some(db))
     }
