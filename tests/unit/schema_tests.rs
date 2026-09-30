@@ -649,3 +649,22 @@ fn test_mysql_defaults_are_restored_to_a_default_clause() {
         Some("'draft'")
     );
 }
+
+#[test]
+fn qualified_generic_types_have_mapping_parity() {
+    // Keep this fixture aligned with the macro's generic-type parity test.
+    for (plain, qualified) in [
+        ("Vec<String>", "std::vec::Vec<std::string::String>"),
+        ("Vec<Json>", "Vec<tideorm::types::Json>"),
+        ("Vec<serde_json::Value>", "std::vec::Vec<serde_json::Value>"),
+        (
+            "Option<Vec<String>>",
+            "std::option::Option<std::vec::Vec<std::string::String>>",
+        ),
+    ] {
+        assert_eq!(
+            sql_for(plain, DatabaseType::Postgres),
+            sql_for(qualified, DatabaseType::Postgres)
+        );
+    }
+}

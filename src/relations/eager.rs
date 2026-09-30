@@ -402,8 +402,20 @@ async fn matching_keys<M: Model>(
 ) -> Result<HashMap<String, Vec<String>>> {
     let column = M::column_named(foreign_key);
     let lookup = |index: usize, key: &serde_json::Value| {
-        let mut query = M::query()
+        let builder = M::query();
+        let quoted = crate::query::db_sql::format_column(builder.db_type_for_sql(), column);
+        // DISTINCT must preserve different byte spellings under case/accent-insensitive collations.
+        let exact = match builder.db_type_for_sql() {
+            crate::config::DatabaseType::Postgres => {
+                format!("CAST({quoted} AS TEXT) COLLATE \"C\"")
+            }
+            crate::config::DatabaseType::SQLite => format!("CAST({quoted} AS BLOB)"),
+            _ => format!("CAST({quoted} AS BINARY)"),
+        };
+        let mut query = builder
+            .distinct()
             .select(vec![column])
+            .select_raw(&format!("{exact} AS tideorm_exact_key"))
             .select_raw(&format!("{index} AS tideorm_key_index"))
             .where_eq(foreign_key, key.clone());
         if let Some((type_column, type_value)) = morph_type {
@@ -413,6 +425,7 @@ async fn matching_keys<M: Model>(
     };
 
     let mut pairs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen = std::collections::HashSet::new();
     for (batch, chunk) in keys.chunks(PAIRED_KEYS_PER_QUERY).enumerate() {
         let offset = batch * PAIRED_KEYS_PER_QUERY;
         let mut lookups = chunk
@@ -435,10 +448,10 @@ async fn matching_keys<M: Model>(
                         M::table_name()
                     ))
                 })?;
-            let matches = pairs.entry(__relation_key(&row[column])).or_default();
+            let stored = __relation_key(&row[column]);
             let key = __relation_key(index);
-            if !matches.contains(&key) {
-                matches.push(key);
+            if seen.insert((stored.clone(), key.clone())) {
+                pairs.entry(stored).or_default().push(key);
             }
         }
     }

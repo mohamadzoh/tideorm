@@ -74,22 +74,31 @@ pub enum QueryOperation {
 impl QueryOperation {
     /// Classify a rendered SQL statement by its leading keyword.
     pub fn from_sql(sql: &str) -> Self {
-        let sql_upper = sql.trim().to_uppercase();
-        if sql_upper.starts_with("SELECT") {
-            Self::Select
-        } else if sql_upper.starts_with("INSERT") {
-            Self::Insert
-        } else if sql_upper.starts_with("UPDATE") {
-            Self::Update
-        } else if sql_upper.starts_with("DELETE") {
-            Self::Delete
-        } else if sql_upper.starts_with("BEGIN")
-            || sql_upper.starts_with("COMMIT")
-            || sql_upper.starts_with("ROLLBACK")
-        {
-            Self::Transaction
+        let words = crate::internal::sql_lexer::top_words(sql);
+        let Some(first) = words.first() else {
+            return Self::Unknown;
+        };
+        let operation = if first.eq_ignore_ascii_case("with") {
+            words
+                .iter()
+                .skip(1)
+                .find(|word| {
+                    ["select", "insert", "update", "delete"]
+                        .iter()
+                        .any(|op| word.eq_ignore_ascii_case(op))
+                })
+                .copied()
+                .unwrap_or("")
         } else {
-            Self::Unknown
+            first
+        };
+        match operation.to_ascii_uppercase().as_str() {
+            "SELECT" => Self::Select,
+            "INSERT" => Self::Insert,
+            "UPDATE" => Self::Update,
+            "DELETE" => Self::Delete,
+            "BEGIN" | "COMMIT" | "ROLLBACK" => Self::Transaction,
+            _ => Self::Unknown,
         }
     }
 

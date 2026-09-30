@@ -819,6 +819,7 @@ impl<M: Model> QueryBuilder<M> {
         other: &QueryBuilder<N>,
     ) -> Self {
         self.absorb_operand_error("operand", method, other);
+        self.clauses.dependencies.extend(other.cache_tables());
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
         self.clauses

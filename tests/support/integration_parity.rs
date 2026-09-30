@@ -4592,13 +4592,17 @@ async fn eager_loads_match_keys_under_the_columns_collation() {
         .await
         .expect("saving an owner failed");
     }
-    CasedItem {
-        id: 0,
-        owner_code: "abc".into(),
+    // Duplicate children must not duplicate the pairing projection; byte-distinct
+    // spellings must still both map to each matching parent under NOCASE.
+    for code in ["abc", "abc", "ABC", "ABC"] {
+        CasedItem {
+            id: 0,
+            owner_code: code.into(),
+        }
+        .save()
+        .await
+        .expect("saving an item failed");
     }
-    .save()
-    .await
-    .expect("saving an item failed");
 
     let eager = CasedOwner::query()
         .order_by("code", Order::Asc)
@@ -4620,7 +4624,7 @@ async fn eager_loads_match_keys_under_the_columns_collation() {
             lazy.code
         );
         if backend::DATABASE_TYPE != DatabaseType::Postgres {
-            assert_eq!(loaded, 1, "owner {}", lazy.code);
+            assert_eq!(loaded, 4, "owner {}", lazy.code);
         }
     }
 }

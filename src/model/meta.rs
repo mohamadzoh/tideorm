@@ -247,6 +247,12 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
         crate::config::Config::get_fallback_language()
     }
 
+    /// Read the backing translation payload independently of serde output policies.
+    #[doc(hidden)]
+    fn __translation_payload(&self) -> crate::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
     #[cfg(feature = "translations")]
     fn has_translations() -> bool {
         !Self::translatable_fields().is_empty()

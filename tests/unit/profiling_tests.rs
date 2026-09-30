@@ -117,3 +117,29 @@ fn a_leading_newline_does_not_hide_a_missing_where() {
         QueryAnalyzer::estimate_complexity("DELETE FROM users")
     );
 }
+
+#[test]
+fn diagnostics_inspect_structure_not_literal_text() {
+    let warnings = QueryAnalyzer::analyze("UPDATE users SET name = 'WHERE'");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.title == "Missing WHERE clause")
+    );
+    let warnings = QueryAnalyzer::analyze("SELECT LOWER(name) FROM users");
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.title == "Function in WHERE clause")
+    );
+    assert_eq!(
+        crate::logging::QueryOperation::from_sql(
+            "/* lead */ WITH c AS (SELECT 1) UPDATE users SET name = 'x'"
+        ),
+        crate::logging::QueryOperation::Update
+    );
+    assert_eq!(
+        crate::logging::QueryOperation::from_sql("-- lead\nSELECT 1"),
+        crate::logging::QueryOperation::Select
+    );
+}

@@ -579,3 +579,22 @@ fn a_distinct_aggregate_runs_over_the_distinct_rows() {
         .expect("aggregate sql");
     assert!(sql.contains("FROM (SELECT DISTINCT"), "{sql}");
 }
+
+#[test]
+fn cache_dependencies_preserve_quoted_identifiers() {
+    let mut tables = Vec::new();
+    super::collect_tables_from_sql("SELECT * FROM \"group by\" /* FROM fake */", &mut tables);
+    assert_eq!(tables, vec!["group by"]);
+    let composed = CacheKeyTestUser::query().union_all(CacheKeyTestPost::query());
+    assert!(
+        composed
+            .clauses
+            .dependencies
+            .contains(&"cache_key_test_posts".to_string())
+    );
+    assert!(
+        composed
+            .cache_tables()
+            .contains(&"cache_key_test_posts".to_string())
+    );
+}

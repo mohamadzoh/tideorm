@@ -43,6 +43,22 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
     let field_names = &ctx.field_names;
     let hidden_attrs = &ctx.hidden_attrs;
+    let translation_field = ctx.fields.iter().find(|field| {
+        !ctx.translatable_fields.is_empty()
+            && field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "translations")
+    });
+    let translation_payload_impl = translation_field.map(|field| {
+        let ident = field.ident();
+        quote! {
+            fn __translation_payload(&self) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {
+                ::tideorm::serde_json::to_value(&self.#ident).map(Some)
+                    .map_err(|error| ::tideorm::Error::internal(format!("Invalid translations: {}", error)))
+            }
+        }
+    });
     let translatable_fields = &ctx.translatable_fields;
     let encrypted_fields = &ctx.encrypted_fields;
     let encrypted_column_names = &ctx.encrypted_column_names;
@@ -292,6 +308,7 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             #searchable_fields_impl
             #morph_owner_key_impl
             #translatable_fields_impl
+            #translation_payload_impl
             #encrypted_fields_impl
             #driver_limited_fields_impl
             #allowed_languages_impl

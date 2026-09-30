@@ -8,27 +8,45 @@ pub(crate) fn to_json<M>(model: &M, options: Option<&HashMap<String, String>>) -
 where
     M: Model,
 {
+    try_to_json(model, options).unwrap_or_else(|error| {
+        crate::tide_warn!("to_json for `{}` failed: {}", M::table_name(), error);
+        serde_json::json!({})
+    })
+}
+
+pub(crate) fn try_to_json<M: Model>(
+    model: &M,
+    options: Option<&HashMap<String, String>>,
+) -> crate::Result<serde_json::Value> {
     let global_hidden = crate::config::Config::get_hidden_attributes();
-
-    let mut json = match model_to_object(model) {
-        Ok(map) => map,
-        Err(error) => {
-            crate::tide_warn!("to_json for `{}` failed: {}", M::table_name(), error);
-            return serde_json::json!({});
-        }
-    };
-
-    if M::has_translations()
-        && let Some(translations) = json.remove(M::serialized_name("translations"))
-        && let Some(translations) = translations.as_object()
-    {
-        let language = options
-            .and_then(|opts| opts.get("language"))
-            .map(String::as_str);
-        for (field, value) in translated_values::<M>(translations, language) {
-            json.insert(M::serialized_name(field).to_string(), value);
+    #[allow(unused_mut)] // Optional translation and attachment renderers mutate this map.
+    let mut json = model_to_object(model).map_err(crate::Error::internal)?;
+    #[cfg(feature = "translations")]
+    if M::has_translations() {
+        let serialized = json.remove(M::serialized_name("translations"));
+        let payload = model.__translation_payload()?.or(serialized);
+        if let Some(payload) = payload.filter(|value| !value.is_null()) {
+            let data: crate::translations::TranslationsData = serde_json::from_value(payload)
+                .map_err(|error| {
+                    crate::Error::internal(format!("Invalid translations: {error}"))
+                })?;
+            let fallback = M::fallback_language();
+            let language = options
+                .and_then(|opts| opts.get("language"))
+                .map(String::as_str)
+                .unwrap_or(&fallback);
+            crate::translations::render_translations(
+                &mut json,
+                &data,
+                M::translatable_fields(),
+                language,
+                &fallback,
+                M::serialized_name,
+            );
         }
     }
+    #[cfg(not(feature = "translations"))]
+    let _ = options;
 
     #[cfg(feature = "attachments")]
     if M::has_file_attachments()
@@ -56,32 +74,7 @@ where
     // attachment named among the hidden attributes was left out above.
     let mut json = serde_json::Value::Object(json);
     strip_model_payload::<M>(&mut json, &global_hidden);
-    json
-}
-
-/// Each translatable field's value for `language` (default: the model's
-/// fallback language), falling back to the fallback language for a field the
-/// requested one does not define.
-fn translated_values<M>(
-    translations: &serde_json::Map<String, serde_json::Value>,
-    language: Option<&str>,
-) -> Vec<(&'static str, serde_json::Value)>
-where
-    M: ModelMeta,
-{
-    let fallback = M::fallback_language();
-    let language = language.unwrap_or(&fallback);
-
-    M::translatable_fields()
-        .into_iter()
-        .filter_map(|field| {
-            let by_language = translations.get(field)?.as_object()?;
-            let value = by_language
-                .get(language)
-                .or_else(|| by_language.get(fallback.as_str()))?;
-            Some((field, value.clone()))
-        })
-        .collect()
+    Ok(json)
 }
 
 /// Return whether `name` is one of the model's own persisted attributes.

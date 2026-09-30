@@ -18,8 +18,8 @@ struct PreparedStatement {
     last_used: Instant,
     /// Number of times this statement has been executed
     execution_count: u64,
-    /// Average execution time in microseconds
-    avg_execution_time_us: u64,
+    /// Accumulated duration; divide only when reporting an average.
+    total_execution_time_us: u128,
 }
 
 impl PreparedStatement {
@@ -30,15 +30,14 @@ impl PreparedStatement {
             prepared_at: now,
             last_used: now,
             execution_count: 0,
-            avg_execution_time_us: 0,
+            total_execution_time_us: 0,
         }
     }
 
     fn record_execution(&mut self, execution_time_us: u64) {
         self.last_used = Instant::now();
-        let total = self.avg_execution_time_us * self.execution_count + execution_time_us;
+        self.total_execution_time_us += u128::from(execution_time_us);
         self.execution_count += 1;
-        self.avg_execution_time_us = total / self.execution_count;
     }
 }
 
@@ -224,71 +223,48 @@ impl PreparedStatementCache {
     /// counts as a miss: the colliding entry is replaced rather than handed back,
     /// so a collision can never make one statement execute another's SQL.
     pub fn get_or_prepare(&self, sql: &str) -> (String, bool) {
-        if !self.is_enabled() {
-            return (sql.to_string(), false);
-        }
-
-        let hash = Self::hash_sql(sql);
-        let max_age = self.config.read().max_age;
-        let is_current =
-            |stmt: &PreparedStatement| stmt.sql == sql && stmt.prepared_at.elapsed() < max_age;
-
-        // Fast path: read-only cache hit without taking the write lock.
-        if self.statements.read().get(&hash).is_some_and(is_current) {
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            return (sql.to_string(), true);
-        }
-
-        // Remove expired or colliding entries, and resolve races, under the
-        // write lock.
-        {
-            let mut statements = self.statements.write();
-            if let Some(stmt) = statements.get(&hash) {
-                if is_current(stmt) {
-                    drop(statements);
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return (sql.to_string(), true);
-                }
-
-                statements.remove(&hash);
-            }
-        }
-
-        self.cache_statement(sql);
-        self.misses.fetch_add(1, Ordering::Relaxed);
-
-        (sql.to_string(), false)
+        (sql.to_string(), self.register(sql, None))
     }
 
-    /// Cache a statement
-    fn cache_statement(&self, sql: &str) {
-        let hash = Self::hash_sql(sql);
-        let max_statements = self.config.read().max_statements;
-
-        // A zero budget means "cache nothing". Falling through would spin forever
-        // under the write lock: the eviction loop can never bring an empty map
-        // below zero entries.
-        if max_statements == 0 {
-            return;
+    // Registration and optional timing update share one lock and one hash.
+    fn register(&self, sql: &str, execution_time_us: Option<u64>) -> bool {
+        if !self.is_enabled() {
+            return false;
         }
-
+        let config = self.config.read().clone();
+        let hash = Self::hash_sql(sql);
         let mut statements = self.statements.write();
-        while statements.len() >= max_statements {
-            let oldest_key = statements
-                .iter()
-                .min_by_key(|(_, stmt)| stmt.last_used)
-                .map(|(key, _)| *key);
-
-            match oldest_key {
-                Some(key) => {
-                    statements.remove(&key);
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
+        let hit = statements
+            .get(&hash)
+            .is_some_and(|stmt| stmt.sql == sql && stmt.prepared_at.elapsed() < config.max_age);
+        if hit {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            statements.remove(&hash);
+            if config.max_statements > 0 {
+                while statements.len() >= config.max_statements {
+                    let oldest = statements
+                        .iter()
+                        .min_by_key(|(_, stmt)| stmt.last_used)
+                        .map(|(key, _)| *key);
+                    if let Some(key) = oldest {
+                        statements.remove(&key);
+                        self.evictions.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        break;
+                    }
                 }
-                None => break,
+                statements.insert(hash, PreparedStatement::new(sql.to_string()));
             }
         }
-
-        statements.insert(hash, PreparedStatement::new(sql.to_string()));
+        if let Some(duration) = execution_time_us {
+            if let Some(stmt) = statements.get_mut(&hash) {
+                stmt.record_execution(duration);
+            }
+            self.total_executions.fetch_add(1, Ordering::Relaxed);
+        }
+        hit
     }
 
     /// Record one execution of `sql`, registering the statement on first sight
@@ -301,8 +277,7 @@ impl PreparedStatementCache {
             return;
         }
 
-        let _ = self.get_or_prepare(sql);
-        self.record_execution(sql, execution_time_us);
+        self.register(sql, Some(execution_time_us));
     }
 
     /// Record execution of a statement
@@ -389,7 +364,9 @@ impl PreparedStatementCache {
                 hash: *hash,
                 sql_preview: sql_preview(&stmt.sql),
                 execution_count: stmt.execution_count,
-                avg_execution_time_us: stmt.avg_execution_time_us,
+                avg_execution_time_us: (stmt.total_execution_time_us
+                    / u128::from(stmt.execution_count.max(1)))
+                    as u64,
                 age_secs: stmt.prepared_at.elapsed().as_secs(),
             })
             .collect()

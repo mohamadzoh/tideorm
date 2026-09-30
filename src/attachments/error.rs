@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Errors that can occur during attachment operations
 #[derive(Debug, Clone, Error)]
 pub enum AttachmentError {
+    /// Stored attachment data could not be decoded.
+    #[error("Invalid attachment data: {0}")]
+    InvalidData(String),
     /// Invalid or unknown relation name
     #[error("Invalid relation: {0}")]
     InvalidRelation(String),

@@ -96,3 +96,38 @@ async fn sqlite_transaction_leak_on_error_returns_transaction_error() {
         .expect("leaked transaction slot lock poisoned")
         .take();
 }
+
+struct RollbackProbe;
+#[async_trait::async_trait]
+impl tideorm::migration::Migration for RollbackProbe {
+    fn version(&self) -> &str {
+        "001"
+    }
+    fn name(&self) -> &str {
+        "rollback probe"
+    }
+    async fn up(&self, _: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+    async fn down(&self, _: &mut tideorm::migration::Schema) -> tideorm::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn missing_latest_migration_is_an_error_and_reset_does_not_silently_succeed() {
+    connect_global().await;
+    let migrator = tideorm::migration::Migrator::new().add(RollbackProbe);
+    migrator.run().await.unwrap();
+    Database::execute("INSERT INTO _migrations (version, name) VALUES ('002', 'missing')")
+        .await
+        .unwrap();
+    let error = migrator.rollback().await.unwrap_err().to_string();
+    assert!(
+        error.contains("002") && error.contains("not registered"),
+        "{error}"
+    );
+    assert!(migrator.rollback_steps(2).await.is_err());
+    assert!(migrator.reset().await.is_err());
+    assert!(migrator.status().await.unwrap()[0].applied);
+}

@@ -20,6 +20,8 @@ use super::{CTE, JoinClause, OrGroup, Order, UnionClause, WhereCondition, Window
 ///   the one reported.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Clauses {
+    /// Structured source tables carried through query composition. **Appended.**
+    pub(crate) dependencies: Vec<String>,
     /// WHERE conditions combined with AND. **Appended.**
     pub(crate) conditions: Vec<WhereCondition>,
     /// Parenthesized OR groups, AND-ed with `conditions`. **Appended.**
@@ -119,6 +121,7 @@ impl Clauses {
     /// Merge `other` in, as replaying the builder calls that made it would,
     /// each slot by the rule its doc names.
     pub(crate) fn merge(&mut self, other: &Clauses) {
+        self.dependencies.extend_from_slice(&other.dependencies);
         self.conditions.extend_from_slice(&other.conditions);
         self.merge_or_groups(other);
         self.order_by.extend_from_slice(&other.order_by);

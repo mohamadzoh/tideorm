@@ -128,7 +128,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.13.0", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.13.1", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.

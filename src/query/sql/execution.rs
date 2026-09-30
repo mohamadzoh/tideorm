@@ -203,16 +203,19 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// A cached payload has to be dropped when *any* of its source tables is
     /// written, not just the model's own table, so the model's table and every
-    /// joined table are reported from the builder's own structure. Union, CTE,
-    /// and subquery operands keep no structured record of what they read — they
-    /// survive only as rendered SQL text — so their tables are recovered by
-    /// `collect_tables_from_sql` until those clauses carry their own sources.
-    fn cache_tables(&self) -> Vec<String> {
+    /// joined table and composed operands retain structured source metadata.
+    /// Raw SQL operands additionally use conservative lexical table extraction.
+    pub(crate) fn cache_tables(&self) -> Vec<String> {
         // The first tag is the declared table name verbatim: every write
         // invalidates with `M::table_name()`, so that tag has to match it
         // character for character. Everything after it is a name read off a join
         // or a rendered operand and is normalized to a bare identifier.
         let mut tables = vec![M::table_name().to_string()];
+        for table in &self.clauses.dependencies {
+            if !tables.contains(table) {
+                tables.push(table.clone());
+            }
+        }
         push_table_tag(&mut tables, M::table_name());
 
         for join in &self.clauses.joins {
@@ -838,32 +841,41 @@ fn push_table_tag(tables: &mut Vec<String>, table: &str) {
 /// `[users]`) and drops any schema qualifier. Anything that is not a plain
 /// identifier is rejected so keywords and expressions never become tags.
 fn normalize_table_name(token: &str) -> Option<String> {
-    const QUOTES: [char; 4] = ['"', '`', '[', ']'];
-    let is_quote = |character: char| QUOTES.contains(&character);
-
-    let qualified = token.trim_matches(|character| is_quote(character) || character == ';');
-    let name = qualified
-        .rsplit_once('.')
-        .map_or(qualified, |(_, table)| table)
-        .trim_matches(is_quote);
-
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|character| character.is_alphanumeric() || character == '_')
-    {
-        return None;
+    use crate::internal::sql_lexer::{Kind, significant};
+    let mut parts = significant(token);
+    let mut name = parts.next()?;
+    loop {
+        if !matches!(name.kind, Kind::Word | Kind::Identifier) {
+            return None;
+        }
+        match parts.next() {
+            None => break,
+            Some(dot) if dot.text == "." => name = parts.next()?,
+            _ => return None,
+        }
     }
-
-    Some(name.to_string())
+    if name.kind == Kind::Identifier {
+        let delimiter = name.text.chars().next_back()?;
+        let expected = if name.text.starts_with('[') {
+            ']'
+        } else {
+            name.text.chars().next()?
+        };
+        if name.text.len() < 2 || delimiter != expected {
+            return None;
+        }
+        let decoded = name.text[1..name.text.len() - 1]
+            .replace(&format!("{delimiter}{delimiter}"), &delimiter.to_string());
+        return (!decoded.is_empty()).then_some(decoded);
+    }
+    Some(name.text.to_string())
 }
 
 /// Pull table names out of rendered SQL: the identifier after each `JOIN`, and
 /// every table of a `FROM` list, `FROM a, b` naming two.
 ///
-/// This is a fallback, not the intended mechanism: joins report their table
-/// directly off `JoinClause`, but union, CTE, and subquery operands only survive
-/// as SQL text and have nothing structured left to ask. Over-collecting is
+/// Composed builders retain structured dependencies. This fallback additionally
+/// handles caller-written SQL in operands and expressions. Over-collecting is
 /// harmless — a spurious tag just makes invalidation more eager — while
 /// under-collecting would keep serving stale rows, so every identifier-shaped
 /// token is kept.
@@ -947,42 +959,22 @@ fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
 /// Split SQL into words and the `(`, `)` and `,` between them, leaving out
 /// whitespace and single-quoted literals.
 fn sql_tokens(sql: &str) -> impl Iterator<Item = &str> {
-    let mut rest = sql;
+    use crate::internal::sql_lexer::{Kind, significant};
+    let mut tokens = significant(sql)
+        .filter(|token| token.kind != Kind::Literal)
+        .peekable();
     std::iter::from_fn(move || {
-        loop {
-            rest = rest.trim_start();
-            let first = rest.chars().next()?;
-            if first == '\'' {
-                // A literal ends at a quote that is not doubled.
-                let mut end = rest.len();
-                let mut chars = rest.char_indices().skip(1).peekable();
-                while let Some((index, character)) = chars.next() {
-                    if character == '\'' {
-                        if chars.peek().is_some_and(|&(_, next)| next == '\'') {
-                            chars.next();
-                        } else {
-                            end = index + 1;
-                            break;
-                        }
-                    }
+        let first = tokens.next()?;
+        let mut end = first.start + first.text.len();
+        if matches!(first.kind, Kind::Word | Kind::Identifier) {
+            while tokens.peek().is_some_and(|token| token.text == ".") {
+                tokens.next();
+                if let Some(part) = tokens.next() {
+                    end = part.start + part.text.len();
                 }
-                rest = &rest[end..];
-                continue;
             }
-            if matches!(first, '(' | ')' | ',') {
-                let (token, tail) = rest.split_at(1);
-                rest = tail;
-                return Some(token);
-            }
-            let end = rest
-                .find(|character: char| {
-                    character.is_whitespace() || matches!(character, '(' | ')' | ',' | '\'')
-                })
-                .unwrap_or(rest.len());
-            let (token, tail) = rest.split_at(end);
-            rest = tail;
-            return Some(token);
         }
+        Some(&sql[first.start..end])
     })
 }
 

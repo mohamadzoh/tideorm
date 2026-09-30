@@ -17,6 +17,7 @@ mod executor;
 mod per_poll;
 #[cfg(feature = "fulltext")]
 pub(crate) mod sql_builder;
+pub(crate) mod sql_lexer;
 pub(crate) mod sql_safety;
 mod topology;
 

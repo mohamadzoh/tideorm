@@ -81,45 +81,47 @@ impl QueryCache {
 
         let strategy = self.config.read().strategy;
 
-        // Fast path: read-only lookup for misses and non-LRU hits.
-        {
+        let payload = {
             let cache = self.cache.read();
-
-            match cache.get(key) {
-                Some(entry) if !entry.is_expired() && strategy != CacheStrategy::LRU => {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return serde_json::from_slice(&entry.data).ok();
-                }
-                Some(_) => {}
-                None => {
-                    self.misses.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
-            }
+            let Some(entry) = cache.get(key) else {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            };
+            (!entry.is_expired() && strategy != CacheStrategy::LRU).then(|| entry.data.clone())
         }
-
-        // Slow path: LRU hits need touch(), and expired entries need removal.
-        let mut cache = self.cache.write();
-
-        match cache.get(key) {
-            Some(entry) if entry.is_expired() => {
-                cache.remove(key);
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                None
+        .or_else(|| {
+            let mut cache = self.cache.write();
+            match cache.get(key) {
+                Some(entry) if entry.is_expired() => {
+                    cache.remove(key);
+                    None
+                }
+                Some(_) if strategy == CacheStrategy::LRU => cache
+                    .touch(key, self.next_order())
+                    .map(|entry| entry.data.clone()),
+                Some(entry) => Some(entry.data.clone()),
+                None => None,
             }
-            Some(_) if strategy == CacheStrategy::LRU => {
-                let access_order = self.next_order();
+        });
+        let Some(payload) = payload else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        match serde_json::from_slice(&payload) {
+            Ok(value) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
-                cache
-                    .touch(key, access_order)
-                    .and_then(|entry| serde_json::from_slice(&entry.data).ok())
+                Some(value)
             }
-            Some(entry) => {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                serde_json::from_slice(&entry.data).ok()
-            }
-            None => {
+            Err(_) => {
                 self.misses.fetch_add(1, Ordering::Relaxed);
+                // A concurrent replacement must survive a failed read of the old payload.
+                let mut cache = self.cache.write();
+                if cache
+                    .get(key)
+                    .is_some_and(|entry| std::sync::Arc::ptr_eq(&entry.data, &payload))
+                {
+                    cache.remove(key);
+                }
                 None
             }
         }

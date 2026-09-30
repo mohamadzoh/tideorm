@@ -163,3 +163,31 @@ fn detaching_a_has_one_by_key_clears_only_that_file() {
     holder.detach("avatar", Some("new.png")).unwrap();
     assert!(holder.files.get_one("avatar").is_none());
 }
+
+#[test]
+fn malformed_attachments_have_fallible_reads() {
+    let files =
+        FilesData::from_json(&serde_json::json!({"one": {"key": 42}, "many": [{"key": 42}]}));
+    assert!(files.try_get_one("one").is_err());
+    assert!(files.try_get_many("many").is_err());
+    assert!(files.try_get_one("absent").unwrap().is_none());
+    assert!(files.try_get_many("absent").unwrap().is_empty());
+}
+
+#[test]
+fn bulk_removal_preserves_order_and_removes_duplicate_keys() {
+    let mut files = FilesData::new();
+    for key in ["a", "b", "a", "c", "d"] {
+        files.add_many("many", FileAttachment::new(key));
+    }
+    files.remove_many("many", &["a", "c"]);
+    assert_eq!(
+        files
+            .try_get_many("many")
+            .unwrap()
+            .iter()
+            .map(|f| f.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b", "d"]
+    );
+}

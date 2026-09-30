@@ -7,7 +7,7 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub(super) struct CacheEntry {
     /// Cached data as serialized JSON bytes.
-    pub(super) data: Vec<u8>,
+    pub(super) data: std::sync::Arc<[u8]>,
     /// Absolute expiration time for efficient TTL eviction.
     expires_at: Instant,
     /// Every table this entry reads, used for targeted invalidation.
@@ -26,7 +26,7 @@ impl CacheEntry {
     pub(super) fn new(data: Vec<u8>, ttl: Duration, tables: HashSet<String>, order: u64) -> Self {
         let now = Instant::now();
         Self {
-            data,
+            data: data.into(),
             // A TTL past what an `Instant` can reach, such as `Duration::MAX`
             // for "keep it", lasts a century rather than expiring at once.
             expires_at: now

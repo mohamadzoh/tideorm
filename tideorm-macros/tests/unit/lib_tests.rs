@@ -1527,3 +1527,24 @@ fn unnamed_indexes_are_named_by_the_runtime_like_a_migration() {
         "{expanded}"
     );
 }
+
+#[test]
+fn qualified_generic_column_types_match_unqualified_types() {
+    for (plain, qualified) in [
+        ("Vec<String>", "std::vec::Vec<std::string::String>"),
+        ("Vec<Json>", "Vec<tideorm::types::Json>"),
+        ("Vec<serde_json::Value>", "std::vec::Vec<serde_json::Value>"),
+        (
+            "Option<Vec<String>>",
+            "std::option::Option<std::vec::Vec<std::string::String>>",
+        ),
+    ] {
+        let column = |ty| {
+            field_with_type(syn::parse_str(ty).unwrap())
+                .column_type_expr()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(column(plain), column(qualified), "{qualified}");
+    }
+}

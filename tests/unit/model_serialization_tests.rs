@@ -337,3 +337,104 @@ fn a_model_reads_a_sequence_in_the_order_serialize_writes_one() {
         Some(1)
     );
 }
+
+fn reject_serialization<S: serde::Serializer>(_: &String, _: S) -> Result<S::Ok, S::Error> {
+    Err(serde::ser::Error::custom(
+        "deliberate serialization failure",
+    ))
+}
+
+#[tideorm::model(table = "serialization_failure_probe")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SerializationFailureProbe {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[serde(serialize_with = "reject_serialization")]
+    name: String,
+}
+
+#[test]
+fn fallible_model_rendering_reports_serialization_errors() {
+    use crate::model::Model;
+    let model = SerializationFailureProbe {
+        id: 1,
+        name: "name".into(),
+    };
+    assert!(
+        model
+            .try_to_json(None)
+            .unwrap_err()
+            .to_string()
+            .contains("deliberate serialization failure")
+    );
+    assert_eq!(model.to_json(None), json!({}));
+    assert!(SerializationFailureProbe::try_collection_to_json(vec![model], None).is_err());
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(
+    table = "serialization_skipped_translations",
+    translatable = "title",
+    fallback_language = "en"
+)]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SkippedTranslationsProbe {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    #[serde(skip)]
+    translations: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "translations")]
+impl crate::translations::HasTranslations for SkippedTranslationsProbe {
+    fn translatable_fields() -> Vec<&'static str> {
+        vec!["title"]
+    }
+    fn allowed_languages() -> Vec<String> {
+        vec!["en".into(), "fr".into()]
+    }
+    fn fallback_language() -> String {
+        "en".into()
+    }
+    fn get_translations_data(
+        &self,
+    ) -> Result<crate::translations::TranslationsData, crate::translations::TranslationError> {
+        serde_json::from_value(self.translations.clone().unwrap_or(json!({})))
+            .map_err(|error| crate::translations::TranslationError::ParseError(error.to_string()))
+    }
+    fn set_translations_data(
+        &mut self,
+        data: crate::translations::TranslationsData,
+    ) -> Result<(), crate::translations::TranslationError> {
+        self.translations = Some(data.to_json());
+        Ok(())
+    }
+    fn get_default_value(
+        &self,
+        _: &str,
+    ) -> Result<serde_json::Value, crate::translations::TranslationError> {
+        Ok(json!(self.title))
+    }
+}
+
+#[cfg(feature = "translations")]
+#[test]
+fn translation_renderers_share_resolution_when_backing_field_is_skipped() {
+    use crate::{model::Model, translations::HasTranslations};
+    let mut model = SkippedTranslationsProbe {
+        id: 1,
+        title: "default".into(),
+        translations: Some(json!({"title":{"en":"translated"}})),
+    };
+    let options = Some(std::collections::HashMap::from([(
+        "language".into(),
+        "fr".into(),
+    )]));
+    let payload = model.try_to_json(options.clone()).unwrap();
+    assert_eq!(payload["title"], "translated");
+    assert_eq!(payload, model.try_to_translated_json(options).unwrap());
+    model.translations = Some(json!({"title": 42}));
+    assert!(model.try_to_json(None).is_err());
+    assert!(model.try_to_translated_json(None).is_err());
+}

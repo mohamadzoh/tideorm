@@ -23,6 +23,7 @@ impl<M: Model> QueryBuilder<M> {
     #[must_use]
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
         self.absorb_operand_error("subquery", "with_query", &query);
+        self.clauses.dependencies.extend(query.cache_tables());
 
         // The body is spliced into the outer statement and executed, so it goes
         // through the parameterized renderer instead of the debug preview

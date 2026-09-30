@@ -597,3 +597,57 @@ fn test_a_deadlock_marks_every_enclosing_transaction() {
     assert!(other.lock().statement_failed());
     assert!(!other.lock().deadlocked());
 }
+
+#[test]
+fn failed_decode_is_a_miss_and_evicts_payload() {
+    for strategy in [CacheStrategy::LRU, CacheStrategy::FIFO, CacheStrategy::TTL] {
+        let cache = QueryCache::with_config(CacheConfig {
+            enabled: true,
+            strategy,
+            ..Default::default()
+        });
+        cache.set("key", &"text", None, "model").unwrap();
+        assert_eq!(cache.get::<u64>("key"), None);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().misses, 1);
+        assert!(!cache.contains("key"));
+    }
+}
+
+#[test]
+fn decoding_can_reenter_cache_without_holding_a_lock() {
+    static CACHE: std::sync::OnceLock<QueryCache> = std::sync::OnceLock::new();
+    struct Reentrant;
+    impl<'de> serde::Deserialize<'de> for Reentrant {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let _ = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+            CACHE
+                .get()
+                .unwrap()
+                .set("another", &1, None, "model")
+                .unwrap();
+            Ok(Self)
+        }
+    }
+    let cache = CACHE.get_or_init(QueryCache::new);
+    cache.enable();
+    cache.set("key", &1, None, "model").unwrap();
+    assert!(cache.get::<Reentrant>("key").is_some());
+}
+
+#[test]
+fn failed_decoding_keeps_a_replacement_written_during_deserialization() {
+    static CACHE: std::sync::OnceLock<QueryCache> = std::sync::OnceLock::new();
+    struct ReplaceThenFail;
+    impl<'de> serde::Deserialize<'de> for ReplaceThenFail {
+        fn deserialize<D: serde::Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+            CACHE.get().unwrap().set("key", &42, None, "model").unwrap();
+            Err(serde::de::Error::custom("old payload is unusable"))
+        }
+    }
+    let cache = CACHE.get_or_init(QueryCache::new);
+    cache.enable();
+    cache.set("key", &1, None, "model").unwrap();
+    assert!(cache.get::<ReplaceThenFail>("key").is_none());
+    assert_eq!(cache.get::<u64>("key"), Some(42));
+}

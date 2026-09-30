@@ -271,3 +271,36 @@ fn translated_json_writes_the_translation_under_the_serialized_key() {
     assert!(json.get("meta_title").is_none(), "{json}");
     assert!(json.get("translations").is_none(), "{json}");
 }
+
+#[derive(serde::Serialize)]
+struct FailingTranslationAccessor {}
+impl HasTranslations for FailingTranslationAccessor {
+    fn fallback_language() -> String {
+        "en".into()
+    }
+    fn translatable_fields() -> Vec<&'static str> {
+        vec!["name"]
+    }
+    fn allowed_languages() -> Vec<String> {
+        vec!["en".into()]
+    }
+    fn get_translations_data(&self) -> Result<TranslationsData, TranslationError> {
+        Err(TranslationError::ParseError("bad data".into()))
+    }
+    fn set_translations_data(&mut self, _: TranslationsData) -> Result<(), TranslationError> {
+        Ok(())
+    }
+    fn get_default_value(&self, _: &str) -> Result<serde_json::Value, TranslationError> {
+        Ok(serde_json::Value::Null)
+    }
+}
+#[test]
+fn fallible_translation_rendering_reports_accessor_errors() {
+    assert!(
+        FailingTranslationAccessor {}
+            .try_to_translated_json(None)
+            .unwrap_err()
+            .to_string()
+            .contains("bad data")
+    );
+}

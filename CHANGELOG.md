@@ -5,6 +5,34 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-09-28
+
+### Fixed
+
+- Rollback now reports an unregistered latest migration as an error. Reset refuses
+  unknown ledger versions before reverting anything, rather than silently stopping early.
+- Statement tracking accumulates exact durations and registers and records under one lock,
+  preserving concurrent statistics without copying SQL on execution hits.
+- Query-cache payloads are decoded after releasing the cache lock. Failed decoding counts
+  as a miss and removes only the payload that failed, preserving concurrent replacements.
+- Shared SQL lexical boundaries preserve identifiers, nested comments, quoted text, and
+  dollar strings during placeholder rendering and rebasing. Placeholder counting no longer
+  renders a discarded SQL string. Diagnostics recognize leading comments and CTE operations
+  and distinguish SQL structure from literals and projection functions.
+- Composed queries retain source-table dependencies for cache invalidation; raw SQL table
+  extraction preserves quoted names containing spaces.
+- Macro type mapping recognizes module-qualified generic arguments, with parity coverage
+  for supported array spellings.
+- Attachment arrays append in place and remove multiple keys in one pass. New
+  `FilesData::try_get_one` / `try_get_many` methods report malformed entries; attachment
+  trait reads and counts propagate decoding errors.
+- New `Model::try_to_json`, `try_collection_to_json`, and translation `try_*` renderers
+  expose serialization failures. Existing infallible rendering methods remain available.
+  Both translation renderers share fallback resolution, including serde-skipped backing
+  fields, while retaining their existing output-filtering policies.
+- Eager-load collation key pairing deduplicates its projection in SQL and uses set-based
+  accumulation, preserving byte-distinct key spellings under permissive collations.
+
 ## [0.13.0] - 2026-09-28
 
 Duplicated code folded into one implementation each, and the defects two further reviews and the

@@ -8,7 +8,7 @@ use crate::internal::{
     ConnectionTrait, OrmTransaction, TransactionTrait, Value, build_statement_with_values,
     translate_error,
 };
-use crate::{tide_info, tide_warn};
+use crate::tide_info;
 
 use super::{
     DatabaseType, Ledger, Migration, MigrationInfo, MigrationResult, MigrationStatus, Schema,
@@ -286,7 +286,9 @@ impl Migrator {
             .iter()
             .find(|migration| migration.version() == last_version)
         else {
-            return Ok(result);
+            return Err(Error::query(format!(
+                "Cannot roll back migration {last_version}: it is recorded but not registered"
+            )));
         };
 
         tide_info!(
@@ -327,8 +329,7 @@ impl Migrator {
     ///
     /// Only migrations still registered on this migrator can be reverted, since
     /// a ledger row for a version that no longer exists in code has no `down()`
-    /// left to run. Those rows are reported and deliberately left in place
-    /// rather than dropped, so the reset is not silently partial.
+    /// left to run. Reset fails before reverting anything if such rows exist.
     pub async fn reset(&self) -> Result<MigrationResult> {
         let db = require_db()?;
         let ledger = self.ledger()?;
@@ -343,14 +344,13 @@ impl Migrator {
             .collect();
 
         if !unknown.is_empty() {
-            tide_warn!(
-                "Migration reset is leaving {} applied migration(s) recorded because they are no longer registered in code: {}. Their down() cannot be run, so the schema is not fully reset.",
-                unknown.len(),
+            return Err(Error::query(format!(
+                "Cannot reset migrations: recorded versions are not registered: {}",
                 unknown.join(", ")
-            );
+            )));
         }
 
-        self.rollback_steps(recorded.len() - unknown.len()).await
+        self.rollback_steps(recorded.len()).await
     }
 
     /// Refresh migrations (reset + run)

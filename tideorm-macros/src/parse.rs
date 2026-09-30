@@ -282,7 +282,7 @@ impl ModelField {
             quote!(::tideorm::orm::ColumnType::TimestampWithTimeZone)
         } else {
             let base_type = type_string(base_ty);
-            match canonical_schema_type(&base_type) {
+            match canonical_schema_type(&base_type).as_str() {
                 "i8" | "i16" | "u8" | "u16" => quote!(::tideorm::orm::ColumnType::SmallInteger),
                 "i32" | "u32" => quote!(::tideorm::orm::ColumnType::Integer),
                 "i64" | "u64" => quote!(::tideorm::orm::ColumnType::BigInteger),
@@ -314,7 +314,11 @@ impl ModelField {
                 "Vec<f64>" | "FloatArray" => quote!(::tideorm::orm::ColumnType::Array(
                     ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Double)
                 )),
-                "Vec<serde_json::Value>" | "Vec<Json>" | "Vec<JsonValue>" | "JsonArray" => {
+                "Vec<Value>"
+                | "Vec<serde_json::Value>"
+                | "Vec<Json>"
+                | "Vec<JsonValue>"
+                | "JsonArray" => {
                     quote!(::tideorm::orm::ColumnType::Array(
                         ::tideorm::orm::sea_query::RcOrArc::new(::tideorm::orm::ColumnType::Json)
                     ))
@@ -349,38 +353,33 @@ pub(crate) fn find_db_field<'a>(fields: &'a [ModelField], name: &str) -> Option<
     fields.iter().find(|field| field.is_named(name))
 }
 
-/// Maps a path to one of the crate's exported column-type aliases, or to
-/// `String`, onto the bare name, so `tideorm::types::Json` and `Json` pick the
-/// same arm, as do `std::string::String` and `String`.
-fn canonical_schema_type(ty: &str) -> &str {
-    const ALIASES: [&str; 16] = [
-        "String",
-        "Json",
-        "JsonValue",
-        "JsonArray",
-        "Jsonb",
-        "IntArray",
-        "BigIntArray",
-        "TextArray",
-        "BoolArray",
-        "FloatArray",
-        "Decimal",
-        "Uuid",
-        "NaiveDate",
-        "NaiveTime",
-        "NaiveDateTime",
-        "Text",
-    ];
-
-    ALIASES
-        .into_iter()
-        .find(|alias| {
-            ty == *alias
-                || ty
-                    .strip_suffix(alias)
-                    .is_some_and(|prefix| prefix.ends_with("::"))
-        })
-        .unwrap_or(ty)
+/// Strip module paths recursively, including paths inside generic arguments.
+/// Runtime schema mapping has matching normalization fixtures.
+fn canonical_schema_type(ty: &str) -> String {
+    if let Some(open) = ty.find('<')
+        && ty.ends_with('>')
+    {
+        let head = ty[..open].rsplit("::").next().unwrap_or(&ty[..open]);
+        let inner = &ty[open + 1..ty.len() - 1];
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut args = Vec::new();
+        for (index, ch) in inner.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    args.push(canonical_schema_type(&inner[start..index]));
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        args.push(canonical_schema_type(&inner[start..]));
+        format!("{head}<{}>", args.join(","))
+    } else {
+        ty.rsplit("::").next().unwrap_or(ty).to_string()
+    }
 }
 
 /// `ty` as compact source text, without the spaces `quote!` puts between

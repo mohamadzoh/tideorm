@@ -37,6 +37,7 @@ impl<M: Model> QueryBuilder<M> {
         subquery: &QueryBuilder<N>,
     ) -> Self {
         self.absorb_operand_error("subquery", method, subquery);
+        self.clauses.dependencies.extend(subquery.cache_tables());
 
         let db_type = self.db_type_for_sql();
         let (mut sql, values) = subquery.build_select_sql_with_params_for_db(db_type);
@@ -347,6 +348,7 @@ impl<M: Model> QueryBuilder<M> {
         related: &QueryBuilder<R>,
     ) -> Self {
         self.absorb_operand_error("related query", method, related);
+        self.clauses.dependencies.extend(related.cache_tables());
         if let Some(part) = related.update_blocker() {
             self.invalidate_query(format!(
                 "{}() correlates the related rows through their filters only; the related query cannot hold {}",
@@ -477,6 +479,7 @@ impl<M: Model> QueryBuilder<M> {
     #[must_use]
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
         self.absorb_operand_error("subquery", "select_subquery", &subquery);
+        self.clauses.dependencies.extend(subquery.cache_tables());
 
         if let Err(reason) = db_sql::validate_identifier("SELECT alias", alias) {
             self.invalidate_query(reason);

@@ -382,9 +382,26 @@ pub trait Model:
     /// (default: the model's fallback language).
     ///
     /// Serialization failures are logged and yield `{}` rather than an error,
-    /// because this sits on a rendering path.
+    /// for compatibility. Use [`Model::try_to_json`] to handle failures explicitly.
     fn to_json(&self, options: Option<HashMap<String, String>>) -> serde_json::Value {
         serialization::to_json::<Self>(self, options.as_ref())
+    }
+
+    /// Render JSON while reporting serialization or translation decoding errors.
+    fn try_to_json(&self, options: Option<HashMap<String, String>>) -> Result<serde_json::Value> {
+        serialization::try_to_json::<Self>(self, options.as_ref())
+    }
+
+    /// Render a collection, failing if any model cannot be serialized.
+    fn try_collection_to_json(
+        models: Vec<Self>,
+        options: Option<HashMap<String, String>>,
+    ) -> Result<serde_json::Value> {
+        models
+            .iter()
+            .map(|model| serialization::try_to_json(model, options.as_ref()))
+            .collect::<Result<Vec<_>>>()
+            .map(serde_json::Value::Array)
     }
 
     /// Render a list of models as a JSON array, applying [`Model::to_json`] to each.

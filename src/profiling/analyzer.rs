@@ -1,3 +1,4 @@
+use crate::internal::sql_lexer::{Kind, Token, significant};
 use std::fmt;
 
 /// Heuristic analyzer for rendered SQL strings.
@@ -7,9 +8,9 @@ impl QueryAnalyzer {
     /// Run simple SQL heuristics against a rendered query string.
     pub fn analyze(sql: &str) -> Vec<QuerySuggestion> {
         let mut suggestions = Vec::new();
-        let sql_upper = sql.to_uppercase();
+        let tokens: Vec<_> = significant(sql).collect();
 
-        if sql_upper.contains("SELECT *") {
+        if has_sequence(&tokens, &["SELECT", "*"]) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Avoid SELECT *",
@@ -22,7 +23,9 @@ impl QueryAnalyzer {
         if matches!(
             operation,
             crate::logging::QueryOperation::Update | crate::logging::QueryOperation::Delete
-        ) && !sql_upper.contains("WHERE")
+        ) && !crate::internal::sql_lexer::top_words(sql)
+            .iter()
+            .any(|word| word.eq_ignore_ascii_case("where"))
         {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Critical,
@@ -32,7 +35,12 @@ impl QueryAnalyzer {
             ));
         }
 
-        if sql_upper.contains("LIKE '%") {
+        if tokens.windows(2).any(|pair| {
+            pair[0].kind == crate::internal::sql_lexer::Kind::Word
+                && pair[0].text.eq_ignore_ascii_case("like")
+                && pair[1].kind == crate::internal::sql_lexer::Kind::Literal
+                && pair[1].text.starts_with("'%")
+        }) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Leading wildcard in LIKE",
@@ -41,7 +49,7 @@ impl QueryAnalyzer {
             ));
         }
 
-        if sql_upper.contains(" OR ") {
+        if has_sequence(&tokens, &["OR"]) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "OR conditions detected",
@@ -50,7 +58,7 @@ impl QueryAnalyzer {
             ));
         }
 
-        if sql_upper.contains("ORDER BY") && !sql_upper.contains("LIMIT") {
+        if has_sequence(&tokens, &["ORDER", "BY"]) && !has_sequence(&tokens, &["LIMIT"]) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "ORDER BY without LIMIT",
@@ -59,7 +67,7 @@ impl QueryAnalyzer {
             ));
         }
 
-        if sql_upper.contains("NOT IN") {
+        if has_sequence(&tokens, &["NOT", "IN"]) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "NOT IN detected",
@@ -68,22 +76,21 @@ impl QueryAnalyzer {
             ));
         }
 
-        let function_patterns = ["LOWER(", "UPPER(", "DATE(", "YEAR(", "MONTH("];
-        for pattern in function_patterns {
-            if sql_upper.contains(pattern) {
-                suggestions.push(QuerySuggestion::new(
-                    SuggestionLevel::Warning,
-                    "Function in WHERE clause",
-                    "Functions in WHERE prevent index usage. Store computed values or use expression indexes.",
-                    "Create a computed column or expression index.",
-                ));
-                break;
-            }
+        if function_in_where(&tokens) {
+            suggestions.push(QuerySuggestion::new(
+                SuggestionLevel::Warning,
+                "Function in WHERE clause",
+                "Functions in WHERE prevent index usage. Store computed values or use expression indexes.",
+                "Create a computed column or expression index.",
+            ));
         }
 
-        // `sql_upper` is uppercased, so the column name is matched as `ID`;
-        // this also covers every `<name>_ID` column.
-        if sql_upper.contains("= '") && sql_upper.contains("ID =") {
+        if tokens.windows(3).any(|p| {
+            p[0].kind == crate::internal::sql_lexer::Kind::Word
+                && p[0].text.to_ascii_uppercase().ends_with("ID")
+                && p[1].text == "="
+                && p[2].kind == crate::internal::sql_lexer::Kind::Literal
+        }) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Info,
                 "Possible type mismatch",
@@ -97,7 +104,7 @@ impl QueryAnalyzer {
 
     /// Classify query shape using a rough score for joins, subqueries, and aggregations.
     pub fn estimate_complexity(sql: &str) -> QueryComplexity {
-        let sql_upper = sql.to_uppercase();
+        let tokens: Vec<_> = significant(sql).collect();
         let mut score = 0;
 
         score += match crate::logging::QueryOperation::from_sql(sql) {
@@ -107,26 +114,81 @@ impl QueryAnalyzer {
             _ => 0,
         };
 
-        score += sql_upper.matches("JOIN").count() * 2;
-        score += sql_upper.matches("SELECT").count().saturating_sub(1) * 3;
+        score += tokens
+            .iter()
+            .filter(|t| {
+                t.kind == crate::internal::sql_lexer::Kind::Word
+                    && t.text.eq_ignore_ascii_case("join")
+            })
+            .count()
+            * 2;
+        score += tokens
+            .iter()
+            .filter(|t| {
+                t.kind == crate::internal::sql_lexer::Kind::Word
+                    && t.text.eq_ignore_ascii_case("select")
+            })
+            .count()
+            .saturating_sub(1)
+            * 3;
 
-        let agg_functions = ["COUNT(", "SUM(", "AVG(", "MAX(", "MIN(", "GROUP BY"];
+        let agg_functions = [
+            ["COUNT", "("],
+            ["SUM", "("],
+            ["AVG", "("],
+            ["MAX", "("],
+            ["MIN", "("],
+            ["GROUP", "BY"],
+        ];
         for func in agg_functions {
-            if sql_upper.contains(func) {
+            if has_sequence(&tokens, &func) {
                 score += 1;
             }
         }
 
-        if sql_upper.contains("ORDER BY") {
+        if has_sequence(&tokens, &["ORDER", "BY"]) {
             score += 1;
         }
 
-        if sql_upper.contains("DISTINCT") {
+        if has_sequence(&tokens, &["DISTINCT"]) {
             score += 1;
         }
 
         QueryComplexity::from_score(score)
     }
+}
+
+fn has_sequence(tokens: &[Token<'_>], words: &[&str]) -> bool {
+    tokens.windows(words.len()).any(|window| {
+        window.iter().zip(words).all(|(token, word)| {
+            matches!(token.kind, Kind::Word | Kind::Symbol) && token.text.eq_ignore_ascii_case(word)
+        })
+    })
+}
+
+fn function_in_where(tokens: &[Token<'_>]) -> bool {
+    let mut scopes = vec![false];
+    for (index, token) in tokens.iter().enumerate() {
+        if token.kind == Kind::Word {
+            match token.text.to_ascii_uppercase().as_str() {
+                "WHERE" => *scopes.last_mut().unwrap() = true,
+                "SELECT" | "GROUP" | "ORDER" | "HAVING" | "LIMIT" | "RETURNING" | "UNION"
+                | "EXCEPT" | "INTERSECT" => *scopes.last_mut().unwrap() = false,
+                "LOWER" | "UPPER" | "DATE" | "YEAR" | "MONTH"
+                    if *scopes.last().unwrap()
+                        && tokens.get(index + 1).is_some_and(|next| next.text == "(") =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        } else if token.text == "(" {
+            scopes.push(*scopes.last().unwrap());
+        } else if token.text == ")" && scopes.len() > 1 {
+            scopes.pop();
+        }
+    }
+    false
 }
 
 /// Severity used by query-analysis suggestions.

@@ -1,3 +1,4 @@
+use super::sql_lexer::{EscapeMode, QuotedRun, quoted_end};
 use crate::config::DatabaseType;
 
 #[cfg(feature = "fulltext")]
@@ -96,18 +97,6 @@ pub(crate) fn validate_raw_sql_fragment(kind: &str, sql: &str) -> std::result::R
     Ok(())
 }
 
-/// How a quoted string literal or quoted identifier ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuotedRun {
-    /// The run was closed by an unescaped quote character.
-    Closed,
-    /// Input ran out before the closing quote.
-    Unterminated,
-    /// A backslash sat immediately before the quote character, so the run ends
-    /// here on some backends and continues on others.
-    AmbiguousEscape,
-}
-
 /// Walk a quoted string literal or quoted identifier starting at its opening
 /// quote, leaving `index` just past the closing quote when the run is closed.
 ///
@@ -139,33 +128,16 @@ enum QuotedRun {
 /// ends — that keeps a value such as `'C:\\'` (as MySQL escapes it) and a plain
 /// `'C:\temp'` from being rejected for no reason.
 fn consume_quoted_run(chars: &[char], index: &mut usize, quote: char) -> QuotedRun {
-    *index += 1;
-
-    while *index < chars.len() {
-        let ch = chars[*index];
-
-        if ch == '\\' {
-            match chars.get(*index + 1) {
-                Some(&next) if next == quote => return QuotedRun::AmbiguousEscape,
-                Some(&'\\') => *index += 2,
-                _ => *index += 1,
-            }
-            continue;
-        }
-
-        if ch == quote {
-            if chars.get(*index + 1) == Some(&quote) {
-                *index += 2;
-            } else {
-                *index += 1;
-                return QuotedRun::Closed;
-            }
-        } else {
-            *index += 1;
-        }
-    }
-
-    QuotedRun::Unterminated
+    let tail = &chars[*index..];
+    let (consumed, result) = quoted_end(
+        tail.iter().copied().enumerate().skip(1),
+        quote,
+        EscapeMode::RejectAmbiguous,
+        tail.len(),
+        |_| 1,
+    );
+    *index += consumed;
+    result
 }
 
 fn consume_numeric_literal(chars: &[char], index: &mut usize) {

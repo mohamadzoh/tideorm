@@ -111,9 +111,7 @@ pub trait HasAttachments {
     fn detach_many(&mut self, relation: &str, file_keys: Vec<&str>) -> Result<(), AttachmentError> {
         require_has_many::<Self>(relation, "")?;
         edit_files(self, |files| {
-            for key in file_keys {
-                files.remove_from_many(relation, key);
-            }
+            files.remove_many(relation, &file_keys);
         })
     }
 
@@ -151,12 +149,16 @@ pub trait HasAttachments {
 
     /// Return the single attachment for a `hasOne` relation.
     fn get_file(&self, relation: &str) -> Result<Option<FileAttachment>, AttachmentError> {
-        Ok(self.get_files_data()?.get_one(relation))
+        self.get_files_data()?
+            .try_get_one(relation)
+            .map_err(|error| AttachmentError::InvalidData(error.to_string()))
     }
 
     /// Return all attachments for a `hasMany` relation.
     fn get_files(&self, relation: &str) -> Result<Vec<FileAttachment>, AttachmentError> {
-        Ok(self.get_files_data()?.get_many(relation))
+        self.get_files_data()?
+            .try_get_many(relation)
+            .map_err(|error| AttachmentError::InvalidData(error.to_string()))
     }
 
     /// Check if a relation has any files
@@ -166,7 +168,11 @@ pub trait HasAttachments {
 
     /// Count files in a relation
     fn count_files(&self, relation: &str) -> Result<usize, AttachmentError> {
-        Ok(self.get_files_data()?.count_files(relation))
+        if Self::is_has_one_relation(relation) {
+            Ok(usize::from(self.get_file(relation)?.is_some()))
+        } else {
+            Ok(self.get_files(relation)?.len())
+        }
     }
 
     /// Validate that a relation exists

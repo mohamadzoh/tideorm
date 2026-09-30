@@ -100,237 +100,34 @@ fn offset_postgres_placeholders(sql: &str, offset: usize) -> String {
         return sql.to_string();
     }
 
-    #[derive(Clone, Copy)]
-    enum ScanState {
-        Normal,
-        SingleQuoted { backslash_escapes: bool },
-        DoubleQuoted,
-        LineComment,
-        BlockComment,
-        DollarQuoted { tag_start: usize, tag_end: usize },
-    }
-
-    fn dollar_quote_tag_bounds(chars: &[char], start: usize) -> Option<usize> {
-        if chars.get(start) != Some(&'$') {
-            return None;
-        }
-
-        let mut index = start + 1;
-        while index < chars.len() {
-            match chars[index] {
-                '$' => return Some(index),
-                ch if ch == '_' || ch.is_ascii_alphanumeric() => index += 1,
-                _ => return None,
-            }
-        }
-
-        None
-    }
-
-    fn has_escape_string_prefix(chars: &[char], quote_index: usize) -> bool {
-        if quote_index == 0 {
-            return false;
-        }
-
-        let prefix = chars[quote_index - 1];
-        if prefix != 'e' && prefix != 'E' {
-            return false;
-        }
-
-        if quote_index == 1 {
-            return true;
-        }
-
-        !matches!(chars[quote_index - 2], '_' | '$' | 'a'..='z' | 'A'..='Z' | '0'..='9')
-    }
-
     let mut output = String::with_capacity(sql.len());
-    let chars: Vec<char> = sql.chars().collect();
-    let mut index = 0;
-    let mut state = ScanState::Normal;
-
-    while index < chars.len() {
-        match state {
-            ScanState::Normal => match chars[index] {
-                '\'' => {
-                    output.push(chars[index]);
-                    state = ScanState::SingleQuoted {
-                        backslash_escapes: has_escape_string_prefix(&chars, index),
-                    };
-                    index += 1;
-                }
-                '"' => {
-                    output.push(chars[index]);
-                    state = ScanState::DoubleQuoted;
-                    index += 1;
-                }
-                '-' if chars.get(index + 1) == Some(&'-') => {
-                    output.push(chars[index]);
-                    output.push(chars[index + 1]);
-                    state = ScanState::LineComment;
-                    index += 2;
-                }
-                '/' if chars.get(index + 1) == Some(&'*') => {
-                    output.push(chars[index]);
-                    output.push(chars[index + 1]);
-                    state = ScanState::BlockComment;
-                    index += 2;
-                }
-                '$' => {
-                    if let Some(tag_end) = dollar_quote_tag_bounds(&chars, index)
-                        && (tag_end == index + 1 || !chars[index + 1].is_ascii_digit())
-                    {
-                        output.extend(chars[index..=tag_end].iter());
-                        state = ScanState::DollarQuoted {
-                            tag_start: index,
-                            tag_end,
-                        };
-                        index = tag_end + 1;
-                        continue;
-                    }
-
-                    let start = index + 1;
-                    let mut end = start;
-                    while end < chars.len() && chars[end].is_ascii_digit() {
-                        end += 1;
-                    }
-
-                    if end > start {
-                        let number: usize = chars[start..end]
-                            .iter()
-                            .collect::<String>()
-                            .parse()
-                            .unwrap_or(0);
-                        if number > 0 {
-                            output.push('$');
-                            output.push_str(&(number + offset).to_string());
-                            index = end;
-                            continue;
-                        }
-                    }
-
-                    output.push(chars[index]);
-                    index += 1;
-                }
-                _ => {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            },
-            ScanState::SingleQuoted { backslash_escapes } => {
-                output.push(chars[index]);
-                if backslash_escapes
-                    && chars[index] == '\\'
-                    && let Some(next) = chars.get(index + 1)
-                {
-                    output.push(*next);
-                    index += 2;
-                    continue;
-                }
-                if chars[index] == '\'' {
-                    if chars.get(index + 1) == Some(&'\'') {
-                        output.push(chars[index + 1]);
-                        index += 2;
-                        continue;
-                    }
-                    state = ScanState::Normal;
-                }
-                index += 1;
-            }
-            ScanState::DoubleQuoted => {
-                output.push(chars[index]);
-                if chars[index] == '"' {
-                    if chars.get(index + 1) == Some(&'"') {
-                        output.push(chars[index + 1]);
-                        index += 2;
-                        continue;
-                    }
-                    state = ScanState::Normal;
-                }
-                index += 1;
-            }
-            ScanState::LineComment => {
-                output.push(chars[index]);
-                if chars[index] == '\n' {
-                    state = ScanState::Normal;
-                }
-                index += 1;
-            }
-            ScanState::BlockComment => {
-                output.push(chars[index]);
-                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    output.push(chars[index + 1]);
-                    state = ScanState::Normal;
-                    index += 2;
-                    continue;
-                }
-                index += 1;
-            }
-            ScanState::DollarQuoted { tag_start, tag_end } => {
-                let tag_len = tag_end - tag_start + 1;
-                if chars[index] == '$'
-                    && chars.get(index..index + tag_len) == Some(&chars[tag_start..=tag_end])
-                {
-                    output.extend(chars[index..index + tag_len].iter());
-                    state = ScanState::Normal;
-                    index += tag_len;
-                    continue;
-                }
-
-                output.push(chars[index]);
-                index += 1;
-            }
+    for token in crate::internal::sql_lexer::tokens(sql) {
+        if token.kind == crate::internal::sql_lexer::Kind::Parameter
+            && let Ok(number) = token.text[1..].parse::<usize>()
+            && number > 0
+            && let Some(rebased) = number.checked_add(offset)
+        {
+            output.push('$');
+            output.push_str(&rebased.to_string());
+        } else {
+            output.push_str(token.text);
         }
     }
-
     output
 }
 
-/// Replace each `?` of a template that stands outside a quoted literal or
-/// identifier with `next()`, keeping the rest as written. A `?` inside quotes
-/// is text, such as a LIKE pattern, not a parameter; so is one inside `[..]`,
-/// which the engine's statement tokenizer reads as quoted too and would never
-/// bind, and one inside a PostgreSQL dollar-quoted string (`$$?$$`,
-/// `$tag$?$tag$`).
+/// Replace template markers outside quoted text and comments.
 pub(crate) fn map_template_placeholders(
     template: &str,
     mut next: impl FnMut() -> String,
 ) -> String {
     let mut rendered = String::with_capacity(template.len());
-    let mut rest = template;
-    let mut previous: Option<char> = None;
-    while let Some(ch) = rest.chars().next() {
-        let quoted = match ch {
-            '\'' | '"' | '`' | '[' => {
-                let close = if ch == '[' { ']' } else { ch };
-                // A doubled quote closes the run and opens the next one, so
-                // the literal goes on.
-                Some(rest[1..].find(close).map_or(rest.len(), |end| end + 2))
-            }
-            '$' if !previous.is_some_and(|previous| {
-                previous == '_' || previous == '$' || previous.is_alphanumeric()
-            }) =>
-            {
-                dollar_quoted_len(rest)
-            }
-            _ => None,
-        };
-        let taken = match quoted {
-            Some(length) => {
-                rendered.push_str(&rest[..length]);
-                length
-            }
-            None if ch == '?' => {
-                rendered.push_str(&next());
-                1
-            }
-            None => {
-                rendered.push(ch);
-                ch.len_utf8()
-            }
-        };
-        previous = rest[..taken].chars().next_back();
-        rest = &rest[taken..];
+    for token in crate::internal::sql_lexer::tokens(template) {
+        if token.text == "?" && token.kind == crate::internal::sql_lexer::Kind::Symbol {
+            rendered.push_str(&next());
+        } else {
+            rendered.push_str(token.text);
+        }
     }
     rendered
 }
@@ -346,29 +143,27 @@ pub(crate) fn render_template(db_type: DatabaseType, template: &str, first: usiz
     })
 }
 
-/// The length of the dollar-quoted string `text` starts with: an opening
-/// `$$` or `$tag$`, the text, and the same tag again. `None` when `text` does
-/// not open one or it never closes, so a lone `$` stays text, as it is on
-/// MySQL and SQLite. A tag cannot start with a digit: `$1` is a parameter.
-fn dollar_quoted_len(text: &str) -> Option<usize> {
-    let tag_body = text[1..]
-        .find(|ch: char| !(ch == '_' || ch.is_alphanumeric()))
-        .unwrap_or(text.len() - 1);
-    let tag_end = 1 + tag_body;
-    if !text[tag_end..].starts_with('$') || text[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
-        return None;
-    }
-    let tag = &text[..=tag_end];
-    let body = &text[tag.len()..];
-    body.find(tag).map(|end| tag.len() + end + tag.len())
+/// How many parameters a template takes, without allocating rendered SQL.
+pub(crate) fn count_template_placeholders(template: &str) -> usize {
+    crate::internal::sql_lexer::tokens(template)
+        .filter(|token| token.text == "?" && token.kind == crate::internal::sql_lexer::Kind::Symbol)
+        .count()
 }
 
-/// How many parameters a template takes: its `?`s outside quotes.
-pub(crate) fn count_template_placeholders(template: &str) -> usize {
-    let mut count = 0;
-    map_template_placeholders(template, || {
-        count += 1;
-        String::new()
-    });
-    count
+#[cfg(test)]
+mod lexical_regressions {
+    use super::*;
+    #[test]
+    fn identifiers_and_nested_comments_are_not_parameters() {
+        assert_eq!(
+            offset_postgres_placeholders("a$1 + $1 /* outer /* $2 */ $3 */ + $2", 1),
+            "a$1 + $2 /* outer /* $2 */ $3 */ + $3"
+        );
+        let template = "? /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + ?";
+        assert_eq!(count_template_placeholders(template), 2);
+        assert_eq!(
+            render_template(DatabaseType::Postgres, template, 1),
+            "$1 /* ? /* ? */ ? */ + '?' + $$?$$ + \"?\" -- ?\n + $2"
+        );
+    }
 }

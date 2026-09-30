@@ -361,6 +361,21 @@ pub trait HasTranslations {
     where
         Self: serde::Serialize,
     {
+        self.try_to_translated_json(options)
+            .unwrap_or_else(|error| {
+                crate::tide_warn!("Translation serialization failed: {}", error);
+                serde_json::json!({})
+            })
+    }
+
+    /// Render translations while reporting serialization and accessor failures.
+    fn try_to_translated_json(
+        &self,
+        options: Option<HashMap<String, String>>,
+    ) -> Result<serde_json::Value, TranslationError>
+    where
+        Self: serde::Serialize,
+    {
         let opts = options.unwrap_or_default();
         let fallback = Self::fallback_language();
         let requested_lang = opts
@@ -368,26 +383,34 @@ pub trait HasTranslations {
             .map(|s| s.as_str())
             .unwrap_or(&fallback);
 
-        let mut json = match serde_json::to_value(self) {
-            Ok(serde_json::Value::Object(map)) => map,
-            _ => return serde_json::json!({}),
+        let mut json = match serde_json::to_value(self)
+            .map_err(|error| TranslationError::ParseError(error.to_string()))?
+        {
+            serde_json::Value::Object(map) => map,
+            _ => {
+                return Err(TranslationError::ParseError(
+                    "Model must serialize to an object".into(),
+                ));
+            }
         };
 
         // Read through the accessor, as every translation lookup does: the
         // serialized JSON need not carry the raw column under that name, or at
         // all, when the model's own serde renames or skips it.
-        let translations = self.get_translations_data().unwrap_or_default();
+        let translations = self.get_translations_data()?;
 
-        // A field without a translation keeps the default value already in `json`.
-        for field in Self::translatable_fields() {
-            if let Some(value) = translations.get_or_fallback(field, requested_lang, &fallback) {
-                json.insert(Self::serialized_key(field).to_string(), value.clone());
-            }
-        }
+        render_translations(
+            &mut json,
+            &translations,
+            Self::translatable_fields(),
+            requested_lang,
+            &fallback,
+            Self::serialized_key,
+        );
 
         json.remove(Self::serialized_key("translations"));
 
-        serde_json::Value::Object(json)
+        Ok(serde_json::Value::Object(json))
     }
 
     /// Serialize the model without removing the raw translations payload.
@@ -395,7 +418,19 @@ pub trait HasTranslations {
     where
         Self: serde::Serialize,
     {
-        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+        self.try_to_json_with_all_translations()
+            .unwrap_or_else(|error| {
+                crate::tide_warn!("Translation serialization failed: {}", error);
+                serde_json::json!({})
+            })
+    }
+
+    /// Serialize the full payload and report serialization failures.
+    fn try_to_json_with_all_translations(&self) -> Result<serde_json::Value, serde_json::Error>
+    where
+        Self: serde::Serialize,
+    {
+        serde_json::to_value(self)
     }
 
     /// Validate that a field is translatable
@@ -420,6 +455,22 @@ pub trait HasTranslations {
             )));
         }
         Ok(())
+    }
+}
+
+/// Shared resolution with explicit caller-owned output filtering.
+pub(crate) fn render_translations(
+    json: &mut serde_json::Map<String, serde_json::Value>,
+    data: &TranslationsData,
+    fields: Vec<&'static str>,
+    language: &str,
+    fallback: &str,
+    serialized_key: impl Fn(&'static str) -> &'static str,
+) {
+    for field in fields {
+        if let Some(value) = data.get_or_fallback(field, language, fallback) {
+            json.insert(serialized_key(field).to_string(), value.clone());
+        }
     }
 }
 

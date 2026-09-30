@@ -74,3 +74,32 @@ fn init_global_applies_config_after_a_default_cache_was_installed() {
     // Leave the process-wide cache as it was found.
     PreparedStatementCache::init_global(previous);
 }
+
+#[test]
+fn average_uses_accumulated_duration() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+    for time in [1, 2, 3] {
+        cache.observe_execution("SELECT 1", time);
+    }
+    assert_eq!(cache.cached_statements_info()[0].avg_execution_time_us, 2);
+}
+
+#[test]
+fn concurrent_registration_preserves_all_executions() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+    let barrier = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                barrier.wait();
+                for _ in 0..100 {
+                    cache.observe_execution("SELECT 1", 3);
+                }
+            });
+        }
+    });
+    assert_eq!(cache.cached_statements_info()[0].execution_count, 800);
+    assert_eq!(cache.stats().misses, 1);
+}

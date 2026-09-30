@@ -530,36 +530,7 @@ impl Database {
     /// `mysql`, as MySQL reads a string, so does one after a
     /// backslash.
     fn skip_quoted(sql: &str, delimiter: char, mysql: bool) -> &str {
-        let mut rest = &sql[delimiter.len_utf8()..];
-
-        loop {
-            let end = if mysql && delimiter != '`' {
-                let mut escaped = false;
-                rest.char_indices().find_map(|(at, character)| {
-                    if escaped {
-                        escaped = false;
-                        None
-                    } else if character == '\\' {
-                        escaped = true;
-                        None
-                    } else {
-                        (character == delimiter).then_some(at)
-                    }
-                })
-            } else {
-                rest.find(delimiter)
-            };
-            let Some(end) = end else {
-                return "";
-            };
-
-            rest = &rest[end + delimiter.len_utf8()..];
-            if !rest.starts_with(delimiter) {
-                return rest;
-            }
-
-            rest = &rest[delimiter.len_utf8()..];
-        }
+        &sql[crate::internal::sql_lexer::quoted_len(sql, delimiter, mysql && delimiter != '`')..]
     }
 
     /// Skip leading whitespace, comments, and opening parentheses.
@@ -587,10 +558,8 @@ impl Database {
                     .find('\n')
                     .map_or("", |end| &after[end + 1..])
                     .trim_start();
-            } else if let Some(after) = rest.strip_prefix("/*") {
-                rest = after
-                    .find("*/")
-                    .map_or("", |end| &after[end + 2..])
+            } else if rest.starts_with("/*") {
+                rest = rest[crate::internal::sql_lexer::block_comment_len(rest, !mysql)..]
                     .trim_start();
             } else {
                 return rest;

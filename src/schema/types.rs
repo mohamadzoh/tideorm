@@ -206,7 +206,7 @@ pub fn rust_type_to_column_type(rust_type: &str) -> Option<ColumnType> {
         "Vec<String>" | "Vec<str>" | "TextArray" => ColumnType::TextArray,
         "Vec<bool>" | "BoolArray" => ColumnType::BooleanArray,
         "Vec<f64>" | "FloatArray" => ColumnType::DoubleArray,
-        "Vec<Value>" | "Vec<JsonValue>" | "JsonArray" => ColumnType::JsonArray,
+        "Vec<Value>" | "Vec<Json>" | "Vec<JsonValue>" | "JsonArray" => ColumnType::JsonArray,
         // Everything else spelled `DateTime<..>` is offset-aware: `DateTime<Utc>`,
         // `DateTime<FixedOffset>`, and the engine's `DateTimeUtc` aliases. This
         // arm is last so the exact `NaiveDateTime` key above wins.
