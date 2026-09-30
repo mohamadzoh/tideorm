@@ -273,8 +273,10 @@ impl Migrator {
         // The ledger is ordered by insertion id, so the last entry is the
         // migration applied most recently - not the one with the highest
         // version. After a long-lived branch merges those are routinely
-        // different migrations.
-        let applied = self.applied_versions(&ledger, db).await?;
+        // different migrations. Every entry is read, registered or not: one
+        // this migrator cannot revert must stop the rollback, not be skipped
+        // over to revert an older migration instead.
+        let applied = ledger.keys(db).await?;
         let mut result = MigrationResult::default();
 
         let Some(last_version) = applied.last() else {

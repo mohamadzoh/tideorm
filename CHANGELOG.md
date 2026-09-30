@@ -5,7 +5,7 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.13.1] - 2026-09-28
+## [0.13.1] - 2026-09-30
 
 ### Fixed
 
@@ -2440,6 +2440,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.13.1]: https://github.com/mohamadzoh/tideorm/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mohamadzoh/tideorm/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mohamadzoh/tideorm/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/mohamadzoh/tideorm/compare/v0.10.2...v0.11.0
