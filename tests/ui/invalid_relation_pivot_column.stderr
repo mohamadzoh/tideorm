@@ -2,4 +2,4 @@ error[E0080]: evaluation panicked: many-to-many relation 'roles' references an u
   --> tests/ui/invalid_relation_pivot_column.rs:18:1
    |
 18 | #[tideorm::model(table = "users")]
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_user::Relation as tideorm::internal::RelationTrait>::def::_` failed here
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `<__tideorm_internal_user::Relation as tideorm::orm::entity::RelationTrait>::def::_` failed here

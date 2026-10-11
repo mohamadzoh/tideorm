@@ -5,6 +5,14 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-10-11
+
+### Fixed
+
+- CI passes on Rust 1.99: the lockfile takes `async-trait` 0.1.92, whose trait methods no
+  longer trip clippy's `double_must_use`, and the compile-fail snapshots match the trait
+  path 1.99 prints. No library behavior changes.
+
 ## [0.14.0] - 2026-10-09
 
 ### Added
@@ -2501,6 +2509,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.14.1]: https://github.com/mohamadzoh/tideorm/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mohamadzoh/tideorm/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/mohamadzoh/tideorm/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mohamadzoh/tideorm/compare/v0.12.0...v0.13.0
