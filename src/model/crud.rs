@@ -27,14 +27,10 @@ where
         }
     }
 
-    let inserted = crate::internal::QueryExecutor::insert_many::<M>(models).await?;
-    // New rows leave every loaded model as it was, so only cached reads go:
-    // the dirty-tracking baselines stay, the inserted models' among them, as
-    // `create()` leaves its own.
-    if !inserted.is_empty() {
-        crate::QueryCache::global().invalidate_model(M::table_name());
-    }
-    Ok(inserted)
+    let inserted = crate::internal::QueryExecutor::insert_many::<M>(models).await;
+    // Triggers and foreign keys can change tables beyond the inserted model.
+    crate::QueryCache::global().clear();
+    inserted
 }
 
 type EntityModel<M> =
@@ -56,9 +52,9 @@ where
     let row = crate::internal::run_profiled(active.insert(&executor), || {
         crate::internal::model_error_context::<M>(format!("insert into {}", M::table_name()))
     })
-    .await?;
-    let model = M::try_from_entity_model(row)?;
-    crate::QueryCache::global().invalidate_model(M::table_name());
+    .await;
+    crate::QueryCache::global().clear();
+    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
     Ok(model)
 }
 
@@ -81,9 +77,9 @@ where
             format!("update where {}", M::primary_key_display(primary_key)),
         )
     })
-    .await?;
-    let model = M::try_from_entity_model(row)?;
-    crate::QueryCache::global().invalidate_model(M::table_name());
+    .await;
+    crate::QueryCache::global().clear();
+    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
     Ok(model)
 }
 
@@ -108,9 +104,10 @@ pub async fn __delete_row<M: Model>(model: &M) -> Result<u64> {
             )
         },
     )
-    .await?;
+    .await;
+    crate::QueryCache::global().clear();
+    let result = result?;
     if result.rows_affected > 0 {
-        crate::QueryCache::global().invalidate_model(M::table_name());
         super::__forget_dirty_snapshot(model);
     }
     Ok(result.rows_affected)

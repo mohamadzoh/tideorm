@@ -380,7 +380,7 @@ fn a_transaction_replays_its_invalidations_when_it_commits() {
     };
 
     let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    let savepoint = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+    let savepoint = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(true)));
     {
         let _outer = install_pending_invalidations(&outer);
         {
@@ -582,7 +582,7 @@ fn test_a_deadlock_marks_every_enclosing_transaction() {
     let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
     let _outer_scope = install_pending_invalidations(&outer);
     {
-        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(true)));
         let scope = install_pending_invalidations(&inner);
         note_failed_statement(true);
         drop(scope);
@@ -596,6 +596,20 @@ fn test_a_deadlock_marks_every_enclosing_transaction() {
     note_failed_statement(false);
     assert!(other.lock().statement_failed());
     assert!(!other.lock().deadlocked());
+}
+
+#[test]
+fn an_independent_deadlock_does_not_abort_the_enclosing_scope() {
+    let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(false)));
+    let _outer_scope = install_pending_invalidations(&outer);
+    {
+        let independent = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(false)));
+        let scope = install_pending_invalidations(&independent);
+        note_failed_statement(true);
+        drop(scope);
+        assert!(independent.lock().deadlocked());
+    }
+    assert!(!outer.lock().deadlocked());
 }
 
 #[test]

@@ -51,6 +51,7 @@ impl<M: Model> OnConflictBuilder<M> {
     ///
     /// Everything else keeps the value already stored; name `updated_at` here
     /// to refresh it, and `created_at` only to overwrite the creation time.
+    /// MySQL and MariaDB reject primary-key columns in this list before writing.
     /// Mutually exclusive with
     /// [`OnConflictBuilder::update_all_except`]; when both are set, this one wins.
     #[must_use]

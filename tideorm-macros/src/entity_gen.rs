@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::Type;
 
 use crate::context::BuildContext;
@@ -40,6 +40,20 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let column_names = &ctx.column_names;
     let column_variants = &ctx.column_variants;
     let column_types = &ctx.column_types;
+    let integer_bounds = ctx
+        .db_fields
+        .iter()
+        .filter(|field| field.is_integer())
+        .map(|field| {
+            let name = field.column_name();
+            let ty = field.validation_base_type();
+            quote! {
+                #name => Some((
+                    i64::try_from(<#ty>::MIN).unwrap_or(i64::MIN),
+                    i64::try_from(<#ty>::MAX).unwrap_or(i64::MAX),
+                )),
+            }
+        });
     let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
     let field_names = &ctx.field_names;
     let hidden_attrs = &ctx.hidden_attrs;
@@ -301,6 +315,12 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
             }
             fn column_names() -> &'static [&'static str] { &[#(#column_names),*] }
             fn field_names() -> &'static [&'static str] { &[#(#field_names),*] }
+            fn __sqlite_integer_bounds(column: &str) -> Option<(i64, i64)> {
+                match Self::own_column_name(column)? {
+                    #(#integer_bounds)*
+                    _ => None,
+                }
+            }
             #hidden_attributes_impl
             #serialized_name_impl
             #serde_round_trips_impl
@@ -718,6 +738,24 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
     let column_names = &ctx.column_names;
     let table_name = &ctx.table_name;
 
+    let constant_idents: Vec<_> = field_idents
+        .iter()
+        .map(|ident| {
+            format_ident!(
+                "{}",
+                ident.to_string().trim_start_matches("r#").to_uppercase()
+            )
+        })
+        .collect();
+    let relation_constants = ctx.relation_fields.iter().map(|field| {
+        let name = field.name();
+        let ident = format_ident!("{}", name.trim_start_matches("r#").to_uppercase());
+        quote! {
+            #[doc = concat!("The `", #name, "` relation for eager loading.")]
+            pub const #ident: &'static str = #name;
+        }
+    });
+
     quote! {
         #[allow(non_camel_case_types)]
         #[derive(Clone)]
@@ -726,6 +764,13 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
         }
 
         impl #struct_name {
+            #(
+                #[doc = concat!("Typed reference to the `", #column_names, "` column.")]
+                pub const #constant_idents: ::tideorm::columns::Column<#field_types> =
+                    ::tideorm::columns::Column::of(#table_name, #column_names);
+            )*
+            #(#relation_constants)*
+
             #[allow(non_upper_case_globals)]
             pub const columns: #columns_struct_name = #columns_struct_name {
                 #(#field_idents: ::tideorm::columns::Column::of(#table_name, #column_names)),*

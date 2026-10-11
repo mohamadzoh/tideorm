@@ -16,6 +16,13 @@ impl<M: Model> QueryBuilder<M> {
     /// a request's sort string with [`sort()`](Self::sort) instead.
     ///
     /// Use [`QueryBuilder::order_by_raw`] when you need a real SQL expression.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().order_by(User::ID, Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn order_by(
         mut self,
@@ -58,6 +65,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Every column is checked as `order_by` checks one, so an expression in
     /// the string fails the query; an empty string orders nothing.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().sort("-id,name").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn sort(mut self, spec: &str) -> Self {
         for term in spec
@@ -83,6 +97,13 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Replace every ordering the query has so far — one a scope added, say —
     /// with this one, as [`order_by`](Self::order_by) takes it.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().reorder(User::NAME, Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn reorder(
         mut self,
@@ -110,6 +131,13 @@ impl<M: Model> QueryBuilder<M> {
     ///     .get()
     ///     .await?;
     /// ```
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().order_by_raw("LOWER(name)", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn order_by_raw(mut self, expression: &str, direction: Order) -> Self {
         self.clauses
@@ -119,30 +147,65 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Order by ascending
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().order_asc(User::ID).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn order_asc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Asc)
     }
 
     /// Order by descending
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().order_desc(User::ID).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn order_desc(self, column: impl crate::columns::IntoColumnName) -> Self {
         self.order_by(column, Order::Desc)
     }
 
     /// Order by latest (created_at DESC)
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().latest().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn latest(self) -> Self {
         self.order_desc("created_at")
     }
 
     /// Order by oldest (created_at ASC)
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().oldest().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn oldest(self) -> Self {
         self.order_asc("created_at")
     }
 
     /// Limit the number of results
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().limit(10).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn limit(mut self, n: u64) -> Self {
         self.clauses.limit_value = Some(n);
@@ -154,6 +217,13 @@ impl<M: Model> QueryBuilder<M> {
     /// An offset without a [`QueryBuilder::limit`] is portable: MySQL, MariaDB,
     /// and SQLite reject a bare `OFFSET`, so rendering supplies the
     /// backend-appropriate open-ended `LIMIT` for them.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().offset(10).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn offset(mut self, n: u64) -> Self {
         self.clauses.offset_value = Some(n);
@@ -171,6 +241,13 @@ impl<M: Model> QueryBuilder<M> {
     /// [`Model::paginate`] gives the same
     /// numbers, naming `page` or `per_page` — what a request handler reports as
     /// bad input.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().page(2, 10).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn page(mut self, page: u64, per_page: u64) -> Self {
         match page_offset(page, per_page) {

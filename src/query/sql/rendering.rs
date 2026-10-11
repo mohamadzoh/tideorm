@@ -72,11 +72,13 @@ impl<M: Model> QueryBuilder<M> {
         exists_query.clauses.offset_value = None;
 
         if exists_query.clauses.unions.is_empty() {
-            // HAVING can name one of the caller's select aliases, so a query
-            // with both keeps its projection.
-            let having_needs_projection = !exists_query.clauses.having_conditions.is_empty()
-                && exists_query.has_explicit_projection();
-            if !having_needs_projection {
+            // Raw projections may aggregate empty input into one row. Keep
+            // them without trying to recognize aggregate functions in SQL.
+            // HAVING can also refer to aliases from an explicit projection.
+            let preserve_projection = exists_query.raw_projection().next().is_some()
+                || (!exists_query.clauses.having_conditions.is_empty()
+                    && exists_query.has_explicit_projection());
+            if !preserve_projection {
                 exists_query.clauses.select_columns = None;
                 exists_query.clauses.raw_select_expressions = vec!["1".to_string()];
                 exists_query.clauses.subquery_select_expressions.clear();

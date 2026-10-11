@@ -28,7 +28,7 @@ pub(super) trait IdentityMapRollback: Send {
 
 struct IdentityMapRollbackEntry<T> {
     key: super::IdentityKey,
-    original: Option<T>,
+    original: Option<Arc<T>>,
 }
 
 impl<T> IdentityMapRollback for IdentityMapRollbackEntry<T>
@@ -39,7 +39,7 @@ where
         let mut map = entity_manager.identity_map.write();
         match self.original {
             Some(entity) => {
-                map.insert(self.key, Box::new(entity));
+                map.insert(self.key, entity);
             }
             None => {
                 map.remove(&self.key);
@@ -144,8 +144,8 @@ pub(super) fn record_identity_map_rollback<T>(
         .identity_map
         .read()
         .get(key)
-        .and_then(|value| value.downcast_ref::<T>())
-        .cloned();
+        .cloned()
+        .and_then(|value| value.downcast::<T>().ok());
     let key = key.clone();
     rollback_log.insert(
         key.clone(),

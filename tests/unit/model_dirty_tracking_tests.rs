@@ -197,3 +197,50 @@ fn eviction_drops_every_databases_baseline_of_a_key_together() {
     assert_eq!(store.order.len(), 1);
     assert_eq!(store.get(&store_row("2")), Some(&named("Dave")));
 }
+
+#[test]
+fn bulk_invalidation_rollback_does_not_overwrite_a_later_read() {
+    let mut model = baseline_user();
+    model.id = 71;
+    remember_model(&model).unwrap();
+    let pending = std::sync::Arc::new(parking_lot::Mutex::new(
+        crate::cache::PendingInvalidations::new(false),
+    ));
+    let scope = crate::cache::install_pending_invalidations(&pending);
+    invalidate_model::<BaselineUser>();
+    assert_eq!(original_value(&model, "name").unwrap(), None);
+    drop(scope);
+    // Another task reads a newer baseline before the bulk write rolls back.
+    model.name = "newer".into();
+    remember_model(&model).unwrap();
+    drop(pending);
+    assert_eq!(
+        original_value(&model, "name").unwrap(),
+        Some(Some(serde_json::json!("newer")))
+    );
+}
+
+#[test]
+fn a_committed_bulk_invalidation_drops_all_origin_tombstones() {
+    let mut model = baseline_user();
+    model.id = 72;
+    for origin in [Some(701), Some(702)] {
+        loading_from(origin, || remember_model(&model)).unwrap();
+    }
+    let pending = std::sync::Arc::new(parking_lot::Mutex::new(
+        crate::cache::PendingInvalidations::new(false),
+    ));
+    let scope = crate::cache::install_pending_invalidations(&pending);
+    invalidate_model::<BaselineUser>();
+    drop(scope);
+    std::sync::Arc::try_unwrap(pending)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .replay();
+    loading_from(Some(703), || remember_model(&model)).unwrap();
+    assert_eq!(
+        original_value(&model, "name").unwrap(),
+        Some(Some(serde_json::json!("Alice")))
+    );
+}

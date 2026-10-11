@@ -67,7 +67,7 @@ pub(crate) fn linkable_key<'a>(
 ) -> Result<&'a serde_json::Value> {
     if key.is_null() {
         return Err(Error::query(format!(
-            "{context}: the owner's key is NULL, so no row can be linked to it"
+            "{context}: the relation key is NULL, so no row can be linked to it"
         )));
     }
     Ok(key)
@@ -109,18 +109,26 @@ pub(crate) fn owner_is_unsaved(key: &Option<serde_json::Value>) -> bool {
 /// Where a relation's statements run.
 ///
 /// By default that is the scope's connection: the enclosing transaction, else
-/// the global database. Under the `entity-manager` feature a relation can also
-/// be tied to the manager that loaded it, or to the database its owner was read
-/// from, which keeps it loadable with no global connection at all.
-#[derive(Debug, Clone, Default)]
+/// the global database. Loaded relations retain their owner's database;
+/// under `entity-manager` they can also belong to a manager's identity map.
+#[derive(Debug, Clone)]
 pub(crate) struct QuerySource {
     /// The manager that loaded the relation. It owns the cached instances, so
     /// `load` serves them rather than re-querying.
     #[cfg(feature = "entity-manager")]
     pub(crate) entity_manager: Option<Arc<EntityManager>>,
     /// The database the owning model was loaded from.
-    #[cfg(feature = "entity-manager")]
     pub(crate) database: Option<Database>,
+}
+
+impl Default for QuerySource {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "entity-manager")]
+            entity_manager: None,
+            database: crate::database::loading_database(),
+        }
+    }
 }
 
 impl QuerySource {
@@ -136,9 +144,9 @@ impl QuerySource {
             if self.entity_manager.is_some() {
                 return false;
             }
-            if self.database.is_some() {
-                return true;
-            }
+        }
+        if self.database.is_some() {
+            return true;
         }
         crate::database::__current_db().is_ok()
     }
@@ -159,26 +167,19 @@ impl QuerySource {
         }
     }
 
-    /// The database the relation is tied to, unless an enclosing transaction
-    /// outranks it: statements inside one must join it, and raw SQL has to be
-    /// rendered for the backend it then reaches.
+    /// Database handles themselves join an enclosing transaction only when it
+    /// belongs to the same pool. Never discard an attached database here.
     fn attached(&self) -> Option<Database> {
         #[cfg(feature = "entity-manager")]
-        if !matches!(
-            crate::database::__current_connection(),
-            Ok(crate::database::ConnectionRef::Transaction(_))
-        ) {
-            return match &self.entity_manager {
-                Some(entity_manager) => Some(entity_manager.database().clone()),
-                None => self.database.clone(),
-            };
+        if let Some(entity_manager) = &self.entity_manager {
+            return Some(entity_manager.database().clone());
         }
-        None
+        self.database.clone()
     }
 
     /// Keep whatever `previous` was tied to wherever this source is not.
-    #[cfg(feature = "entity-manager")]
     pub(crate) fn preserve_from(&mut self, previous: &Self) {
+        #[cfg(feature = "entity-manager")]
         if self.entity_manager.is_none() {
             self.entity_manager = previous.entity_manager.clone();
         }

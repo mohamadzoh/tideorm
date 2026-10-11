@@ -24,6 +24,8 @@ use super::QueryCache;
 /// if it never commits.
 #[derive(Default)]
 pub(crate) struct PendingInvalidations {
+    /// Only a savepoint can hand rollback work to its enclosing transaction.
+    nested: bool,
     tables: HashSet<String>,
     all: bool,
     undo: Vec<Box<dyn FnOnce() + Send>>,
@@ -43,7 +45,7 @@ impl Drop for PendingInvalidations {
         while let Some(undo) = self.undo.pop() {
             undo();
         }
-        if self.deadlocked {
+        if self.deadlocked && self.nested {
             record(|enclosing| enclosing.deadlocked = true);
         }
     }
@@ -57,6 +59,16 @@ thread_local! {
 }
 
 impl PendingInvalidations {
+    pub(crate) fn new(nested: bool) -> Self {
+        Self {
+            nested,
+            tables: HashSet::new(),
+            all: false,
+            undo: Vec::new(),
+            statement_failed: false,
+            deadlocked: false,
+        }
+    }
     pub(super) fn table(&mut self, table: &str) {
         self.tables.insert(table.to_string());
     }
@@ -78,11 +90,11 @@ impl PendingInvalidations {
 
     /// Invalidate again what the transaction's writes invalidated, now that it
     /// has committed. Inside an enclosing transaction this records it there
-    /// as well, to be replayed when that one commits, and hands it the undo
-    /// steps, since rolling that one back still undoes this one.
+    /// as well, to be replayed when that one commits. Only a savepoint hands
+    /// it undo steps: an independent transaction's commit is already final.
     pub(crate) fn replay(mut self) {
         let undo = std::mem::take(&mut self.undo);
-        if !undo.is_empty() {
+        if self.nested && !undo.is_empty() {
             record(|enclosing| enclosing.undo.extend(undo));
         }
 
@@ -136,4 +148,14 @@ pub(super) fn record(note: impl FnOnce(&mut PendingInvalidations)) {
             note(&mut pending.lock());
         }
     });
+}
+
+/// A server-side deadlock may have ended the transaction already. Never let
+/// further statements on its executor escape into autocommit mode.
+pub(crate) fn transaction_deadlocked() -> bool {
+    CURRENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|pending| pending.lock().deadlocked)
+    })
 }

@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::database::{Database, require_db, transaction_error};
+use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
 use crate::internal::sql_safety::is_safe_identifier_segment;
-use crate::internal::{
-    ConnectionTrait, OrmTransaction, TransactionTrait, Value, build_statement_with_values,
-    translate_error,
-};
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use crate::internal::sqlx::{ConnectOptions, Connection};
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use crate::internal::translate_error;
 use crate::tide_info;
 
 use super::{
@@ -23,6 +23,7 @@ use super::{
 const DEFAULT_MIGRATIONS_TABLE: &str = "_migrations";
 
 /// Key used for the PostgreSQL advisory lock that serializes migrators.
+#[cfg(feature = "postgres")]
 const MIGRATION_LOCK_KEY: i64 = 0x0054_4944_454F_524D;
 
 /// Name used for the MySQL/MariaDB named lock that serializes migrators.
@@ -53,48 +54,51 @@ fn supports_transactional_ddl(db_type: DatabaseType) -> bool {
 /// same time. The lock is held on a connection of its own; the migrations
 /// themselves keep running on the pool.
 ///
-/// **The pool therefore needs at least two connections.** With `max_connections(1)`
-/// — reasonable for a migration-only process or a constrained test harness — the
-/// lock holds the only connection and the first DDL statement blocks until
-/// `acquire_timeout` elapses, then fails with a pool-exhaustion error that says
-/// nothing about the lock. Size the pool accordingly.
+/// Lock sessions connect directly using the pool's connection options. They
+/// do not occupy pool slots: even a one-connection pool remains available to
+/// execute DDL while other migrators wait for the advisory lock.
 enum MigrationLock {
-    /// SQLite serializes writers itself, and its pool is frequently limited to
-    /// a single connection — taking a second one here would deadlock.
     Unlocked,
-    /// PostgreSQL's transaction-scoped advisory lock, released by commit, by
-    /// rollback, and by the transaction dropping.
-    Transaction(OrmTransaction),
-    /// MySQL's and MariaDB's named lock, which belongs to the session, not to a
-    /// transaction. Its connection closes when dropped instead of returning to
-    /// the pool, so a cancelled run ends the session and the lock with it; an
-    /// idle pooled connection would otherwise hold it until the pool retired
-    /// the connection, and every other migrator would time out waiting.
+    #[cfg(feature = "postgres")]
+    Postgres(crate::internal::sqlx::PgConnection),
     #[cfg(feature = "mysql")]
-    Session(crate::internal::sqlx::pool::PoolConnection<crate::internal::sqlx::MySql>),
+    Session(crate::internal::sqlx::MySqlConnection),
 }
 
 impl MigrationLock {
     async fn acquire(db: &Database, db_type: DatabaseType) -> Result<Self> {
+        #[cfg(not(any(feature = "postgres", feature = "mysql")))]
+        let _ = db;
         match db_type {
             DatabaseType::SQLite => Ok(Self::Unlocked),
+            #[cfg(feature = "postgres")]
             DatabaseType::Postgres => {
-                let transaction = db
-                    .__internal_connection()?
-                    .begin()
+                let pool = db.__internal_connection()?;
+                if pool.get_database_backend() != crate::internal::OrmBackend::Postgres {
+                    return Err(Error::transaction(
+                        "the PostgreSQL migration lock needs a PostgreSQL connection",
+                    ));
+                }
+                let mut connection = pool
+                    .get_postgres_connection_pool()
+                    .connect_options()
+                    .connect()
                     .await
-                    .map_err(transaction_error)?;
-                let statement = build_statement_with_values(
-                    transaction.get_database_backend(),
-                    "SELECT pg_advisory_xact_lock($1)",
-                    vec![Value::BigInt(Some(MIGRATION_LOCK_KEY))],
-                );
-                transaction
-                    .query_one_raw(statement)
+                    .map_err(|error| {
+                        crate::internal::translate_connection_error(sqlx_error(error))
+                    })?;
+                crate::internal::sqlx::query("SELECT pg_advisory_lock($1)")
+                    .bind(MIGRATION_LOCK_KEY)
+                    .execute(&mut connection)
                     .await
-                    .map_err(translate_error)?;
-                Ok(Self::Transaction(transaction))
+                    .map_err(|error| translate_error(sqlx_error(error)))?;
+                Ok(Self::Postgres(connection))
             }
+            #[cfg(not(feature = "postgres"))]
+            DatabaseType::Postgres => Err(Error::backend_not_supported(
+                "the migration lock needs TideORM's `postgres` feature",
+                "PostgreSQL",
+            )),
             #[cfg(feature = "mysql")]
             DatabaseType::MySQL | DatabaseType::MariaDB => {
                 use crate::internal::sqlx::Row;
@@ -105,19 +109,19 @@ impl MigrationLock {
                         "the MySQL migration lock needs a MySQL connection",
                     ));
                 }
-                let mut connection =
-                    pool.get_mysql_connection_pool()
-                        .acquire()
-                        .await
-                        .map_err(|error| {
-                            crate::internal::translate_connection_error(sqlx_error(error))
-                        })?;
-                connection.close_on_drop();
+                let mut connection = pool
+                    .get_mysql_connection_pool()
+                    .connect_options()
+                    .connect()
+                    .await
+                    .map_err(|error| {
+                        crate::internal::translate_connection_error(sqlx_error(error))
+                    })?;
 
                 let row = crate::internal::sqlx::query("SELECT GET_LOCK(?, ?)")
                     .bind(MIGRATION_LOCK_NAME)
                     .bind(MIGRATION_LOCK_TIMEOUT_SECONDS)
-                    .fetch_one(&mut *connection)
+                    .fetch_one(&mut connection)
                     .await
                     .map_err(|error| translate_error(sqlx_error(error)))?;
                 // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
@@ -148,22 +152,36 @@ impl MigrationLock {
     async fn release(self) -> Result<()> {
         match self {
             Self::Unlocked => Ok(()),
-            Self::Transaction(transaction) => transaction.commit().await.map_err(transaction_error),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(mut connection) => {
+                crate::internal::sqlx::query("SELECT pg_advisory_unlock($1)")
+                    .bind(MIGRATION_LOCK_KEY)
+                    .execute(&mut connection)
+                    .await
+                    .map_err(|error| translate_error(sqlx_error(error)))?;
+                connection
+                    .close()
+                    .await
+                    .map_err(|error| translate_error(sqlx_error(error)))
+            }
             #[cfg(feature = "mysql")]
             Self::Session(mut connection) => {
                 crate::internal::sqlx::query("SELECT RELEASE_LOCK(?)")
                     .bind(MIGRATION_LOCK_NAME)
-                    .execute(&mut *connection)
+                    .execute(&mut connection)
                     .await
                     .map_err(|error| translate_error(sqlx_error(error)))?;
-                Ok(())
+                connection
+                    .close()
+                    .await
+                    .map_err(|error| translate_error(sqlx_error(error)))
             }
         }
     }
 }
 
 /// A driver error from the lock's own connection, as SeaORM reports one.
-#[cfg(feature = "mysql")]
+#[cfg(any(feature = "postgres", feature = "mysql"))]
 fn sqlx_error(error: crate::internal::sqlx::Error) -> crate::internal::OrmError {
     crate::internal::OrmError::Query(crate::internal::RuntimeErr::SqlxError(error.into()))
 }

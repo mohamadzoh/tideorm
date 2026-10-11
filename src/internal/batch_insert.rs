@@ -64,11 +64,16 @@ struct ClientKey {
 /// batch of large rows. Every batch of several rows runs in a transaction, a
 /// savepoint inside the caller's, so it stays all-or-nothing on every backend,
 /// down to a statement whose returned rows do not match the batch.
-pub(super) async fn insert_many<M>(conn: &Executor<'_>, models: Vec<M>) -> Result<Vec<M>>
+pub(super) async fn insert_many<M>(
+    connection: &crate::database::ConnectionRef,
+    models: Vec<M>,
+) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
     EntityModel<M>: IntoActiveModel<M::ActiveModel>,
 {
+    let executor = connection.executor();
+    let conn = &executor;
     if models.is_empty() {
         return Ok(Vec::new());
     }
@@ -81,7 +86,7 @@ where
         .map(M::try_into_active_model)
         .collect::<Result<Vec<_>>>()?;
     if batch_size == 1 {
-        return insert_individually::<M, _>(conn, active_models, &error_context).await;
+        return insert_individually::<M, _>(conn, connection, active_models, &error_context).await;
     }
 
     let backend = Backend::from(conn.get_database_backend());
@@ -105,57 +110,87 @@ where
         .map_err(|err| err.with_context(error_context.clone()))?;
     // The rows go through an executor, which binds their values as it binds
     // every other statement's.
-    let in_txn = Executor::new((&txn).into());
-    let inserted = match &strategy {
-        Strategy::Returning(order) => {
-            let mut results = Vec::with_capacity(batch_size);
-            let mut remaining = active_models.into_iter();
-            loop {
-                let chunk: Vec<_> = remaining.by_ref().take(rows_per_statement).collect();
-                if chunk.is_empty() {
-                    break Ok(results);
+    let pending = std::sync::Arc::new(parking_lot::Mutex::new(
+        crate::cache::PendingInvalidations::new(conn.is_transaction()),
+    ));
+    let outcome = super::per_poll(
+        async {
+            let in_txn = Executor::new((&txn).into());
+            let inserted = match &strategy {
+                Strategy::Returning(order) => {
+                    let mut results = Vec::with_capacity(batch_size);
+                    let mut remaining = active_models.into_iter();
+                    loop {
+                        let chunk: Vec<_> = remaining.by_ref().take(rows_per_statement).collect();
+                        if chunk.is_empty() {
+                            break Ok(results);
+                        }
+                        let offset = results.len();
+                        match insert_returning::<M, _>(
+                            &in_txn,
+                            connection,
+                            chunk,
+                            order,
+                            offset,
+                            &error_context,
+                        )
+                        .await
+                        {
+                            Ok(rows) => results.extend(rows),
+                            Err(err) => break Err(err),
+                        }
+                    }
                 }
-                let offset = results.len();
-                match insert_returning::<M, _>(&in_txn, chunk, order, offset, &error_context).await
-                {
-                    Ok(rows) => results.extend(rows),
-                    Err(err) => break Err(err),
+                Strategy::InsertThenSelect(keys) => {
+                    let mut results = Vec::with_capacity(batch_size);
+                    let mut remaining = active_models.into_iter().peekable();
+                    loop {
+                        let chunk = mysql_chunk::<M, _>(&mut remaining, rows_per_statement);
+                        if chunk.is_empty() {
+                            break Ok(results);
+                        }
+                        let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
+                        match insert_then_select::<M, _>(
+                            &in_txn,
+                            connection,
+                            chunk,
+                            chunk_keys,
+                            &error_context,
+                        )
+                        .await
+                        {
+                            Ok(rows) => results.extend(rows),
+                            Err(err) => break Err(err),
+                        }
+                    }
                 }
-            }
-        }
-        Strategy::InsertThenSelect(keys) => {
-            let mut results = Vec::with_capacity(batch_size);
-            let mut remaining = active_models.into_iter().peekable();
-            loop {
-                let chunk = mysql_chunk::<M, _>(&mut remaining, rows_per_statement);
-                if chunk.is_empty() {
-                    break Ok(results);
+                Strategy::PerRow => {
+                    insert_individually::<M, _>(&in_txn, connection, active_models, &error_context)
+                        .await
                 }
-                let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
-                match insert_then_select::<M, _>(&in_txn, chunk, chunk_keys, &error_context).await {
-                    Ok(rows) => results.extend(rows),
-                    Err(err) => break Err(err),
-                }
-            }
-        }
-        Strategy::PerRow => {
-            insert_individually::<M, _>(&in_txn, active_models, &error_context).await
-        }
-    };
+            };
 
-    match inserted {
-        Ok(results) => {
-            txn.commit()
-                .await
-                .map_err(translate_error)
-                .map_err(|err| err.with_context(error_context.clone()))?;
-            Ok(results)
-        }
-        Err(err) => {
-            let _ = txn.rollback().await;
-            Err(err)
-        }
+            match inserted {
+                Ok(results) => {
+                    txn.commit()
+                        .await
+                        .map_err(translate_error)
+                        .map_err(|err| err.with_context(error_context.clone()))?;
+                    Ok(results)
+                }
+                Err(err) => {
+                    let _ = txn.rollback().await;
+                    Err(err)
+                }
+            }
+        },
+        || crate::cache::install_pending_invalidations(&pending),
+    )
+    .await;
+    if outcome.is_ok() {
+        std::mem::take(&mut *pending.lock()).replay();
     }
+    outcome
 }
 
 /// The batch strategy `backend` can run for `M`.
@@ -273,6 +308,7 @@ fn order_by_keys<M: InternalModel>(
 /// `INSERT .. RETURNING`, and return them in input order.
 async fn insert_returning<M, C>(
     conn: &C,
+    connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     order: &Order,
     offset: usize,
@@ -303,7 +339,9 @@ where
         Order::ByIncreasingKey => {
             let mut models = rows
                 .into_iter()
-                .map(M::try_from_entity_model)
+                .map(|row| {
+                    crate::model::__loading_through(connection, || M::try_from_entity_model(row))
+                })
                 .collect::<Result<Vec<_>>>()?;
             models.sort_by_cached_key(|model| {
                 serde_json::to_value(model.primary_key())
@@ -313,7 +351,9 @@ where
             return Ok(models);
         }
     };
-    rows.into_iter().map(M::try_from_entity_model).collect()
+    rows.into_iter()
+        .map(|row| crate::model::__loading_through(connection, || M::try_from_entity_model(row)))
+        .collect()
 }
 
 /// The next rows of `remaining` for one MySQL or MariaDB insert: at most
@@ -357,6 +397,7 @@ fn row_bytes<M: InternalModel>(active: &M::ActiveModel) -> usize {
 /// with one `SELECT`, in input order.
 async fn insert_then_select<M, C>(
     conn: &C,
+    connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     keys: &[ClientKey],
     error_context: &ErrorContext,
@@ -387,7 +428,7 @@ where
 
     order_by_keys::<M>(rows, keys)?
         .into_iter()
-        .map(M::try_from_entity_model)
+        .map(|row| crate::model::__loading_through(connection, || M::try_from_entity_model(row)))
         .collect()
 }
 
@@ -397,6 +438,7 @@ where
 /// whole batch stays all-or-nothing.
 async fn insert_individually<M, C>(
     conn: &C,
+    connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     error_context: &ErrorContext,
 ) -> Result<Vec<M>>
@@ -408,7 +450,9 @@ where
     let mut results = Vec::with_capacity(active_models.len());
     for active in active_models {
         let result = run_profiled(active.insert(conn), || error_context.clone()).await?;
-        results.push(M::try_from_entity_model(result)?);
+        results.push(crate::model::__loading_through(connection, || {
+            M::try_from_entity_model(result)
+        })?);
     }
     Ok(results)
 }

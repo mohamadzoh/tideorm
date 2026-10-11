@@ -18,6 +18,12 @@ impl crate::columns::ConditionOwner for OrGroup {
 
 impl OrGroup {
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// let group = OrGroup::new();
+    /// assert!(group.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self {
             conditions: Vec::new(),
@@ -35,6 +41,12 @@ impl OrGroup {
     }
 
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// let group = OrGroup::new().nested_or(|q| q.where_eq("active", true).where_eq("role", "admin"));
+    /// assert_eq!(group.condition_count(), 2);
+    /// ```
     pub fn nested_or<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
@@ -44,6 +56,12 @@ impl OrGroup {
     }
 
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// let group = OrGroup::new().nested_and(|q| q.where_eq("active", true).where_eq("role", "admin"));
+    /// assert_eq!(group.condition_count(), 2);
+    /// ```
     pub fn nested_and<F>(mut self, f: F) -> Self
     where
         F: FnOnce(OrGroup) -> OrGroup,
@@ -52,6 +70,11 @@ impl OrGroup {
         self
     }
 
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// assert!(OrGroup::new().is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.conditions.is_empty() && self.nested_groups.is_empty()
     }
@@ -81,6 +104,11 @@ impl OrGroup {
         }
     }
 
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// assert_eq!(OrGroup::new().where_eq("active", true).condition_count(), 1);
+    /// ```
     pub fn condition_count(&self) -> usize {
         let nested_count: usize = self.nested_groups.iter().map(|g| g.condition_count()).sum();
         self.conditions.len() + nested_count

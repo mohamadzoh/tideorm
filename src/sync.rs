@@ -7,9 +7,9 @@
 //! deployed environments.
 //!
 //! TideORM models describe themselves with a `ModelSchema`, which the macros
-//! generate. Register them through `TideConfig::models::<(... )>()`,
-//! `TideConfig::models_matching("src/models/*.model.rs")`, or the corresponding
-//! `SyncRegistry` helpers, and enable synchronization with `sync(true)`.
+//! generate. Discover all linked models with `TideConfig::auto_models()`, or
+//! select a subset with `TideConfig::models::<(... )>()`. Enable synchronization
+//! with `sync(true)`. The legacy `models_matching` path filter remains available.
 //!
 //! When sync fails, inspect the reported SQL/backend error first. Common causes
 //! are unsupported type changes, existing tables with incompatible columns, or a
@@ -88,6 +88,20 @@ impl SyncRegistry {
         }
     }
 
+    /// Register every compiled model, independent of its source file layout.
+    ///
+    /// `#[tideorm::model]` submits metadata to `inventory` automatically. Only
+    /// modules linked into the program participate. Explicit registration and
+    /// path selection remain available for applications that sync a subset.
+    pub fn register_all_models() -> usize {
+        let mut count = 0;
+        for model in inventory::iter::<CompiledModelRegistration> {
+            Self::register_schema((model.sync_schema)());
+            count += 1;
+        }
+        count
+    }
+
     /// Register all compiled TideORM models whose source file path matches a glob pattern.
     ///
     /// This matches against the source path captured from each `#[tideorm::model]` invocation,
@@ -136,8 +150,20 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
 
     let schema_count = SyncRegistry::schema_count();
     if schema_count == 0 {
-        tide_info!("No models registered for sync");
-        return Ok(());
+        let mut available: Vec<_> = inventory::iter::<CompiledModelRegistration>
+            .into_iter()
+            .map(|model| (model.table_name)())
+            .collect();
+        available.sort_unstable();
+        available.dedup();
+        return Err(crate::Error::query(format!(
+            "No models registered for schema sync; call auto_models() or models::<(YourModel,)>(). Available compiled model tables: {}",
+            if available.is_empty() {
+                "(none; include your model modules with mod)".to_owned()
+            } else {
+                available.join(", ")
+            }
+        )));
     }
 
     tide_info!("Syncing {} model(s)...", schema_count);

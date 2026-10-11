@@ -94,6 +94,7 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
 
     let encrypt = |value| encrypt_batch_json_value(value, M::table_name(), field_name, column_name);
     let operation = match value {
+        UpdateValue::SqlNull | UpdateValue::CoalesceSqlNull => return Ok(value),
         UpdateValue::Value(value) => return Ok(UpdateValue::Value(encrypt(value)?)),
         UpdateValue::Coalesce(value) => return Ok(UpdateValue::Coalesce(encrypt(value)?)),
         UpdateValue::UnsafeRaw(_) => "trusted raw SQL",

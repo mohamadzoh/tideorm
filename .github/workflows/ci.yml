@@ -207,6 +207,12 @@ jobs:
           cargo test --package tideorm --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio
           cargo test --package tideorm --test sqlite_entity_manager_tests --no-default-features --features sqlite,runtime-tokio,entity-manager
 
+      # Several review regressions are gated on the module features.
+      - name: Run review regressions and developer-experience tests
+        run: |
+          cargo test --package tideorm --test review_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+          cargo test --package tideorm --test developer_experience --no-default-features --features sqlite,runtime-tokio
+
   # Integration targets that never touch a database. Targets are named
   # explicitly rather than using `--tests`, because the postgres, mysql and
   # mariadb integration targets all need a live server.
@@ -374,3 +380,23 @@ jobs:
 
       - name: Build book
         run: mdbook build
+
+  rustdoc-and-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs with the docs.rs feature set
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --features "attachments translations fulltext entity-manager dirty-tracking encrypted-fields"
+      - name: Execute documentation examples, including SQLite terminals
+        run: cargo test --doc --all-features -- --test-threads=8
+      - name: Compile all standalone examples
+        run: cargo check --all-features --examples
+      - name: Run standalone SQLite examples
+        run: |
+          for example in crud relations transactions migrations scopes; do
+            cargo run --no-default-features --features sqlite,runtime-tokio --example "$example"
+          done

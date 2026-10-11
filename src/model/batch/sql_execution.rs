@@ -88,12 +88,34 @@ fn gcd(mut a: u64, mut b: u64) -> u64 {
 }
 
 impl<M: Model> BatchUpdateBuilder<M> {
+    /// SQLite has one integer storage width; enforce the model's narrower type too.
+    fn sqlite_integer_bounds(column: &str) -> (i64, i64) {
+        use crate::orm::ColumnType;
+        if let Some(bounds) = M::__sqlite_integer_bounds(column) {
+            return bounds;
+        }
+        match crate::internal::column_type_of::<M>(column) {
+            Some(ColumnType::TinyInteger) => (i8::MIN.into(), i8::MAX.into()),
+            Some(ColumnType::SmallInteger) => (i16::MIN.into(), i16::MAX.into()),
+            Some(ColumnType::Integer) => (i32::MIN.into(), i32::MAX.into()),
+            Some(ColumnType::TinyUnsigned) => (0, u8::MAX.into()),
+            Some(ColumnType::SmallUnsigned) => (0, u16::MAX.into()),
+            Some(ColumnType::Unsigned) => (0, u32::MAX.into()),
+            Some(ColumnType::BigUnsigned) => (0, i64::MAX),
+            _ => (i64::MIN, i64::MAX),
+        }
+    }
+
     /// Bind `value` with the type of the column it is assigned to.
     fn column_value(column: &str, value: &serde_json::Value) -> crate::internal::Value {
-        crate::internal::json_to_assignment_value(
-            value,
-            crate::internal::column_type_of::<M>(column).as_ref(),
-        )
+        let column_type = crate::internal::column_type_of::<M>(column);
+        if matches!(
+            column_type,
+            Some(crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary)
+        ) {
+            return crate::internal::Value::from(value.clone());
+        }
+        crate::internal::json_to_assignment_value(value, column_type.as_ref())
     }
 
     /// `col` multiplied, or with `divide` divided, by `factor`.
@@ -112,10 +134,15 @@ impl<M: Model> BatchUpdateBuilder<M> {
         params: &mut Vec<crate::internal::Value>,
         factor: f64,
         divide: bool,
-    ) -> String {
+    ) -> Result<String> {
         use crate::config::DatabaseType;
         use crate::orm::ColumnType;
 
+        if !factor.is_finite() || (divide && factor == 0.0) {
+            return Err(Error::query(
+                "bulk arithmetic requires a finite factor and a nonzero divisor",
+            ));
+        }
         let column_type = crate::internal::column_type_of::<M>(column);
         let integral = column_type
             .as_ref()
@@ -129,7 +156,18 @@ impl<M: Model> BatchUpdateBuilder<M> {
         match (db_type, exact_decimal(factor)) {
             (DatabaseType::SQLite, Some(exact)) if integral => {
                 if let Some(scaled) = sqlite_integer_scale(col, exact, divide, db_type, params) {
-                    return format!("CAST({scaled} AS INTEGER)");
+                    // SQLite promotes overflowing integer arithmetic to REAL.
+                    // Casting that REAL clamps it silently. Fail the statement
+                    // instead; abs(i64::MIN) raises SQLite's integer-overflow
+                    // error and rolls back every row of this UPDATE.
+                    let bounded = sqlite_integer_scale(col, exact, divide, db_type, params)
+                        .expect("the same exact factor was already accepted");
+                    let (min, max) = Self::sqlite_integer_bounds(column);
+                    let result = sqlite_integer_scale(col, exact, divide, db_type, params)
+                        .expect("the same exact factor was already accepted");
+                    return Ok(format!(
+                        "CASE WHEN typeof({scaled}) IN ('integer', 'null') AND COALESCE(({bounded}) BETWEEN {min} AND {max}, 1) THEN {result} ELSE abs(-9223372036854775808) END"
+                    ));
                 }
             }
             (DatabaseType::Postgres | DatabaseType::MySQL | DatabaseType::MariaDB, Some(exact))
@@ -140,22 +178,23 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     params,
                     crate::internal::Value::Decimal(Some(exact)),
                 );
-                return format!("{col} {operator} {placeholder}");
+                return Ok(format!("{col} {operator} {placeholder}"));
             }
             _ => {}
         }
 
+        if integral && db_type == DatabaseType::SQLite {
+            return Err(Error::query(
+                "SQLite cannot scale this integer column exactly with the requested factor",
+            ));
+        }
         let placeholder = push_param(
             db_type,
             params,
             crate::internal::Value::Double(Some(factor)),
         );
         let scaled = format!("{col} {operator} {placeholder}");
-        if integral && db_type == DatabaseType::SQLite {
-            format!("CAST(ROUND({scaled}) AS INTEGER)")
-        } else {
-            scaled
-        }
+        Ok(scaled)
     }
 
     fn build_assignment_sql(
@@ -167,33 +206,67 @@ impl<M: Model> BatchUpdateBuilder<M> {
         let col = Self::quote_update_column(column, db_type)?;
 
         match value {
+            UpdateValue::SqlNull | UpdateValue::CoalesceSqlNull => {
+                let null = crate::internal::json_to_column_value(
+                    &serde_json::Value::Null,
+                    crate::internal::column_type_of::<M>(column).as_ref(),
+                );
+                let parameter = push_param(db_type, params, null);
+                Ok(if matches!(value, UpdateValue::SqlNull) {
+                    format!("{col} = {parameter}")
+                } else {
+                    format!("{col} = COALESCE({col}, {parameter})")
+                })
+            }
             UpdateValue::Value(value) => {
                 let placeholder = push_param(db_type, params, Self::column_value(column, value));
                 Ok(format!("{} = {}", col, placeholder))
             }
             UpdateValue::UnsafeRaw(expression) => Ok(format!("{} = {}", col, expression)),
-            UpdateValue::Increment(by) => {
+            UpdateValue::Increment(by) | UpdateValue::Decrement(by) => {
+                let operator = if matches!(value, UpdateValue::Increment(_)) {
+                    "+"
+                } else {
+                    "-"
+                };
                 let placeholder =
                     push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
-                Ok(format!("{} = {} + {}", col, col, placeholder))
-            }
-            UpdateValue::Decrement(by) => {
-                let placeholder =
-                    push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
-                Ok(format!("{} = {} - {}", col, col, placeholder))
+                let expression = format!("{col} {operator} {placeholder}");
+                if db_type == crate::config::DatabaseType::SQLite
+                    && crate::internal::column_type_of::<M>(column)
+                        .as_ref()
+                        .is_some_and(crate::internal::is_integer)
+                {
+                    let bounded_parameter =
+                        push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                    let (min, max) = Self::sqlite_integer_bounds(column);
+                    let result_parameter =
+                        push_param(db_type, params, crate::internal::Value::BigInt(Some(*by)));
+                    Ok(format!(
+                        "{col} = CASE WHEN typeof({expression}) IN ('integer', 'null') AND COALESCE(({col} {operator} {bounded_parameter}) BETWEEN {min} AND {max}, 1) THEN {col} {operator} {result_parameter} ELSE abs(-9223372036854775808) END"
+                    ))
+                } else {
+                    Ok(format!("{col} = {expression}"))
+                }
             }
             UpdateValue::Multiply(by) => Ok(format!(
                 "{col} = {}",
-                Self::scaled(column, &col, db_type, params, *by, false)
+                Self::scaled(column, &col, db_type, params, *by, false)?
             )),
             UpdateValue::Divide(by) => Ok(format!(
                 "{col} = {}",
-                Self::scaled(column, &col, db_type, params, *by, true)
+                Self::scaled(column, &col, db_type, params, *by, true)?
             )),
             UpdateValue::ArrayAppend(value) => Ok(match db_type {
                 crate::config::DatabaseType::Postgres => {
-                    let placeholder =
-                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    let placeholder = push_param(
+                        db_type,
+                        params,
+                        crate::internal::json_to_array_element(
+                            value,
+                            crate::internal::column_type_of::<M>(column).as_ref(),
+                        ),
+                    );
                     format!("{} = array_append({}, {})", col, col, placeholder)
                 }
                 // The element is bound as its JSON text and read back as JSON,
@@ -224,8 +297,14 @@ impl<M: Model> BatchUpdateBuilder<M> {
             }),
             UpdateValue::ArrayRemove(value) => Ok(match db_type {
                 crate::config::DatabaseType::Postgres => {
-                    let placeholder =
-                        push_param(db_type, params, crate::internal::json_to_db_value(value));
+                    let placeholder = push_param(
+                        db_type,
+                        params,
+                        crate::internal::json_to_array_element(
+                            value,
+                            crate::internal::column_type_of::<M>(column).as_ref(),
+                        ),
+                    );
                     format!("{} = array_remove({}, {})", col, col, placeholder)
                 }
                 // Every element equal to the value goes, compared as JSON as
@@ -252,13 +331,13 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         equal.sql
                     )
                 }
-                // Each kept element is rebuilt as the JSON it was: `json_each`
-                // reports true and false as 1 and 0 and null as NULL.
+                // Extract JSON text, not json_each.value: SQL REAL rounds large
+                // integers and rebuilding from it would corrupt untouched values.
                 crate::config::DatabaseType::SQLite => {
                     let equal =
                         crate::query::db_sql::sqlite_json_element_equals("tideorm_element", value);
                     params.extend(equal.values);
-                    let element = "CASE tideorm_element.type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false') WHEN 'null' THEN json('null') WHEN 'object' THEN json(tideorm_element.value) WHEN 'array' THEN json(tideorm_element.value) ELSE json_quote(tideorm_element.value) END";
+                    let element = "json(tideorm_element.json -> tideorm_element.fullkey)";
                     format!(
                         "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({col}) AS tideorm_element WHERE NOT {}) END",
                         equal.sql
@@ -539,9 +618,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         let (sql, params) = self.build_update_statement(db_type)?;
 
-        let rows_affected = db.__execute_with_params(&sql, params).await?;
-        QueryBuilder::<M>::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+        let result = db.__execute_with_params(&sql, params).await;
+        QueryBuilder::<M>::invalidate_model_state(result.as_ref().copied().unwrap_or(1));
+        result
     }
 
     /// Run the update and return the rows it wrote.

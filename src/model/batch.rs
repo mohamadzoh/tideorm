@@ -59,6 +59,10 @@ pub struct BatchUpdateBuilder<M: Model> {
 pub enum UpdateValue {
     /// Assign a literal value, bound as a parameter.
     Value(serde_json::Value),
+    /// Assign SQL NULL, preserving Option::None separately from a JSON null document.
+    SqlNull,
+    /// Use SQL NULL as the COALESCE fallback.
+    CoalesceSqlNull,
     /// Assign a raw SQL expression, spliced into the statement verbatim.
     ///
     /// Nothing escapes or validates the string, so it must never contain

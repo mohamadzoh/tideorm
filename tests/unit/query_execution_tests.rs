@@ -598,3 +598,26 @@ fn cache_dependencies_preserve_quoted_identifiers() {
             .contains(&"cache_key_test_posts".to_string())
     );
 }
+
+#[test]
+fn mixed_joins_keep_comma_dependencies_without_reading_expression_commas() {
+    for join in [
+        "JOIN b ON a.id=b.id",
+        "LEFT JOIN b USING(id)",
+        "CROSS JOIN b",
+    ] {
+        let mut tables = Vec::new();
+        super::collect_tables_from_sql(
+            &format!("SELECT * FROM a {join}, c WHERE coalesce(c.id, 0)>0 ORDER BY a.id, ignored"),
+            &mut tables,
+        );
+        assert!(tables.iter().any(|table| table == "a"));
+        assert!(tables.iter().any(|table| table == "b"));
+        assert!(tables.iter().any(|table| table == "c"));
+        assert!(
+            !tables
+                .iter()
+                .any(|table| table == "ignored" || table == "0")
+        );
+    }
+}

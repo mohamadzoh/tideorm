@@ -17,6 +17,7 @@ pub use config::{CacheConfig, CacheStrategy};
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
     PendingInvalidations, install as install_pending_invalidations, note_failed_statement,
+    transaction_deadlocked,
 };
 pub use store::CacheStats;
 use store::{CacheEntry, CacheStore};
@@ -24,7 +25,10 @@ use store::{CacheEntry, CacheStore};
 /// Query result cache
 ///
 /// Caches the results of database queries to avoid repeated round-trips
-/// for frequently accessed data.
+/// for frequently accessed data. Successful database writes clear the global
+/// query cache because foreign-key actions and triggers may write other tables.
+/// Transactions repeat this invalidation on commit to evict results cached
+/// by other connections while the write was still uncommitted.
 #[derive(Debug)]
 pub struct QueryCache {
     /// Cache configuration

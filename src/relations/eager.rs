@@ -262,6 +262,11 @@ pub struct EagerQueryBuilder<M: Model> {
 #[async_trait]
 #[doc(hidden)]
 pub trait EagerLoadModel: Model + InternalModel {
+    /// Check requested paths before querying, including when there are no rows.
+    fn __validate_relations(_relation_tree: &RelationTree) -> Result<()> {
+        Ok(())
+    }
+
     /// Resolve `relation_tree` across every entry of `models` in place, writing
     /// each payload into both the [`WithRelations`] map and the model's own
     /// relation wrapper.
@@ -621,14 +626,42 @@ impl<M: Model> EagerQueryBuilder<M> {
     /// Calls accumulate and merge, so shared prefixes are loaded once. The name
     /// is not validated here — a typo surfaces as an "Unknown relation" error
     /// when a terminal runs.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// let query = User::query().with(User::POSTS).with(User::POSTS);
+    /// # }
+    /// ```
     pub fn with(mut self, relation: &str) -> Self {
-        let path = RelationPath::parse(relation);
+        let path = if relation.split('.').any(str::is_empty) {
+            RelationPath {
+                segments: vec![relation.to_owned()],
+            }
+        } else {
+            RelationPath::parse(relation)
+        };
         self.relation_tree.add_path(&path);
         self
     }
 
     /// Request several relations at once; equivalent to chained
     /// [`with`](Self::with) calls.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// let query = User::query().with(User::POSTS).with_many(&[User::POSTS]);
+    /// # }
+    /// ```
     pub fn with_many(mut self, relations: &[&str]) -> Self {
         for relation in relations {
             self = self.with(relation);
@@ -649,6 +682,17 @@ impl<M: Model> EagerQueryBuilder<M> {
     /// Relation queries are unaffected; constrain those by loading them lazily
     /// with `load_with` instead.
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// let query = User::query().with(User::POSTS).query(|q| q.where_eq(User::ID, 1));
+    /// # }
+    /// ```
     pub fn query(mut self, shape: impl FnOnce(QueryBuilder<M>) -> QueryBuilder<M>) -> Self {
         self.query = shape(self.query);
         self
@@ -659,10 +703,32 @@ impl<M: Model> EagerQueryBuilder<M> {
     ///
     /// Relation loading is skipped entirely when the root query returns nothing,
     /// so an empty result costs exactly one query.
+    ///
+    /// Run with the `sqlite` feature.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User, Post)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id) VALUES (1)").await?;
+    /// let result = User::query().with(User::POSTS).get().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// # }
+    /// ```
     pub async fn get(self) -> Result<Vec<WithRelations<M>>>
     where
         M: EagerLoadModel,
     {
+        M::__validate_relations(&self.relation_tree)?;
         let database = self.query.named_database();
         let models = self.query.get().await?;
         let mut results: Vec<WithRelations<M>> =
@@ -681,6 +747,27 @@ impl<M: Model> EagerQueryBuilder<M> {
     /// the root query so the relation load covers only that row.
     ///
     /// Without an `order_by` "first" is whatever the backend returns first.
+    ///
+    /// Run with the `sqlite` feature.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User, Post)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id) VALUES (1)").await?;
+    /// let result = User::query().with(User::POSTS).first().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// # }
+    /// ```
     pub async fn first(mut self) -> Result<Option<WithRelations<M>>>
     where
         M: EagerLoadModel,
@@ -697,6 +784,27 @@ impl<M: Model> EagerQueryBuilder<M> {
     /// soft-delete scope applies and a trashed row is *not* returned unless the
     /// chain opted into it. Composite keys are supported: the key serializes to
     /// an array and is matched column by column.
+    ///
+    /// Run with the `sqlite` feature.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User, Post)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id) VALUES (1)").await?;
+    /// let result = User::query().with(User::POSTS).find(1).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// # }
+    /// ```
     pub async fn find(mut self, id: M::PrimaryKey) -> Result<Option<WithRelations<M>>>
     where
         M: EagerLoadModel,

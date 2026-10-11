@@ -65,12 +65,15 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Assign a literal value to a column.
     ///
+    /// `None` writes SQL NULL; a JSON null value writes a JSON null document
+    /// when the destination is a JSON column.
     /// The value is bound as a parameter. Setting the same column twice keeps
     /// the last assignment.
     #[must_use]
     pub fn set(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
-        match crate::query::checked_filter_value(value) {
-            Ok(value) => self.assign(field, UpdateValue::Value(value)),
+        match crate::query::checked_assignment_value(value) {
+            Ok((_, true)) => self.assign(field, UpdateValue::SqlNull),
+            Ok((value, false)) => self.assign(field, UpdateValue::Value(value)),
             Err(reason) => self.invalidate(format!("set(): {}", reason)),
         }
     }
@@ -117,6 +120,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///
     /// On an integer column the product is exact, taking `by` as the decimal
     /// it is written as, and rounded half away from zero on every backend.
+    /// Non-finite factors and factors SQLite cannot apply exactly to integers
+    /// are rejected before executing the update.
     #[must_use]
     pub fn multiply(self, field: impl IntoColumnName, by: f64) -> Self {
         self.assign(field, UpdateValue::Multiply(by))
@@ -125,9 +130,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Divide the column's current value by `by` in the database.
     ///
     /// On an integer column the quotient is exact, taking `by` as the decimal
-    /// it is written as, and rounded half away from zero on every backend. A
-    /// zero divisor is passed through to the backend, which normally raises a
-    /// division-by-zero error for the whole statement.
+    /// it is written as, and rounded half away from zero on every backend.
+    /// Zero, non-finite divisors and factors SQLite cannot apply exactly to
+    /// integers are rejected before executing the update.
     #[must_use]
     pub fn divide(self, field: impl IntoColumnName, by: f64) -> Self {
         self.assign(field, UpdateValue::Divide(by))
@@ -138,25 +143,22 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Renders to each backend's own function, so the column has to be a real
     /// array type on PostgreSQL and a JSON array elsewhere.
     #[must_use]
-    pub fn array_append(
-        self,
-        field: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.assign(field, UpdateValue::ArrayAppend(value.into()))
+    pub fn array_append(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
+        match crate::query::checked_assignment_value(value) {
+            Ok((value, _)) => self.assign(field, UpdateValue::ArrayAppend(value)),
+            Err(reason) => self.invalidate(format!("array_append(): {}", reason)),
+        }
     }
 
     /// Remove a value from an array or JSON array column.
     ///
-    /// PostgreSQL drops every matching element; the JSON-based backends drop one
-    /// match per row.
+    /// Every backend drops all matching elements. Non-finite floats are rejected.
     #[must_use]
-    pub fn array_remove(
-        self,
-        field: impl IntoColumnName,
-        value: impl Into<serde_json::Value>,
-    ) -> Self {
-        self.assign(field, UpdateValue::ArrayRemove(value.into()))
+    pub fn array_remove(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
+        match crate::query::checked_assignment_value(value) {
+            Ok((value, _)) => self.assign(field, UpdateValue::ArrayRemove(value)),
+            Err(reason) => self.invalidate(format!("array_remove(): {}", reason)),
+        }
     }
 
     /// Set one path inside a JSON column, leaving the rest of the document intact.
@@ -171,9 +173,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
         self,
         field: impl IntoColumnName,
         path: &str,
-        value: impl Into<serde_json::Value>,
+        value: impl serde::Serialize,
     ) -> Self {
-        self.assign(field, UpdateValue::JsonSet(path.to_string(), value.into()))
+        match crate::query::checked_assignment_value(value) {
+            Ok((value, _)) => self.assign(field, UpdateValue::JsonSet(path.to_string(), value)),
+            Err(reason) => self.invalidate(format!("json_set(): {}", reason)),
+        }
     }
 
     /// Fill the column with `default` only where it is currently `NULL`.
@@ -182,8 +187,9 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// the update is safe to re-run.
     #[must_use]
     pub fn coalesce(self, field: impl IntoColumnName, default: impl serde::Serialize) -> Self {
-        match crate::query::checked_filter_value(default) {
-            Ok(default) => self.assign(field, UpdateValue::Coalesce(default)),
+        match crate::query::checked_assignment_value(default) {
+            Ok((_, true)) => self.assign(field, UpdateValue::CoalesceSqlNull),
+            Ok((default, false)) => self.assign(field, UpdateValue::Coalesce(default)),
             Err(reason) => self.invalidate(format!("coalesce(): {}", reason)),
         }
     }
@@ -204,7 +210,18 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Keyed by the column, so a later assignment through the field's name
     /// or the column's replaces an earlier one through the other.
+    /// Typed columns must belong to the model being updated.
     fn assign(mut self, field: impl IntoColumnName, value: UpdateValue) -> Self {
+        if let Some(table) = field.column_table()
+            && table != M::table_name()
+        {
+            return self.invalidate(format!(
+                "cannot update {} with typed column {}.{}",
+                M::table_name(),
+                table,
+                field.column_name()
+            ));
+        }
         let name = field.column_name();
         let column = M::column_named(name);
         self.updates.insert(column.to_string(), value);

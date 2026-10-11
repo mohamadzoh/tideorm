@@ -231,6 +231,13 @@ fn sum_expression(column_sql: &str) -> String {
 
 impl<M: Model> QueryBuilder<M> {
     /// Add a GROUP BY clause
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().group_by(User::ACTIVE).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.clauses.group_by.push(crate::columns::column_reference(
@@ -255,10 +262,23 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     ///
     /// A raw condition, `having("COUNT(*) > 2")`, is **trusted SQL only**.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().having(Aggregate::count().gt(1)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn having(mut self, condition: impl Into<HavingCondition>) -> Self {
         match condition.into() {
             HavingCondition::Aggregate(condition) => {
+                if let Aggregate::CountDistinct(column) = &condition.aggregate
+                    && let Err(error) = self.ensure_distinct_column_is_comparable(column)
+                {
+                    self.invalidate_query(error.to_string());
+                    return self;
+                }
                 let db_type = self.db_type_for_sql();
                 // The model's own columns are written with its table, so a
                 // join added after this call cannot make them ambiguous.
@@ -349,7 +369,7 @@ impl<M: Model> QueryBuilder<M> {
         if let Some((output, _)) = selected.or_else(|| {
             outputs
                 .iter()
-                .find(|(output, _)| output == column || output == name)
+                .find(|(output, _)| !column.contains('.') && output == column)
         }) {
             return Some(output.clone());
         }
@@ -429,8 +449,33 @@ impl<M: Model> QueryBuilder<M> {
     fn build_projected_aggregate_sql(
         &self,
         db_type: DatabaseType,
-        projections: impl FnOnce(&dyn Fn(&str) -> String) -> Vec<String>,
+        projections: impl Fn(&dyn Fn(&str) -> String) -> Vec<String>,
     ) -> Result<(String, Vec<Value>)> {
+        let invalid = std::cell::RefCell::new(None);
+        projections(&|column| {
+            let column = column.trim();
+            let is_output_alias = (self.is_distinct() || !self.clauses.unions.is_empty())
+                && !column.contains('.')
+                && self
+                    .projection_outputs()
+                    .iter()
+                    .any(|(name, _)| name == column);
+            if !is_output_alias {
+                let result = Self::validate_order_or_group_value(
+                    "aggregate column",
+                    column,
+                    false,
+                    Some(&self.known_qualifiers()),
+                );
+                if let Err(reason) = result {
+                    invalid.borrow_mut().get_or_insert(reason);
+                }
+            }
+            String::new()
+        });
+        if let Some(reason) = invalid.into_inner() {
+            return Err(Error::query(reason));
+        }
         if !self.aggregate_needs_derived_table() {
             let select_list = projections(&|column| self.format_aggregate_column(db_type, column));
             return Ok(self.build_plain_select_sql(db_type, &select_list.join(", ")));
@@ -530,8 +575,13 @@ impl<M: Model> QueryBuilder<M> {
         } else {
             Vec::new()
         };
+        let sources = if reads_as_column {
+            vec![(alias.to_string(), column.to_string())]
+        } else {
+            Vec::new()
+        };
         let rows = self
-            .fetch_json_with_types(&sql, params, &output_types)
+            .fetch_aggregate_json(&sql, params, &output_types, &sources)
             .await?;
 
         Ok(rows.first().and_then(|row| row.get(alias)).cloned())
@@ -552,6 +602,23 @@ impl<M: Model> QueryBuilder<M> {
     /// Joins, CTEs, unions, and `limit()`/`offset()` are honoured; `group_by()`,
     /// `having()`, and `window()` are rejected because a grouped aggregate has no
     /// single scalar answer.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).sum::<i64>(User::ID).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn sum<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -569,6 +636,23 @@ impl<M: Model> QueryBuilder<M> {
     /// Average a column, read as `T` (usually `f64`); `None` over no rows.
     ///
     /// Carries the same modifier rules as [`sum()`](Self::sum).
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).avg::<f64>(User::ID).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn avg<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -593,6 +677,23 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     ///
     /// Carries the same modifier rules as [`sum()`](Self::sum).
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).min::<i64>(User::ID).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn min<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -603,6 +704,23 @@ impl<M: Model> QueryBuilder<M> {
     /// The largest value of a column, read as `T`; `None` over no rows.
     ///
     /// Works like [`min()`](Self::min).
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).max::<i64>(User::ID).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn max<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -627,6 +745,48 @@ impl<M: Model> QueryBuilder<M> {
         .await
     }
 
+    /// Resolve the column actually read by an aggregate. DISTINCT and UNION
+    /// preserve projections, so their aliases take precedence over model fields.
+    pub(in crate::query) fn aggregate_source(&self, column: &str) -> Option<(String, String)> {
+        if self.is_distinct() || !self.clauses.unions.is_empty() {
+            let output = self.derived_output_name(column)?;
+            if let Some((_, source)) = self
+                .projection_outputs()
+                .into_iter()
+                .find(|(name, _)| *name == output)
+            {
+                return source;
+            }
+        }
+        if let Some(column) = M::own_column_name(column) {
+            return Some((M::table_name().to_string(), column.to_string()));
+        }
+        column
+            .split_once('.')
+            .map(|(table, field)| (table.to_string(), field.to_string()))
+    }
+
+    /// Randomized encryption does not preserve equality between stored values.
+    pub(in crate::query) fn ensure_distinct_column_is_comparable(
+        &self,
+        column: &str,
+    ) -> Result<()> {
+        if let Some((table, field)) = self.aggregate_source(column)
+            && table == M::table_name()
+            && M::encrypted_column_names().contains(&M::column_named(&field))
+        {
+            return Err(Error::query(format!(
+                "DISTINCT is not supported for encrypted column {table}.{field}: randomized ciphertext cannot deduplicate plaintext values; read the values and deduplicate them after decryption"
+            )));
+        }
+        Ok(())
+    }
+
+    fn aggregate_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
+        let (table, field) = self.aggregate_source(column)?;
+        self.column_type(&format!("{table}.{field}"))
+    }
+
     /// The type a `MIN`/`MAX` of `column`, selected as `alias`, is decoded by:
     /// the column's own, the model's or a joined model's, so a second `MAX`
     /// of a timestamp, under an alias of its own, still reads as one.
@@ -635,7 +795,7 @@ impl<M: Model> QueryBuilder<M> {
         alias: &str,
         column: &str,
     ) -> Vec<(String, crate::orm::ColumnType)> {
-        self.column_type(column)
+        self.aggregate_column_type(column)
             .map(|column_type| vec![(alias.to_string(), column_type)])
             .unwrap_or_default()
     }
@@ -678,8 +838,29 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Count distinct values of a column
     ///
+    /// Encrypted model columns are rejected because randomized ciphertext
+    /// cannot count distinct plaintext values.
+    ///
     /// Carries the same modifier rules as [`sum()`](Self::sum).
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).count_distinct(User::NAME).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
+        self.ensure_distinct_column_is_comparable(&Self::aggregated_column(&column))?;
         let value = self
             .execute_scalar_aggregate(
                 "count_distinct()",
@@ -709,6 +890,23 @@ impl<M: Model> QueryBuilder<M> {
     ///     .aggregates(&[Aggregate::count(), Aggregate::sum("amount"), Aggregate::max("amount")])
     ///     .await?;
     /// ```
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).aggregates::<serde_json::Value>(&[Aggregate::count()]).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn aggregates<T: serde::de::DeserializeOwned>(
         self,
         aggregates: &[Aggregate],
@@ -718,6 +916,11 @@ impl<M: Model> QueryBuilder<M> {
         }
         self.ensure_query_is_executable()?;
         self.ensure_scalar_aggregate_is_representable("aggregates()")?;
+        for aggregate in aggregates {
+            if let Aggregate::CountDistinct(column) = aggregate {
+                self.ensure_distinct_column_is_comparable(column)?;
+            }
+        }
 
         let db_type = self.db_type_for_sql();
         // A MIN or MAX is selected as its model column's name, the first time
@@ -753,8 +956,17 @@ impl<M: Model> QueryBuilder<M> {
             })
             .flat_map(|(column, alias)| self.extreme_output_type(alias, column))
             .collect();
+        let sources = aggregates
+            .iter()
+            .zip(&aliases)
+            .filter_map(|(aggregate, alias)| {
+                aggregate
+                    .extreme_column()
+                    .map(|column| (alias.clone(), column.to_string()))
+            })
+            .collect::<Vec<_>>();
         let rows = self
-            .fetch_json_with_types(&sql, params, &output_types)
+            .fetch_aggregate_json(&sql, params, &output_types, &sources)
             .await?;
         let row = rows.first();
 
@@ -779,7 +991,7 @@ impl<M: Model> QueryBuilder<M> {
                 let reads_numbers = !matches!(
                     aggregate
                         .extreme_column()
-                        .and_then(crate::internal::column_type_of::<M>),
+                        .and_then(|column| self.aggregate_column_type(column)),
                     Some(
                         crate::orm::ColumnType::String(_)
                             | crate::orm::ColumnType::Text
@@ -831,6 +1043,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a UNION with another query
     ///
     /// UNION combines the results of two queries and removes duplicates.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().union(User::query().where_eq(User::ACTIVE, false)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn union<N: Model>(self, other: QueryBuilder<N>) -> Self {
         self.push_compound_operand(UnionType::Union, "union", &other)
@@ -839,6 +1058,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a UNION ALL with another query
     ///
     /// UNION ALL combines all results including duplicates (faster than UNION).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().union_all(User::query().where_eq(User::ACTIVE, false)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn union_all<N: Model>(self, other: QueryBuilder<N>) -> Self {
         self.push_compound_operand(UnionType::UnionAll, "union_all", &other)
@@ -848,6 +1074,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Trusted SQL only. Do not pass user-controlled input; prefer `union()` with a
     /// `QueryBuilder` whenever possible.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().union_raw("SELECT * FROM users").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn union_raw(self, sql: &str) -> Self {
         self.push_raw_union(UnionType::Union, "union_raw", sql)
@@ -857,6 +1090,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Trusted SQL only. Do not pass user-controlled input; prefer `union_all()` with a
     /// `QueryBuilder` whenever possible.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().union_all_raw("SELECT * FROM users").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn union_all_raw(self, sql: &str) -> Self {
         self.push_raw_union(UnionType::UnionAll, "union_all_raw", sql)

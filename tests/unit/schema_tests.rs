@@ -1,4 +1,4 @@
-use super::writer::{CatalogColumn, CatalogIndexColumn, catalog_table, group_indexes};
+use super::writer::{CatalogColumn, catalog_table};
 use super::*;
 use crate::config::DatabaseType;
 use crate::model::IndexDefinition;
@@ -499,31 +499,6 @@ fn catalog_column(name: &str, sql_type: &str) -> CatalogColumn {
     }
 }
 
-fn index_column(index: &str, unique: bool, column: &str) -> CatalogIndexColumn {
-    CatalogIndexColumn {
-        index: index.to_string(),
-        unique,
-        column: column.to_string(),
-    }
-}
-
-#[test]
-fn test_catalog_indexes_come_out_sorted_and_keep_key_order() {
-    // Grouping used to go through a HashMap, so the same database exported
-    // its indexes in a different order on every run.
-    let indexes = group_indexes([
-        index_column("idx_users_tenant_email", false, "tenant_id"),
-        index_column("idx_users_tenant_email", false, "email"),
-        index_column("idx_b", true, "b"),
-        index_column("idx_a", false, "a"),
-    ]);
-
-    let names: Vec<&str> = indexes.iter().map(|index| index.name.as_str()).collect();
-    assert_eq!(names, vec!["idx_a", "idx_b", "idx_users_tenant_email"]);
-    assert!(indexes[1].unique);
-    assert_eq!(indexes[2].columns, vec!["tenant_id", "email"]);
-}
-
 #[test]
 fn test_catalog_table_keeps_every_primary_key_column_in_key_order() {
     // Only the first key column used to survive introspection, which exported
@@ -594,63 +569,6 @@ fn test_catalog_table_auto_increments_key_columns_unless_any_column_counts() {
 }
 
 #[test]
-fn test_mysql_defaults_are_restored_to_a_default_clause() {
-    use super::writer::mysql_default;
-
-    let default = |value: &str, sql_type: &str, extra: &str| {
-        mysql_default(Some(value.to_string()), sql_type, extra, false)
-    };
-    // MySQL 8 reports a literal bare and an expression without parentheses.
-    assert_eq!(
-        default("draft", "varchar(20)", "").as_deref(),
-        Some("'draft'")
-    );
-    assert_eq!(default("", "varchar(20)", "").as_deref(), Some("''"));
-    assert_eq!(default("it's", "text", "").as_deref(), Some("'it''s'"));
-    assert_eq!(
-        default(r"C:\temp", "varchar(20)", "").as_deref(),
-        Some(r"'C:\\temp'")
-    );
-    assert_eq!(default("5", "int", "").as_deref(), Some("5"));
-    assert_eq!(
-        default("1.50", "decimal(10,2)", "").as_deref(),
-        Some("1.50")
-    );
-    assert_eq!(
-        default("CURRENT_TIMESTAMP(6)", "datetime(6)", "DEFAULT_GENERATED").as_deref(),
-        Some("CURRENT_TIMESTAMP(6)")
-    );
-    assert_eq!(
-        default("CURRENT_TIMESTAMP", "timestamp", "DEFAULT_GENERATED").as_deref(),
-        Some("CURRENT_TIMESTAMP")
-    );
-    // Text that only starts like one is a literal, as is the same text in a
-    // column that takes no current-time default.
-    assert_eq!(
-        default("CURRENT_TIMESTAMP is text", "varchar(100)", "").as_deref(),
-        Some("'CURRENT_TIMESTAMP is text'")
-    );
-    assert_eq!(
-        default("CURRENT_TIMESTAMP", "varchar(20)", "").as_deref(),
-        Some("'CURRENT_TIMESTAMP'")
-    );
-    assert_eq!(
-        default(r"_utf8mb4\'x\'", "longtext", "DEFAULT_GENERATED").as_deref(),
-        Some("(_utf8mb4'x')")
-    );
-    assert_eq!(
-        default("uuid()", "char(36)", "DEFAULT_GENERATED").as_deref(),
-        Some("(uuid())")
-    );
-    assert_eq!(mysql_default(None, "varchar(20)", "", false), None);
-    // MariaDB reports the clause's own spelling.
-    assert_eq!(
-        mysql_default(Some("'draft'".to_string()), "varchar(20)", "", true).as_deref(),
-        Some("'draft'")
-    );
-}
-
-#[test]
 fn qualified_generic_types_have_mapping_parity() {
     // Keep this fixture aligned with the macro's generic-type parity test.
     for (plain, qualified) in [
@@ -667,4 +585,23 @@ fn qualified_generic_types_have_mapping_parity() {
             sql_for(qualified, DatabaseType::Postgres)
         );
     }
+}
+
+#[test]
+fn mysql_native_ddl_defers_only_foreign_keys() {
+    let ddl = "CREATE TABLE `odd(table` (\n `id` int AUTO_INCREMENT,\n `txt` varchar(100) DEFAULT 'a,b)it\\'s',\n UNIQUE KEY `expr` ((lower(`txt`))),\n CONSTRAINT `fk` FOREIGN KEY (`id`) REFERENCES `later` (`id`),\n CONSTRAINT `ck` CHECK (`id` > 0)\n) ENGINE=InnoDB";
+    let (table, keys) = super::writer::mysql_defer_foreign_keys(ddl, "odd(table").unwrap();
+    assert_eq!(
+        keys,
+        [
+            "ALTER TABLE `odd(table` ADD CONSTRAINT `fk` FOREIGN KEY (`id`) REFERENCES `later` (`id`)"
+        ]
+    );
+    assert!(!table.contains("FOREIGN KEY"));
+    assert!(table.contains("UNIQUE KEY `expr` ((lower(`txt`)))"));
+    assert!(table.contains("DEFAULT 'a,b)it\\'s'"));
+    assert!(table.ends_with(") ENGINE=InnoDB"));
+    let (same, keys) = super::writer::mysql_defer_foreign_keys(&table, "odd(table").unwrap();
+    assert_eq!(same, table);
+    assert!(keys.is_empty());
 }

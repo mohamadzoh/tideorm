@@ -7,18 +7,58 @@ use crate::parse::{ModelField, RelationKind};
 pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let struct_name_str = &ctx.struct_name_str;
+    let valid_relations = ctx
+        .relation_fields
+        .iter()
+        .map(|field| field.name())
+        .collect::<Vec<_>>()
+        .join(", ");
     let relation_arms = ctx
         .relation_fields
         .iter()
         .map(|field| build_relation_arm(ctx, field));
 
+    let validation_arms = ctx.relation_fields.iter().map(|field| {
+        let name = field.name();
+        if let Some(
+            kind @ (RelationKind::MorphTo | RelationKind::SelfRef | RelationKind::SelfRefMany),
+        ) = field.relation_kind()
+        {
+            return unsupported_relation_arm(struct_name, &name, kind);
+        }
+        let types = field.related_types();
+        let nested = types.first().map(|ty| {
+            quote! {
+                if let Some(nested) = relation_tree.get_nested(#name) {
+                    <#ty as ::tideorm::relations::EagerLoadModel>::__validate_relations(nested)?;
+                }
+            }
+        });
+        quote! { #name => { #nested } }
+    });
+
     quote! {
         #[::tideorm::async_trait::async_trait]
         impl ::tideorm::relations::EagerLoadModel for #struct_name {
+            fn __validate_relations(relation_tree: &::tideorm::relations::RelationTree) -> ::tideorm::Result<()> {
+                for name in relation_tree.roots() {
+                    match name.as_str() {
+                        #(#validation_arms)*
+                        _ => return Err(::tideorm::Error::query(format!(
+                            "Unknown relation '{}' on {}; valid relations: {}",
+                            name, #struct_name_str,
+                            if #valid_relations.is_empty() { "(none)" } else { #valid_relations }
+                        ))),
+                    }
+                }
+                Ok(())
+            }
+
             async fn __eager_load(
                 models: &mut [::tideorm::relations::WithRelations<Self>],
                 relation_tree: &::tideorm::relations::RelationTree,
             ) -> ::tideorm::Result<()> {
+                <Self as ::tideorm::relations::EagerLoadModel>::__validate_relations(relation_tree)?;
                 if models.is_empty() || relation_tree.is_empty() {
                     return Ok(());
                 }
@@ -28,9 +68,10 @@ pub(super) fn generate_eager_loader_impl(ctx: &BuildContext) -> TokenStream2 {
                         #(#relation_arms)*
                         _ => {
                             return Err(::tideorm::Error::query(format!(
-                                "Unknown relation '{}' on {}",
+                                "Unknown relation '{}' on {}; valid relations: {}",
                                 relation_name,
-                                #struct_name_str
+                                #struct_name_str,
+                                if #valid_relations.is_empty() { "(none)" } else { #valid_relations }
                             )));
                         }
                     }

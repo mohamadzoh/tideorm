@@ -171,22 +171,6 @@ impl SnapshotStore {
         }
     }
 
-    fn remove_model_type(&mut self, model_type: TypeId) {
-        let mut evicted = Vec::new();
-        self.entries.retain(|(type_id, _), baselines| {
-            if *type_id == model_type {
-                evicted.extend(baselines.values().map(|entry| entry.sequence));
-                false
-            } else {
-                true
-            }
-        });
-
-        for sequence in evicted {
-            self.order.remove(&sequence);
-        }
-    }
-
     /// Drop every baseline. Sequences go on from where they were, so an
     /// undo step still pending cannot mistake a new baseline for its own.
     fn clear(&mut self) {
@@ -320,7 +304,49 @@ pub fn forget_model<M: Model>(model: &M) -> Result<()> {
 /// Forget every dirty-tracking baseline for one model type.
 pub fn invalidate_model<M: Model>() {
     let model_type = TypeId::of::<M>();
-    snapshot_store().write().remove_model_type(model_type);
+    let mut store = snapshot_store().write();
+    let keys: Vec<_> = store
+        .entries
+        .iter()
+        .filter(|((type_id, _), _)| *type_id == model_type)
+        .flat_map(|(row, baselines)| baselines.keys().map(move |origin| (row.clone(), *origin)))
+        .collect();
+    let mut undo = Vec::with_capacity(keys.len());
+    for (row, origin) in keys {
+        let previous = store.take(&row, origin);
+        let standing = store.insert(row.clone(), origin, None);
+        undo.push((row, origin, standing, previous));
+    }
+    drop(store);
+    let mut undo = InvalidatedBaselines(undo);
+    crate::cache::undo_on_rollback(move || {
+        let mut store = snapshot_store().write();
+        for (row, origin, standing, previous) in undo.0.drain(..) {
+            store.restore(row, origin, Some(standing), previous);
+        }
+    });
+}
+
+/// A committed invalidation forgets its tombstones. Until then they retain
+/// mutation identities so rollback cannot overwrite a newer baseline.
+struct InvalidatedBaselines(Vec<(RowKey, Origin, u64, Option<SnapshotEntry>)>);
+
+impl Drop for InvalidatedBaselines {
+    fn drop(&mut self) {
+        if self.0.is_empty() {
+            return;
+        }
+        let mut store = snapshot_store().write();
+        for (row, origin, standing, _) in self.0.drain(..) {
+            let current = store
+                .entries
+                .get(&row)
+                .and_then(|baselines| baselines.get(&origin));
+            if current.is_some_and(|entry| entry.sequence == standing) {
+                store.take(&row, origin);
+            }
+        }
+    }
 }
 
 /// Clear every remembered dirty-tracking baseline.

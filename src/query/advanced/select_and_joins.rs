@@ -15,6 +15,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Read a subset of the columns with [`get_json()`](Self::get_json):
     /// [`get()`](Self::get) refuses a `select()` that leaves model columns out,
     /// because the models it built would carry defaults in their place.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select(vec!["id", "name"]).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn select(mut self, columns: Vec<&str>) -> Self {
         self.clauses.select_columns = Some(columns.into_iter().map(|s| s.to_string()).collect());
@@ -37,11 +44,23 @@ impl<M: Model> QueryBuilder<M> {
     /// because deduplication cannot change whether a row exists. Calling it more
     /// than once is idempotent.
     ///
+    /// Projections containing known encrypted model columns are rejected:
+    /// randomized ciphertext does not preserve plaintext equality. Select
+    /// unencrypted columns, or deduplicate the values after decryption in Rust.
+    /// Trusted raw expressions remain the caller's responsibility.
+    ///
     /// PostgreSQL requires every `ORDER BY` expression of a `SELECT DISTINCT` to
     /// appear in the select list. A query that breaks that rule is rejected by
     /// validation with a query error naming the column, rather than
     /// being sent to the server; ordering by an expression supplied through
     /// `order_by_raw()` cannot be checked and stays the caller's responsibility.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().distinct().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn distinct(mut self) -> Self {
         if !self.is_distinct() {
@@ -88,6 +107,13 @@ impl<M: Model> QueryBuilder<M> {
     /// read-check-write transactions fails with a retryable
     /// [`LockNotAvailable`](crate::error::DbFailureKind::LockNotAvailable) error
     /// instead of racing.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().lock_for_update().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn lock_for_update(mut self) -> Self {
         self.clauses.lock_for_update = true;
@@ -102,6 +128,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Like [`select()`](Self::select) this replaces the typed projection; the
     /// LEFT JOIN it registers is validated exactly as
     /// [`left_join()`](Self::left_join) validates its own.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select_with_linked(vec!["id"], "posts", "id", "user_id", vec!["title"]).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn select_with_linked(
         self,
@@ -136,6 +169,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Carries the same projection and JOIN-validation rules as
     /// [`select_with_linked()`](Self::select_with_linked).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select_also_linked("posts", "id", "user_id", vec!["title"]).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn select_also_linked(
         self,
@@ -159,6 +199,13 @@ impl<M: Model> QueryBuilder<M> {
     /// `table.column` (or `alias.column`), such as
     /// `inner_join("posts", "users.id", "posts.user_id")`: a bare column name
     /// invalidates the query, and the error surfaces when it runs.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().inner_join("posts", "users.id", "posts.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn inner_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Inner, table, None, left_column, right_column)
@@ -168,6 +215,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The columns are `alias.column` or `table.column`, as for
     /// [`inner_join`](Self::inner_join).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().inner_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn inner_join_as(
         self,
@@ -189,6 +243,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Returns all rows from the left table, and matched rows from the right.
     /// The columns are `table.column`, as for [`inner_join`](Self::inner_join).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().left_join("posts", "users.id", "posts.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn left_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Left, table, None, left_column, right_column)
@@ -198,6 +259,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The alias is what lets a table join itself. The columns are
     /// `alias.column` or `table.column`, as for [`inner_join`](Self::inner_join).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().left_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn left_join_as(
         self,
@@ -222,6 +290,13 @@ impl<M: Model> QueryBuilder<M> {
     /// `get()` cannot turn into a model, so read the query with
     /// [`get_json()`](Self::get_json) and `select()` the columns you need. The
     /// columns are `table.column`, as for [`inner_join`](Self::inner_join).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().right_join("posts", "users.id", "posts.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn right_join(self, table: &str, left_column: &str, right_column: &str) -> Self {
         self.join(JoinType::Right, table, None, left_column, right_column)
@@ -231,6 +306,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The columns are `alias.column` or `table.column`, as for
     /// [`inner_join`](Self::inner_join).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().right_join_as("posts", "p", "users.id", "p.user_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn right_join_as(
         self,

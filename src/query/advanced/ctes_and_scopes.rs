@@ -5,6 +5,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// CTEs allow you to define temporary named result sets that can be
     /// referenced within the main query.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().with_cte(CTE::new("selected", "SELECT id FROM users".to_owned())).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn with_cte(self, cte: CTE) -> Self {
         self.push_cte("with_cte", cte)
@@ -20,6 +27,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a CTE from another query builder
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().with_query("selected", User::query().select(vec!["id"])).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn with_query<N: Model>(mut self, name: &str, query: QueryBuilder<N>) -> Self {
         self.absorb_operand_error("subquery", "with_query", &query);
@@ -38,6 +52,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a recursive CTE
     ///
     /// Use recursive CTEs for hierarchical or tree-structured data.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().with_recursive_cte("numbers", vec!["n"], "SELECT 1", "SELECT n + 1 FROM numbers WHERE n < 3").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn with_recursive_cte(
         mut self,
@@ -73,6 +94,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// By default, soft-deleted records (where `deleted_at` is not NULL) are excluded.
     /// Use this method to include them.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().with_trashed().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn with_trashed(mut self) -> Self {
         self.clauses.include_trashed = true;
@@ -83,6 +111,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Only return soft-deleted records
     ///
     /// Returns only records where `deleted_at` is not NULL.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().only_trashed().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn only_trashed(mut self) -> Self {
         self.clauses.only_trashed = true;

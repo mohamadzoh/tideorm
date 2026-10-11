@@ -149,7 +149,7 @@ impl EntityManager {
         let key = identity_key::<T>(entity.tide_pk_key());
         save::record_identity_map_rollback::<T>(self, &key);
         let mut map = self.identity_map.write();
-        map.insert(key, Box::new(entity));
+        map.insert(key, Arc::new(entity));
     }
 
     pub(crate) fn remove_by_entity_manager_key<T>(&self, key: &str)

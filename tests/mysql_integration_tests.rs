@@ -41,8 +41,14 @@ mod backend {
     }
 }
 
+#[path = "support/schema_script.rs"]
+mod schema_script;
+
 #[path = "support/integration_parity.rs"]
 mod parity;
+
+#[path = "support/review_backend.rs"]
+mod review_backend;
 
 #[path = "support/mysql_family.rs"]
 mod mysql_family;

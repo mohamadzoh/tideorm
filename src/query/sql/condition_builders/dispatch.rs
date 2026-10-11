@@ -80,7 +80,7 @@ impl<M: Model> QueryBuilder<M> {
                 target,
             ),
             ConditionSpec::Array { operator, values } => {
-                self.build_array_expression(db_type, &column_sql(), operator, values)
+                self.build_array_expression(db_type, &column_sql(), operator, column, values)
             }
         })
     }

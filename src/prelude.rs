@@ -96,7 +96,7 @@ pub use crate::fulltext::{
 // Strongly-typed columns
 pub use crate::columns::{
     Column, ColumnCondition, ColumnEq, ColumnIn, ColumnLike, ColumnNullable, ColumnOrd,
-    IntoColumnName,
+    ColumnValue, IntoColumnName,
 };
 
 // JPA-like entity manager / persistence context

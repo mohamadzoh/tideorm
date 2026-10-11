@@ -202,6 +202,14 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Describe this query: its preview and parameterized SQL, bound values,
     /// and the clauses it was built from.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let info = User::query().where_eq(User::ACTIVE, true).debug();
+    /// println!("{info:?}");
+    /// ```
     pub fn debug(&self) -> crate::logging::QueryDebugInfo {
         use crate::logging::QueryDebugInfo;
 
@@ -269,12 +277,27 @@ impl<M: Model> QueryBuilder<M> {
     /// let query = Post::query().order_by(params.sort.as_str(), Order::Asc);
     /// query.validate()?; // answer 400 before touching the database
     /// ```
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_eq(User::ACTIVE, true).validate().unwrap();
+    /// ```
     pub fn validate(&self) -> Result<()> {
         self.ensure_query_is_executable()
     }
 
     /// The statement [`get()`](Self::get) would run, with its bound values
     /// written in as literals, under a banner marking it display-only.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let sql = User::query().where_eq(User::ACTIVE, true).build_sql_preview();
+    /// assert!(sql.contains("SELECT"));
+    /// ```
     pub fn build_sql_preview(&self) -> String {
         self.build_sql_preview_for_db(self.db_type_for_sql())
     }

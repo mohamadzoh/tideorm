@@ -537,8 +537,8 @@ fn test_build_select_sql_with_params_renders_valid_empty_postgres_array_predicat
 
     // `ARRAY[]` has no inferrable element type and PostgreSQL rejects it outright.
     assert!(!sql.contains("ARRAY["), "sql: {sql}");
-    // Vacuously true for "contains all", never true for "contains any".
-    assert!(sql.contains("1 = 1"), "sql: {sql}");
+    // Empty containment excludes SQL NULL; empty overlap matches nothing.
+    assert!(sql.contains("\"tags\" IS NOT NULL"), "sql: {sql}");
     assert!(sql.contains("0 = 1"), "sql: {sql}");
     assert!(
         sql.contains(

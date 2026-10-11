@@ -95,6 +95,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE IN (subquery) condition.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_in_subquery(User::ID, User::query().select(vec!["id"])).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_in_subquery<N: Model>(
         self,
@@ -106,6 +113,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE NOT IN (subquery) condition.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_not_in_subquery(User::ID, User::query().select(vec!["id"])).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_not_in_subquery<N: Model>(
         self,
@@ -117,12 +131,26 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE EXISTS (subquery) condition.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_exists(User::query().where_eq(User::ACTIVE, true)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
         self.push_subquery_condition("where_exists", "", "EXISTS", &subquery)
     }
 
     /// Add a WHERE NOT EXISTS (subquery) condition.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_not_exists(User::query().where_eq(User::ACTIVE, true)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_not_exists<N: Model>(self, subquery: QueryBuilder<N>) -> Self {
         self.push_subquery_condition("where_not_exists", "", "NOT EXISTS", &subquery)
@@ -223,6 +251,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// [`where_has`](Self::where_has) is the typed form: it names the related
     /// model, applies its soft-delete scope, and takes any filter.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().has_related("posts", "user_id", "id", "title", "Hello").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn has_related(
         self,
@@ -255,6 +290,13 @@ impl<M: Model> QueryBuilder<M> {
     /// [`where_not_exists`](Self::where_not_exists).
     ///
     /// [`where_doesnt_have`](Self::where_doesnt_have) is the typed form.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().has_no_related("posts", "user_id", "id", "title", "Hello").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn has_no_related(
         self,
@@ -300,6 +342,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Pass `|q| q` to ask only that a related row exists. A related query
     /// that could not run fails this one; so does one that joins, pages or
     /// unions, which a correlated `EXISTS` cannot keep.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_has(User::ID, User::ID, |q: QueryBuilder<User>| q.where_eq(User::ACTIVE, true)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_has<R: Model>(
         self,
@@ -320,6 +369,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Keep the rows with no related `R` row that `constrain` keeps; the
     /// opposite of [`where_has`](Self::where_has), whose rules it follows. A
     /// row with no related rows at all passes.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_doesnt_have(User::ID, User::ID, |q: QueryBuilder<User>| q.where_eq(User::ACTIVE, true)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_doesnt_have<R: Model>(
         self,
@@ -415,6 +471,13 @@ impl<M: Model> QueryBuilder<M> {
     /// invalidates the query instead of being spliced into SQL. The table is
     /// named, not modeled, so its soft-deleted rows count too; to skip them,
     /// pass the related model's query to [`where_exists`](Self::where_exists).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().has_any_related("posts", "user_id", "id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn has_any_related(self, related_table: &str, foreign_key: &str, local_key: &str) -> Self {
         self.push_related_exists_condition(
@@ -434,6 +497,13 @@ impl<M: Model> QueryBuilder<M> {
     /// named, not modeled, so its soft-deleted rows count too; to skip them,
     /// pass the related model's query to
     /// [`where_not_exists`](Self::where_not_exists).
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().has_no_related_at_all("posts", "user_id", "id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn has_no_related_at_all(
         self,
@@ -455,11 +525,26 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// This is the statement [`build_sql_preview()`](Self::build_sql_preview)
     /// shows, without the banner, for display only.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let sql = User::query().select(vec!["id"]).to_subquery_sql();
+    /// assert!(sql.contains("SELECT"));
+    /// ```
     pub fn to_subquery_sql(&self) -> String {
         self.build_select_sql_for_db(self.db_type_for_sql())
     }
 
     /// Add a raw SELECT expression.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select_raw("COUNT(*) AS total").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn select_raw(mut self, raw_select: &str) -> Self {
         if let Err(reason) = db_sql::validate_raw_sql_fragment("SELECT raw SQL", raw_select) {
@@ -476,6 +561,13 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The subquery keeps its values as bound parameters, rendered for this
     /// query's backend.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().select_subquery(User::query().select(vec!["id"]).limit(1), "first_id").validate().unwrap();
+    /// ```
     #[must_use]
     pub fn select_subquery<N: Model>(mut self, subquery: QueryBuilder<N>, alias: &str) -> Self {
         self.absorb_operand_error("subquery", "select_subquery", &subquery);
@@ -498,6 +590,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add a WHERE condition using a strongly-typed column.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().where_col(User::ID.gt(1)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn where_col(self, mut condition: crate::columns::ColumnCondition) -> Self {
         // A column of this query's own model needs no qualifier.

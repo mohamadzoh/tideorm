@@ -77,7 +77,7 @@ pub trait EntityManagerLoad {
 /// of work: a long-lived manager grows without bound, and its `find` keeps
 /// serving rows other connections have changed since.
 pub struct EntityManager {
-    identity_map: RwLock<HashMap<IdentityKey, Box<dyn Any + Send + Sync>>>,
+    identity_map: Arc<RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>>,
     managed_identity_map: RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>,
     managed_entries: RwLock<Vec<Arc<dyn managed::ManagedOps>>>,
     snapshots: RwLock<HashMap<SnapshotKey, HashSet<String>>>,
@@ -90,7 +90,7 @@ impl EntityManager {
     /// Create an empty context over `db`.
     pub fn new(db: Arc<crate::database::Database>) -> Arc<Self> {
         Arc::new(Self {
-            identity_map: RwLock::new(HashMap::new()),
+            identity_map: Arc::new(RwLock::new(HashMap::new())),
             managed_identity_map: RwLock::new(HashMap::new()),
             managed_entries: RwLock::new(Vec::new()),
             snapshots: RwLock::new(HashMap::new()),
@@ -419,7 +419,18 @@ impl EntityManager {
             Some(key.clone()),
             Some(&key),
         );
-        self.put(entity);
+        // `find` already registered the identity. A rolled-back read must also
+        // stop this newly attached handle from participating in later flushes.
+        let manager = self.clone();
+        let rollback_entry = managed.entry.clone();
+        crate::cache::undo_on_rollback(move || {
+            if manager
+                .get_managed_by_key::<T>(&key)
+                .is_some_and(|current| Arc::ptr_eq(&current.entry, &rollback_entry))
+            {
+                manager.detach(&Managed::from_entry(rollback_entry));
+            }
+        });
         managed
     }
 
@@ -457,7 +468,19 @@ impl EntityManager {
             return existing.clone();
         }
 
-        map.insert(key, Box::new(entity.clone()));
+        let stored: Arc<dyn Any + Send + Sync> = Arc::new(entity.clone());
+        map.insert(key.clone(), stored.clone());
+        drop(map);
+        let identity_map = self.identity_map.clone();
+        crate::cache::undo_on_rollback(move || {
+            let mut map = identity_map.write();
+            if map
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &stored))
+            {
+                map.remove(&key);
+            }
+        });
         entity
     }
 }

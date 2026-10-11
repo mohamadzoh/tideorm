@@ -315,7 +315,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
             "HasManyThrough::attach",
         )?;
         let related_id = crate::query::filter_value(related_id);
-        let related_id = require_scalar_relation_key(&related_id, "HasManyThrough::attach")?;
+        let related_id = linkable_key(
+            require_scalar_relation_key(&related_id, "HasManyThrough::attach")?,
+            "HasManyThrough::attach related key",
+        )?;
         let db = self.state.source.database()?;
         let db_type = db.execution_backend();
 
@@ -333,11 +336,6 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         }
 
         insert_pivot_pair::<Pivot>(&db, self.foreign_key, self.related_key, pk, related_id).await?;
-        // The pivot row is written as raw SQL, which carries no model context, so
-        // the cache has to be told which table changed. `detach` needs no
-        // equivalent: it goes through `Pivot::query().delete()`, which invalidates
-        // as part of the typed mutation path.
-        crate::QueryCache::global().invalidate_model(self.pivot_table);
         Ok(())
     }
 
@@ -392,7 +390,10 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         let mut seen = std::collections::HashSet::new();
         let mut wanted = Vec::with_capacity(related_ids.len());
         for id in related_ids.into_iter().map(crate::query::filter_value) {
-            require_scalar_relation_key(&id, "HasManyThrough::sync")?;
+            linkable_key(
+                require_scalar_relation_key(&id, "HasManyThrough::sync")?,
+                "HasManyThrough::sync related key",
+            )?;
             if seen.insert(id.to_string()) {
                 wanted.push(id);
             }
@@ -425,11 +426,6 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
         })
         .await?;
 
-        // Invalidate after the transaction commits, not inside it: a rolled-back
-        // sync leaves the pivot table untouched, so evicting mid-transaction would
-        // throw away a still-valid cache. The re-inserts are raw SQL and carry no
-        // model context of their own.
-        crate::QueryCache::global().invalidate_model(self.pivot_table);
         Ok(())
     }
 
@@ -481,7 +477,10 @@ async fn insert_pivot_pair<Pivot: Model>(
     let db_type = db.execution_backend();
     let (sql, params) =
         build_pivot_insert::<Pivot>(db_type, foreign_key, related_key, parent_pk, related_id);
-    let written = db.__execute_with_params(&sql, params).await?;
+    let written = db.__execute_with_params(&sql, params).await;
+    // A trigger can change other tables before failing or suppressing the insert.
+    crate::QueryCache::global().clear();
+    let written = written?;
     let unconfirmed =
         written == 0 || matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB);
     if unconfirmed

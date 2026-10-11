@@ -2,6 +2,13 @@ use super::*;
 
 impl<M: Model> QueryBuilder<M> {
     /// Add a window function to the SELECT clause
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().window(WindowFunction::new(WindowFunctionType::RowNumber, "position").order_by("id", Order::Asc)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn window(mut self, window_fn: WindowFunction) -> Self {
         self.clauses.window_functions.push(window_fn);
@@ -25,6 +32,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add ROW_NUMBER() window function
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().row_number("position", None, "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn row_number(
         self,
@@ -43,6 +57,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add RANK() window function
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().rank("position", None, "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn rank(
         self,
@@ -63,6 +84,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add DENSE_RANK() window function
     ///
     /// Similar to RANK() but without gaps in ranking values.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().dense_rank("position", None, "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn dense_rank(
         self,
@@ -83,6 +111,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add LAG() window function
     ///
     /// Access data from a previous row.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().lag("previous_id", "id", 1, None, "active", "id", Order::Asc).validate().unwrap();
+    /// ```
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn lag(
@@ -111,6 +146,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add LEAD() window function
     ///
     /// Access data from a following row.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().lead("next_id", "id", 1, None, "active", "id", Order::Asc).validate().unwrap();
+    /// ```
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn lead(
@@ -137,6 +179,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add running SUM() window function
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().running_sum("total", "id", "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn running_sum(self, alias: &str, column: &str, order_by: &str, order: Order) -> Self {
         self.window(
@@ -153,6 +202,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Add NTILE() window function
     ///
     /// Distribute rows into specified number of groups.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().ntile("bucket", 4, "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn ntile(self, alias: &str, buckets: u32, order_by: &str, order: Order) -> Self {
         self.ordered_window(
@@ -165,6 +221,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Add FIRST_VALUE() window function
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().first_value("first_id", "id", "active", "id", Order::Asc).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn first_value(
         self,

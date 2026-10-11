@@ -72,6 +72,13 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn column_names() -> &'static [&'static str];
 
+    /// The Rust field's integer range intersected with SQLite's signed storage range.
+    /// Generated models retain signedness here even when their SQL types coincide.
+    #[doc(hidden)]
+    fn __sqlite_integer_bounds(_column: &str) -> Option<(i64, i64)> {
+        None
+    }
+
     fn field_names() -> &'static [&'static str];
 
     fn canonical_column_name(name: &str) -> Option<&'static str> {

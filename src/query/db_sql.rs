@@ -37,9 +37,6 @@ pub(crate) fn select_from_derived(
     )
 }
 
-/// A predicate that holds for every row, such as containment of no values.
-/// The mutation guard recognizes it as no restriction.
-pub(crate) const MATCH_EVERYTHING: &str = "1 = 1";
 pub(crate) use placeholders::{
     count_template_placeholders, inline_parameters, map_template_placeholders, placeholders,
     rebase_placeholders, render_template,

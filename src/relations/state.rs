@@ -100,9 +100,9 @@ impl<C> RelationState<C> {
             self.cached = previous.cached.clone();
             self.loaded |= previous.loaded;
         }
-        #[cfg(feature = "entity-manager")]
         if same_relation {
             self.source.preserve_from(&previous.source);
+            #[cfg(feature = "entity-manager")]
             if self.owner_key.is_none() {
                 self.owner_key = previous.owner_key.clone();
             }

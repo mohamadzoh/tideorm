@@ -242,7 +242,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Callers who genuinely need an expression opt in through
     /// `QueryBuilder::order_by_raw`, whose entries carry `RAW_ORDER_BY_MARKER`
     /// and are checked as trusted raw SQL instead.
-    fn validate_order_or_group_value(
+    pub(in crate::query) fn validate_order_or_group_value(
         kind: &str,
         value: &str,
         allow_raw_and_direction: bool,
@@ -319,9 +319,16 @@ impl<M: Model> QueryBuilder<M> {
     /// columns come back under the same names as the model's (`id`,
     /// `created_at`), and the model would be filled from whichever came last.
     pub(in crate::query) fn ensure_projection_covers_model(&self) -> Result<()> {
-        let Some(columns) = &self.clauses.select_columns else {
+        if self
+            .clauses
+            .select_columns
+            .as_ref()
+            .is_none_or(Vec::is_empty)
+            && self.clauses.subquery_select_expressions.is_empty()
+        {
             return Ok(());
-        };
+        }
+        let columns = self.clauses.select_columns.as_deref().unwrap_or_default();
         if self.raw_projection().next().is_some() {
             return Ok(());
         }
@@ -349,7 +356,14 @@ impl<M: Model> QueryBuilder<M> {
         for column in columns {
             let column = column.trim();
             let output = match Self::split_alias(column).1 {
-                Some(alias) => alias,
+                // Aliases are literal result names, not Rust field references.
+                // The model decoder looks up the database column name.
+                Some(alias) => {
+                    if M::column_names().contains(&alias) {
+                        covered.insert(alias);
+                    }
+                    continue;
+                }
                 None => match column.rsplit_once('.') {
                     // Another table's column fills none of the model's.
                     Some((table, _)) if table != M::table_name() => continue,
@@ -359,6 +373,19 @@ impl<M: Model> QueryBuilder<M> {
             };
             if let Some(name) = M::canonical_column_name(output) {
                 covered.insert(name);
+            }
+        }
+
+        // Scalar subqueries suppress the default model projection too. Their
+        // aliases can complete an explicit projection, but cannot hide omissions.
+        for subquery in &self.clauses.subquery_select_expressions {
+            if M::column_names().contains(&subquery.alias.as_str()) {
+                covered.insert(subquery.alias.as_str());
+            }
+        }
+        for window in &self.clauses.window_functions {
+            if M::column_names().contains(&window.alias.as_str()) {
+                covered.insert(window.alias.as_str());
             }
         }
 
@@ -402,10 +429,13 @@ impl<M: Model> QueryBuilder<M> {
                 let name = match alias {
                     Some(alias) => alias.trim_matches(|c| c == '"' || c == '`').to_string(),
                     None => {
-                        let (_, column) = source?;
-                        M::canonical_column_name(column)
-                            .unwrap_or(column)
-                            .to_string()
+                        let (table, column) = source?;
+                        if table.is_empty() || table == M::table_name() {
+                            M::canonical_column_name(column).unwrap_or(column)
+                        } else {
+                            column
+                        }
+                        .to_string()
                     }
                 };
                 let source = source.map(|(table, column)| {
@@ -418,6 +448,12 @@ impl<M: Model> QueryBuilder<M> {
                 Some((name, source))
             })
             .chain(subqueries)
+            .chain(
+                self.clauses
+                    .window_functions
+                    .iter()
+                    .map(|window| (window.alias.clone(), None)),
+            )
             .collect()
     }
 
@@ -442,13 +478,62 @@ impl<M: Model> QueryBuilder<M> {
     /// keyed by name, so one of the two would be lost, and a derived table over
     /// the query is rejected by MySQL and MariaDB.
     fn validate_projection_names(&self) -> std::result::Result<(), String> {
-        let outputs = self.projection_outputs();
+        let mut outputs = self.projection_outputs();
+        for _ in 0..self.model_projection_count() {
+            outputs.extend(
+                M::column_names()
+                    .iter()
+                    .map(|name| (name.to_string(), None)),
+            );
+        }
         for (index, (name, _)) in outputs.iter().enumerate() {
             if outputs[..index].iter().any(|(earlier, _)| earlier == name) {
                 return Err(format!(
                     "the projection names the column '{}' twice, and a result row keeps one value per name; alias one of them, as in `joined_table.{} AS joined_{}`",
                     name, name, name
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// How often the model's columns are selected implicitly or by wildcard.
+    fn model_projection_count(&self) -> usize {
+        // Match the renderer's fallback, including select([]) and DISTINCT.
+        // Window expressions are appended after this implicit projection.
+        let implicit = self
+            .clauses
+            .select_columns
+            .iter()
+            .flatten()
+            .next()
+            .is_none()
+            && self.raw_projection().next().is_none()
+            && self.clauses.subquery_select_expressions.is_empty();
+        let own_wildcard = format!("{}.*", M::table_name());
+        let wildcards = self
+            .clauses
+            .select_columns
+            .iter()
+            .flatten()
+            .chain(self.raw_projection())
+            .filter(|entry| entry.trim() == "*" || entry.trim() == own_wildcard)
+            .count();
+        usize::from(implicit) + wildcards
+    }
+
+    fn ensure_distinct_projection_is_comparable(&self) -> Result<()> {
+        if !M::has_encrypted_fields() {
+            return Ok(());
+        }
+        if self.model_projection_count() > 0 {
+            for column in M::encrypted_column_names() {
+                self.ensure_distinct_column_is_comparable(column)?;
+            }
+        }
+        for (_, source) in self.projection_outputs() {
+            if let Some((table, column)) = source {
+                self.ensure_distinct_column_is_comparable(&format!("{table}.{column}"))?;
             }
         }
         Ok(())
@@ -791,6 +876,7 @@ impl<M: Model> QueryBuilder<M> {
         self.validate_projection_names().map_err(Error::query)?;
 
         if self.is_distinct() {
+            self.ensure_distinct_projection_is_comparable()?;
             self.validate_distinct_order_by().map_err(Error::query)?;
         }
 
@@ -823,6 +909,14 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Create a new query builder
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let query = QueryBuilder::<User>::new();
+    /// query.validate().unwrap();
+    /// ```
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -856,6 +950,13 @@ impl<M: Model> QueryBuilder<M> {
     /// Unlike [`Model::update_all`], trashed
     /// rows stay out unless the query includes them. A query that joins,
     /// groups, pages or unions cannot be an `UPDATE`, and running one fails.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let update = User::query().where_eq(User::ACTIVE, false).update_all().set("active", true);
+    /// ```
     #[must_use]
     pub fn update_all(self) -> crate::model::BatchUpdateBuilder<M> {
         crate::model::BatchUpdateBuilder::from_query(self)
@@ -909,6 +1010,17 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// This preserves any filters, ordering, pagination, cache settings, and explicit
     /// database handle already attached to the query.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// let query = User::query().with(User::POSTS);
+    /// # }
+    /// ```
     #[must_use]
     pub fn with(self, relation: &str) -> crate::relations::EagerQueryBuilder<M> {
         crate::relations::EagerQueryBuilder::from_query(self).with(relation)
@@ -918,6 +1030,17 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// This preserves any filters, ordering, pagination, cache settings, and explicit
     /// database handle already attached to the query.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64, #[tideorm(has_many = "Post", foreign_key = "user_id")] posts: HasMany<Post> }
+    /// # #[tideorm::model(table = "posts")]
+    /// # struct Post { #[tideorm(primary_key)] id: i64, user_id: i64 }
+    /// # fn main() {
+    /// let query = User::query().with_many(&[User::POSTS]);
+    /// # }
+    /// ```
     #[must_use]
     pub fn with_many(self, relations: &[&str]) -> crate::relations::EagerQueryBuilder<M> {
         crate::relations::EagerQueryBuilder::from_query(self).with_many(relations)
@@ -946,6 +1069,14 @@ impl<M: Model> QueryBuilder<M> {
     /// parameters intact.
     ///
     /// See [`apply`](Self::apply) for how a fragment merges back into a builder.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let fragment = User::query().where_eq(User::ACTIVE, true).consolidate();
+    /// assert_eq!(fragment.condition_count(), 1);
+    /// ```
     pub fn consolidate(&self) -> QueryFragment<M> {
         QueryFragment {
             _marker: PhantomData,
@@ -1001,6 +1132,14 @@ impl<M: Model> QueryBuilder<M> {
     /// Nothing is silently discarded, so applying a fragment produced by
     /// [`consolidate`](Self::consolidate) to an empty builder reproduces the
     /// original query.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// let fragment = User::query().where_eq(User::ACTIVE, true).consolidate();
+    /// User::query().apply(&fragment).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn apply(mut self, fragment: &QueryFragment<M>) -> Self {
         self.clauses.merge(&fragment.clauses);

@@ -23,7 +23,8 @@ mod topology;
 
 pub use column_values::__column_type_of;
 pub(crate) use column_values::{
-    column_type_of, is_integer, json_to_assignment_value, json_to_column_value,
+    column_type_of, is_integer, json_to_array_element, json_to_assignment_value,
+    json_to_column_value,
 };
 pub use executor::Executor;
 pub(crate) use per_poll::per_poll;
@@ -816,7 +817,9 @@ impl QueryExecutor {
             model_error_context::<M>("find_all()")
         })
         .await?;
-        rows.into_iter().map(M::try_from_entity_model).collect()
+        crate::model::__loading_through(&connection, || {
+            rows.into_iter().map(M::try_from_entity_model).collect()
+        })
     }
 
     /// The first row in scope, in the backend's natural order.
@@ -857,7 +860,9 @@ impl QueryExecutor {
             model_error_context::<M>(query_label)
         })
         .await?;
-        row.map(M::try_from_entity_model).transpose()
+        crate::model::__loading_through(&connection, || {
+            row.map(M::try_from_entity_model).transpose()
+        })
     }
 
     /// `COUNT(*)` over the model's scoped rows.
@@ -933,7 +938,9 @@ impl QueryExecutor {
             || model_error_context::<M>(format!("paginate(limit={}, offset={})", limit, offset)),
         )
         .await?;
-        rows.into_iter().map(M::try_from_entity_model).collect()
+        crate::model::__loading_through(&connection, || {
+            rows.into_iter().map(M::try_from_entity_model).collect()
+        })
     }
 
     // Deletes deliberately do not live here: the macro-generated `delete` and
@@ -949,7 +956,7 @@ impl QueryExecutor {
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
     {
         let connection = crate::database::__current_connection()?;
-        batch_insert::insert_many(&connection.executor(), models).await
+        batch_insert::insert_many(&connection, models).await
     }
 }
 

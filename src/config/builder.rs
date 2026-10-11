@@ -29,7 +29,7 @@ use crate::tide_warn;
 /// TideConfig::init()
 ///     .database(&std::env::var("DATABASE_URL")?)
 ///     .max_connections(20)
-///     .models_matching("src/models/*")
+///     .auto_models()
 ///     .sync(true)
 ///     .connect()
 ///     .await?;
@@ -115,7 +115,7 @@ impl TideConfig {
     /// registered models.
     ///
     /// Schema sync creates and alters tables to match the models registered with
-    /// [`models`](TideConfig::models) or [`models_matching`](TideConfig::models_matching),
+    /// [`auto_models`](TideConfig::auto_models) or [`models`](TideConfig::models),
     /// which is convenient in development and a poor substitute for migrations
     /// in production. It only adds missing tables and columns;
     /// [`force_sync`](TideConfig::force_sync) instead drops and recreates every
@@ -130,11 +130,26 @@ impl TideConfig {
     ///
     /// `T` is a tuple of model types. Registration is what makes a model visible
     /// to schema sync and schema export; use
-    /// [`models_matching`](TideConfig::models_matching) to pick them up by path
+    /// [`auto_models`](TideConfig::auto_models) to discover all linked models
     /// instead.
     #[must_use]
     pub fn models<T: crate::sync::RegisterModels>(self) -> Self {
         T::register_all();
+        self
+    }
+
+    /// Discover all linked models automatically, without source-path globs.
+    ///
+    /// ```
+    /// use tideorm::TideConfig;
+    /// let config = TideConfig::init().auto_models().sync(true);
+    /// ```
+    ///
+    /// Call `models::<(User, Post)>()` instead when only a subset should be
+    /// synced. Discovery itself does not connect or change database tables.
+    #[must_use]
+    pub fn auto_models(self) -> Self {
+        crate::sync::SyncRegistry::register_all_models();
         self
     }
 

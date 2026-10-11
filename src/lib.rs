@@ -8,6 +8,40 @@
 //!   report that no global database has been configured
 //!
 //! The module docs below cover the public surface area in more detail.
+//!
+//! # Features
+//!
+//! Defaults are `postgres` and `runtime-tokio`. For SQLite use
+//! `default-features = false, features = ["sqlite", "runtime-tokio"]`.
+//!
+//! | API | Feature |
+//! | --- | --- |
+//! | Models, typed columns, queries, relations, scopes, migrations | No module flag |
+//! | PostgreSQL / MySQL and MariaDB / SQLite | `postgres` / `mysql` / `sqlite` |
+//! | Tokio / async-std | `runtime-tokio` / `runtime-async-std` |
+//! | `changed_fields()`, `original_value()` | `dirty-tracking` |
+//! | `EntityManager` and managed persistence | `entity-manager` |
+//! | Attachments / translations / full-text search | `attachments` / `translations` / `fulltext` |
+//! | Automatic model field encryption | `encrypted-fields` |
+//!
+//! Database operations need a backend and runtime. docs.rs includes all module
+//! features; applications must enable those they use. Rust 1.94 is required by
+//! the SeaORM and SQLx dependencies.
+//!
+//! # Typed queries
+//!
+//! ```
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! let query = User::query().where_eq(User::ACTIVE, true);
+//! query.validate()?;
+//! # Ok::<(), tideorm::Error>(())
+//! ```
+//!
+//! Generated constants also work for relations (`User::POSTS`). Use
+//! [`TideConfig::auto_models`] for schema discovery without source-path globs.
+//! Schema sync is intended for development; use migrations for deployed schemas.
 
 #![recursion_limit = "256"]
 // CI runs `clippy -- -D warnings`, so these `warn` levels are effectively deny

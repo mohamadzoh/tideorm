@@ -48,6 +48,9 @@ where
         .into_iter()
         .map(|column| M::canonical_column_name(&column).map_or(column, str::to_string))
         .collect();
+    if conflict_cols.is_empty() {
+        return Err(Error::query("upsert requires at least one conflict column"));
+    }
     let is_key_column = |column: &str| M::primary_key_names().contains(&column);
     let auto_increment = M::primary_key_auto_increment();
 
@@ -135,6 +138,11 @@ where
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
 
     if Backend::from(executor.get_database_backend()) == Backend::MySql {
+        if update_cols.iter().any(|column| is_key_column(column)) {
+            return Err(Error::query(
+                "MySQL upsert update_columns() cannot update a primary key; omit primary-key columns from the update list",
+            ));
+        }
         return upsert_mysql::<M>(
             lookup,
             active,
@@ -166,9 +174,9 @@ where
             .exec_with_returning(&executor),
         error_context,
     )
-    .await?;
-    crate::QueryCache::global().invalidate_model(table);
-    M::try_from_entity_model(row)
+    .await;
+    crate::QueryCache::global().clear();
+    super::__loading_through(&connection, || M::try_from_entity_model(row?))
 }
 
 /// The MySQL-family upsert. `ON DUPLICATE KEY UPDATE` fires on a conflict
@@ -192,6 +200,7 @@ where
     crate::database::__current_db()?
         .transaction(move |_| {
             Box::pin(async move {
+                validate_mysql_conflict_target::<M>(&conflict_columns).await?;
                 let conflicts_on_null = conflict_columns.iter().any(|column| {
                     let value = lookup.get(*column);
                     value == value.as_null()
@@ -219,7 +228,8 @@ where
                     return super::__insert_row::<M>(active).await;
                 };
                 if update_columns.is_empty() {
-                    return M::try_from_entity_model(row);
+                    let connection = crate::database::__current_connection()?;
+                    return super::__loading_through(&connection, || M::try_from_entity_model(row));
                 }
                 let primary_key = M::try_from_entity_model(row.clone())?.primary_key();
                 let mut update = row.into_active_model();
@@ -232,4 +242,61 @@ where
             })
         })
         .await
+}
+
+/// MySQL's emulation must have the same full unique-key target as ON CONFLICT.
+async fn validate_mysql_conflict_target<M: Model>(
+    columns: &[<M::Entity as EntityTrait>::Column],
+) -> Result<()> {
+    use crate::orm::sea_query::Iden;
+    let connection = crate::database::__current_connection()?;
+    let executor = connection.executor();
+    let sql = "SELECT INDEX_NAME AS index_name, COLUMN_NAME AS column_name,
+        CAST(SUB_PART AS SIGNED) AS prefix_length FROM information_schema.statistics
+        WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ? AND NON_UNIQUE = 0
+        ORDER BY INDEX_NAME, SEQ_IN_INDEX";
+    let statement = crate::internal::build_statement_with_values(
+        executor.get_database_backend(),
+        sql,
+        vec![
+            M::schema_name().map(str::to_string).into(),
+            M::table_name().into(),
+        ],
+    );
+    let rows = executor
+        .query_all_raw(statement)
+        .await
+        .map_err(crate::internal::translate_error)?;
+    let mut indexes = std::collections::BTreeMap::<String, Vec<Option<String>>>::new();
+    for row in rows {
+        let index: String = row
+            .try_get("", "index_name")
+            .map_err(crate::internal::translate_error)?;
+        let column: Option<String> = row
+            .try_get("", "column_name")
+            .map_err(crate::internal::translate_error)?;
+        let prefix: Option<i64> = row
+            .try_get("", "prefix_length")
+            .map_err(crate::internal::translate_error)?;
+        indexes
+            .entry(index)
+            .or_default()
+            .push(column.filter(|_| prefix.is_none()));
+    }
+    let target: std::collections::BTreeSet<String> = columns.iter().map(Iden::to_string).collect();
+    let valid = target.len() == columns.len()
+        && indexes.values().any(|parts| {
+            parts.len() == target.len()
+                && parts
+                    .iter()
+                    .all(|part| part.as_ref().is_some_and(|name| target.contains(name)))
+        });
+    if !valid {
+        return Err(Error::query(format!(
+            "upsert conflict columns ({}) must match a complete unique index on {}",
+            target.into_iter().collect::<Vec<_>>().join(", "),
+            M::table_name()
+        )));
+    }
+    Ok(())
 }

@@ -126,8 +126,8 @@ pub(crate) fn encrypted_field_columns<M: ModelMeta>()
 /// each reads, as `QueryBuilder::projection_outputs` gives them; none for
 /// the model's own columns. An output reading an encrypted column of `M` is
 /// decrypted under whatever name it has, and one named like such a column
-/// is too unless it reads a column of another table or another column: an
-/// expression over the column comes back under its name.
+/// is too when it belongs to the implicit model projection. An expression
+/// with that alias is not an encrypted column.
 pub(crate) fn decrypt_json_rows<M: ModelMeta>(
     rows: &mut [serde_json::Value],
     outputs: &[(String, Option<(String, String)>)],
@@ -137,18 +137,18 @@ pub(crate) fn decrypt_json_rows<M: ModelMeta>(
     }
     let mut encrypted_outputs: Vec<(String, &str, &str)> = Vec::new();
     for (field, column) in encrypted_field_columns::<M>()? {
-        let mut named_by_a_column = false;
+        let mut explicitly_named = false;
         for (name, source) in outputs {
+            explicitly_named |= name == column;
             let Some((table, source_column)) = source else {
                 continue;
             };
-            named_by_a_column |= name == column;
             let source_column = M::column_named(source_column);
             if table == M::table_name() && source_column == column {
                 encrypted_outputs.push((name.clone(), field, column));
             }
         }
-        if !named_by_a_column {
+        if !explicitly_named {
             encrypted_outputs.push((column.to_string(), field, column));
         }
     }
@@ -299,7 +299,9 @@ pub fn __loading_through<T>(
     connection: &crate::database::ConnectionRef,
     load: impl FnOnce() -> T,
 ) -> T {
-    __loading_from(crate::database::origin_of(connection), load)
+    crate::database::with_loading_connection(connection, || {
+        __loading_from(crate::database::origin_of(connection), load)
+    })
 }
 
 #[doc(hidden)]

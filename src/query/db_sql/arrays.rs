@@ -9,7 +9,7 @@
 //! PostgreSQL infer each parameter's type from the column's element type.
 //! `operands` are the bound placeholders (`$1`, `$2`, ..) of the fragment.
 
-use super::{MATCH_EVERYTHING, MATCH_NOTHING};
+use super::MATCH_NOTHING;
 
 /// Alias given to the `unnest(..)` derived table in the contained-by rendering,
 /// together with the name of its single column.
@@ -17,7 +17,7 @@ const POSTGRES_ARRAY_ELEMENT_ALIAS: &str = "tideorm_array_element";
 
 /// Render `column @> ARRAY[..]`.
 pub(crate) fn postgres_array_contains(column: &str, operands: &[String]) -> String {
-    all_elements(&postgres_element_checks(column, operands))
+    all_elements(column, &postgres_element_checks(column, operands))
 }
 
 /// Render `column && ARRAY[..]` (overlap).
@@ -33,9 +33,9 @@ fn postgres_element_checks(column: &str, operands: &[String]) -> Vec<String> {
 }
 
 /// Every one of the element `checks` holds: what containment of a list
-/// tests. A list of no elements is vacuously contained.
-pub(crate) fn all_elements(checks: &[String]) -> String {
-    joined(checks, " AND ", MATCH_EVERYTHING)
+/// tests. A list of no elements is contained by every non-NULL array.
+pub(crate) fn all_elements(column: &str, checks: &[String]) -> String {
+    joined(checks, " AND ", &format!("{column} IS NOT NULL"))
 }
 
 /// One of the element `checks` holds: what an overlap with a list tests.

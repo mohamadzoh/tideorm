@@ -4,11 +4,66 @@ use super::QueryBuilder;
 use crate::internal::Value;
 use crate::model::Model;
 
+// Executable examples emitted beside every generated predicate.
+macro_rules! condition_example {
+    ($receiver:ident, $name:ident, $operator:ident, other) => {
+        $crate::query::condition_example!(@example $receiver, $name, "User::ID, User::ID")
+    };
+    ($receiver:ident, $name:ident, $operator:ident $(, $arg:ident)* $(,)?) => {
+        $crate::query::condition_example!(@example $receiver, $name,
+            $crate::query::condition_example!(@args $operator))
+    };
+    (@example $receiver:ident, $name:ident, $args:expr) => {
+        concat!(
+            "\n\n```\nuse tideorm::prelude::*;\n",
+            "# #[tideorm::model(table = \"users\")]\n",
+            "# struct User { #[tideorm(primary_key)] id: i64, name: String, data: serde_json::Value, tags: Vec<String> }\n",
+            $crate::query::condition_example!(@start $receiver), stringify!($name), "(", $args, ")",
+            $crate::query::condition_example!(@end $receiver), "\n```"
+        )
+    };
+    (@start QueryBuilder) => { "User::query()." };
+    (@end QueryBuilder) => { ".validate().unwrap();" };
+    (@start OrBranchBuilder) => { "User::query().begin_or()." };
+    (@end OrBranchBuilder) => { ".end_or().validate().unwrap();" };
+    (@start OrGroup) => { "let group = OrGroup::new()." };
+    (@end OrGroup) => { ";\nassert_eq!(group.condition_count(), 1);" };
+    (@start BatchUpdateBuilder) => { "let _update = User::update_all()." };
+    (@end BatchUpdateBuilder) => { ";" };
+    (@args Eq) => { "User::ID, 1" };
+    (@args NotEq) => { "User::ID, 1" };
+    (@args Gt) => { "User::ID, 1" };
+    (@args Gte) => { "User::ID, 1" };
+    (@args Lt) => { "User::ID, 1" };
+    (@args Lte) => { "User::ID, 1" };
+    (@args Like) => { "User::NAME, \"A%\"" };
+    (@args NotLike) => { "User::NAME, \"A%\"" };
+    (@args LikeEscaped) => { "User::NAME, \"A%\"" };
+    (@args In) => { "User::ID, [1, 2]" };
+    (@args NotIn) => { "User::ID, [1, 2]" };
+    (@args IsNull) => { "User::NAME" };
+    (@args IsNotNull) => { "User::NAME" };
+    (@args Between) => { "User::ID, 1, 10" };
+    (@args NotBetween) => { "User::ID, 1, 10" };
+    (@args JsonContains) => { "\"data\", serde_json::json!({\"key\": 1})" };
+    (@args JsonContainedBy) => { "\"data\", serde_json::json!({\"key\": 1})" };
+    (@args JsonKeyExists) => { "\"data\", \"key\"" };
+    (@args JsonKeyNotExists) => { "\"data\", \"key\"" };
+    (@args JsonPathExists) => { "\"data\", \"key\"" };
+    (@args JsonPathNotExists) => { "\"data\", \"key\"" };
+    (@args ArrayContains) => { "\"tags\", [\"rust\"]" };
+    (@args ArrayContainedBy) => { "\"tags\", [\"rust\"]" };
+    (@args ArrayOverlaps) => { "\"tags\", [\"rust\"]" };
+    (@args Raw) => { "\"id > 0\"" };
+    (@args RawWith) => { "\"id > ?\", vec![1_i64.into()]" };
+}
+pub(crate) use condition_example;
+
 /// Emit the condition-builder methods of one or more families on a type.
 ///
 /// Every builder that collects `WhereCondition`s — `QueryBuilder`, `OrGroup`,
 /// `OrBranchBuilder` and `BatchUpdateBuilder` — gets its `where_*`,
-/// `or_where_*` or `and_where_*` methods from the single operation table in
+/// `or_where_*` or `and_where_*` methods from the operation tables in
 /// `@family` below, so the families cannot drift apart. Each family names the
 /// target method that receives the built condition and the sentence that ends
 /// every method's docs; `+ raw` adds the family's `*_raw` method.
@@ -22,40 +77,48 @@ use crate::model::Model;
 /// }
 /// ```
 macro_rules! condition_methods {
-    (impl[$($generics:tt)*] $target:ty {
+    (impl[$($generics:tt)*] $target:ident $(<$model:ident>)? {
         $($family:ident $(+ $raw:ident)? => $push:ident, $doc:literal;)+
     }) => {
-        impl<$($generics)*> $target {
-            $($crate::query::condition_methods!(@family $family $(+ $raw)? => $push, $doc);)+
+        impl<$($generics)*> $target $(<$model>)? {
+            $($crate::query::condition_methods!(@family $target, $family $(+ $raw)? => $push, $doc);)+
         }
     };
 
-    (@family $family:ident $(+ $raw:ident)? => $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@ops $family, $push, $doc;
-            [where_eq, or_where_eq, and_where_eq]
+    (@family $receiver:ident, $family:ident $(+ $raw:ident)? => $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@typed_ops $family, $receiver, $push, $doc;
+            [where_eq, or_where_eq, and_where_eq] TypedValue
                 "Match rows where `column` equals `value`."
-                (value: impl serde::Serialize)
-                => Eq, $crate::query::ConditionValue::single(value);
-            [where_not, or_where_not, and_where_not]
+                => Eq;
+            [where_not, or_where_not, and_where_not] TypedValue
                 "Match rows where `column` differs from `value`; like SQL `<>`, a NULL column never matches."
-                (value: impl serde::Serialize)
-                => NotEq, $crate::query::ConditionValue::single(value);
-            [where_gt, or_where_gt, and_where_gt]
+                => NotEq;
+            [where_gt, or_where_gt, and_where_gt] TypedValue
                 "Match rows where `column` is greater than `value`."
-                (value: impl serde::Serialize)
-                => Gt, $crate::query::ConditionValue::single(value);
-            [where_gte, or_where_gte, and_where_gte]
+                => Gt;
+            [where_gte, or_where_gte, and_where_gte] TypedValue
                 "Match rows where `column` is greater than or equal to `value`."
-                (value: impl serde::Serialize)
-                => Gte, $crate::query::ConditionValue::single(value);
-            [where_lt, or_where_lt, and_where_lt]
+                => Gte;
+            [where_lt, or_where_lt, and_where_lt] TypedValue
                 "Match rows where `column` is less than `value`."
-                (value: impl serde::Serialize)
-                => Lt, $crate::query::ConditionValue::single(value);
-            [where_lte, or_where_lte, and_where_lte]
+                => Lt;
+            [where_lte, or_where_lte, and_where_lte] TypedValue
                 "Match rows where `column` is less than or equal to `value`."
-                (value: impl serde::Serialize)
-                => Lte, $crate::query::ConditionValue::single(value);
+                => Lte;
+            [where_in, or_where_in, and_where_in] TypedList
+                "Match rows where `column` is one of `values` — a `Vec`, an array, `&ids`, a set — each bound as its own parameter."
+                => In;
+            [where_not_in, or_where_not_in, and_where_not_in] TypedList
+                "Match rows where `column` is none of `values`, any list as for `where_in`; like SQL `NOT IN`, a NULL column never matches."
+                => NotIn;
+            [where_between, or_where_between, and_where_between] TypedRange
+                "Match rows where `column` lies between `min` and `max`, inclusive."
+                => Between;
+            [where_not_between, or_where_not_between, and_where_not_between] TypedRange
+                "Match rows where `column` lies outside `min` and `max`; like SQL `NOT BETWEEN`, a NULL column never matches."
+                => NotBetween;
+        );
+        $crate::query::condition_methods!(@ops $family, $receiver, $push, $doc;
             [where_like, or_where_like, and_where_like]
                 "Match rows against a raw `LIKE` pattern, used as written: `%` and `_` stay wildcards."
                 (pattern: &str)
@@ -76,14 +139,6 @@ macro_rules! condition_methods {
                 "Match rows where `column` ends with `value` literally; its `%` and `_` are escaped."
                 (value: &str)
                 => LikeEscaped, $crate::query::ConditionValue::ends_with(value);
-            [where_in, or_where_in, and_where_in] <V: serde::Serialize>
-                "Match rows where `column` is one of `values` — a `Vec`, an array, `&ids`, a set — each bound as its own parameter."
-                (values: impl IntoIterator<Item = V>)
-                => In, $crate::query::ConditionValue::list(values);
-            [where_not_in, or_where_not_in, and_where_not_in] <V: serde::Serialize>
-                "Match rows where `column` is none of `values`, any list as for `where_in`; like SQL `NOT IN`, a NULL column never matches."
-                (values: impl IntoIterator<Item = V>)
-                => NotIn, $crate::query::ConditionValue::list(values);
             [where_null, or_where_null, and_where_null]
                 "Match rows where `column` is NULL."
                 ()
@@ -92,14 +147,6 @@ macro_rules! condition_methods {
                 "Match rows where `column` holds a value."
                 ()
                 => IsNotNull, $crate::query::ConditionValue::None;
-            [where_between, or_where_between, and_where_between]
-                "Match rows where `column` lies between `min` and `max`, inclusive."
-                (min: impl serde::Serialize, max: impl serde::Serialize)
-                => Between, $crate::query::ConditionValue::range(min, max);
-            [where_not_between, or_where_not_between, and_where_not_between]
-                "Match rows where `column` lies outside `min` and `max`; like SQL `NOT BETWEEN`, a NULL column never matches."
-                (min: impl serde::Serialize, max: impl serde::Serialize)
-                => NotBetween, $crate::query::ConditionValue::range(min, max);
             [where_column_eq, or_where_column_eq, and_where_column_eq]
                 "Match rows where `column` equals the row's `other` column: `where_column_eq(\"shipped_on\", \"ordered_on\")`."
                 (other: impl $crate::columns::IntoColumnName)
@@ -179,38 +226,132 @@ macro_rules! condition_methods {
                 (values: impl IntoIterator<Item = V>)
                 => ArrayOverlaps, $crate::query::ConditionValue::list(values);
         );
-        $($crate::query::condition_methods!(@raw $raw $family => $push, $doc);)?
+        $($crate::query::condition_methods!(@raw $raw $family => $receiver, $push, $doc);)?
     };
 
-    (@ops where, $push:ident, $doc:literal; $(
+    (@ops where, $receiver:ident, $push:ident, $doc:literal; $(
         [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
         $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
     )*) => {$(
-        $crate::query::condition_methods!(@method $name $(<$generic: $bound>)?, $summary, $doc,
+        $crate::query::condition_methods!(@method $name $(<$generic: $bound>)?, $summary, $doc, $receiver,
             ($($arg: $arg_ty),*), $push, $operator, $value);
     )*};
 
-    (@ops or_where, $push:ident, $doc:literal; $(
+    (@ops or_where, $receiver:ident, $push:ident, $doc:literal; $(
         [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
         $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
     )*) => {$(
-        $crate::query::condition_methods!(@method $or_name $(<$generic: $bound>)?, $summary, $doc,
+        $crate::query::condition_methods!(@method $or_name $(<$generic: $bound>)?, $summary, $doc, $receiver,
             ($($arg: $arg_ty),*), $push, $operator, $value);
     )*};
 
-    (@ops and_where, $push:ident, $doc:literal; $(
+    (@ops and_where, $receiver:ident, $push:ident, $doc:literal; $(
         [$name:ident, $or_name:ident, $and_name:ident] $(<$generic:ident: $bound:path>)?
         $summary:literal ($($arg:ident: $arg_ty:ty),*) => $operator:ident, $value:expr;
     )*) => {$(
-        $crate::query::condition_methods!(@method $and_name $(<$generic: $bound>)?, $summary, $doc,
+        $crate::query::condition_methods!(@method $and_name $(<$generic: $bound>)?, $summary, $doc, $receiver,
             ($($arg: $arg_ty),*), $push, $operator, $value);
     )*};
 
-    (@method $name:ident $(<$generic:ident: $bound:path>)?, $summary:literal, $doc:literal,
+    (@typed_ops $family:ident, $receiver:ident, $push:ident, $doc:literal; $(
+        [$name:ident, $or_name:ident, $and_name:ident] $kind:ident
+        $summary:literal => $operator:ident;
+    )*) => {$(
+        $crate::query::condition_methods!(@typed_name $family,
+            [$name, $or_name, $and_name], $kind, $summary, $doc, $receiver, $push, $operator);
+    )*};
+
+    (@typed_name where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
+        $crate::query::condition_methods!(@typed_method $name, $($rest)*);
+    };
+    (@typed_name or_where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
+        $crate::query::condition_methods!(@typed_method $or_name, $($rest)*);
+    };
+    (@typed_name and_where, [$name:ident, $or_name:ident, $and_name:ident], $($rest:tt)*) => {
+        $crate::query::condition_methods!(@typed_method $and_name, $($rest)*);
+    };
+    // TypedValue/TypedList/TypedRange are dispatch markers for value-aware
+    // signatures. The remaining operations keep their operator-specific types.
+    (@typed_method $name:ident, TypedValue, $summary:literal, $doc:literal,
+        $receiver:ident, $push:ident, $operator:ident) => {
+        #[doc = $summary]
+        #[doc = ""]
+        #[doc = $doc]
+        /// Typed columns accept their Rust type (see [`ColumnValue`]); string
+        /// names accept any serializable value.
+        ///
+        /// [`ColumnValue`]: crate::columns::ColumnValue
+        #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
+        #[must_use]
+        pub fn $name<C, V>(self, column: C, value: V) -> Self
+        where
+            C: $crate::columns::ColumnValue<V>,
+        {
+            self.$push($crate::query::WhereCondition {
+                column: $crate::columns::column_reference(
+                    &column,
+                    <Self as $crate::columns::ConditionOwner>::own_table(),
+                ),
+                operator: $crate::query::Operator::$operator,
+                value: $crate::query::ConditionValue::single(C::convert_value(value)),
+            })
+        }
+    };
+
+    (@typed_method $name:ident, TypedList, $summary:literal, $doc:literal,
+        $receiver:ident, $push:ident, $operator:ident) => {
+        #[doc = $summary]
+        /// A typed column takes owned or borrowed elements, so `&ids` works.
+        #[doc = ""]
+        #[doc = $doc]
+        #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
+        #[must_use]
+        pub fn $name<C, V>(self, column: C, values: impl IntoIterator<Item = V>) -> Self
+        where
+            C: $crate::columns::ColumnValue<V>,
+        {
+            self.$push($crate::query::WhereCondition {
+                column: $crate::columns::column_reference(
+                    &column,
+                    <Self as $crate::columns::ConditionOwner>::own_table(),
+                ),
+                operator: $crate::query::Operator::$operator,
+                value: $crate::query::ConditionValue::list(values.into_iter().map(C::convert_value)),
+            })
+        }
+    };
+
+    (@typed_method $name:ident, TypedRange, $summary:literal, $doc:literal,
+        $receiver:ident, $push:ident, $operator:ident) => {
+        #[doc = $summary]
+        #[doc = ""]
+        #[doc = $doc]
+        #[doc = $crate::query::condition_example!($receiver, $name, $operator)]
+        #[must_use]
+        pub fn $name<C, L, H>(self, column: C, min: L, max: H) -> Self
+        where
+            C: $crate::columns::ColumnValue<L> + $crate::columns::ColumnValue<H>,
+        {
+            self.$push($crate::query::WhereCondition {
+                column: $crate::columns::column_reference(
+                    &column,
+                    <Self as $crate::columns::ConditionOwner>::own_table(),
+                ),
+                operator: $crate::query::Operator::$operator,
+                value: $crate::query::ConditionValue::range(
+                    <C as $crate::columns::ColumnValue<L>>::convert_value(min),
+                    <C as $crate::columns::ColumnValue<H>>::convert_value(max),
+                ),
+            })
+        }
+    };
+
+    (@method $name:ident $(<$generic:ident: $bound:path>)?, $summary:literal, $doc:literal, $receiver:ident,
         ($($arg:ident: $arg_ty:ty),*), $push:ident, $operator:ident, $value:expr) => {
         #[doc = $summary]
         #[doc = ""]
         #[doc = $doc]
+        #[doc = $crate::query::condition_example!($receiver, $name, $operator, $($arg),*)]
         #[must_use]
         pub fn $name $(<$generic: $bound>)? (
             self,
@@ -228,20 +369,20 @@ macro_rules! condition_methods {
         }
     };
 
-    (@raw raw where => $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method where_raw, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method where_raw_with, $push, $doc);
+    (@raw raw where => $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@raw_method where_raw, $receiver, $push, $doc);
+        $crate::query::condition_methods!(@raw_with_method where_raw_with, $receiver, $push, $doc);
     };
-    (@raw raw or_where => $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method or_where_raw, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method or_where_raw_with, $push, $doc);
+    (@raw raw or_where => $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@raw_method or_where_raw, $receiver, $push, $doc);
+        $crate::query::condition_methods!(@raw_with_method or_where_raw_with, $receiver, $push, $doc);
     };
-    (@raw raw and_where => $push:ident, $doc:literal) => {
-        $crate::query::condition_methods!(@raw_method and_where_raw, $push, $doc);
-        $crate::query::condition_methods!(@raw_with_method and_where_raw_with, $push, $doc);
+    (@raw raw and_where => $receiver:ident, $push:ident, $doc:literal) => {
+        $crate::query::condition_methods!(@raw_method and_where_raw, $receiver, $push, $doc);
+        $crate::query::condition_methods!(@raw_with_method and_where_raw_with, $receiver, $push, $doc);
     };
 
-    (@raw_with_method $name:ident, $push:ident, $doc:literal) => {
+    (@raw_with_method $name:ident, $receiver:ident, $push:ident, $doc:literal) => {
         /// Match rows by a raw SQL fragment whose `?` placeholders bind
         /// `params`, in order.
         ///
@@ -252,6 +393,7 @@ macro_rules! condition_methods {
         /// fails the query.
         ///
         #[doc = $doc]
+        #[doc = $crate::query::condition_example!($receiver, $name, RawWith)]
         #[must_use]
         pub fn $name(self, raw_sql: &str, params: Vec<$crate::internal::DbValue>) -> Self {
             self.$push($crate::query::WhereCondition {
@@ -265,7 +407,7 @@ macro_rules! condition_methods {
         }
     };
 
-    (@raw_method $name:ident, $push:ident, $doc:literal) => {
+    (@raw_method $name:ident, $receiver:ident, $push:ident, $doc:literal) => {
         /// Match rows by a raw SQL fragment.
         ///
         /// **Trusted SQL only**: the fragment is checked for statement
@@ -273,6 +415,7 @@ macro_rules! condition_methods {
         /// a rejected one fails the query, but it is never escaped.
         ///
         #[doc = $doc]
+        #[doc = $crate::query::condition_example!($receiver, $name, Raw)]
         #[must_use]
         pub fn $name(self, raw_sql: &str) -> Self {
             self.$push($crate::query::WhereCondition {
@@ -288,14 +431,17 @@ pub(crate) use condition_methods;
 
 /// Emit `when` and `when_some` on a builder.
 macro_rules! conditional_methods {
-    (impl[$($generics:tt)*] $target:ty) => {
+    (impl[$($generics:tt)*] $target:ty; $start:literal, $apply:literal) => {
         impl<$($generics)*> $target {
             /// Apply `f` only when `condition` holds: a filter that depends on
             /// a request parameter, without breaking the chain.
             ///
-            /// ```ignore
-            /// query.when(only_active, |q| q.where_eq("active", true))
-            /// ```
+            #[doc = concat!(
+                "```\nuse tideorm::prelude::*;\n",
+                "# #[tideorm::model(table = \"users\")]\n",
+                "# struct User { #[tideorm(primary_key)] id: i64, active: bool }\n",
+                "let _query = ", $start, ".when(true, |q| { let value = true; ", $apply, " });\n```"
+            )]
             #[must_use]
             pub fn when(self, condition: bool, f: impl FnOnce(Self) -> Self) -> Self {
                 if condition { f(self) } else { self }
@@ -303,9 +449,12 @@ macro_rules! conditional_methods {
 
             /// Apply `f` with the value when `option` holds one.
             ///
-            /// ```ignore
-            /// query.when_some(params.role, |q, role| q.where_eq("role", role))
-            /// ```
+            #[doc = concat!(
+                "```\nuse tideorm::prelude::*;\n",
+                "# #[tideorm::model(table = \"users\")]\n",
+                "# struct User { #[tideorm(primary_key)] id: i64, active: bool }\n",
+                "let _query = ", $start, ".when_some(Some(true), |q, value| ", $apply, ");\n```"
+            )]
             #[must_use]
             pub fn when_some<T>(self, option: Option<T>, f: impl FnOnce(Self, T) -> Self) -> Self {
                 match option {
@@ -317,17 +466,21 @@ macro_rules! conditional_methods {
     };
 }
 
-conditional_methods!(impl[M: Model] QueryBuilder<M>);
-conditional_methods!(impl[] OrGroup);
-conditional_methods!(impl[M: Model] OrBranchBuilder<M>);
-conditional_methods!(impl[M: Model] crate::model::BatchUpdateBuilder<M>);
-conditional_methods!(impl[M: Model] crate::relations::EagerQueryBuilder<M>);
+conditional_methods!(impl[M: Model] QueryBuilder<M>; "User::query()", "q.where_eq(User::ACTIVE, value)");
+conditional_methods!(impl[] OrGroup; "OrGroup::new()", "q.where_eq(User::ACTIVE, value)");
+conditional_methods!(impl[M: Model] OrBranchBuilder<M>; "User::query().begin_or()", "q.or_where_eq(User::ACTIVE, value)");
+conditional_methods!(impl[M: Model] crate::model::BatchUpdateBuilder<M>; "User::update_all()", "q.where_eq(User::ACTIVE, value)");
+conditional_methods!(
+    impl[M: Model] crate::relations::EagerQueryBuilder<M>;
+    "User::query().with_many(&[])",
+    "q.query(|query| query.where_eq(User::ACTIVE, value))"
+);
 
 mod finite;
 mod or_branch_builder;
 mod or_group;
 
-pub(crate) use finite::checked_filter_value;
+pub(crate) use finite::{checked_assignment_value, checked_filter_value};
 
 pub use or_branch_builder::OrBranchBuilder;
 pub use or_group::OrGroup;

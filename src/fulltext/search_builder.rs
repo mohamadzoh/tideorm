@@ -184,7 +184,10 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 let model = <T::Entity as EntityTrait>::Model::from_query_result(row, "")
                     .map_err(translate_error)?;
                 let rank = row.try_get("", "_fts_rank").map_err(translate_error)?;
-                let mut result = SearchResult::new(T::try_from_entity_model(model)?, rank);
+                let record = crate::model::__loading_through(&db.__get_connection()?, || {
+                    T::try_from_entity_model(model)
+                })?;
+                let mut result = SearchResult::new(record, rank);
                 if let Some(config) = &self.highlight {
                     result.highlights =
                         self.highlights_for(&result.record, config, pattern.as_ref());

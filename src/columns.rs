@@ -10,6 +10,61 @@
 //! Use these helpers when raw string column names become hard to audit or easy
 //! to misspell in larger query builders.
 
+//! # Typed filter values
+//!
+//! ```
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool, name: String }
+//! User::query().where_eq(User::ACTIVE, true).where_eq(User::NAME, "Ada").validate()?;
+//! # Ok::<(), tideorm::Error>(())
+//! ```
+//!
+//! A misspelled constant and a value of the wrong type are compile errors:
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().where_eq(User::ACTVIE, true);
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().where_eq(User::ACTIVE, "yes");
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().where_gt(User::ACTIVE, "yes");
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().where_in(User::ACTIVE, ["yes"]);
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().where_between(User::ACTIVE, "no", "yes");
+//! ```
+//!
+//! ```compile_fail
+//! use tideorm::prelude::*;
+//! #[tideorm::model(table = "users")]
+//! struct User { #[tideorm(primary_key)] id: i64, active: bool }
+//! User::query().begin_or().or_where_eq(User::ACTIVE, "yes");
+//! ```
+//!
+
 use std::marker::PhantomData;
 
 mod impls;
@@ -28,6 +83,76 @@ pub trait IntoColumnName {
         None
     }
 }
+
+/// A column that accepts `V` as a filter value.
+///
+/// A generated `Column<T>` accepts a `T` or a `&T`, so a borrowed list works
+/// in `where_in`. A nullable `Column<Option<T>>` accepts those as well as an
+/// `Option<T>`. Text columns accept `&str`, and integer, float and decimal
+/// columns accept narrower numbers that convert losslessly. String column
+/// names retain their dynamic, serializable values.
+#[diagnostic::on_unimplemented(
+    message = "a `{Self}` filter does not accept a `{V}` value",
+    label = "expected the column's Rust type",
+    note = "typed columns take their field's type or a reference to it, `&str` for text, or a losslessly widened number; filter by the column's name to pass any serializable value"
+)]
+pub trait ColumnValue<V>: IntoColumnName {
+    /// The value serialized into the query parameter.
+    type Value: serde::Serialize;
+    /// Convert a filter value to the column's Rust type.
+    fn convert_value(value: V) -> Self::Value;
+}
+
+// Concrete impls rather than one `V: Into<T>` blanket: the blanket cannot
+// coexist with `&str` for `Option<String>` (coherence), and it made an
+// unsuffixed literal fall back to `i32` for `u64` and `i16` columns.
+macro_rules! identity_column_value {
+    ($([$($generics:tt)*] $value:ty => $column:ty),* $(,)?) => {$(
+        impl<$($generics)*> ColumnValue<$value> for Column<$column> {
+            type Value = $value;
+            fn convert_value(value: $value) -> $value { value }
+        }
+    )*};
+}
+identity_column_value!(
+    [T: serde::Serialize] T => T,
+    [T: serde::Serialize] T => Option<T>,
+    ['a, T: serde::Serialize] &'a T => T,
+    ['a, T: serde::Serialize] &'a T => Option<T>,
+    ['a] &'a str => String,
+    ['a] &'a str => Option<String>,
+);
+
+// Only into types an unsuffixed literal falls back to (`i32`, `f64`) or reaches
+// from one: a widening into `i16` would make `where_eq(column, 5)` ambiguous.
+macro_rules! widened_column_value {
+    ($($column:ty => $($value:ty),+;)*) => {$($(
+        impl ColumnValue<$value> for Column<$column> {
+            type Value = $column;
+            fn convert_value(value: $value) -> $column { value.into() }
+        }
+        impl ColumnValue<$value> for Column<Option<$column>> {
+            type Value = $column;
+            fn convert_value(value: $value) -> $column { value.into() }
+        }
+    )+)*};
+}
+widened_column_value!(
+    i64 => i8, i16, i32, u8, u16, u32;
+    i32 => i8, i16, u8, u16;
+    f64 => f32, i8, i16, i32, u8, u16, u32;
+    rust_decimal::Decimal => i8, i16, i32, i64, u8, u16, u32, u64;
+);
+
+macro_rules! dynamic_column_value {
+    ($($ty:ty),*) => {$(
+        impl<V: serde::Serialize> ColumnValue<V> for $ty {
+            type Value = V;
+            fn convert_value(value: V) -> V { value }
+        }
+    )*};
+}
+dynamic_column_value!(&str, String, &String);
 
 /// How a query of the model whose table is `own_table` refers to `column`:
 /// by name, qualified with the column's own table when that is another

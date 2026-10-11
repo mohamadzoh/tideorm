@@ -142,3 +142,92 @@ fn nulls_are_typed_and_unparseable_values_fall_back_to_generic_binding() {
         json_to_db_value(&json!("x"))
     );
 }
+
+#[test]
+fn binary_filters_bind_bytes_and_preserve_invalid_input_for_database_errors() {
+    for ty in [
+        ColumnType::Blob,
+        ColumnType::Binary(2),
+        ColumnType::VarBinary(crate::orm::sea_query::StringLen::N(2)),
+    ] {
+        assert_eq!(
+            json_to_column_value(&json!([1, 2]), Some(&ty)),
+            Value::from(vec![1u8, 2])
+        );
+        assert_eq!(
+            json_to_column_value(&json!([]), Some(&ty)),
+            Value::from(Vec::<u8>::new())
+        );
+        assert_eq!(
+            json_to_column_value(&json!(null), Some(&ty)),
+            Value::Bytes(None)
+        );
+        assert_ne!(
+            json_to_column_value(&json!([256]), Some(&ty)),
+            Value::from(vec![0u8])
+        );
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn jsonb_array_elements_keep_json_primitive_types() {
+    let ty = ColumnType::Array(std::sync::Arc::new(ColumnType::JsonBinary));
+    for value in [
+        json!("hello"),
+        json!(12),
+        json!(true),
+        json!({"a": 1}),
+        json!([1]),
+    ] {
+        assert_eq!(json_to_array_element(&value, Some(&ty)), Value::from(value));
+    }
+    assert_eq!(
+        json_to_array_element(&json!(null), Some(&ty)),
+        Value::from(json!(null))
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn native_array_filters_bind_the_same_type_as_assignments() {
+    for (element, value, expected) in [
+        (
+            ColumnType::Integer,
+            json!([1, 2]),
+            Value::from(vec![1i32, 2]),
+        ),
+        (
+            ColumnType::BigInteger,
+            json!([1, 2]),
+            Value::from(vec![1i64, 2]),
+        ),
+        (
+            ColumnType::Text,
+            json!(["a", "b"]),
+            Value::from(vec!["a".to_owned(), "b".to_owned()]),
+        ),
+        (
+            ColumnType::Boolean,
+            json!([true, false]),
+            Value::from(vec![true, false]),
+        ),
+        (
+            ColumnType::Double,
+            json!([1.5, 2.5]),
+            Value::from(vec![1.5f64, 2.5]),
+        ),
+        (
+            ColumnType::JsonBinary,
+            json!(["a", 1, true]),
+            Value::from(vec![json!("a"), json!(1), json!(true)]),
+        ),
+    ] {
+        let column = ColumnType::Array(crate::orm::sea_query::RcOrArc::new(element));
+        assert_eq!(json_to_column_value(&value, Some(&column)), expected);
+        assert_eq!(
+            json_to_column_value(&json!([]), Some(&column)),
+            json_to_assignment_value(&json!([]), Some(&column))
+        );
+    }
+}

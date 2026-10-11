@@ -23,8 +23,22 @@ impl<'c> Executor<'c> {
         Self(inner)
     }
 
+    pub(crate) fn is_transaction(&self) -> bool {
+        !matches!(self.0, DatabaseExecutor::Connection(_))
+    }
+
+    fn ensure_transaction_active(&self) -> Result<(), DbErr> {
+        if self.is_transaction() && crate::cache::transaction_deadlocked() {
+            return Err(DbErr::Custom(
+                "transaction was aborted by a deadlock; further statements are blocked".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Begin a transaction, or a savepoint inside the one this runs on.
     pub(crate) async fn begin(&self) -> Result<DatabaseTransaction, DbErr> {
+        self.ensure_transaction_active()?;
         self.0.begin().await
     }
 }
@@ -54,22 +68,26 @@ impl ConnectionTrait for Executor<'_> {
     }
 
     async fn execute_raw(&self, statement: Statement) -> Result<ExecResult, DbErr> {
+        self.ensure_transaction_active()?;
         self.0
             .execute_raw(bind_zoned_timestamps_as_datetime(statement))
             .await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
+        self.ensure_transaction_active()?;
         self.0.execute_unprepared(sql).await
     }
 
     async fn query_one_raw(&self, statement: Statement) -> Result<Option<QueryResult>, DbErr> {
+        self.ensure_transaction_active()?;
         self.0
             .query_one_raw(bind_zoned_timestamps_as_datetime(statement))
             .await
     }
 
     async fn query_all_raw(&self, statement: Statement) -> Result<Vec<QueryResult>, DbErr> {
+        self.ensure_transaction_active()?;
         self.0
             .query_all_raw(bind_zoned_timestamps_as_datetime(statement))
             .await

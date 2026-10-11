@@ -3,7 +3,7 @@
 //! `serde_json` writes a NaN or an infinite float as `null`, and a filter reads
 //! `null` as SQL NULL, so `where_eq("price", f64::NAN)` would become
 //! `price IS NULL`. Such a value is refused instead. Only a value whose JSON
-//! holds a `null` is serialized a second time, through [`NonFinite`], to tell a
+//! holds a `null` is serialized a second time, through [`NullProbe`], to tell a
 //! NaN from a `None`.
 
 use serde::Serialize;
@@ -12,12 +12,26 @@ use serde::ser;
 /// `value` as the JSON a filter carries, or why it cannot be one.
 pub(crate) fn checked_filter_value(value: impl Serialize) -> Result<serde_json::Value, String> {
     let json = super::filter_value(&value);
-    if holds_null(&json) && value.serialize(NonFinite).unwrap_or(false) {
+    if holds_null(&json) && value.serialize(NullProbe::<false>).unwrap_or(false) {
         return Err(
             "a filter value holds a NaN or infinite float, which SQL cannot compare".to_string(),
         );
     }
     Ok(json)
+}
+
+/// Preserve a top-level Option::None before JSON erases its distinction from
+/// a JSON null document. Some(null), references and transparent newtypes work
+/// through Serde's own representation, without Rust type-name heuristics.
+pub(crate) fn checked_assignment_value(
+    value: impl Serialize,
+) -> Result<(serde_json::Value, bool), String> {
+    let json = checked_filter_value(&value)?;
+    let sql_null = json.is_null()
+        && value
+            .serialize(NullProbe::<true>)
+            .map_err(|e| e.to_string())?;
+    Ok((json, sql_null))
 }
 
 fn holds_null(json: &serde_json::Value) -> bool {
@@ -29,8 +43,9 @@ fn holds_null(json: &serde_json::Value) -> bool {
     }
 }
 
-/// A serializer that only answers whether a value holds a non-finite float.
-struct NonFinite;
+/// Probe either non-finite floats (NONE=false) or a top-level optional null
+/// (NONE=true); collections always recurse for non-finite validation.
+struct NullProbe<const NONE: bool>;
 
 /// The same question over the members of a sequence, a map or a struct.
 #[derive(Default)]
@@ -38,7 +53,7 @@ struct Members(bool);
 
 impl Members {
     fn visit<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), serde_json::Error> {
-        self.0 |= value.serialize(NonFinite)?;
+        self.0 |= value.serialize(NullProbe::<false>)?;
         Ok(())
     }
 }
@@ -51,7 +66,7 @@ macro_rules! finite_scalars {
     )*};
 }
 
-impl ser::Serializer for NonFinite {
+impl<const NONE: bool> ser::Serializer for NullProbe<NONE> {
     type Ok = bool;
     type Error = serde_json::Error;
     type SerializeSeq = Members;
@@ -70,15 +85,15 @@ impl ser::Serializer for NonFinite {
     );
 
     fn serialize_f32(self, value: f32) -> Result<bool, Self::Error> {
-        Ok(!value.is_finite())
+        Ok(!NONE && !value.is_finite())
     }
 
     fn serialize_f64(self, value: f64) -> Result<bool, Self::Error> {
-        Ok(!value.is_finite())
+        Ok(!NONE && !value.is_finite())
     }
 
     fn serialize_none(self) -> Result<bool, Self::Error> {
-        Ok(false)
+        Ok(NONE)
     }
 
     fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<bool, Self::Error> {

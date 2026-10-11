@@ -109,13 +109,6 @@ impl<M: Model> QueryBuilder<M> {
         crate::sync::registered_column_type(join.bare_table(), name)
     }
 
-    pub(crate) fn sea_value_list(values: &[serde_json::Value]) -> Vec<Value> {
-        values
-            .iter()
-            .map(crate::internal::json_to_db_value)
-            .collect()
-    }
-
     pub(crate) fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
         // Both shapes canonicalize, so `where_eq("users.display_name", ..)`
         // addresses the same column `where_eq("display_name", ..)` does.

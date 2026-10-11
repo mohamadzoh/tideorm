@@ -17,6 +17,41 @@ static GLOBAL_CONNECTION: RwLock<Option<Arc<InternalConnection>>> = RwLock::new(
 thread_local! {
     /// The scope's connection, and the identity of the pool it belongs to.
     static DB_OVERRIDE: RefCell<Option<(ConnectionRef, Option<u64>)>> = const { RefCell::new(None) };
+    static LOADING_DATABASE: RefCell<Option<Database>> = const { RefCell::new(None) };
+}
+
+/// The pool whose rows are currently being converted into models. Relations
+/// retain the pool, never a transaction handle that would prevent commit.
+pub(crate) fn loading_database() -> Option<Database> {
+    LOADING_DATABASE.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) fn with_loading_connection<T>(
+    connection: &ConnectionRef,
+    load: impl FnOnce() -> T,
+) -> T {
+    let pool = match connection {
+        ConnectionRef::Database(pool) => Some(pool.clone()),
+        ConnectionRef::Transaction(_) => origin_of(connection).and_then(|origin| {
+            CONNECTION_IDENTITIES
+                .get()?
+                .lock()
+                .assigned
+                .values()
+                .find_map(|(pool, id)| (*id == origin).then(|| pool.upgrade()).flatten())
+        }),
+    };
+    struct Restore(Option<Database>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LOADING_DATABASE.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let database = pool.map(|pool| Database::from_handle(ConnectionRef::Database(pool)));
+    let _restore = Restore(LOADING_DATABASE.with(|slot| slot.replace(database)));
+    load()
 }
 
 const NOT_INITIALIZED: &str = "Global database connection not initialized. \

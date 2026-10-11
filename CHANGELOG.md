@@ -5,6 +5,67 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-10-09
+
+### Added
+
+- Generated uppercase column and relation constants (`User::EMAIL`, `User::POSTS`).
+- Path-independent `.auto_models()` discovery using compiled inventory metadata.
+- Six runnable examples, an API cheat sheet and executable query method docs;
+  explicit docs.rs links in both package manifests and documentation CI checks.
+
+### Changed
+
+- **Breaking:** scalar comparisons, ranges and IN filters check the values given
+  with a typed column, including OR/AND variants. A `Column<T>` takes a `T` or a
+  `&T` (so `where_in(User::ID, &ids)` works), a nullable column also takes `T`,
+  text columns take `&str`, and integer, float and decimal columns take narrower
+  numbers that convert losslessly. A value of another type — a string for a
+  timestamp column, an `i64` for an `i32` column — is now a compile error. Filters
+  by column name keep accepting any serializable value.
+- **Breaking:** the generated constants are inherent associated constants, so a
+  model that defines its own associated constant with a field's uppercase name
+  must rename it.
+
+### Fixed
+
+- Failed writes invalidate cached queries when database triggers retain side effects,
+  including rejected or suppressed pivot inserts.
+- Empty `select([])` projections load all model columns, matching the rendered SQL.
+- Schema export restores MySQL/MariaDB views, stored programs, triggers and
+  events, including SQL modes and event time zones. Local database references
+  in multi-table statements follow the destination database on replay.
+- PostgreSQL exports retain domain checks/defaults, view defaults, custom rules,
+  partition nullability and generated expressions, replica identities, unlogged
+  tables and storage options. Object/column grants preserve their grantors and
+  cascading revocation; default privileges are restored for future objects.
+- JSON array predicates reject scalar/object documents on SQLite and the MySQL
+  family. PostgreSQL JSON array operations retain JSON null elements.
+- Batch setters distinguish JSON null documents from `Option::None` SQL NULL,
+  including COALESCE fallbacks. SQLite integer arithmetic rejects overflow
+  without partially updating a batch.
+- Every public raw SQL call clears cached query results, including SELECTs that
+  mutate through stored routines. Internal ORM reads retain their cache behavior.
+- Bulk-insert results retain their originating database for lazy relation loads,
+  including results returned from transactions.
+- PostgreSQL schema exports preserve routine execution grants and grant options,
+  and order tables, types and routines by their catalog dependencies, including
+  functions using table row types and domain checks using functions.
+- PostgreSQL column defaults restore after table creation so multiple inheritance
+  with conflicting parent defaults retains the child's defaults and ownership.
+- Bulk arithmetic rejects non-finite factors and zero divisors. SQLite integer
+  scaling rejects factors it cannot represent exactly instead of losing precision.
+- Bulk NULL assignments preserve JSON, binary and PostgreSQL array parameter types.
+  Failed internal batch transactions restore dirty-tracking snapshots.
+- Aggregate aliases no longer inherit unrelated model field types or encryption.
+  Empty array containment excludes SQL NULL arrays.
+- MySQL upserts require a complete unique index for their conflict target.
+- Schema exports preserve PostgreSQL shared sequence definitions, options and
+  ownership, partition default overrides, and MySQL descending index parts.
+- Unknown eager relation paths report valid names before querying, even for
+  empty results. Schema sync without registered models reports available models
+  and registration instructions instead of succeeding without syncing anything.
+
 ## [0.13.1] - 2026-09-30
 
 ### Fixed
@@ -2440,6 +2501,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.14.0]: https://github.com/mohamadzoh/tideorm/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/mohamadzoh/tideorm/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/mohamadzoh/tideorm/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/mohamadzoh/tideorm/compare/v0.11.0...v0.12.0

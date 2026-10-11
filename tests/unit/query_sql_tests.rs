@@ -444,6 +444,24 @@ fn exists_sql_ignores_order_limit_and_offset() {
 }
 
 #[test]
+fn exists_sql_keeps_potential_aggregates_in_every_dialect() {
+    for backend in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::SQLite,
+    ] {
+        for expression in ["COUNT(*) AS total", "COALESCE(SUM(id), 0) AS total"] {
+            let (sql, params) = QueryCountGuardUser::query()
+                .select_raw(expression)
+                .where_eq("name", "alice")
+                .build_exists_sql_with_params_for_db(backend);
+            assert!(sql.contains(expression), "{sql}");
+            assert_eq!(params.len(), 1);
+        }
+    }
+}
+
+#[test]
 fn exists_sql_preserves_subquery_wrapper_for_union_queries() {
     let (sql, params) = QueryCountGuardUser::query()
         .where_eq("name", "alice")

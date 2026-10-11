@@ -90,15 +90,15 @@ fn scaling_an_integer_column_stays_integral_on_sqlite() {
     // column is divided before it is multiplied, so no step overflows.
     let sqlite = scaled(DatabaseType::SQLite);
     assert!(
-        sqlite.contains(
-            r#""age" = CAST(("age" / ?) * ? + (("age" % ?) * ? + CASE WHEN "age" < 0 THEN ? ELSE ? END) / ? AS INTEGER)"#
-        ),
+        sqlite.contains(r#""age" = CASE WHEN typeof(("age" / ?) * ?"#),
         "{sqlite}"
     );
     assert!(
-        sqlite.contains(
-            r#""id" = CAST(("id" / ?) + (("id" % ?) + CASE WHEN "id" < 0 THEN ? ELSE ? END) / ? AS INTEGER)"#
-        ),
+        sqlite.contains(r#""id" = CASE WHEN typeof(("id" / ?)"#),
+        "{sqlite}"
+    );
+    assert!(
+        sqlite.contains("ELSE abs(-9223372036854775808) END"),
         "{sqlite}"
     );
     // The other backends take the factor as an exact decimal.

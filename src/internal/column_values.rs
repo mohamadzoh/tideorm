@@ -102,6 +102,13 @@ fn typed_value(value: &serde_json::Value, column_type: &ColumnType) -> Option<Va
     use serde_json::Value as Json;
 
     match (column_type, value) {
+        #[cfg(feature = "postgres")]
+        (ColumnType::Array(element), Json::Array(_)) => array_value(value, element),
+        (ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_), Json::Array(_)) => {
+            serde_json::from_value::<Vec<u8>>(value.clone())
+                .ok()
+                .map(Value::from)
+        }
         (ColumnType::Uuid, Json::String(text)) => uuid::Uuid::parse_str(text).ok().map(Value::from),
         (ColumnType::TimestampWithTimeZone, Json::String(text)) => {
             parse_utc_datetime(text).map(Value::from)
@@ -135,6 +142,12 @@ fn typed_value(value: &serde_json::Value, column_type: &ColumnType) -> Option<Va
 /// itself is happy to compare with NULL.
 fn typed_null(column_type: &ColumnType) -> Value {
     match column_type {
+        ColumnType::Json | ColumnType::JsonBinary => Value::Json(None),
+        ColumnType::Blob | ColumnType::Binary(_) | ColumnType::VarBinary(_) => Value::Bytes(None),
+        #[cfg(feature = "postgres")]
+        ColumnType::Array(element) => array_value(&serde_json::json!([]), element)
+            .map(|value| value.as_null())
+            .unwrap_or_else(|| json_to_db_value(&serde_json::Value::Null)),
         ColumnType::Uuid => Value::from(None::<uuid::Uuid>),
         ColumnType::TimestampWithTimeZone => Value::from(None::<DateTime<Utc>>),
         ColumnType::DateTime | ColumnType::Timestamp => Value::from(None::<NaiveDateTime>),
@@ -205,3 +218,21 @@ fn parse_decimal(text: &str) -> Option<Decimal> {
 #[cfg(test)]
 #[path = "../../tests/unit/internal_column_values_tests.rs"]
 mod tests;
+
+/// Bind an element using the declared SQL array element type.
+pub(crate) fn json_to_array_element(
+    value: &serde_json::Value,
+    column: Option<&ColumnType>,
+) -> Value {
+    #[cfg(feature = "postgres")]
+    if let Some(ColumnType::Array(element)) = column {
+        // Every serde_json::Value, including Null, is a JSON document inside
+        // a JSON array. SQL NULL would corrupt a Vec<Value> on its next read.
+        if matches!(element.as_ref(), ColumnType::Json | ColumnType::JsonBinary) {
+            return Value::from(value.clone());
+        }
+        return json_to_assignment_value(value, Some(element));
+    }
+    let _ = column;
+    json_to_db_value(value)
+}

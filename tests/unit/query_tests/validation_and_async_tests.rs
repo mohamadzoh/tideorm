@@ -225,10 +225,21 @@ fn test_standalone_offset_renders_a_portable_limit() {
 
 #[test]
 fn test_select_takes_columns_and_aliases_but_not_expressions() {
-    QueryBuilder::<QueryTestUser>::new()
-        .select(vec!["name AS display_name", "query_test_users.id", "*"])
+    for columns in [
+        vec!["name AS display_name", "query_test_users.id"],
+        vec!["*"],
+        vec!["query_test_users.*"],
+    ] {
+        QueryBuilder::<QueryTestUser>::new()
+            .select(columns)
+            .ensure_query_is_valid()
+            .expect("columns, qualified columns, aliases and * are the typed projection");
+    }
+    let error = QueryBuilder::<QueryTestUser>::new()
+        .select(vec!["query_test_users.id", "*"])
         .ensure_query_is_valid()
-        .expect("columns, qualified columns, aliases and * are the typed projection");
+        .expect_err("a wildcard must not hide a duplicate result name");
+    assert!(error.to_string().contains("names the column 'id' twice"));
 
     for expression in [
         "CAST(name AS TEXT) AS display_name",

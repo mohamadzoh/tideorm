@@ -52,7 +52,7 @@ impl SchemaGenerator {
         sql
     }
 
-    fn generate_create_table(&self, table: &TableSchema) -> String {
+    pub(super) fn generate_create_table(&self, table: &TableSchema) -> String {
         let columns: Vec<ColumnDefinition> = table.columns.iter().map(column_definition).collect();
 
         let mut sql = ddl::create_table(

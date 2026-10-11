@@ -37,8 +37,8 @@ pub use core::Database;
 pub(crate) use state::__scope_origin;
 pub use state::{__current_connection, __current_db, db, has_global_db, require_db};
 pub(crate) use state::{connection_identity, origin_of};
+pub(crate) use state::{loading_database, with_loading_connection};
 pub use transaction::Transaction;
-pub(crate) use transaction::transaction_error;
 
 #[doc(hidden)]
 pub use transaction::ConnectionRef;

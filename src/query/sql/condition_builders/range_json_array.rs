@@ -66,8 +66,12 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
         column_sql: &str,
         operator: ArrayOperator,
+        column: &str,
         values: &[serde_json::Value],
     ) -> SimpleExpr {
+        if values.is_empty() && matches!(operator, ArrayOperator::Overlaps) {
+            return Expr::cust(db_sql::MATCH_NOTHING);
+        }
         match db_type {
             DatabaseType::Postgres => {
                 let (sql, bound) = match operator {
@@ -79,7 +83,14 @@ impl<M: Model> QueryBuilder<M> {
                         values.to_vec(),
                     ),
                     ArrayOperator::ContainedBy => {
-                        let (listed, null_allowed) = split_nulls(values);
+                        let json_elements = matches!(self.column_type(column),
+                            Some(crate::orm::ColumnType::Array(element))
+                                if matches!(element.as_ref(), crate::orm::ColumnType::Json | crate::orm::ColumnType::JsonBinary));
+                        let (listed, null_allowed) = if json_elements {
+                            (values.to_vec(), false)
+                        } else {
+                            split_nulls(values)
+                        };
                         let operands = db_sql::placeholders(db_type, listed.len());
                         (
                             db_sql::postgres_array_contained_by(
@@ -98,7 +109,18 @@ impl<M: Model> QueryBuilder<M> {
                         values.to_vec(),
                     ),
                 };
-                self.build_custom_expression(sql, Self::sea_value_list(&bound))
+                self.build_custom_expression(
+                    sql,
+                    bound
+                        .iter()
+                        .map(|value| {
+                            crate::internal::json_to_array_element(
+                                value,
+                                self.column_type(column).as_ref(),
+                            )
+                        })
+                        .collect(),
+                )
             }
             // A JSON array column is contained in or contains the list as a
             // JSON document, with the guards that make `JSON_CONTAINS` read
@@ -127,7 +149,10 @@ impl<M: Model> QueryBuilder<M> {
                         )
                     }
                 };
-                self.build_custom_expression(bound.sql, bound.values)
+                self.build_custom_expression(
+                    format!("(JSON_TYPE({column_sql}) = 'ARRAY' AND ({}))", bound.sql),
+                    bound.values,
+                )
             }
             // Elements are compared as JSON values, as `where_eq` compares a
             // document: `1` is not `true`, and the string `"{\"a\":1}"` is not
@@ -146,9 +171,10 @@ impl<M: Model> QueryBuilder<M> {
                 let has_element =
                     |equal: &String| format!("EXISTS (SELECT 1 FROM {elements} WHERE {equal})");
                 let sql = match operator {
-                    ArrayOperator::Contains => {
-                        db_sql::all_elements(&checks.iter().map(has_element).collect::<Vec<_>>())
-                    }
+                    ArrayOperator::Contains => db_sql::all_elements(
+                        column_sql,
+                        &checks.iter().map(has_element).collect::<Vec<_>>(),
+                    ),
                     ArrayOperator::Overlaps => {
                         db_sql::any_element(&checks.iter().map(has_element).collect::<Vec<_>>())
                     }
@@ -158,7 +184,12 @@ impl<M: Model> QueryBuilder<M> {
                         db_sql::array_contained_by(column_sql, &elements, offending.as_deref())
                     }
                 };
-                self.build_custom_expression(sql, bound)
+                // json_each also enumerates objects and scalar documents. Array
+                // operators must never widen reads or writes to those values.
+                self.build_custom_expression(
+                    format!("(json_type({column_sql}) = 'array' AND ({sql}))"),
+                    bound,
+                )
             }
         }
     }

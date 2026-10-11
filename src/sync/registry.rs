@@ -5,7 +5,7 @@ use super::{ModelSchema, SyncRegistry};
 
 pub(super) static MODEL_SCHEMAS: RwLock<Vec<ModelSchema>> = RwLock::new(Vec::new());
 
-/// Distributed registration emitted by `#[tideorm::model]` for source-path-based sync discovery.
+/// Distributed registration emitted by `#[tideorm::model]` for sync discovery and column metadata.
 #[doc(hidden)]
 pub struct CompiledModelRegistration {
     pub source_path: &'static str,

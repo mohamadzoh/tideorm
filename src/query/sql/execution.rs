@@ -24,11 +24,12 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// The direction `chunk()` pages in: the query's ordering, which may only
-    /// be by `primary_key`, bare or as `cursor_column`, else ascending.
-    fn chunk_order(&self, primary_key: &str, cursor_column: &str) -> Result<crate::query::Order> {
+    /// be by the model's primary key, using its Rust field or database column
+    /// name, optionally qualified by the model's table; otherwise ascending.
+    fn chunk_order(&self, primary_key: &str) -> Result<crate::query::Order> {
         match self.clauses.order_by.as_slice() {
             [] => Ok(crate::query::Order::Asc),
-            [(column, direction)] if column == primary_key || column == cursor_column => {
+            [(column, direction)] if M::own_column_name(column) == Some(primary_key) => {
                 Ok(*direction)
             }
             _ => Err(Error::query(format!(
@@ -52,12 +53,26 @@ impl<M: Model> QueryBuilder<M> {
     /// transaction, and locked reads, bypass the cache. Writes TideORM does not
     /// make, from another process or straight through the driver, are only
     /// seen once the TTL expires.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().cache(std::time::Duration::from_secs(30)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn cache(mut self, ttl: std::time::Duration) -> Self {
         self.clauses.cache_options = Some(crate::cache::CacheOptions::new(ttl));
         self
     }
 
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().cache_with_key("users:active", std::time::Duration::from_secs(30)).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn cache_with_key(mut self, key: &str, ttl: std::time::Duration) -> Self {
         self.clauses.cache_key = Some(key.to_string());
@@ -65,6 +80,13 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().no_cache().validate().unwrap();
+    /// ```
     #[must_use]
     pub fn no_cache(mut self) -> Self {
         self.clauses.cache_options = None;
@@ -123,17 +145,15 @@ impl<M: Model> QueryBuilder<M> {
         let db = self.current_db()?;
         let outputs = self.projection_outputs();
         // An output is typed by where it comes from, not by its name: a model
-        // column under any alias by that column's type, and another table's
-        // column or an expression (`COUNT(*) AS active`) by what the driver
-        // declares, even when a model field shares its name.
+        // column under any alias by that column's type, including registered
+        // joined models. Unknown sources and expressions use the driver's type,
+        // even when a model field shares their output name.
         let model_type = |name: &str| {
             if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
                 return Some(column_type.clone());
             }
             match outputs.iter().find(|(output, _)| output == name) {
-                Some((_, Some((table, column)))) if table == M::table_name() => {
-                    crate::internal::column_type_of::<M>(column)
-                }
+                Some((_, Some((table, column)))) => self.column_type(&format!("{table}.{column}")),
                 Some(_) => None,
                 None => crate::internal::column_type_of::<M>(name),
             }
@@ -144,14 +164,52 @@ impl<M: Model> QueryBuilder<M> {
         Ok(rows)
     }
 
+    /// Decode generated aggregate outputs using only their declared result types.
+    /// Their aliases are independent of the model's fields and query projection.
+    pub(in crate::query) async fn fetch_aggregate_json(
+        &self,
+        sql: &str,
+        params: Vec<Value>,
+        output_types: &[(String, crate::orm::ColumnType)],
+        source_columns: &[(String, String)],
+    ) -> Result<Vec<serde_json::Value>> {
+        let db = self.current_db()?;
+        let result_type = |name: &str| {
+            output_types
+                .iter()
+                .find(|(output, _)| output == name)
+                .map(|(_, ty)| ty.clone())
+        };
+        let rows = db.__raw_json_typed(sql, params, &result_type);
+        let mut rows = self.logged(sql, rows, |rows| rows.len() as u64).await?;
+        let outputs = rows
+            .first()
+            .and_then(serde_json::Value::as_object)
+            .map(|row| {
+                row.keys()
+                    .map(|alias| {
+                        let source = source_columns
+                            .iter()
+                            .find(|(name, _)| name == alias)
+                            .and_then(|(_, column)| self.aggregate_source(column));
+                        (alias.clone(), source)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        crate::model::decrypt_json_rows::<M>(&mut rows, &outputs)?;
+        Ok(rows)
+    }
+
     /// Run a mutation and drop every cached result it may have made stale.
     async fn run_mutation(&self, sql: &str, params: Vec<Value>) -> Result<u64> {
         let db = self.current_db()?;
-        let rows_affected = self
+        let result = self
             .logged(sql, db.__execute_with_params(sql, params), |rows| *rows)
-            .await?;
-        Self::invalidate_model_state(rows_affected);
-        Ok(rows_affected)
+            .await;
+        // SQLite FAIL triggers can preserve writes even when the statement errors.
+        Self::invalidate_model_state(result.as_ref().copied().unwrap_or(1));
+        result
     }
 
     /// Mix the identity of the connection this query runs on into the cache key.
@@ -327,6 +385,23 @@ impl<M: Model> QueryBuilder<M> {
         crate::cache::QueryCache::global().generate_key(M::table_name(), hash)
     }
 
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).get().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn get(self) -> Result<Vec<M>> {
         self.ensure_query_is_executable()?;
         self.ensure_projection_covers_model()?;
@@ -345,9 +420,12 @@ impl<M: Model> QueryBuilder<M> {
             cache.warn_once_if_disabled();
             let key = self.generate_cache_key();
             if let Some(cached) = cache.get::<Vec<M>>(&key) {
-                let cached: Vec<M> = cached.into_iter().map(M::__rebuild_relations).collect();
-                crate::model::__remember_dirty_snapshots(&cached);
-                return Ok(cached);
+                let connection = self.current_db()?.__get_connection()?;
+                return crate::model::__loading_through(&connection, || {
+                    let cached: Vec<M> = cached.into_iter().map(M::__rebuild_relations).collect();
+                    crate::model::__remember_dirty_snapshots(&cached);
+                    Ok(cached)
+                });
             }
             // Taken before the read: a write that lands while it runs may
             // replace the rows it returns.
@@ -382,12 +460,46 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Without an order, which row comes first is up to the database; order
     /// the query when the choice matters.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).first().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn first(self) -> Result<Option<M>> {
         let results = self.limit(1).get().await?;
         Ok(results.into_iter().next())
     }
 
     /// [`first()`](Self::first), with a not-found error when nothing matches.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).first_or_fail().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn first_or_fail(self) -> Result<M> {
         self.first()
             .await?
@@ -404,6 +516,24 @@ impl<M: Model> QueryBuilder<M> {
     /// A join can repeat a primary key: the rows sharing one key are always handed to the
     /// callback in the same batch, so a key that repeats more often than `chunk_size` fails the
     /// call. A `union()` is refused, since its other branches do not follow the cursor.
+    /// GROUP BY and HAVING are refused because the cursor would change group membership.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).chunk(10, |rows| async move { assert!(!rows.is_empty()); Ok(()) }).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn chunk<F, Fut>(self, chunk_size: u64, mut callback: F) -> Result<()>
     where
         F: FnMut(Vec<M>) -> Fut,
@@ -414,6 +544,12 @@ impl<M: Model> QueryBuilder<M> {
         if chunk_size == 0 {
             return Err(Error::query(
                 "chunk() requires chunk_size to be greater than 0",
+            ));
+        }
+
+        if !self.clauses.group_by.is_empty() || !self.clauses.having_conditions.is_empty() {
+            return Err(Error::query(
+                "chunk() does not support GROUP BY or HAVING: its primary-key cursor changes group membership; read grouped results with get() or page()",
             ));
         }
 
@@ -431,7 +567,7 @@ impl<M: Model> QueryBuilder<M> {
 
         let primary_key = self.chunk_primary_key_column()?;
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
-        let order = self.chunk_order(primary_key, &cursor_column)?;
+        let order = self.chunk_order(primary_key)?;
         let mut remaining = self.clauses.limit_value;
         let mut base_query = self;
         let explicit_cache_key = base_query.clauses.cache_key.clone();
@@ -549,12 +685,29 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Ordering, `limit()` and `offset()` are ignored, so a paged query counts
     /// its total across every page. The aggregates honour them.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).count().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn count(self) -> Result<u64> {
         let query = self.without_distinct_ordering();
         query.ensure_query_is_executable()?;
 
         let (sql, params) = query.build_count_sql_with_params();
-        let rows = query.fetch_json(&sql, params).await?;
+        let rows = query.fetch_aggregate_json(&sql, params, &[], &[]).await?;
         Self::decode_count_value(rows.first().and_then(|row| row.get("count")), "count")
     }
 
@@ -588,12 +741,29 @@ impl<M: Model> QueryBuilder<M> {
 
     /// Whether any row matches the query; its ordering, limit and offset are
     /// ignored.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).exists().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn exists(self) -> Result<bool> {
         let query = self.without_distinct_ordering();
         query.ensure_query_is_executable()?;
 
         let (sql, params) = query.build_exists_sql_with_params();
-        let rows = query.fetch_json(&sql, params).await?;
+        let rows = query.fetch_aggregate_json(&sql, params, &[], &[]).await?;
 
         // `build_exists_sql_with_params` renders one of two shapes. The
         // `SELECT EXISTS(..) AS "exists_result"` shape always returns a single
@@ -634,8 +804,10 @@ impl<M: Model> QueryBuilder<M> {
     /// Drop the cached reads and dirty-tracking snapshots a write to this
     /// model's table has made stale.
     pub(crate) fn invalidate_model_state(rows_affected: u64) {
+        // Cascades and triggers can write other tables, even when a trigger
+        // suppresses every directly affected row. clear() also records commit replay.
+        crate::QueryCache::global().clear();
         if rows_affected > 0 {
-            crate::QueryCache::global().invalidate_model(M::table_name());
             crate::model::__invalidate_dirty_snapshots::<M>();
         }
     }
@@ -658,6 +830,23 @@ impl<M: Model> QueryBuilder<M> {
     /// marked deleted, as [`soft_delete()`](Self::soft_delete) marks them;
     /// [`force_delete()`](Self::force_delete) removes them for good. At least
     /// one explicit filter is required.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).delete().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn delete(self) -> Result<u64> {
         if M::soft_delete_enabled() {
             self.ensure_not_only_trashed("delete")?;
@@ -678,6 +867,23 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// On a soft-delete model the live rows are marked deleted, as `delete()`
     /// marks them; `only_trashed().force_delete()` empties the trash.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().delete_all().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn delete_all(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("delete_all")?;
@@ -744,6 +950,23 @@ impl<M: Model> QueryBuilder<M> {
     /// Mark the live rows this query matches deleted, stamping `deleted_at`;
     /// a trashed row keeps the stamp it has, even under `with_trashed()`. At
     /// least one explicit filter is required.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).soft_delete().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn soft_delete(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("soft_delete")?;
@@ -764,6 +987,24 @@ impl<M: Model> QueryBuilder<M> {
         query.run_mutation(&sql, params).await
     }
 
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// # User::query().where_eq(User::ID, 1).soft_delete().await?;
+    /// let result = User::query().only_trashed().where_eq(User::ID, 1).restore().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn restore(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("restore")?;
@@ -800,6 +1041,23 @@ impl<M: Model> QueryBuilder<M> {
         query.run_mutation(&sql, params).await
     }
 
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).force_delete().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn force_delete(self) -> Result<u64> {
         self.ensure_query_is_executable()?;
         self.ensure_mutation_query_is_safe("force_delete")?;
@@ -817,6 +1075,23 @@ impl<M: Model> QueryBuilder<M> {
         query.run_mutation(&sql, params).await
     }
 
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).get_json().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn get_json(self) -> Result<Vec<serde_json::Value>> {
         self.ensure_query_is_executable()?;
         let (sql, params) = self.build_select_sql_with_params();
@@ -884,7 +1159,7 @@ fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
     // Words a table may follow: `FROM ONLY posts` reads `posts`.
     const BEFORE_A_TABLE: [&str; 2] = ["only", "lateral"];
     // The keywords that end a `FROM` list.
-    const LIST_END: [&str; 20] = [
+    const LIST_END: [&str; 13] = [
         "where",
         "group",
         "order",
@@ -896,15 +1171,8 @@ fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
         "except",
         "window",
         "for",
-        "on",
-        "using",
         "returning",
         "fetch",
-        "inner",
-        "left",
-        "right",
-        "full",
-        "cross",
     ];
 
     let mut depth = 0usize;
@@ -927,9 +1195,6 @@ fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
                 expect_table = true;
             }
             word if word.eq_ignore_ascii_case("join") => {
-                if lists.last() == Some(&depth) {
-                    lists.pop();
-                }
                 expect_table = true;
             }
             word => {

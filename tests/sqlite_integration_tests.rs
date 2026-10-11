@@ -57,6 +57,9 @@ mod backend {
     }
 }
 
+#[path = "support/schema_script.rs"]
+mod schema_script;
+
 #[path = "support/integration_parity.rs"]
 mod parity;
 

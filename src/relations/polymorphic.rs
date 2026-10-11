@@ -173,12 +173,9 @@ impl<Morphable> MorphTo<Morphable> {
     /// the columns no longer hold.
     #[doc(hidden)]
     pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        #[cfg(feature = "entity-manager")]
         if self.type_value == previous.type_value && self.id_value == previous.id_value {
             self.source.preserve_from(&previous.source);
         }
-        #[cfg(not(feature = "entity-manager"))]
-        let _ = previous;
     }
 }
 

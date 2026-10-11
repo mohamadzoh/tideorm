@@ -166,6 +166,10 @@ pub(crate) fn transaction_error(err: crate::internal::OrmError) -> Error {
 impl Database {
     /// Execute a closure within a database transaction
     ///
+    /// After a deadlock, subsequent TideORM statements and nested transactions
+    /// in this scope fail without reaching the server, even if the closure
+    /// catches the original error. Retry the entire transaction instead.
+    ///
     /// The transaction is always terminated before this returns. If a clone of
     /// the handle escaped the closure — for example a `Database` captured from
     /// `__current_db()` inside it and stored elsewhere — the transaction cannot
@@ -198,7 +202,7 @@ impl Database {
         );
 
         let tx = Transaction { inner: txn.clone() };
-        let pending = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
+        let pending = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(nested)));
         let outcome = with_connection_override(
             ConnectionRef::Transaction(txn.clone()),
             origin,
@@ -219,8 +223,7 @@ impl Database {
                     return Err(Error::Transaction {
                         message: "the transaction cannot commit: a statement inside it \
                                   deadlocked, and the database rolled the whole transaction \
-                                  back; on MySQL and MariaDB the statements after the deadlock \
-                                  ran outside it and are not undone"
+                                  back; further TideORM statements on this transaction are blocked"
                             .to_string(),
                         source: None,
                     });

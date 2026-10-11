@@ -22,6 +22,13 @@ impl<M: Model> crate::columns::ConditionOwner for OrBranchBuilder<M> {
 
 impl<M: Model> OrBranchBuilder<M> {
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64 }
+    /// OrBranchBuilder::new(User::query()).or_where_eq(User::ID, 1).end_or().validate().unwrap();
+    /// ```
     pub fn new(query: QueryBuilder<M>) -> Self {
         Self {
             query,
@@ -49,6 +56,13 @@ impl<M: Model> OrBranchBuilder<M> {
     /// A single-condition branch becomes a plain member of the OR group; a
     /// longer one becomes a nested AND group. An empty expression adds nothing.
     #[must_use]
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users")]
+    /// # struct User { #[tideorm(primary_key)] id: i64 }
+    /// OrBranchBuilder::new(User::query()).or_where_eq(User::ID, 1).end_or().validate().unwrap();
+    /// ```
     pub fn end_or(mut self) -> QueryBuilder<M> {
         if !self.current_branch.is_empty() {
             self.branches.push(self.current_branch);

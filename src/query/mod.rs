@@ -33,7 +33,8 @@ pub use filters::{
     ConditionValue, LogicalOp, Operator, OrBranchBuilder, OrGroup, Order, SortOrder, WhereCondition,
 };
 pub(crate) use filters::{
-    checked_filter_value, condition_is_vacuous, condition_methods, filter_value,
+    checked_assignment_value, checked_filter_value, condition_example, condition_is_vacuous,
+    condition_methods, filter_value,
 };
 pub use sql::execution::Paginated;
 pub use structure::{

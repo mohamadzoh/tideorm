@@ -3,6 +3,13 @@ use crate::model::Model;
 
 impl<M: Model> QueryBuilder<M> {
     /// Add an OR group built by `f`, ANDed with the query's other filters.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().or_where(|q| q.where_eq(User::ACTIVE, true).where_eq(User::NAME, "Ada")).validate().unwrap();
+    /// ```
     #[must_use]
     pub fn or_where<F>(mut self, f: F) -> Self
     where
@@ -16,6 +23,13 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     /// Start building a fluent OR expression with chained AND conditions.
+    ///
+    /// ```
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// User::query().begin_or().or_where_eq(User::ACTIVE, true).and_where_gt(User::ID, 1).end_or().validate().unwrap();
+    /// ```
     pub fn begin_or(self) -> OrBranchBuilder<M> {
         OrBranchBuilder::new(self)
     }

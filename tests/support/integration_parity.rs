@@ -5,6 +5,17 @@
 //! `false` when the backend is switched off for this run. Tables are built with
 //! the migration `Schema`, so the same DDL renders for all three backends.
 
+use super::schema_script;
+fn export_statements(sql: &str) -> Vec<&str> {
+    schema_script::statements(
+        sql,
+        matches!(
+            backend::DATABASE_TYPE,
+            DatabaseType::MySQL | DatabaseType::MariaDB
+        ),
+    )
+}
+
 use std::sync::{LazyLock, Mutex};
 
 use tideorm::internal::ConnectionTrait;
@@ -3985,8 +3996,8 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
         DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_rows`",
         _ => "\"exported_rows\"",
     };
-    let statements: Vec<String> = file
-        .split(";\n")
+    let statements: Vec<String> = export_statements(&file)
+        .into_iter()
         .map(|chunk| {
             chunk
                 .lines()
@@ -3996,27 +4007,37 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
                 .trim()
                 .to_string()
         })
-        .filter(|statement| statement.contains(quoted))
+        .filter(|statement| {
+            statement.contains(quoted)
+                // PostgreSQL's catalog quotes only identifiers that need it.
+                || (backend::DATABASE_TYPE == DatabaseType::Postgres
+                    && (statement.contains(" ON public.exported_rows ")
+                        || statement.contains(" ON exported_rows ")
+                        || statement.contains("exported_rows_id_seq")))
+        })
         .collect();
-    let create = statements
+    let _create = statements
         .iter()
         .find(|statement| statement.starts_with("CREATE TABLE"))
         .unwrap_or_else(|| panic!("no CREATE TABLE for exported_rows in:\n{file}"));
-    let index = statements
-        .iter()
-        .find(|statement| statement.starts_with("CREATE UNIQUE INDEX"))
-        .unwrap_or_else(|| panic!("no unique index for exported_rows in:\n{file}"));
+    assert!(
+        statements.iter().any(|statement| {
+            statement.starts_with("CREATE UNIQUE INDEX") || statement.contains("UNIQUE KEY `")
+        }),
+        "no unique index for exported_rows in:\n{file}"
+    );
 
     Schema::new(backend::DATABASE_TYPE)
         .drop_table("exported_rows")
         .await
         .expect("drop failed");
-    Database::execute(create)
-        .await
-        .unwrap_or_else(|error| panic!("the exported table did not run: {error}\n{create}"));
-    Database::execute(index)
-        .await
-        .unwrap_or_else(|error| panic!("the exported index did not run: {error}\n{index}"));
+    // Explicit sequence definitions precede their table; ownership and
+    // constraints follow it. Restore the complete exported object set.
+    for statement in &statements {
+        Database::execute(statement).await.unwrap_or_else(|error| {
+            panic!("the exported statement did not run: {error}\n{statement}")
+        });
+    }
 
     Database::execute("INSERT INTO exported_rows (code, score) VALUES ('a', 1)")
         .await
@@ -4061,8 +4082,8 @@ async fn write_schema_keeps_what_sqlite_pragmas_leave_out() {
     Database::execute("DROP TABLE exported_kinds")
         .await
         .expect("drop failed");
-    for statement in file
-        .split(";\n")
+    for statement in export_statements(&file)
+        .into_iter()
         .filter(|statement| statement.contains("exported_kinds"))
     {
         Database::execute(statement.trim())
@@ -5409,8 +5430,8 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
         DatabaseType::MySQL | DatabaseType::MariaDB => "`exported_docs`",
         _ => "\"exported_docs\"",
     };
-    let create = file
-        .split(";\n")
+    let create = export_statements(&file)
+        .into_iter()
         .find(|statement| statement.contains("CREATE TABLE") && statement.contains(quoted))
         .unwrap_or_else(|| panic!("no CREATE TABLE for exported_docs in:\n{file}"));
     let column = |name: &str| {
@@ -5419,18 +5440,55 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
             .find(|line| line.contains(name))
             .unwrap_or_else(|| panic!("no {name} column in:\n{create}"))
     };
-    assert!(column("status").contains("'draft'"), "{create}");
-    assert!(column("note").contains("''"), "{create}");
+    if backend::DATABASE_TYPE == DatabaseType::Postgres {
+        // Defaults are intentionally deferred until after CREATE TABLE so
+        // inherited tables can resolve conflicting parent defaults.
+        Database::execute("ALTER TABLE exported_docs ALTER COLUMN status DROP DEFAULT, ALTER COLUMN note DROP DEFAULT")
+            .await.expect("clear defaults failed");
+        for statement in export_statements(&file).into_iter().filter(|statement| {
+            statement
+                .trim_start()
+                .starts_with("ALTER TABLE ONLY public.exported_docs ALTER COLUMN")
+        }) {
+            Database::execute(statement)
+                .await
+                .expect("restore default failed");
+        }
+        Database::execute("INSERT INTO exported_docs(id,body) VALUES(1,'test')")
+            .await
+            .expect("default insert failed");
+        let rows = Database::raw_json("SELECT status,note FROM exported_docs WHERE id=1")
+            .await
+            .expect("default read failed");
+        assert_eq!(rows[0]["status"], "draft");
+        assert_eq!(rows[0]["note"], "");
+    } else {
+        assert!(column("status").contains("'draft'"), "{create}");
+        assert!(column("note").contains("''"), "{create}");
+    }
     match backend::DATABASE_TYPE {
         DatabaseType::Postgres => assert!(
             file.contains("CREATE INDEX exported_docs_fts ON public.exported_docs USING gin"),
             "{file}"
         ),
         DatabaseType::MySQL | DatabaseType::MariaDB => {
-            assert!(
-                file.contains("CREATE FULLTEXT INDEX `exported_docs_fts`"),
-                "{file}"
-            )
+            // SHOW CREATE TABLE places the full-text key inside CREATE TABLE.
+            // Verify the restored index and defaults by using them.
+            Database::execute("DROP TABLE exported_docs").await.unwrap();
+            Database::execute(create).await.unwrap();
+            Database::execute("INSERT INTO exported_docs(body) VALUES('restoredsearchtoken')")
+                .await
+                .unwrap();
+            let rows = Database::raw_json(
+                "SELECT status,note FROM exported_docs WHERE MATCH(body) AGAINST('restoredsearchtoken')"
+            ).await.unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "restored full-text index did not find the row"
+            );
+            assert_eq!(rows[0]["status"], "draft");
+            assert_eq!(rows[0]["note"], "");
         }
         _ => {
             assert!(
@@ -6370,7 +6428,7 @@ async fn write_schema_keeps_constraints_and_generated_columns() {
     let _ = std::fs::remove_file(&path);
 
     drop().await;
-    for statement in file.split(";\n").filter(|statement| {
+    for statement in export_statements(&file).into_iter().filter(|statement| {
         statement.contains("exported_parents") || statement.contains("exported_children")
     }) {
         Database::execute(statement.trim())

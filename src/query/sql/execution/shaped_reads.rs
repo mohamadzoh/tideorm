@@ -62,11 +62,45 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     ///
     /// A composite key is the tuple `Model::find` takes.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).find(1).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn find(self, id: M::PrimaryKey) -> Result<Option<M>> {
         self.where_primary_key(&id)?.first().await
     }
 
     /// [`find()`](Self::find), with a not-found error when no row matches.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).find_or_fail(1).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn find_or_fail(self, id: M::PrimaryKey) -> Result<M> {
         self.find(id).await?.ok_or_else(|| {
             Error::not_found(format!(
@@ -125,6 +159,23 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The model's own columns arrive as its JSON has them, as in
     /// [`get_json()`](Self::get_json).
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).get_as::<serde_json::Value>().await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn get_as<T: serde::de::DeserializeOwned>(self) -> Result<Vec<T>> {
         self.get_json()
             .await?
@@ -151,6 +202,23 @@ impl<M: Model> QueryBuilder<M> {
     /// `.distinct().pluck("country")` lists each country once. On a
     /// `union()`, whose other queries keep the projection they were given,
     /// the column is read off the union's rows.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).pluck::<String>(User::NAME).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn pluck<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -204,6 +272,23 @@ impl<M: Model> QueryBuilder<M> {
     /// ```ignore
     /// let newest: Option<String> = Post::query().latest().value("title").await?;
     /// ```
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).value::<String>(User::NAME).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn value<T: serde::de::DeserializeOwned>(
         self,
         column: impl crate::columns::IntoColumnName,
@@ -222,6 +307,23 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// Give the query a unique order, as for [`page()`](Self::page). A zero
     /// page or page size is refused like `page()` refuses it.
+    ///
+    /// Run this example with the `sqlite` feature.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")]
+    /// # {
+    /// use tideorm::prelude::*;
+    /// # #[tideorm::model(table = "users", soft_delete)]
+    /// # struct User { #[tideorm(primary_key)] id: i64, name: String, active: bool, created_at: Option<chrono::DateTime<chrono::Utc>>, deleted_at: Option<chrono::DateTime<chrono::Utc>> }
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// # TideConfig::init().database("sqlite::memory:").max_connections(1).models::<(User,)>().sync(true).connect().await?;
+    /// # Database::execute("INSERT INTO users (id, name, active) VALUES (1, 'Ada', 1)").await?;
+    /// let result = User::query().where_eq(User::ID, 1).paginate(1, 10).await?;
+    /// # Ok::<(), tideorm::Error>(())
+    /// # }).unwrap();
+    /// # }
+    /// ```
     pub async fn paginate(self, page: u64, per_page: u64) -> Result<Paginated<M>> {
         let rows = self.clone().page(page, per_page);
         // `page()` checks the numbers; its verdict comes before any statement.

@@ -17,6 +17,7 @@ struct Node {
     json: String,
     /// Its type as `json_type` and `json_each.type` spell it.
     kind: String,
+    raw_json: String,
     /// Its value as an SQL scalar.
     atom: String,
 }
@@ -25,6 +26,7 @@ impl Node {
     fn document(column_sql: &str) -> Self {
         Self {
             json: column_sql.to_string(),
+            raw_json: format!("({column_sql} -> '$')"),
             kind: format!("json_type({column_sql})"),
             atom: format!("json_extract({column_sql}, '$')"),
         }
@@ -33,6 +35,7 @@ impl Node {
     fn row(alias: &str) -> Self {
         Self {
             json: format!("{alias}.value"),
+            raw_json: format!("({alias}.json -> {alias}.fullkey)"),
             kind: format!("{alias}.type"),
             atom: format!("{alias}.atom"),
         }
@@ -247,6 +250,31 @@ impl JsonTests {
             Json::Bool(true) => format!("{} = 'true'", node.kind),
             Json::Bool(false) => format!("{} = 'false'", node.kind),
             Json::Number(number) => {
+                // json_each.atom rounds integers outside i64 to REAL. Compare
+                // those integers using the original JSON token instead.
+                if let Some(integer) = number.as_u64().filter(|n| *n > i64::MAX as u64) {
+                    self.values.push(Value::from(integer.to_string()));
+                    let integer_test =
+                        format!("({} = 'integer' AND {} = ?)", node.kind, node.raw_json);
+                    let float = integer as f64;
+                    if float as u128 == integer as u128 {
+                        self.values.push(Value::from(float));
+                        return format!(
+                            "({integer_test} OR ({} = 'real' AND {} = ?))",
+                            node.kind, node.atom
+                        );
+                    }
+                    return integer_test;
+                }
+                if number.is_f64() {
+                    let float = number.as_f64().unwrap();
+                    self.values.push(Value::from(float));
+                    self.values.push(Value::from(format!("{float:.0}")));
+                    return format!(
+                        "({} IN ('integer', 'real') AND {} = ? AND ({} != 'integer' OR typeof({}) != 'real' OR {} = ?))",
+                        node.kind, node.atom, node.kind, node.atom, node.raw_json
+                    );
+                }
                 self.values.push(
                     number
                         .as_i64()

@@ -40,8 +40,14 @@ mod backend {
     }
 }
 
+#[path = "support/schema_script.rs"]
+mod schema_script;
+
 #[path = "support/integration_parity.rs"]
 mod parity;
+
+#[path = "support/review_backend.rs"]
+mod review_backend;
 
 #[tokio::test]
 async fn raw_json_preserves_postgres_types() {
