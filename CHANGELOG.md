@@ -39,8 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A SQLite error that rolls back the whole transaction now blocks the statements after it
   and fails the commit, as a deadlock does; they used to run outside the transaction.
-- SQLite migrations hold a lock file beside the database (a per-process one for in-memory
-  databases), so concurrent migrators, separate pools included, apply each migration once.
+- SQLite migrations hold a lock file beside the database (an in-process lock for an in-memory
+  one), so concurrent migrators, separate pools included, apply each migration once.
 - Entity manager: a remove or detach that arrives while a save is in flight is kept, a
   detached merge whose key was edited never deletes another row, and concurrent
   `persist`, `merge` and lookups of one row share one managed identity.

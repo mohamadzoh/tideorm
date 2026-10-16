@@ -57,12 +57,16 @@ fn supports_transactional_ddl(db_type: DatabaseType) -> bool {
 /// Lock sessions connect directly using the pool's connection options. They
 /// do not occupy pool slots: even a one-connection pool remains available to
 /// execute DDL while other migrators wait for the advisory lock.
-/// SQLite uses an OS lock on a persistent sidecar file beside the database;
-/// in-memory databases use a process-specific temporary lock file. The file
-/// must not be unlinked while another migrator could be waiting on it.
+/// SQLite uses an OS lock on a persistent sidecar file beside the database,
+/// which must not be unlinked while another migrator could be waiting on it.
+/// An in-memory database, which only its own process can reach, takes an
+/// in-process lock instead: never a file in a shared directory, where another
+/// user could create or replace it first.
 enum MigrationLock {
     #[cfg(feature = "sqlite")]
     Sqlite(std::fs::File),
+    #[cfg(feature = "sqlite")]
+    SqliteMemory(futures_util::lock::OwnedMutexGuard<()>),
     #[cfg(feature = "postgres")]
     Postgres(crate::internal::sqlx::PgConnection),
     #[cfg(feature = "mysql")]
@@ -87,24 +91,15 @@ impl MigrationLock {
                 .fetch_one(sqlite)
                 .await
                 .map_err(|error| crate::internal::translate_error(sqlx_error(error)))?;
-                let path = if file.is_empty() {
-                    // Only this process can reach an in-memory database.
-                    use std::hash::{Hash, Hasher};
-                    let mut hash = std::collections::hash_map::DefaultHasher::new();
-                    sqlite.connect_options().get_filename().hash(&mut hash);
-                    std::env::temp_dir().join(format!(
-                        "tideorm-migrations-{}-{}.lock",
-                        std::process::id(),
-                        hash.finish()
-                    ))
-                } else {
-                    let file = std::fs::canonicalize(&file)
-                        .unwrap_or_else(|_| std::path::PathBuf::from(&file));
-                    let mut path = file.into_os_string();
-                    path.push(".tideorm-migrations.lock");
-                    std::path::PathBuf::from(path)
-                };
-                Ok(Self::Sqlite(sqlite_file_lock(path).await?))
+                if file.is_empty() {
+                    let name = sqlite.connect_options().get_filename().to_path_buf();
+                    return Ok(Self::SqliteMemory(sqlite_memory_lock(name).await));
+                }
+                let file = std::fs::canonicalize(&file)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&file));
+                let mut path = file.into_os_string();
+                path.push(".tideorm-migrations.lock");
+                Ok(Self::Sqlite(sqlite_file_lock(path.into()).await?))
             }
             #[cfg(not(feature = "sqlite"))]
             DatabaseType::SQLite => Err(Error::backend_not_supported(
@@ -195,6 +190,11 @@ impl MigrationLock {
             Self::Sqlite(file) => file
                 .unlock()
                 .map_err(|e| Error::transaction(format!("migration unlock: {e}"))),
+            #[cfg(feature = "sqlite")]
+            Self::SqliteMemory(guard) => {
+                drop(guard);
+                Ok(())
+            }
             #[cfg(feature = "postgres")]
             Self::Postgres(mut connection) => {
                 crate::internal::sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -221,6 +221,23 @@ impl MigrationLock {
             }
         }
     }
+}
+
+/// The migration lock of the in-memory database `name` (SQLx's name for it,
+/// which a named shared-cache database keeps across pools): one in-process
+/// mutex per database.
+#[cfg(feature = "sqlite")]
+async fn sqlite_memory_lock(name: std::path::PathBuf) -> futures_util::lock::OwnedMutexGuard<()> {
+    type Locks = std::collections::HashMap<std::path::PathBuf, Arc<futures_util::lock::Mutex<()>>>;
+    static LOCKS: std::sync::OnceLock<parking_lot::Mutex<Locks>> = std::sync::OnceLock::new();
+    let lock = Arc::clone(
+        LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .entry(name)
+            .or_default(),
+    );
+    lock.lock_owned().await
 }
 
 /// Blocking file locks live on a worker thread, never the async executor.

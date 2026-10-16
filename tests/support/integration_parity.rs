@@ -3981,7 +3981,7 @@ async fn write_schema_exports_a_table_that_can_be_recreated_from_the_file() {
     })
     .await;
 
-    let path = std::env::temp_dir().join(format!(
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "tideorm_schema_{:?}_{}.sql",
         backend::DATABASE_TYPE,
         std::process::id()
@@ -5410,7 +5410,7 @@ async fn write_schema_keeps_string_defaults_and_full_text_indexes() {
     }
     Database::execute(index).await.expect("index failed");
 
-    let path = std::env::temp_dir().join(format!(
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "tideorm_schema_docs_{:?}_{}.sql",
         backend::DATABASE_TYPE,
         std::process::id()

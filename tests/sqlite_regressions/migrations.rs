@@ -53,8 +53,8 @@ async fn concurrent_sqlite_migrators_apply_once() {
 #[tokio::test]
 async fn independent_sqlite_pools_share_the_migration_lock() {
     use tideorm::migration::__run_sql_migration;
-    let path =
-        std::env::temp_dir().join(format!("tideorm-migration-audit-{}.sqlite", Uuid::new_v4()));
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tideorm-migration-audit-{}.sqlite", Uuid::new_v4()));
     let url = format!("sqlite://{}?mode=rwc", path.display());
     let a = Database::builder()
         .url(&url)
@@ -123,8 +123,8 @@ async fn independent_sqlite_pools_share_the_migration_lock() {
 #[tokio::test]
 async fn migration_lock_follows_the_opened_file_for_any_url_spelling() {
     use tideorm::migration::__run_sql_migration;
-    let path =
-        std::env::temp_dir().join(format!("tideorm-migration-url-{}.sqlite", Uuid::new_v4()));
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tideorm-migration-url-{}.sqlite", Uuid::new_v4()));
     let slashed = path.display().to_string().replace('\\', "/");
     let url = format!("sqlite:///{}?mode=rwc", slashed.trim_start_matches('/'));
     let db = Database::builder()
@@ -163,7 +163,8 @@ async fn sqlite_export_keeps_names_similar_to_reserved_prefix() {
         source.exec_raw(sql).await.unwrap();
     }
     Database::set_global(source).unwrap();
-    let path = std::env::temp_dir().join(format!("tideorm-prefix-{}.sql", uuid::Uuid::new_v4()));
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tideorm-prefix-{}.sql", uuid::Uuid::new_v4()));
     tideorm::schema::SchemaWriter::write_schema(&path)
         .await
         .unwrap();
