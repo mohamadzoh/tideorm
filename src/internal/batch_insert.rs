@@ -85,6 +85,9 @@ where
         .into_iter()
         .map(M::try_into_active_model)
         .collect::<Result<Vec<_>>>()?;
+    for active in &active_models {
+        super::ensure_active_values_storable::<M>(active, conn)?;
+    }
     if batch_size == 1 {
         return insert_individually::<M, _>(conn, connection, active_models, &error_context).await;
     }

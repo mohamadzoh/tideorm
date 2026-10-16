@@ -28,12 +28,54 @@ impl<'c> Executor<'c> {
     }
 
     fn ensure_transaction_active(&self) -> Result<(), DbErr> {
-        if self.is_transaction() && crate::cache::transaction_deadlocked() {
+        if self.is_transaction()
+            && (crate::cache::transaction_deadlocked()
+                || crate::cache::transaction_sqlite_aborted())
+        {
             return Err(DbErr::Custom(
-                "transaction was aborted by a deadlock; further statements are blocked".into(),
+                "transaction was aborted; further statements are blocked".into(),
             ));
         }
         Ok(())
+    }
+
+    /// The driver does not expose SQLite's autocommit flag through SeaORM.
+    /// BEGIN fails without changing an active transaction; if it succeeds,
+    /// SQLite already rolled back. Keep that replacement transaction empty
+    /// and blocked, so the driver's eventual rollback can balance its depth.
+    async fn check_sqlite_failure<T>(&self, result: Result<T, DbErr>) -> Result<T, DbErr> {
+        if result.is_err()
+            && self.is_transaction()
+            && self.get_database_backend() == DbBackend::Sqlite
+        {
+            crate::cache::note_sqlite_aborted(true);
+            match self.0.execute_unprepared("BEGIN").await {
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("cannot start a transaction within a transaction") =>
+                {
+                    crate::cache::note_sqlite_aborted(false);
+                }
+                Ok(_) => {
+                    // Recreate only the empty SQLx savepoint stack. This is
+                    // SQLx's ANSI savepoint naming convention, also used by
+                    // SeaORM. No application statements may run on this stack.
+                    for depth in 1..crate::cache::transaction_depth() {
+                        if self
+                            .0
+                            .execute_unprepared(&format!("SAVEPOINT _sqlx_savepoint_{depth}"))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => {} // Unknown connection state must remain blocked.
+            }
+        }
+        result
     }
 
     /// Begin a transaction, or a savepoint inside the one this runs on.
@@ -69,28 +111,35 @@ impl ConnectionTrait for Executor<'_> {
 
     async fn execute_raw(&self, statement: Statement) -> Result<ExecResult, DbErr> {
         self.ensure_transaction_active()?;
-        self.0
+        let result = self
+            .0
             .execute_raw(bind_zoned_timestamps_as_datetime(statement))
-            .await
+            .await;
+        self.check_sqlite_failure(result).await
     }
 
     async fn execute_unprepared(&self, sql: &str) -> Result<ExecResult, DbErr> {
         self.ensure_transaction_active()?;
-        self.0.execute_unprepared(sql).await
+        let result = self.0.execute_unprepared(sql).await;
+        self.check_sqlite_failure(result).await
     }
 
     async fn query_one_raw(&self, statement: Statement) -> Result<Option<QueryResult>, DbErr> {
         self.ensure_transaction_active()?;
-        self.0
+        let result = self
+            .0
             .query_one_raw(bind_zoned_timestamps_as_datetime(statement))
-            .await
+            .await;
+        self.check_sqlite_failure(result).await
     }
 
     async fn query_all_raw(&self, statement: Statement) -> Result<Vec<QueryResult>, DbErr> {
         self.ensure_transaction_active()?;
-        self.0
+        let result = self
+            .0
             .query_all_raw(bind_zoned_timestamps_as_datetime(statement))
-            .await
+            .await;
+        self.check_sqlite_failure(result).await
     }
 
     fn support_returning(&self) -> bool {

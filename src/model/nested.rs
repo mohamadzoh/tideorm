@@ -150,7 +150,9 @@ fn require_scalar_primary_key<M: Model>(
 ) -> Result<serde_json::Value> {
     let value = serde_json::to_value(primary_key)
         .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?;
-    if value.is_array() || value.is_object() {
+    // A single binary or JSON key can serialize as an array or object.
+    // Composite keys are determined by model columns, not JSON shape.
+    if M::primary_key_names().len() != 1 {
         return Err(Error::query(format!(
             "{} does not support composite primary keys for {}",
             context,

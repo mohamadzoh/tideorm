@@ -177,10 +177,16 @@ pub enum ValidationRule {
     Length(usize),
     /// Minimum numeric value
     Min(f64),
+    /// Minimum bound with its exact decimal spelling preserved.
+    MinExact(String),
     /// Maximum numeric value
     Max(f64),
+    /// Maximum bound with its exact decimal spelling preserved.
+    MaxExact(String),
     /// Value must be within a range (inclusive)
     Range(f64, f64),
+    /// Inclusive bounds with their exact decimal spellings preserved.
+    RangeExact(String, String),
     /// Must match a regular expression pattern
     Regex(String),
     /// Must contain only letters (a-zA-Z)
@@ -212,6 +218,11 @@ impl ValidationRule {
             }
             ValidationRule::Length(len) => {
                 format!("The {} must be exactly {} characters", field, len)
+            }
+            ValidationRule::MinExact(val) => format!("The {} must be at least {}", field, val),
+            ValidationRule::MaxExact(val) => format!("The {} must not exceed {}", field, val),
+            ValidationRule::RangeExact(min, max) => {
+                format!("The {} must be between {} and {}", field, min, max)
             }
             ValidationRule::Min(val) => format!("The {} must be at least {}", field, val),
             ValidationRule::Max(val) => format!("The {} must not exceed {}", field, val),
@@ -264,6 +275,11 @@ impl Validator {
             ValidationRule::MinLength(min) => text_fails(&|s| s.chars().count() < *min),
             ValidationRule::MaxLength(max) => text_fails(&|s| s.chars().count() > *max),
             ValidationRule::Length(len) => text_fails(&|s| s.chars().count() != *len),
+            ValidationRule::MinExact(min) => outside_exact(value, min, true),
+            ValidationRule::MaxExact(max) => outside_exact(value, max, false),
+            ValidationRule::RangeExact(min, max) => {
+                outside_exact(value, min, true) || outside_exact(value, max, false)
+            }
             ValidationRule::Min(min) => below_bound(value, *min) == Some(true),
             ValidationRule::Max(max) => above_bound(value, *max) == Some(true),
             ValidationRule::Range(min, max) => {
@@ -343,6 +359,9 @@ fn below_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bo
             integer < bound.ceil() as i128
         });
     }
+    if let Some(decimal) = value.as_decimal_value() {
+        return Some(decimal_outside(decimal, &bound.to_string(), true));
+    }
     value
         .as_f64_value()
         .map(|n| n.is_nan() || n < value.numeric_bound(bound))
@@ -359,9 +378,123 @@ fn above_bound<T: ValidatableValue + ?Sized>(value: &T, bound: f64) -> Option<bo
             integer > bound.floor() as i128
         });
     }
+    if let Some(decimal) = value.as_decimal_value() {
+        return Some(decimal_outside(decimal, &bound.to_string(), false));
+    }
     value
         .as_f64_value()
         .map(|n| n.is_nan() || n > value.numeric_bound(bound))
+}
+
+// Compare finite decimal text without rounding either operand to a machine number.
+fn compare_decimal_text(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    fn parts(text: &str) -> Option<(bool, Vec<u8>, i128)> {
+        let text = text.trim();
+        let (negative, text) = if let Some(rest) = text.strip_prefix('-') {
+            (true, rest)
+        } else {
+            (false, text.strip_prefix('+').unwrap_or(text))
+        };
+        let mut split = text.split(['e', 'E']);
+        let mantissa = split.next()?;
+        let exponent = split
+            .next()
+            .map(str::parse::<i128>)
+            .transpose()
+            .ok()?
+            .unwrap_or(0);
+        if split.next().is_some() {
+            return None;
+        }
+        let mut digits = Vec::new();
+        let mut fractional = 0_i128;
+        let mut dot = false;
+        for byte in mantissa.bytes() {
+            if byte == b'.' && !dot {
+                dot = true;
+            } else if byte.is_ascii_digit() {
+                digits.push(byte);
+                if dot {
+                    fractional += 1;
+                }
+            } else {
+                return None;
+            }
+        }
+        if digits.is_empty() {
+            return None;
+        }
+        let first = digits.iter().position(|digit| *digit != b'0');
+        let Some(first) = first else {
+            return Some((false, vec![], 0));
+        };
+        let digits = digits[first..].to_vec();
+        let magnitude = exponent
+            .checked_sub(fractional)?
+            .checked_add(digits.len() as i128)?;
+        Some((negative, digits, magnitude))
+    }
+    use std::cmp::Ordering;
+    let (ln, ld, lm) = parts(left)?;
+    let (rn, rd, rm) = parts(right)?;
+    if ln != rn {
+        return Some(if ln {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    let order = match (ld.is_empty(), rd.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => lm.cmp(&rm).then_with(|| {
+            (0..ld.len().max(rd.len()))
+                .map(|i| {
+                    ld.get(i)
+                        .copied()
+                        .unwrap_or(b'0')
+                        .cmp(&rd.get(i).copied().unwrap_or(b'0'))
+                })
+                .find(|order| !order.is_eq())
+                .unwrap_or(Ordering::Equal)
+        }),
+    };
+    Some(if ln { order.reverse() } else { order })
+}
+
+fn decimal_text_outside(value: &str, bound: &str, below: bool) -> bool {
+    match compare_decimal_text(value, bound) {
+        Some(order) => {
+            if below {
+                order.is_lt()
+            } else {
+                order.is_gt()
+            }
+        }
+        None => true,
+    }
+}
+
+fn decimal_outside(value: rust_decimal::Decimal, text: &str, below: bool) -> bool {
+    decimal_text_outside(&value.to_string(), text, below)
+}
+
+fn outside_exact<T: ValidatableValue + ?Sized>(value: &T, text: &str, below: bool) -> bool {
+    if let Some(integer) = value.as_i128_value() {
+        return decimal_text_outside(&integer.to_string(), text, below);
+    }
+    if let Some(decimal) = value.as_decimal_value() {
+        return decimal_outside(decimal, text, below);
+    }
+    let Ok(bound) = text.parse::<f64>() else {
+        return true;
+    };
+    if below {
+        below_bound(value, bound) == Some(true)
+    } else {
+        above_bound(value, bound) == Some(true)
+    }
 }
 
 #[cfg(test)]

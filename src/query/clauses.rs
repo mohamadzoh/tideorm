@@ -22,6 +22,8 @@ use super::{CTE, JoinClause, OrGroup, Order, UnionClause, WhereCondition, Window
 pub(crate) struct Clauses {
     /// Structured source tables carried through query composition. **Appended.**
     pub(crate) dependencies: Vec<String>,
+    /// Explicit databases of embedded operands, checked again at execution.
+    pub(crate) operand_databases: Vec<crate::database::Database>,
     /// WHERE conditions combined with AND. **Appended.**
     pub(crate) conditions: Vec<WhereCondition>,
     /// Parenthesized OR groups, AND-ed with `conditions`. **Appended.**
@@ -54,6 +56,11 @@ pub(crate) struct Clauses {
     /// The values bound to each HAVING clause's placeholders, slot `i` for
     /// clause `i`; empty for a raw clause.
     pub(crate) having_bindings: Vec<Vec<crate::internal::Value>>,
+    /// Extrema operands retain their JSON value until the query's joins are known.
+    pub(crate) having_typed_bindings:
+        std::collections::BTreeMap<usize, (String, serde_json::Value)>,
+    /// Typed HAVING comparisons rechecked after all joins are known. **Appended.**
+    pub(crate) having_comparisons: Vec<(String, &'static str)>,
     /// JOIN clauses, in the order they render. **Appended.**
     pub(crate) joins: Vec<JoinClause>,
     /// Compound-select operands. **Appended.**
@@ -88,7 +95,8 @@ impl Clauses {
     /// Whether merging these clauses would change nothing. A soft-delete scope
     /// counts: `with_trashed()` alone still changes a query.
     pub(crate) fn is_empty(&self) -> bool {
-        self.conditions.is_empty()
+        self.operand_databases.is_empty()
+            && self.conditions.is_empty()
             && self.or_groups.is_empty()
             && self.order_by.is_empty()
             && self.limit_value.is_none()
@@ -122,6 +130,8 @@ impl Clauses {
     /// each slot by the rule its doc names.
     pub(crate) fn merge(&mut self, other: &Clauses) {
         self.dependencies.extend_from_slice(&other.dependencies);
+        self.operand_databases
+            .extend_from_slice(&other.operand_databases);
         self.conditions.extend_from_slice(&other.conditions);
         self.merge_or_groups(other);
         self.order_by.extend_from_slice(&other.order_by);
@@ -190,6 +200,15 @@ impl Clauses {
     /// two vectors had drifted apart would otherwise shift the pairing for
     /// every clause that follows.
     fn merge_having(&mut self, other: &Clauses) {
+        self.having_comparisons
+            .extend(other.having_comparisons.iter().cloned());
+        let offset = self.having_conditions.len();
+        self.having_typed_bindings.extend(
+            other
+                .having_typed_bindings
+                .iter()
+                .map(|(index, operand)| (offset + index, operand.clone())),
+        );
         self.having_bindings
             .resize(self.having_conditions.len(), Vec::new());
 

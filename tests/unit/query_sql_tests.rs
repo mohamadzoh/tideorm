@@ -792,16 +792,19 @@ fn sql_preview_is_the_executed_statement_with_its_values_inlined() {
 }
 
 #[test]
-fn sqlite_json_preview_keeps_numbers_numeric() {
+fn sqlite_json_preview_compares_original_numeric_tokens() {
     let preview = MutationGuardUser::query()
         .where_json_contains("name", 5)
         .build_sql_preview_for_db(DatabaseType::SQLite);
 
     assert!(
-        preview.contains("json_extract(\"name\", '$') = 5"),
+        preview.contains("\"query_mutation_guard_users\".\"name\" -> '$'"),
         "{preview}"
     );
-    assert!(!preview.contains("'5'"), "{preview}");
+    assert!(
+        preview.contains("coefficient = '5'") && preview.contains("scale = 0"),
+        "{preview}"
+    );
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]

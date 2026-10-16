@@ -12,11 +12,13 @@ pub(super) struct PostgresObjects {
 pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result<PostgresObjects> {
     // These objects can be required by views, constraints, indexes or routines.
     // Refuse the export before write_schema touches its output file.
-    let unsupported = query(conn, Backend::Postgres,
+    let mut unsupported = query(conn, Backend::Postgres,
         "SELECT pg_catalog.pg_describe_object(o.classid, o.oid, 0) AS object
          FROM (
              SELECT 'pg_catalog.pg_proc'::regclass AS classid, oid, pronamespace AS namespace
              FROM pg_catalog.pg_proc WHERE prokind='a'
+             UNION ALL SELECT 'pg_catalog.pg_class'::regclass, c.oid, c.relnamespace
+             FROM pg_catalog.pg_foreign_table f JOIN pg_catalog.pg_class c ON c.oid=f.ftrelid
              UNION ALL SELECT 'pg_catalog.pg_operator'::regclass, oid, oprnamespace FROM pg_catalog.pg_operator
              UNION ALL SELECT 'pg_catalog.pg_ts_config'::regclass, oid, cfgnamespace FROM pg_catalog.pg_ts_config
              UNION ALL SELECT 'pg_catalog.pg_ts_dict'::regclass, oid, dictnamespace FROM pg_catalog.pg_ts_dict
@@ -27,6 +29,9 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
                            WHERE d.classid=o.classid AND d.objid=o.oid AND d.deptype='e')
          ORDER BY object", Vec::new()).await?;
+    unsupported.extend(query(conn, Backend::Postgres,
+        "SELECT format('foreign server %I', srvname) AS object FROM pg_catalog.pg_foreign_server ORDER BY srvname",
+        Vec::new()).await?);
     if !unsupported.is_empty() {
         let objects = unsupported
             .iter()
@@ -68,12 +73,14 @@ pub(super) async fn postgres_dependencies(conn: &impl ConnectionTrait) -> Result
         statements.push(get(&row, "definition")?);
     }
     for row in query(conn, Backend::Postgres,
-        "SELECT format('CREATE COLLATION %I.%I (provider = %s, %s, deterministic = %s)',
+        "SELECT format('CREATE COLLATION %I.%I (provider = %s, %s, deterministic = %s%s)',
             n.nspname, c.collname,
             CASE c.collprovider WHEN 'i' THEN 'icu' WHEN 'b' THEN 'builtin' ELSE 'libc' END,
             CASE WHEN c.collprovider = 'c' THEN format('lc_collate = %L, lc_ctype = %L', c.collcollate, c.collctype)
                  ELSE format('locale = %L', COALESCE(to_jsonb(c)->>'colllocale', to_jsonb(c)->>'colliculocale')) END,
-            CASE WHEN c.collisdeterministic THEN 'true' ELSE 'false' END) AS definition,
+            CASE WHEN c.collisdeterministic THEN 'true' ELSE 'false' END,
+            CASE WHEN to_jsonb(c)->>'collicurules' IS NULL THEN ''
+                 ELSE format(', rules = %L', to_jsonb(c)->>'collicurules') END) AS definition,
             format('ALTER COLLATION %I.%I OWNER TO %I', n.nspname, c.collname, pg_catalog.pg_get_userbyid(c.collowner)) AS owner
          FROM pg_catalog.pg_collation c JOIN pg_catalog.pg_namespace n ON n.oid = c.collnamespace
          WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'

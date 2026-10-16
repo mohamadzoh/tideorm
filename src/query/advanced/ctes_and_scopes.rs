@@ -120,6 +120,11 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     #[must_use]
     pub fn only_trashed(mut self) -> Self {
+        if !M::soft_delete_enabled() {
+            self.invalidate_query(
+                "only_trashed() cannot be used: this model has no soft delete".to_string(),
+            );
+        }
         self.clauses.only_trashed = true;
         self.clauses.include_trashed = false;
         self

@@ -57,8 +57,12 @@ fn supports_transactional_ddl(db_type: DatabaseType) -> bool {
 /// Lock sessions connect directly using the pool's connection options. They
 /// do not occupy pool slots: even a one-connection pool remains available to
 /// execute DDL while other migrators wait for the advisory lock.
+/// SQLite uses an OS lock on a persistent sidecar file beside the database;
+/// in-memory databases use a process-specific temporary lock file. The file
+/// must not be unlinked while another migrator could be waiting on it.
 enum MigrationLock {
-    Unlocked,
+    #[cfg(feature = "sqlite")]
+    Sqlite(std::fs::File),
     #[cfg(feature = "postgres")]
     Postgres(crate::internal::sqlx::PgConnection),
     #[cfg(feature = "mysql")]
@@ -70,7 +74,43 @@ impl MigrationLock {
         #[cfg(not(any(feature = "postgres", feature = "mysql")))]
         let _ = db;
         match db_type {
-            DatabaseType::SQLite => Ok(Self::Unlocked),
+            #[cfg(feature = "sqlite")]
+            DatabaseType::SQLite => {
+                let pool = db.__internal_connection()?;
+                let sqlite = pool.get_sqlite_connection_pool();
+                // Where SQLite opened the main database, whatever the URL's
+                // spelling (`sqlite:///C:/..` names `/C:/..`, which Windows
+                // cannot resolve); empty for an in-memory database.
+                let file: String = crate::internal::sqlx::query_scalar(
+                    "SELECT file FROM pragma_database_list WHERE name = 'main'",
+                )
+                .fetch_one(sqlite)
+                .await
+                .map_err(|error| crate::internal::translate_error(sqlx_error(error)))?;
+                let path = if file.is_empty() {
+                    // Only this process can reach an in-memory database.
+                    use std::hash::{Hash, Hasher};
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    sqlite.connect_options().get_filename().hash(&mut hash);
+                    std::env::temp_dir().join(format!(
+                        "tideorm-migrations-{}-{}.lock",
+                        std::process::id(),
+                        hash.finish()
+                    ))
+                } else {
+                    let file = std::fs::canonicalize(&file)
+                        .unwrap_or_else(|_| std::path::PathBuf::from(&file));
+                    let mut path = file.into_os_string();
+                    path.push(".tideorm-migrations.lock");
+                    std::path::PathBuf::from(path)
+                };
+                Ok(Self::Sqlite(sqlite_file_lock(path).await?))
+            }
+            #[cfg(not(feature = "sqlite"))]
+            DatabaseType::SQLite => Err(Error::backend_not_supported(
+                "SQLite migrations require the sqlite feature",
+                "SQLite",
+            )),
             #[cfg(feature = "postgres")]
             DatabaseType::Postgres => {
                 let pool = db.__internal_connection()?;
@@ -151,7 +191,10 @@ impl MigrationLock {
 
     async fn release(self) -> Result<()> {
         match self {
-            Self::Unlocked => Ok(()),
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(file) => file
+                .unlock()
+                .map_err(|e| Error::transaction(format!("migration unlock: {e}"))),
             #[cfg(feature = "postgres")]
             Self::Postgres(mut connection) => {
                 crate::internal::sqlx::query("SELECT pg_advisory_unlock($1)")
@@ -180,8 +223,55 @@ impl MigrationLock {
     }
 }
 
+/// Blocking file locks live on a worker thread, never the async executor.
+/// Dropping a cancelled wait drops the eventual file guard too.
+#[cfg(feature = "sqlite")]
+async fn sqlite_file_lock(path: std::path::PathBuf) -> Result<std::fs::File> {
+    type Waiting = (Option<Result<std::fs::File>>, Option<std::task::Waker>);
+    let state = Arc::new(std::sync::Mutex::new(Waiting::default()));
+    let worker = Arc::clone(&state);
+    std::thread::Builder::new()
+        .name("tideorm-migration-lock".into())
+        .spawn(move || {
+            let result = open_locked(&path);
+            let mut state = worker.lock().unwrap();
+            state.0 = Some(result);
+            let waker = state.1.take();
+            drop(state);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        })
+        .map_err(|e| Error::transaction(format!("start migration lock worker: {e}")))?;
+    std::future::poll_fn(|cx| {
+        let mut state = state.lock().unwrap();
+        if let Some(result) = state.0.take() {
+            std::task::Poll::Ready(result)
+        } else {
+            state.1 = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// Open (creating) the lock file at `path` and wait for its exclusive lock.
+#[cfg(feature = "sqlite")]
+fn open_locked(path: &std::path::Path) -> Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| Error::transaction(format!("open migration lock: {e}")))?;
+    file.lock()
+        .map_err(|e| Error::transaction(format!("acquire migration lock: {e}")))?;
+    Ok(file)
+}
+
 /// A driver error from the lock's own connection, as SeaORM reports one.
-#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 fn sqlx_error(error: crate::internal::sqlx::Error) -> crate::internal::OrmError {
     crate::internal::OrmError::Query(crate::internal::RuntimeErr::SqlxError(error.into()))
 }

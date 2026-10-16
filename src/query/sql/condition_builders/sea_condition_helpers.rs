@@ -96,6 +96,26 @@ impl<M: Model> QueryBuilder<M> {
             .or_else(|| self.joined_model_column_type(column))
     }
 
+    /// Decode a projected output using the metadata captured by scalar subqueries.
+    pub(in crate::query) fn projected_column_type(
+        &self,
+        output: &str,
+    ) -> Option<crate::orm::ColumnType> {
+        if let Some(subquery) = self
+            .clauses
+            .subquery_select_expressions
+            .iter()
+            .find(|item| item.alias == output)
+        {
+            return subquery.column_type.clone();
+        }
+        self.projection_outputs()
+            .into_iter()
+            .find(|(name, _)| name == output)
+            .and_then(|(_, source)| source)
+            .and_then(|(table, column)| self.column_type(&format!("{table}.{column}")))
+    }
+
     /// The type a model declares for `qualifier.column` when the qualifier is
     /// a joined table or its alias, so a value compared with a joined table's
     /// UUID or timestamp column is bound as one, not as text.
@@ -259,6 +279,14 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query::sql) fn ensure_conditions_are_representable(&self) -> Result<()> {
         for condition in self.all_conditions() {
             Self::ensure_condition_is_representable(condition)?;
+            if self.db_type_for_sql() == DatabaseType::SQLite
+                && matches!(condition.operator, Operator::LikeEscaped)
+                && matches!(&condition.value, ConditionValue::Single(serde_json::Value::String(text)) if text.contains('\0'))
+            {
+                return Err(Error::query(
+                    "SQLite literal text filters cannot represent a NUL character",
+                ));
+            }
         }
 
         Ok(())

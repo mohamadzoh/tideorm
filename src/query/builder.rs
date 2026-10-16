@@ -168,7 +168,7 @@ impl<M: Model> QueryBuilder<M> {
         (expression, Some(alias))
     }
 
-    fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
+    pub(in crate::query) fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
         let (value, _) = Self::split_alias(value);
         match crate::internal::sql_safety::identifier_reference_parts(value)?.as_slice() {
             [column] => Some(("", *column)),
@@ -409,9 +409,9 @@ impl<M: Model> QueryBuilder<M> {
     /// name.
     ///
     /// A plain column is read from its qualifier's table, or the model's when
-    /// unqualified; an expression, a `select_subquery()` among them, has no
-    /// source. Wildcards and unaliased expressions name no column and are
-    /// left out.
+    /// unqualified. Scalar subqueries retain their source metadata, and joined
+    /// wildcards expand using registered model columns. The own-table wildcard
+    /// stays implicit; unaliased expressions have no known output name.
     pub(in crate::query) fn projection_outputs(&self) -> Vec<(String, Option<(String, String)>)> {
         let typed = self.clauses.select_columns.iter().flatten();
         let raw = self.raw_projection();
@@ -419,42 +419,172 @@ impl<M: Model> QueryBuilder<M> {
             .clauses
             .subquery_select_expressions
             .iter()
-            .map(|subquery| (subquery.alias.clone(), None));
+            .map(|subquery| (subquery.alias.clone(), subquery.source.clone()));
         typed
             .chain(raw)
-            .filter_map(|entry| {
-                let entry = entry.trim();
-                let (expression, alias) = Self::split_alias(entry);
-                let source = Self::simple_column_reference(expression);
-                let name = match alias {
-                    Some(alias) => alias.trim_matches(|c| c == '"' || c == '`').to_string(),
-                    None => {
-                        let (table, column) = source?;
-                        if table.is_empty() || table == M::table_name() {
-                            M::canonical_column_name(column).unwrap_or(column)
-                        } else {
-                            column
-                        }
-                        .to_string()
-                    }
-                };
-                let source = source.map(|(table, column)| {
-                    let table = match table {
-                        "" => M::table_name(),
-                        table => table,
-                    };
-                    (table.to_string(), column.to_string())
-                });
-                Some((name, source))
+            .flat_map(|entry| {
+                Self::named_projection_output(entry)
+                    .into_iter()
+                    .chain(self.joined_wildcard_outputs(entry))
             })
             .chain(subqueries)
-            .chain(
-                self.clauses
-                    .window_functions
-                    .iter()
-                    .map(|window| (window.alias.clone(), None)),
-            )
+            .chain(self.clauses.window_functions.iter().map(|window| {
+                let source = window.function.value_column().and_then(Self::column_source);
+                (window.alias.clone(), source)
+            }))
             .collect()
+    }
+
+    /// The table and column a plain column reference reads, the model's table
+    /// when it is unqualified; `None` for an expression.
+    fn column_source(reference: &str) -> Option<(String, String)> {
+        let (table, column) = Self::simple_column_reference(reference)?;
+        let table = if table.is_empty() {
+            M::table_name()
+        } else {
+            table
+        };
+        Some((table.to_string(), column.to_string()))
+    }
+
+    fn named_projection_output(entry: &str) -> Option<(String, Option<(String, String)>)> {
+        let entry = entry.trim();
+        let (expression, alias) = Self::split_alias(entry);
+        let source = Self::column_source(expression);
+        let name = match alias {
+            Some(alias) => alias.trim_matches(|c| c == '"' || c == '`').to_string(),
+            None => {
+                let (table, column) = source.as_ref()?;
+                match table == M::table_name() {
+                    true => M::canonical_column_name(column).unwrap_or(column),
+                    false => column,
+                }
+                .to_string()
+            }
+        };
+        Some((name, source))
+    }
+
+    /// Resolve joined wildcards using model metadata. The own-table wildcard
+    /// stays implicit, as model_projection_count already accounts for it.
+    fn joined_wildcard_outputs(&self, entry: &str) -> Vec<(String, Option<(String, String)>)> {
+        let entry = entry.trim();
+        let qualifier = if entry == "*" {
+            None
+        } else if let Some(qualifier) = entry.strip_suffix(".*") {
+            Some(qualifier)
+        } else {
+            return Vec::new();
+        };
+        self.clauses
+            .joins
+            .iter()
+            .filter(|join| qualifier.is_none_or(|qualifier| qualifier == join.qualifier()))
+            .flat_map(|join| {
+                let columns = self.joined_column_names(join);
+                columns.iter().map(move |column| {
+                    (
+                        column.to_string(),
+                        Some((join.qualifier().to_string(), column.to_string())),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub(in crate::query) fn joined_column_names(
+        &self,
+        join: &super::JoinClause,
+    ) -> &'static [&'static str] {
+        if self.is_model_table_qualifier(join.qualifier()) {
+            M::column_names()
+        } else {
+            let (schema, table) = match join.table.split_once('.') {
+                Some((schema, table)) => (Some(schema), table),
+                None => (None, join.table.as_str()),
+            };
+            crate::sync::registered_column_names(schema, table)
+        }
+    }
+
+    /// Chunk cursors compare the stored key, so the model must read that same
+    /// key rather than a different column or expression under its output name.
+    pub(in crate::query) fn ensure_chunk_key_is_original(&self, primary_key: &str) -> Result<()> {
+        let original = self.model_projection_count() > 0
+            || self.projection_outputs().iter().any(|(name, source)| {
+                name == primary_key
+                    && source.as_ref().is_some_and(|(table, column)| {
+                        table == M::table_name() && M::column_named(column) == primary_key
+                    })
+            });
+        if original {
+            Ok(())
+        } else {
+            Err(Error::query(format!(
+                "chunk() requires the original primary key '{}.{}' in its projection; use get() for a projection that replaces it",
+                M::table_name(),
+                primary_key
+            )))
+        }
+    }
+
+    /// Whether a qualifier names this model's table, including a self-join
+    /// alias. Keep explicit schemas distinct from a same-named table elsewhere.
+    pub(in crate::query) fn is_model_table_qualifier(&self, qualifier: &str) -> bool {
+        qualifier == M::table_name()
+            || self.clauses.joins.iter().any(|join| {
+                join.qualifier() == qualifier
+                    && match (M::schema_name(), join.table.split_once('.')) {
+                        (None, None) => join.table == M::table_name(),
+                        (Some(schema), Some((joined_schema, table))) => {
+                            schema == joined_schema && table == M::table_name()
+                        }
+                        _ => false,
+                    }
+            })
+    }
+
+    /// Resolve an input in this query's scope before looking up model metadata.
+    pub(in crate::query) fn encrypted_source_column(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<crate::model::EncryptedColumn>> {
+        if self.is_model_table_qualifier(table) {
+            return crate::model::__encrypted_column::<M>(column);
+        }
+        let Some(join) = self
+            .clauses
+            .joins
+            .iter()
+            .find(|join| join.qualifier() == table)
+        else {
+            return Ok(None);
+        };
+        let (schema, table) = match join.table.split_once('.') {
+            Some((schema, table)) => (Some(schema), table),
+            None => (None, join.table.as_str()),
+        };
+        crate::sync::registered_encrypted_column(schema, table, column)
+    }
+
+    pub(in crate::query) fn projected_encrypted_column(
+        &self,
+        output: &str,
+        source: Option<&(String, String)>,
+    ) -> Result<Option<crate::model::EncryptedColumn>> {
+        if let Some(subquery) = self
+            .clauses
+            .subquery_select_expressions
+            .iter()
+            .find(|subquery| subquery.alias == output && subquery.source.as_ref() == source)
+        {
+            return Ok(subquery.encrypted_column);
+        }
+        match source {
+            Some((table, column)) => self.encrypted_source_column(table, column),
+            None => Ok(None),
+        }
     }
 
     /// Whether the projection names every column itself: an explicit one
@@ -523,17 +653,144 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn ensure_distinct_projection_is_comparable(&self) -> Result<()> {
-        if !M::has_encrypted_fields() {
-            return Ok(());
-        }
         if self.model_projection_count() > 0 {
             for column in M::encrypted_column_names() {
-                self.ensure_distinct_column_is_comparable(column)?;
+                self.ensure_encrypted_column_is_comparable(column, "DISTINCT")?;
             }
         }
-        for (_, source) in self.projection_outputs() {
-            if let Some((table, column)) = source {
-                self.ensure_distinct_column_is_comparable(&format!("{table}.{column}"))?;
+        for (output, source) in self.projection_outputs() {
+            Self::reject_encrypted_source(
+                self.projected_encrypted_column(&output, source.as_ref())?,
+                "DISTINCT",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Capture positional types and encryption scopes before a compound operand becomes SQL.
+    pub(in crate::query) fn compound_projection(
+        &self,
+    ) -> Result<super::structure::UnionProjection> {
+        let outputs = self.projection_outputs();
+        let mut projection = super::structure::UnionProjection {
+            columns: Vec::new(),
+            types: Vec::new(),
+            complete: true,
+            has_encrypted: false,
+        };
+        let entries: Vec<_> = self
+            .clauses
+            .select_columns
+            .iter()
+            .flatten()
+            .chain(self.raw_projection())
+            .collect();
+        if entries.is_empty() && self.clauses.subquery_select_expressions.is_empty() {
+            // The default SELECT enumerates model columns in their declared order.
+            for column in M::column_names() {
+                projection
+                    .types
+                    .push(crate::internal::column_type_of::<M>(column));
+                projection
+                    .columns
+                    .push(crate::model::__encrypted_column::<M>(column)?);
+            }
+        }
+        for entry in entries {
+            match Self::named_projection_output(entry) {
+                Some((name, Some(source)))
+                    if db_sql::is_safe_identifier_segment(&source.0)
+                        && db_sql::is_safe_identifier_segment(&source.1) =>
+                {
+                    projection
+                        .types
+                        .push(self.column_type(&format!("{}.{}", source.0, source.1)));
+                    projection
+                        .columns
+                        .push(self.projected_encrypted_column(&name, Some(&source))?);
+                }
+                _ => {
+                    // Wildcard order depends on the live schema; raw expressions may
+                    // contribute several columns. Do not guess their positions.
+                    projection.complete = false;
+                    projection.columns.push(None);
+                    projection.types.push(None);
+                }
+            }
+        }
+        for subquery in &self.clauses.subquery_select_expressions {
+            projection.columns.push(subquery.encrypted_column);
+            projection.types.push(subquery.column_type.clone());
+        }
+        for window in &self.clauses.window_functions {
+            projection
+                .types
+                .push(self.projected_column_type(&window.alias));
+            let source = outputs
+                .iter()
+                .find(|(name, _)| *name == window.alias)
+                .and_then(|(_, source)| source.as_ref());
+            projection
+                .columns
+                .push(self.projected_encrypted_column(&window.alias, source)?);
+        }
+        // Include encrypted wildcard outputs even when their positions are unknown.
+        projection.has_encrypted = projection.columns.iter().any(Option::is_some);
+        if self.model_projection_count() > 0 {
+            projection.has_encrypted |= !crate::model::encrypted_field_columns::<M>()?.is_empty();
+        }
+        for (name, source) in &outputs {
+            projection.has_encrypted |= self
+                .projected_encrypted_column(name, source.as_ref())?
+                .is_some();
+        }
+        Ok(projection)
+    }
+
+    fn ensure_union_projections_are_valid(&self) -> Result<()> {
+        if self.clauses.unions.is_empty() {
+            return Ok(());
+        }
+        let left = self.compound_projection()?;
+        for union in &self.clauses.unions {
+            let right = union.projection.as_ref();
+            let encrypted = left.has_encrypted || right.is_some_and(|right| right.has_encrypted);
+            if encrypted && union.union_type == super::UnionType::Union {
+                return Err(Error::query(
+                    "UNION is not supported for encrypted projections: randomized ciphertext cannot deduplicate plaintext values; use compatible UNION ALL projections and compare after decryption",
+                ));
+            }
+            let compatible = right.is_some_and(|right| {
+                left.complete
+                    && right.complete
+                    && left.columns.len() == right.columns.len()
+                    && left.columns.iter().zip(&right.columns).all(|(a, b)| {
+                        a.map(|source| (source.table, source.column))
+                            == b.map(|source| (source.table, source.column))
+                    })
+            });
+            if encrypted && !compatible {
+                return Err(Error::query(
+                    "UNION ALL encrypted projections require the same encryption table and column at each output position; select explicit columns with matching scopes, or read incompatible queries separately",
+                ));
+            }
+            if let Some(right) = right
+                && left.complete
+                && right.complete
+                && left.types.len() == right.types.len()
+            {
+                for (index, (a, b)) in left.types.iter().zip(&right.types).enumerate() {
+                    if let (Some(a), Some(b)) = (a, b)
+                        && !super::structure::union_column_types_compatible(a, b)
+                    {
+                        return Err(Error::query(format!(
+                            "UNION output position {} has incompatible column types {:?} and {:?}; select matching types or read the queries separately",
+                            index + 1,
+                            a,
+                            b,
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -810,6 +1067,12 @@ impl<M: Model> QueryBuilder<M> {
         method: &str,
         operand: &QueryBuilder<N>,
     ) {
+        self.clauses
+            .operand_databases
+            .extend(operand.database.iter().cloned());
+        self.clauses
+            .operand_databases
+            .extend(operand.clauses.operand_databases.iter().cloned());
         if let Err(err) = operand.ensure_query_is_executable() {
             self.invalidate_query(format!("invalid {what} for {method}(): {err}"));
         }
@@ -828,7 +1091,26 @@ impl<M: Model> QueryBuilder<M> {
         db_sql::validate_compound_subquery_sql(&cte.query_sql)
     }
 
+    /// Refuse an embedded query (subquery, CTE, union operand) bound to another
+    /// database or transaction than this one: it renders into this statement,
+    /// so it would silently run here instead.
+    fn ensure_operands_share_connection(&self) -> Result<()> {
+        if self.clauses.operand_databases.is_empty() {
+            return Ok(());
+        }
+        let outer = self.current_db()?.__get_connection()?;
+        for database in &self.clauses.operand_databases {
+            if !database.__get_connection()?.is_same(&outer) {
+                return Err(Error::query(
+                    "query operand is bound to a different database or transaction",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_query_fragments(&self) -> Result<()> {
+        self.ensure_operands_share_connection()?;
         let qualifiers = self.known_qualifiers();
         let qualifiers = Some(&qualifiers);
 
@@ -842,10 +1124,14 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         for column in &self.clauses.group_by {
+            self.ensure_encrypted_input_is_comparable(column, "GROUP BY")?;
             Self::validate_order_or_group_value("GROUP BY column", column, false, qualifiers)
                 .map_err(Error::query)?;
         }
 
+        for (column, operation) in &self.clauses.having_comparisons {
+            self.ensure_encrypted_input_is_comparable(column, operation)?;
+        }
         for (having, bindings) in self.having_clauses() {
             // Parameterized clauses are validated too: the stored template still
             // has to be a safe HAVING expression, and `?` is an accepted token
@@ -883,9 +1169,32 @@ impl<M: Model> QueryBuilder<M> {
         for union in &self.clauses.unions {
             Self::validate_union_clause(union).map_err(Error::query)?;
         }
+        self.ensure_union_projections_are_valid()?;
 
         for window_function in &self.clauses.window_functions {
             Self::validate_window_function(window_function, qualifiers).map_err(Error::query)?;
+            // Window inputs refer to source columns, not SELECT aliases.
+            let comparable = |column: &str, operation: &str| match Self::column_source(column) {
+                Some((table, column)) => {
+                    self.ensure_encrypted_source_is_comparable(&table, &column, operation)
+                }
+                None => Ok(()),
+            };
+            match &window_function.function {
+                WindowFunctionType::Min(column) | WindowFunctionType::Max(column) => {
+                    comparable(column, "window MIN/MAX")?
+                }
+                WindowFunctionType::Sum(column) | WindowFunctionType::Avg(column) => {
+                    comparable(column, "window SUM/AVG")?
+                }
+                _ => {}
+            }
+            for column in &window_function.partition_by {
+                comparable(column, "window PARTITION BY")?;
+            }
+            for (column, _) in &window_function.order_by {
+                comparable(column, "window ORDER BY")?;
+            }
         }
 
         for cte in &self.clauses.ctes {
@@ -1087,17 +1396,24 @@ impl<M: Model> QueryBuilder<M> {
     /// Each HAVING clause paired with the values bound to its `?` placeholders.
     pub(in crate::query) fn having_clauses(
         &self,
-    ) -> impl Iterator<Item = (&str, &[crate::internal::Value])> {
+    ) -> impl Iterator<Item = (&str, Vec<crate::internal::Value>)> {
         self.clauses
             .having_conditions
             .iter()
             .enumerate()
             .map(|(index, clause)| {
-                let bindings = self
-                    .clauses
-                    .having_bindings
-                    .get(index)
-                    .map_or(&[][..], Vec::as_slice);
+                let bindings = match self.clauses.having_typed_bindings.get(&index) {
+                    Some((column, value)) => vec![crate::internal::json_to_column_value(
+                        value,
+                        self.column_type(column).as_ref(),
+                    )],
+                    None => self
+                        .clauses
+                        .having_bindings
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_default(),
+                };
                 (clause.as_str(), bindings)
             })
     }

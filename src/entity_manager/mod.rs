@@ -83,6 +83,9 @@ pub struct EntityManager {
     snapshots: RwLock<HashMap<SnapshotKey, HashSet<String>>>,
     /// Held by the flush or save running as this context's unit of work.
     unit_of_work: futures_util::lock::Mutex<()>,
+    /// Serialize the lookup and registration of a managed identity. Separate from
+    /// map locks, so registering an entry never holds a map lock while editing it.
+    managed_registration: parking_lot::Mutex<()>,
     pub(crate) db: Arc<crate::database::Database>,
 }
 
@@ -95,6 +98,7 @@ impl EntityManager {
             managed_entries: RwLock::new(Vec::new()),
             snapshots: RwLock::new(HashMap::new()),
             unit_of_work: futures_util::lock::Mutex::new(()),
+            managed_registration: parking_lot::Mutex::new(()),
             db,
         })
     }
@@ -168,6 +172,7 @@ impl EntityManager {
         // every other path files the map under.
         let key = (!entity.tide_pk_is_new()).then(|| entity.tide_pk_key());
 
+        let _registration = self.managed_registration.lock();
         // Persisting an entity this context was about to remove takes the
         // removal back: the row is written as given instead of deleted.
         if let Some(existing) = key
@@ -235,6 +240,7 @@ impl EntityManager {
             return Ok(self.persist(entity));
         };
 
+        let _registration = self.managed_registration.lock();
         if let Some(existing) = self.get_managed_by_key::<T>(&key) {
             existing.entry.overwrite_merged(entity);
             return Ok(existing);
@@ -405,6 +411,7 @@ impl EntityManager {
         let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
 
+        let _registration = self.managed_registration.lock();
         // Another lookup of the same row finished first: its handle may hold
         // edits since, which the row as this lookup read it must not undo.
         let key = entity.tide_pk_key();

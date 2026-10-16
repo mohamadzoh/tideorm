@@ -60,7 +60,7 @@ pub(crate) use query_cache::undo_on_rollback;
 pub use query_cache::{CacheConfig, CacheStats, CacheStrategy, QueryCache};
 pub(crate) use query_cache::{
     PendingInvalidations, install_pending_invalidations, note_failed_statement,
-    transaction_deadlocked,
+    note_sqlite_aborted, transaction_deadlocked, transaction_depth, transaction_sqlite_aborted,
 };
 
 static GLOBAL_QUERY_CACHE: OnceLock<QueryCache> = OnceLock::new();

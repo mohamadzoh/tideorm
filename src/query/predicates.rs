@@ -459,6 +459,9 @@ impl<M: Model> QueryBuilder<M> {
     /// related row, and the correlation names this one.
     fn related_query<R: Model>(&self) -> QueryBuilder<R> {
         let mut related = QueryBuilder::<R>::new();
+        // The closure may render nested subqueries immediately. Give those
+        // builders the outer connection before they choose a SQL dialect.
+        related.database = self.database.clone();
         if R::table_name() == M::table_name() {
             related.self_join_depth = self.self_join_depth + 1;
         }
@@ -579,12 +582,35 @@ impl<M: Model> QueryBuilder<M> {
 
         let (query_sql, params) =
             subquery.build_select_sql_with_params_for_db(self.db_type_for_sql());
+        // What the one column it selects reads, captured while the subquery
+        // still knows its model and joins: the outer query decodes and
+        // decrypts the output, and checks comparisons of it, by these.
+        let (source, column_type, encrypted_column) = match subquery.projection_outputs().as_slice()
+        {
+            [(output, source)] => {
+                let encrypted = subquery
+                    .projected_encrypted_column(output, source.as_ref())
+                    .unwrap_or_else(|error| {
+                        self.invalidate_query(error.to_string());
+                        None
+                    });
+                (
+                    source.clone(),
+                    subquery.projected_column_type(output),
+                    encrypted,
+                )
+            }
+            _ => (None, None, None),
+        };
         self.clauses
             .subquery_select_expressions
             .push(SubquerySelect {
                 query_sql,
                 alias: alias.to_string(),
                 params,
+                source,
+                column_type,
+                encrypted_column,
             });
         self
     }

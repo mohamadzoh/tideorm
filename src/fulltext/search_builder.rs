@@ -88,6 +88,26 @@ impl HighlightConfig {
 }
 
 impl<T: Model> FullTextSearchBuilder<T> {
+    /// Choose a score output that cannot shadow a model column on any backend.
+    fn rank_alias() -> String {
+        crate::query::db_sql::unused_name("_fts_rank", |name| {
+            T::column_names()
+                .iter()
+                .any(|column| column.eq_ignore_ascii_case(name))
+        })
+    }
+
+    /// Check the live schema, including columns omitted from the Rust model
+    /// and indexes installed by an older version of the library.
+    async fn check_sqlite_rowid(db: &crate::database::Database) -> Result<()> {
+        if db.execution_backend() == DatabaseType::SQLite {
+            let guard = super::index_helpers::sqlite_rowid_guard(T::table_name(), T::schema_name());
+            db.fetch_rows(&format!("SELECT {guard}"), Vec::new())
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Create a new search builder
     pub fn new(columns: &[&str], query: &str) -> Self {
         Self {
@@ -168,6 +188,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn get(self) -> Result<Vec<T>> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_sql(db.execution_backend())?;
+        Self::check_sqlite_rowid(&db).await?;
         db.__raw_with_params::<T>(&sql, params).await
     }
 
@@ -175,15 +196,17 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn get_ranked(self) -> Result<Vec<SearchResult<T>>> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_ranked_sql(db.execution_backend())?;
+        Self::check_sqlite_rowid(&db).await?;
 
         let pattern = term_pattern(&self.highlight_terms());
+        let rank_alias = Self::rank_alias();
         db.fetch_rows(&sql, params)
             .await?
             .iter()
             .map(|row| {
                 let model = <T::Entity as EntityTrait>::Model::from_query_result(row, "")
                     .map_err(translate_error)?;
-                let rank = row.try_get("", "_fts_rank").map_err(translate_error)?;
+                let rank = row.try_get("", &rank_alias).map_err(translate_error)?;
                 let record = crate::model::__loading_through(&db.__get_connection()?, || {
                     T::try_from_entity_model(model)
                 })?;
@@ -208,6 +231,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
     pub async fn count(self) -> Result<u64> {
         let db = crate::database::__current_db()?;
         let (sql, params) = self.build_count_sql(db.execution_backend())?;
+        Self::check_sqlite_rowid(&db).await?;
 
         let rows = db.fetch_rows(&sql, params).await?;
         let row = rows

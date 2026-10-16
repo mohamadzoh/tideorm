@@ -1239,7 +1239,7 @@ fn validation_accepts_assignment_function_and_range_forms() {
     let rendered = rendered_rules(&ctx, "label");
 
     assert!(rendered.contains("MinLength(3usize)"));
-    assert!(rendered.contains("Range(1f64,10f64)"));
+    assert!(rendered.contains("RangeExact(\"1\".to_string(),\"10\".to_string())"));
 }
 
 /// A raw-identifier field is named without its `r#` everywhere a name is a string —

@@ -32,7 +32,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             let sql = SqlBuilder::new(PG, &mut params)
                 .raw("SELECT ")
                 .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
-                .raw(", CAST(0 AS double precision) AS _fts_rank FROM ")
+                .raw(", CAST(0 AS double precision) AS ")
+                .raw(&Self::rank_alias())
+                .raw(" FROM ")
                 .raw(&crate::query::db_sql::quote_table::<T>(PG))
                 .raw(" WHERE ")
                 .raw(MATCH_NOTHING)
@@ -56,7 +58,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             .raw(&crate::query::db_sql::model_columns_sql::<T>(PG, None))
             .raw(", CAST(")
             .raw(&rank)
-            .raw(" AS double precision) AS _fts_rank FROM ")
+            .raw(" AS double precision) AS ")
+            .raw(&Self::rank_alias())
+            .raw(" FROM ")
             .raw(&crate::query::db_sql::quote_table::<T>(PG))
             .raw(" WHERE ")
             .raw(&self.scoped(PG, format!("{tsvector} @@ {tsquery}"), None))
@@ -70,7 +74,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push_str(&threshold);
         }
 
-        sql.push_str(" ORDER BY _fts_rank DESC");
+        sql.push_str(&format!(" ORDER BY {} DESC", Self::rank_alias()));
         self.append_limit_offset(PG, &mut sql, &mut params);
 
         Ok((sql, params))

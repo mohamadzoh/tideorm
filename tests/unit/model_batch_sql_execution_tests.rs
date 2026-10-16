@@ -115,13 +115,13 @@ fn scaling_an_integer_column_stays_integral_on_sqlite() {
         )))
     );
 
-    // A text column is not touched, whatever it holds.
-    let (sql, _) = BatchUpdateBuilder::<BatchSqlUser>::new()
+    // Arithmetic on text is rejected before SQLite can coerce its contents.
+    let error = BatchUpdateBuilder::<BatchSqlUser>::new()
         .multiply("name", 2.0)
         .where_eq("id", 1)
         .build_update_statement(DatabaseType::SQLite)
-        .expect("statement should build");
-    assert!(sql.contains(r#""name" = "name" * ?"#), "{sql}");
+        .expect_err("text arithmetic must fail");
+    assert!(error.to_string().contains("requires a numeric column"));
 }
 
 fn filtered_builder() -> BatchUpdateBuilder<BatchSqlUser> {
@@ -284,14 +284,14 @@ fn batch_update_or_filters_form_one_group_anded_with_the_rest() {
 
 #[test]
 fn batch_json_set_binds_the_backend_path_then_the_value() {
-    let (sql, params) = BatchUpdateBuilder::<BatchSqlUser>::new()
+    let (sql, params) = BatchUpdateBuilder::<BatchJsonUser>::new()
         .json_set("name", "$.profile.city", "Paris")
         .where_eq("id", 1)
         .build_update_statement(crate::config::DatabaseType::Postgres)
         .expect("statement should build");
 
     assert!(
-        sql.starts_with(r#"UPDATE "batch_sql_execution_users" SET "name" = jsonb_set(("name")::jsonb, $1::text[], CAST($2 AS jsonb))"#),
+        sql.starts_with(r#"UPDATE "batch_json_users" SET "name" = jsonb_set(("name")::jsonb, $1::text[], CAST($2 AS jsonb))"#),
         "unexpected sql: {sql}"
     );
     assert_eq!(
@@ -307,7 +307,7 @@ fn batch_json_set_binds_the_backend_path_then_the_value() {
 fn batch_json_set_takes_indexes_and_quoted_keys() {
     let path = r#"$.items[0]."a \"b\"""#;
     let bound_path = |db_type| {
-        let (_, params) = BatchUpdateBuilder::<BatchSqlUser>::new()
+        let (_, params) = BatchUpdateBuilder::<BatchJsonUser>::new()
             .json_set("name", path, 1)
             .where_eq("id", 1)
             .build_update_statement(db_type)
@@ -325,7 +325,7 @@ fn batch_json_set_takes_indexes_and_quoted_keys() {
     );
 
     for path in ["$", "$.*", "$.items[*]", "items"] {
-        let error = BatchUpdateBuilder::<BatchSqlUser>::new()
+        let error = BatchUpdateBuilder::<BatchJsonUser>::new()
             .json_set("name", path, 1)
             .where_eq("id", 1)
             .build_update_statement(crate::config::DatabaseType::MySQL)
@@ -335,4 +335,11 @@ fn batch_json_set_takes_indexes_and_quoted_keys() {
             "{path}: {error}"
         );
     }
+}
+
+#[tideorm::model(table = "batch_json_users")]
+struct BatchJsonUser {
+    #[tideorm(primary_key)]
+    id: i64,
+    name: serde_json::Value,
 }

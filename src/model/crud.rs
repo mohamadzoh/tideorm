@@ -49,6 +49,7 @@ where
     let connection = crate::database::__current_connection()?;
     let executor = connection.executor();
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
     let row = crate::internal::run_profiled(active.insert(&executor), || {
         crate::internal::model_error_context::<M>(format!("insert into {}", M::table_name()))
     })
@@ -71,6 +72,7 @@ where
     let connection = crate::database::__current_connection()?;
     let executor = connection.executor();
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
     let row = crate::internal::run_profiled(active.update(&executor), || {
         crate::internal::primary_key_error_context::<M>(
             primary_key,

@@ -131,6 +131,47 @@ pub fn bindable_value(value: impl Into<Value>) -> Value {
     }
 }
 
+/// Refuse to write `active` to SQLite when one of its values could not be read
+/// back: SQLite stores a non-finite float, and a decimal past what its REAL
+/// storage can return to a `Decimal`, but the model then fails to load the row.
+pub(crate) fn ensure_active_values_storable<M: crate::model::Model>(
+    active: &M::ActiveModel,
+    conn: &impl ConnectionTrait,
+) -> Result<()> {
+    if conn.get_database_backend() != OrmBackend::Sqlite {
+        return Ok(());
+    }
+    for name in M::column_names() {
+        let Some(column) = M::column_from_str(name) else {
+            continue;
+        };
+        let invalid = match active.get(column).into_value() {
+            Some(Value::Float(Some(value))) => !value.is_finite(),
+            Some(Value::Double(Some(value))) => !value.is_finite(),
+            Some(Value::Decimal(Some(value))) => !sqlite_decimal_is_storable(value),
+            _ => false,
+        };
+        if invalid {
+            return Err(Error::query(format!(
+                "SQLite value for {name} must be finite and within its readable model range"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The largest decimal magnitude SQLite can return: it stores a `Decimal` as
+/// an `f64`, and 2^96 rounds past `Decimal::MAX`, so the `f64` just below it.
+pub(crate) const SQLITE_DECIMAL_MAX: f64 = 79_228_162_514_264_337_593_543_950_336_f64.next_down();
+
+/// Whether SQLite can store `value` and read it back as a `Decimal`.
+pub(crate) fn sqlite_decimal_is_storable(value: rust_decimal::Decimal) -> bool {
+    use rust_decimal::prelude::ToPrimitive;
+    value
+        .to_f64()
+        .is_some_and(|number| number.abs() <= SQLITE_DECIMAL_MAX)
+}
+
 /// Refuse to write `M` through `conn` when its driver cannot store one of `M`'s
 /// integer fields and read it back.
 ///

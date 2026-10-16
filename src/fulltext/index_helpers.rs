@@ -103,6 +103,10 @@ impl FullTextIndex {
     /// that indexes the rows the table already holds, and the triggers that
     /// keep it in sync with the table
     ///
+    /// A declared `rowid` column is supported only when it aliases SQLite's
+    /// row identity (`INTEGER PRIMARY KEY`). Other shadowing columns are
+    /// rejected before index installation or rebuild, and before searches.
+    ///
     /// The index follows the table's rowid. SQLite keeps rowids through a
     /// `VACUUM` only for a table with an `INTEGER PRIMARY KEY`; after
     /// vacuuming any other table, a UUID- or text-keyed one, run
@@ -111,16 +115,18 @@ impl FullTextIndex {
     ///
     /// A table has one SQLite full-text index, the `<table>_fts` table its
     /// searches read, whatever the index is named. Applying the same index
-    /// again changes nothing; applying one over a column the table's index
-    /// does not hold fails with `no such column` rather than keeping the
-    /// first index's columns: drop `<table>_fts` and its triggers first.
+    /// again changes nothing. A conflicting definition under a maintenance
+    /// trigger's name is rejected and left untouched. Applying one over a column the table's index
+    /// does not hold is refused rather than keeping the first index's columns:
+    /// drop `<table>_fts` and its maintenance triggers before changing the index.
     ///
     /// The index of a table in an attached database (`tenant.posts`) is
     /// created in that database. Its content table and its triggers' tables
     /// are named without it, as FTS5 and SQLite's triggers require.
     pub fn to_sqlite_sql(&self) -> Vec<String> {
         let mut params = Vec::new();
-        let (_, table) = self.sqlite_table_parts();
+        let (schema, table) = self.sqlite_table_parts();
+        let rowid_guard = sqlite_rowid_guard(table, schema);
         let fts_table = format!("{table}_fts");
         let columns = column_list(DatabaseType::SQLite, &self.columns, "");
 
@@ -145,7 +151,18 @@ impl FullTextIndex {
             .raw(");")
             .into_sql();
 
+        let update = format!("{delete_old} {insert_new}");
+        let conflicts = [
+            self.sqlite_trigger_conflict("ai", "INSERT", &insert_new),
+            self.sqlite_trigger_conflict("ad", "DELETE", &delete_old),
+            self.sqlite_trigger_conflict("au", "UPDATE", &update),
+        ]
+        .join(" OR ");
         vec![
+            format!(
+                "SELECT {rowid_guard}, CASE WHEN {conflicts} THEN {} ELSE 1 END",
+                sqlite_fail("TideORM full-text trigger name conflict")
+            ),
             SqlBuilder::new(DatabaseType::SQLite, &mut params)
                 .raw("CREATE VIRTUAL TABLE IF NOT EXISTS ")
                 .raw(&self.sqlite_qualified(&fts_table))
@@ -173,7 +190,7 @@ impl FullTextIndex {
                 .into_sql(),
             self.sqlite_trigger("ai", "INSERT", &insert_new),
             self.sqlite_trigger("ad", "DELETE", &delete_old),
-            self.sqlite_trigger("au", "UPDATE", &format!("{delete_old} {insert_new}")),
+            self.sqlite_trigger("au", "UPDATE", &update),
             // An external-content table starts empty: without a rebuild, rows
             // written before the index was created are never found.
             self.sqlite_rebuild_sql(),
@@ -184,15 +201,43 @@ impl FullTextIndex {
     /// rowids as they are now: what a `VACUUM` of a table without an
     /// `INTEGER PRIMARY KEY` calls for (see [`to_sqlite_sql`](Self::to_sqlite_sql)).
     pub fn sqlite_rebuild_sql(&self) -> String {
-        let (_, table) = self.sqlite_table_parts();
+        let (schema, table) = self.sqlite_table_parts();
+        let rowid_guard = sqlite_rowid_guard(table, schema);
         let fts_table = format!("{table}_fts");
         SqlBuilder::new(DatabaseType::SQLite, &mut Vec::new())
             .raw("INSERT INTO ")
             .raw(&self.sqlite_qualified(&fts_table))
             .raw("(")
             .ident(&fts_table)
-            .raw(") VALUES('rebuild')")
+            .raw(") SELECT CASE WHEN ")
+            .raw(&rowid_guard)
+            .raw(" THEN 'rebuild' END")
             .into_sql()
+    }
+
+    /// Refuse a user trigger (or an obsolete definition) under a maintenance
+    /// trigger's name. IF NOT EXISTS alone silently leaves the index unmaintained.
+    fn sqlite_trigger_conflict(&self, suffix: &str, event: &str, body: &str) -> String {
+        let (schema, table) = self.sqlite_table_parts();
+        let name = format!("{table}_{suffix}");
+        // sqlite_schema removes IF NOT EXISTS and the trigger name's schema.
+        let expected = format!(
+            "CREATE TRIGGER {} AFTER {event} ON {} BEGIN {body} END",
+            quote_ident(DatabaseType::SQLite, &name),
+            quote_ident(DatabaseType::SQLite, table)
+        );
+        let catalog = match schema {
+            Some(schema) => format!(
+                "{}.sqlite_schema",
+                quote_ident(DatabaseType::SQLite, schema)
+            ),
+            None => String::from("main.sqlite_schema"),
+        };
+        let name = escape_sql_literal_for_db(DatabaseType::SQLite, &name);
+        let expected = escape_sql_literal_for_db(DatabaseType::SQLite, &expected);
+        format!(
+            "EXISTS (SELECT 1 FROM {catalog} WHERE type = 'trigger' AND name = '{name}' COLLATE NOCASE AND sql IS NOT '{expected}')"
+        )
     }
 
     /// Render the `AFTER <event>` trigger named `<table>_<suffix>`.
@@ -241,6 +286,38 @@ impl FullTextIndex {
             DatabaseType::SQLite => self.to_sqlite_sql(),
         }
     }
+}
+
+/// Require the `rowid` spelling used by FTS content, triggers, and joins to
+/// identify the actual SQLite row. Other rowid aliases may themselves be
+/// shadowed, so switching blindly to `_rowid_` or `oid` is not safe.
+/// An INTEGER PRIMARY KEY alias has no separate primary-key index; checking
+/// that distinguishes it from composite keys and INTEGER PRIMARY KEY DESC.
+pub(super) fn sqlite_rowid_guard(table: &str, schema: Option<&str>) -> String {
+    let table = escape_sql_literal_for_db(DatabaseType::SQLite, table);
+    let schema = schema
+        .map(|schema| {
+            format!(
+                ", '{}'",
+                escape_sql_literal_for_db(DatabaseType::SQLite, schema)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "CASE WHEN EXISTS (SELECT 1 FROM pragma_table_xinfo('{table}'{schema}) AS c \
+         WHERE c.name = 'rowid' COLLATE NOCASE AND NOT \
+         (upper(c.type) = 'INTEGER' AND c.pk = 1 AND NOT EXISTS \
+         (SELECT 1 FROM pragma_index_list('{table}'{schema}) WHERE origin = 'pk'))) \
+         THEN {} ELSE 1 END",
+        sqlite_fail("TideORM full-text rowid is shadowed by a non-identity column")
+    )
+}
+
+/// An SQLite expression that fails, when evaluated, with an error naming
+/// `message`: `json_extract` reports a malformed path with the path in it.
+/// `message` is a constant of ours, never caller text.
+fn sqlite_fail(message: &str) -> String {
+    format!("json_extract('{{}}', '{message}')")
 }
 
 /// Highlight search terms in text

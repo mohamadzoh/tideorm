@@ -128,7 +128,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.14.1", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.15.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -156,9 +156,12 @@ Encrypted field behavior:
 - Each encrypted field uses a scoped key derived from the configured encryption secret plus the model table and column name, so ciphertext from one attribute does not decrypt under another attribute's context.
 - Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
 - Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
+- Typed `DISTINCT`, `GROUP BY`, `MIN`, `MAX`, `SUM`, and `AVG` operations reject encrypted columns, including projection aliases, joined model columns, and scalar subquery outputs. Randomized ciphertext does not preserve plaintext equality or order; load and decrypt the values before comparing or aggregating them.
+- Typed unions reject known incompatible output types, such as a boolean and an integer at the same position, because all rows share one decoder.
+- `UNION` rejects encrypted projections because deduplication compares ciphertext. `UNION ALL` supports explicit columns (or the default model projection) when each output position has the same encryption table and column in every operand. Incompatible scopes and unknown shapes such as raw SQL or wildcards are rejected when an encrypted projection is involved; read those queries separately.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
 - Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`. A batch `set()` of an encrypted field takes a string or `None`.
-- `pluck`, `value`, `get_json` and `get_as` return an encrypted column decrypted when they read it under its own name.
+- `pluck`, `value`, `get_json` and `get_as` decrypt encrypted columns from the query model or joined models. Named projections in `get_json` and `get_as` retain decryption through aliases and scalar subqueries.
 - A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
 
 ---

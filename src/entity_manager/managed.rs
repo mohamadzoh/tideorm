@@ -443,10 +443,6 @@ impl<T> ManagedEntry<T> {
     pub(crate) fn mark_removed(&self) {
         *self.state.write() = EntityState::Removed;
     }
-
-    pub(crate) fn mark_detached(&self) {
-        *self.state.write() = EntityState::Detached;
-    }
 }
 
 impl<T: Send + Sync + 'static> ManagedEntry<T> {
@@ -454,10 +450,14 @@ impl<T: Send + Sync + 'static> ManagedEntry<T> {
     /// and detach it. `identity_key`, not `persisted_key`: an entity
     /// `persist`ed with a client-assigned key is filed before any insert.
     pub(crate) fn evict(&self, entity_manager: &EntityManager) {
+        // Flush completion uses the same lock when re-filing a saved entry.
+        // Detaching must remove that entry and change its state atomically
+        // with respect to that completion, or the save can reattach it.
+        let mut state = self.state.write();
         if let Some(key) = self.identity_key.write().take() {
             entity_manager.remove_managed_entry::<T>(&key);
         }
-        self.mark_detached();
+        *state = EntityState::Detached;
     }
 }
 
@@ -553,6 +553,17 @@ where
                         .read()
                         .clone()
                         .unwrap_or_else(|| self.current.read().clone());
+                    // A detached merge may have no loaded snapshot. In that
+                    // case `entity` is the live value, whose key can have been
+                    // edited since it was attached. Never delete another row.
+                    let delete_key = entity.tide_pk_key();
+                    if delete_key != key {
+                        return Err(crate::error::Error::query(format!(
+                            "the primary key of a managed {} row changed from {key} to \
+                             {delete_key}; refusing to delete a different row",
+                            <T as crate::model::ModelMeta>::table_name()
+                        )));
+                    }
                     super::with_entity_manager_db(
                         entity_manager,
                         <T as crate::model::Model>::delete(entity),
@@ -598,16 +609,6 @@ where
                 };
                 let next_key = Some(saved.tide_pk_key());
 
-                if let Some(ref previous_key) = previous_key
-                    && Some(previous_key.as_str()) != next_key.as_deref()
-                {
-                    entity_manager.remove_managed_entry::<T>(previous_key);
-                }
-
-                if let Some(key) = next_key.as_deref() {
-                    entity_manager.put_managed_entry::<T>(key, self.clone());
-                }
-
                 // Edits made while the row was being written stay, over the
                 // row as stored, and leave the entry dirty for the next flush.
                 {
@@ -617,9 +618,28 @@ where
                     *live = stored;
                 }
                 *self.snapshot.write() = Some(saved.clone());
-                *self.identity_key.write() = next_key.clone();
-                *self.persisted_key.write() = next_key;
-                *self.state.write() = EntityState::Managed;
+                *self.persisted_key.write() = next_key.clone();
+
+                // A remove or detach may have arrived during the save. Keep
+                // that request, while recording the saved row so a pending
+                // removal can delete even an insert that just received its key.
+                // Serialize re-filing with evict, without holding this lock
+                // across database work or user edits to the current value.
+                let mut state = self.state.write();
+                if *state != EntityState::Detached {
+                    if let Some(ref previous_key) = previous_key
+                        && Some(previous_key.as_str()) != next_key.as_deref()
+                    {
+                        entity_manager.remove_managed_entry::<T>(previous_key);
+                    }
+                    if let Some(key) = next_key.as_deref() {
+                        entity_manager.put_managed_entry::<T>(key, self.clone());
+                    }
+                    *self.identity_key.write() = next_key;
+                    if *state != EntityState::Removed {
+                        *state = EntityState::Managed;
+                    }
+                }
                 Ok(())
             }
         }

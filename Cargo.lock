@@ -3018,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3044,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "tideorm-macros"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",

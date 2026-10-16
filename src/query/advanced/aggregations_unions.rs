@@ -13,6 +13,29 @@ const COUNT_RESULT_ALIAS: &str = "count_result";
 /// Alias of the derived table an aggregate over limited/compound input reads from.
 const AGGREGATE_SUBQUERY_ALIAS: &str = "tideorm_aggregate_subquery";
 
+/// The operand of a numeric HAVING comparison (a count, sum or average): a
+/// JSON number as is, or numeric text as the number it spells, so a text
+/// parameter never makes the database compare the aggregate as text. SQLite
+/// has no decimal type and gets an integer or a REAL. `None` for anything else.
+fn numeric_having_value(value: &serde_json::Value, db_type: DatabaseType) -> Option<Value> {
+    use rust_decimal::prelude::ToPrimitive;
+    if value.is_number() {
+        return Some(crate::internal::json_to_db_value(value));
+    }
+    let decimal = value
+        .as_str()?
+        .trim()
+        .parse::<rust_decimal::Decimal>()
+        .ok()?;
+    Some(match db_type {
+        DatabaseType::SQLite => match decimal.to_i64().filter(|_| decimal.fract().is_zero()) {
+            Some(integer) => Value::from(integer),
+            None => Value::from(decimal.to_f64()?),
+        },
+        _ => Value::Decimal(Some(decimal)),
+    })
+}
+
 /// Decode an aggregate result as `T`.
 ///
 /// Drivers hand back an exact numeric result (PostgreSQL `numeric`, MySQL
@@ -176,6 +199,18 @@ impl Aggregate {
             _ => None,
         }
     }
+
+    /// The column this aggregate compares values of, with the operation an
+    /// error names: randomized ciphertext cannot be ordered, summed or
+    /// deduplicated, so none of these may read an encrypted column.
+    fn compared_column(&self) -> Option<(&str, &'static str)> {
+        match self {
+            Self::Min(column) | Self::Max(column) => Some((column, "MIN/MAX")),
+            Self::CountDistinct(column) => Some((column, "DISTINCT")),
+            Self::Sum(column) | Self::Avg(column) => Some((column, "SUM/AVG")),
+            Self::Count => None,
+        }
+    }
 }
 
 /// An aggregate compared with a value, which [`QueryBuilder::having`] keeps
@@ -273,11 +308,12 @@ impl<M: Model> QueryBuilder<M> {
     pub fn having(mut self, condition: impl Into<HavingCondition>) -> Self {
         match condition.into() {
             HavingCondition::Aggregate(condition) => {
-                if let Aggregate::CountDistinct(column) = &condition.aggregate
-                    && let Err(error) = self.ensure_distinct_column_is_comparable(column)
-                {
-                    self.invalidate_query(error.to_string());
-                    return self;
+                // Checked against encrypted columns when the query is validated,
+                // once every join this HAVING may read is known.
+                if let Some((column, operation)) = condition.aggregate.compared_column() {
+                    self.clauses
+                        .having_comparisons
+                        .push((column.to_string(), operation));
                 }
                 let db_type = self.db_type_for_sql();
                 // The model's own columns are written with its table, so a
@@ -295,12 +331,50 @@ impl<M: Model> QueryBuilder<M> {
                     | Aggregate::Max(column) => self.column_type(column),
                 };
                 let value = match &condition.value {
+                    Ok(value) if value.is_null() => {
+                        let operator = match condition.operator {
+                            "=" => "IS NULL",
+                            "<>" => "IS NOT NULL",
+                            _ => {
+                                self.invalidate_query(
+                                    "HAVING ordering comparisons cannot use NULL".to_string(),
+                                );
+                                return self;
+                            }
+                        };
+                        return self.having_with_params(format!("{expression} {operator}"), vec![]);
+                    }
+                    Ok(value)
+                        if matches!(
+                            condition.aggregate,
+                            Aggregate::Count
+                                | Aggregate::CountDistinct(_)
+                                | Aggregate::Sum(_)
+                                | Aggregate::Avg(_)
+                        ) =>
+                    {
+                        let Some(value) = numeric_having_value(value, db_type) else {
+                            self.invalidate_query(
+                                "numeric HAVING comparisons require a number".to_string(),
+                            );
+                            return self;
+                        };
+                        value
+                    }
                     Ok(value) => crate::internal::json_to_column_value(value, column_type.as_ref()),
                     Err(reason) => {
                         self.invalidate_query(format!("having(): {}", reason));
                         return self;
                     }
                 };
+                if let (Some(column), Ok(value)) =
+                    (condition.aggregate.extreme_column(), &condition.value)
+                {
+                    self.clauses.having_typed_bindings.insert(
+                        self.clauses.having_conditions.len(),
+                        (column.to_string(), value.clone()),
+                    );
+                }
                 self.having_with_params(
                     format!("{} {} ?", expression, condition.operator),
                     vec![value],
@@ -355,6 +429,11 @@ impl<M: Model> QueryBuilder<M> {
             (None, name) => (M::table_name(), name),
         };
         let outputs = self.projection_outputs();
+        if !column.contains('.')
+            && let Some((output, _)) = outputs.iter().find(|(output, _)| output == column)
+        {
+            return Some(output.clone());
+        }
         let selected = outputs.iter().find(|(_, source)| {
             source
                 .as_ref()
@@ -482,7 +561,13 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let rows_fixed_by_projection = self.is_distinct() || !self.clauses.unions.is_empty();
-        let input_alias = |index: usize| format!("tideorm_aggregate_input_{index}");
+        let occupied = self.projection_outputs();
+        let input_alias = |index: usize| {
+            db_sql::unused_name(&format!("tideorm_aggregate_input_{index}"), |name| {
+                occupied.iter().any(|(output, _)| output == name)
+                    || M::column_names().contains(&name)
+            })
+        };
         let inputs = std::cell::RefCell::new(Vec::<String>::new());
         let unselected = std::cell::RefCell::new(None::<String>);
         let select_list = projections(&|column| {
@@ -516,9 +601,9 @@ impl<M: Model> QueryBuilder<M> {
 
         let mut inner = self.clone();
         if !rows_fixed_by_projection && !inputs.is_empty() {
-            inner.clauses.select_columns = None;
-            inner.clauses.subquery_select_expressions.clear();
-            inner.clauses.raw_select_expressions = inputs
+            // Keep the original projection: ORDER BY may resolve its aliases,
+            // even when an alias has the same name as another model column.
+            let aggregate_inputs = inputs
                 .iter()
                 .enumerate()
                 .map(|(index, column)| {
@@ -528,7 +613,11 @@ impl<M: Model> QueryBuilder<M> {
                         db_sql::quote_ident(db_type, &input_alias(index))
                     )
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            inner
+                .clauses
+                .raw_select_expressions
+                .extend(aggregate_inputs);
         }
 
         let (inner_sql, params) = inner.build_select_sql_with_params_for_db(db_type);
@@ -623,6 +712,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<T> {
+        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "SUM")?;
         self.decoded_aggregate(
             "sum()",
             &Self::aggregated_column(&column),
@@ -657,6 +747,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
+        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "AVG")?;
         self.decoded_aggregate(
             "avg()",
             &Self::aggregated_column(&column),
@@ -737,6 +828,7 @@ impl<M: Model> QueryBuilder<M> {
         function: &str,
         column: &str,
     ) -> Result<Option<T>> {
+        self.ensure_encrypted_column_is_comparable(column, function)?;
         let terminal = format!("{}()", function.to_ascii_lowercase());
         let alias = Self::extreme_alias(column).unwrap_or(AGGREGATE_RESULT_ALIAS);
         self.decoded_aggregate(&terminal, column, alias, true, |column| {
@@ -766,23 +858,104 @@ impl<M: Model> QueryBuilder<M> {
             .map(|(table, field)| (table.to_string(), field.to_string()))
     }
 
-    /// Randomized encryption does not preserve equality between stored values.
-    pub(in crate::query) fn ensure_distinct_column_is_comparable(
+    pub(in crate::query) fn ensure_encrypted_column_is_comparable(
         &self,
         column: &str,
+        operation: &str,
     ) -> Result<()> {
-        if let Some((table, field)) = self.aggregate_source(column)
-            && table == M::table_name()
-            && M::encrypted_column_names().contains(&M::column_named(&field))
+        // Derived queries read output aliases; ordinary aggregates read source columns.
+        let output = if self.is_distinct() || !self.clauses.unions.is_empty() {
+            self.derived_output_name(column)
+        } else if self.aggregate_source(column).is_none() {
+            Some(column.to_string())
+        } else {
+            None
+        };
+        if let Some(output) = output
+            && let Some((name, source)) = self
+                .projection_outputs()
+                .into_iter()
+                .find(|(name, _)| *name == output)
         {
+            return Self::reject_encrypted_source(
+                self.projected_encrypted_column(&name, source.as_ref())?,
+                operation,
+            );
+        }
+        if let Some((table, field)) = self.aggregate_source(column) {
+            self.ensure_encrypted_source_is_comparable(&table, &field, operation)?;
+        }
+        Ok(())
+    }
+
+    /// GROUP BY and HAVING read inputs before DISTINCT is applied. A model
+    /// column takes precedence over an identically named output alias; aliases
+    /// remain usable when they do not shadow an input column.
+    pub(in crate::query) fn ensure_encrypted_input_is_comparable(
+        &self,
+        column: &str,
+        operation: &str,
+    ) -> Result<()> {
+        let (table, column) = Self::simple_column_reference(column).unwrap_or(("", column));
+        if !table.is_empty() {
+            return self.ensure_encrypted_source_is_comparable(table, column, operation);
+        }
+        if let Some(column) = M::own_column_name(column) {
+            return self.ensure_encrypted_source_is_comparable(M::table_name(), column, operation);
+        }
+        // An unqualified joined input also takes precedence over an output alias.
+        let mut joined_input = false;
+        for join in &self.clauses.joins {
+            if self.joined_column_names(join).contains(&column) {
+                joined_input = true;
+                self.ensure_encrypted_source_is_comparable(join.qualifier(), column, operation)?;
+            }
+        }
+        if joined_input {
+            return Ok(());
+        }
+        if let Some((name, source)) = self
+            .projection_outputs()
+            .into_iter()
+            .find(|(name, _)| name == column)
+        {
+            Self::reject_encrypted_source(
+                self.projected_encrypted_column(&name, source.as_ref())?,
+                operation,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(in crate::query) fn ensure_encrypted_source_is_comparable(
+        &self,
+        table: &str,
+        field: &str,
+        operation: &str,
+    ) -> Result<()> {
+        Self::reject_encrypted_source(self.encrypted_source_column(table, field)?, operation)
+    }
+
+    pub(in crate::query) fn reject_encrypted_source(
+        source: Option<crate::model::EncryptedColumn>,
+        operation: &str,
+    ) -> Result<()> {
+        if let Some(source) = source {
             return Err(Error::query(format!(
-                "DISTINCT is not supported for encrypted column {table}.{field}: randomized ciphertext cannot deduplicate plaintext values; read the values and deduplicate them after decryption"
+                "{operation} is not supported for encrypted column {}.{}: randomized ciphertext cannot compare plaintext values; read the values and compare them after decryption",
+                source.table, source.column,
             )));
         }
         Ok(())
     }
 
     fn aggregate_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
+        if (self.is_distinct() || !self.clauses.unions.is_empty())
+            && let Some(output) = self.derived_output_name(column)
+            && let Some(column_type) = self.projected_column_type(&output)
+        {
+            return Some(column_type);
+        }
         let (table, field) = self.aggregate_source(column)?;
         self.column_type(&format!("{table}.{field}"))
     }
@@ -860,7 +1033,7 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
-        self.ensure_distinct_column_is_comparable(&Self::aggregated_column(&column))?;
+        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "DISTINCT")?;
         let value = self
             .execute_scalar_aggregate(
                 "count_distinct()",
@@ -916,10 +1089,8 @@ impl<M: Model> QueryBuilder<M> {
         }
         self.ensure_query_is_executable()?;
         self.ensure_scalar_aggregate_is_representable("aggregates()")?;
-        for aggregate in aggregates {
-            if let Aggregate::CountDistinct(column) = aggregate {
-                self.ensure_distinct_column_is_comparable(column)?;
-            }
+        for (column, operation) in aggregates.iter().filter_map(Aggregate::compared_column) {
+            self.ensure_encrypted_column_is_comparable(column, operation)?;
         }
 
         let db_type = self.db_type_for_sql();
@@ -927,11 +1098,13 @@ impl<M: Model> QueryBuilder<M> {
         // that name comes up, so it is decoded as the model decodes the column.
         let mut aliases: Vec<String> = Vec::with_capacity(aggregates.len());
         for (index, aggregate) in aggregates.iter().enumerate() {
-            let alias = aggregate
+            let base = aggregate
                 .extreme_column()
                 .and_then(Self::extreme_alias)
                 .filter(|name| !aliases.iter().any(|alias| alias == name))
                 .map_or_else(|| format!("aggregate_{index}"), str::to_string);
+            let alias =
+                db_sql::unused_name(&base, |name| aliases.iter().any(|alias| alias == name));
             aliases.push(alias);
         }
         let (sql, params) = self.build_projected_aggregate_sql(db_type, |format_column| {
@@ -1034,15 +1207,23 @@ impl<M: Model> QueryBuilder<M> {
         self.clauses.dependencies.extend(other.cache_tables());
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
-        self.clauses
-            .unions
-            .push(UnionClause::with_params(union_type, query_sql, params));
+        let mut operand = UnionClause::with_params(union_type, query_sql, params);
+        match other.compound_projection() {
+            Ok(projection) => operand.projection = Some(projection),
+            Err(error) => self.invalidate_query(error.to_string()),
+        }
+        self.clauses.unions.push(operand);
         self
     }
 
     /// Add a UNION with another query
     ///
     /// UNION combines the results of two queries and removes duplicates.
+    /// Explicitly bound operands must resolve to the same database and
+    /// transaction as the outer query, as with subqueries and CTEs.
+    /// Encrypted projections are rejected because randomized ciphertext cannot
+    /// deduplicate plaintext values; use compatible [`union_all()`](Self::union_all)
+    /// projections instead.
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -1058,6 +1239,11 @@ impl<M: Model> QueryBuilder<M> {
     /// Add a UNION ALL with another query
     ///
     /// UNION ALL combines all results including duplicates (faster than UNION).
+    /// Explicitly bound operands must resolve to the same database and
+    /// transaction as the outer query.
+    /// If a projection includes encrypted columns, every operand must have the
+    /// same encryption table and column at each output position. Use explicit
+    /// columns or the default model projection so these scopes can be checked.
     ///
     /// ```
     /// use tideorm::prelude::*;

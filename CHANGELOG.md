@@ -5,6 +5,66 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-10-16
+
+### Added
+
+- `ValidationRule::MinExact`, `MaxExact` and `RangeExact` keep a bound as written.
+  `#[validate(min, max, range)]` generates them, so a bound compares exactly with
+  integers past 2^53 and with decimal fields (`max = 0.1` admits `0.1` and nothing above).
+
+### Changed
+
+- **Breaking:** `ValidationRule` has those three new variants; an exhaustive `match` on
+  it needs arms for them.
+- **Breaking:** operations that returned wrong results now fail instead:
+  - Typed `DISTINCT`, `GROUP BY`, `HAVING`, `MIN`/`MAX`/`SUM`/`AVG` (terminals,
+    `aggregates()` and window functions, including their `PARTITION BY` and `ORDER BY`)
+    refuse encrypted columns, also through aliases, joined models, wildcards and scalar
+    subqueries. `UNION` refuses encrypted projections; `UNION ALL` requires the same
+    encryption table and column at each output position.
+  - Typed unions refuse known incompatible output types at one position.
+  - `only_trashed()` on a model without soft delete.
+  - Batch `set()` and `coalesce()` check values against the column: booleans, bytes,
+    UUIDs, dates and times, decimals, the `f32` range and, on SQLite, the model's integer
+    range. Bulk arithmetic requires a numeric column, and JSON and array setters a
+    compatible one.
+  - `chunk()` with window functions, or with a projection that replaces the primary key.
+  - A subquery, CTE or union operand bound to another database or transaction.
+  - On SQLite: writing a non-finite float or a decimal past what REAL storage reads back,
+    a literal text filter containing NUL, and full-text indexes over a table whose `rowid`
+    is shadowed by a column or that has a different trigger under a maintenance trigger's name.
+
+### Fixed
+
+- A SQLite error that rolls back the whole transaction now blocks the statements after it
+  and fails the commit, as a deadlock does; they used to run outside the transaction.
+- SQLite migrations hold a lock file beside the database (a per-process one for in-memory
+  databases), so concurrent migrators, separate pools included, apply each migration once.
+- Entity manager: a remove or detach that arrives while a save is in flight is kept, a
+  detached merge whose key was edited never deletes another row, and concurrent
+  `persist`, `merge` and lookups of one row share one managed identity.
+- `pluck`, `value`, `get_json` and `get_as` decrypt encrypted columns read through
+  aliases, joined models, joined wildcards, value window functions and scalar subqueries.
+- Distinct `pluck()` with extra projections or a union groups values by database equality,
+  collations included, and pages over the distinct values.
+- `HAVING` compares with NULL as `IS NULL`/`IS NOT NULL`, binds numeric text as a number,
+  and binds a `MIN`/`MAX` operand with the type of a column joined after the call.
+- Aggregate aliases no longer collide with model columns or other outputs, and aggregates
+  over a `DISTINCT` or union query decode with the output's type.
+- Nested `where_has` subqueries keep the outer query's explicit database.
+- SQLite bulk arithmetic on float and decimal columns rolls the whole statement back on a
+  result the model cannot read, and rounds `f32` results as model writes do.
+- SQLite JSON equality compares numbers by value (`1`, `1.0` and `10e-1` match; adjacent
+  large decimals do not), and literal `contains`/`starts_with`/`ends_with` match text after a NUL.
+- JSON path segments with escapes are decoded before a mutation uses them.
+- SQLite full-text searches read the index in the model's own schema, and the rank output
+  can no longer shadow a model column.
+- A primary key of one binary or JSON column works with `find`, nested saves and error messages.
+- Upserts with a generated key validate their update and exclusion columns.
+- PostgreSQL schema export restores the enabled state of constraint triggers, `CLUSTER ON`
+  and ICU collation rules, and refuses foreign tables and servers.
+
 ## [0.14.1] - 2026-10-11
 
 ### Fixed
@@ -2509,6 +2569,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.15.0]: https://github.com/mohamadzoh/tideorm/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/mohamadzoh/tideorm/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mohamadzoh/tideorm/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/mohamadzoh/tideorm/compare/v0.13.0...v0.13.1

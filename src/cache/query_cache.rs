@@ -17,7 +17,7 @@ pub use config::{CacheConfig, CacheStrategy};
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
     PendingInvalidations, install as install_pending_invalidations, note_failed_statement,
-    transaction_deadlocked,
+    note_sqlite_aborted, transaction_deadlocked, transaction_depth, transaction_sqlite_aborted,
 };
 pub use store::CacheStats;
 use store::{CacheEntry, CacheStore};

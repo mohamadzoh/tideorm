@@ -23,6 +23,16 @@ pub(crate) use arrays::{
 /// leaving the WHERE clause.
 pub(crate) const MATCH_NOTHING: &str = "0 = 1";
 
+/// `base`, with `_` appended until `taken` no longer holds: a name for a
+/// generated output that no model column or other output already uses.
+pub(crate) fn unused_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut name = base.to_string();
+    while taken(&name) {
+        name.push('_');
+    }
+    name
+}
+
 /// `SELECT <projection> FROM (<inner_sql>) AS <alias>`: a query's rows read
 /// through a derived table.
 pub(crate) fn select_from_derived(
@@ -384,27 +394,30 @@ pub(crate) fn postgres_json_path_array(steps: &[JsonPathStep]) -> String {
 fn parse_quoted_json_path_segment(chars: &[char], index: &mut usize) -> Option<String> {
     let quote = chars.get(*index).copied()?;
     *index += 1;
-
-    let mut segment = String::new();
+    let mut json = String::from("\"");
     while *index < chars.len() {
-        match chars[*index] {
-            '\\' => {
-                *index += 1;
-                let escaped = chars.get(*index).copied()?;
-                segment.push(escaped);
-                *index += 1;
+        let ch = chars[*index];
+        *index += 1;
+        if ch == quote {
+            json.push('"');
+            return serde_json::from_str(&json).ok();
+        }
+        if ch == '\\' {
+            let escaped = *chars.get(*index)?;
+            *index += 1;
+            if quote == '\'' && escaped == '\'' {
+                json.push('\'');
+            } else {
+                json.push('\\');
+                json.push(escaped);
             }
-            ch if ch == quote => {
-                *index += 1;
-                return Some(segment);
+        } else {
+            if ch == '"' {
+                json.push('\\');
             }
-            ch => {
-                segment.push(ch);
-                *index += 1;
-            }
+            json.push(ch);
         }
     }
-
     None
 }
 

@@ -149,6 +149,14 @@ impl<M: Model> QueryBuilder<M> {
         // joined models. Unknown sources and expressions use the driver's type,
         // even when a model field shares their output name.
         let model_type = |name: &str| {
+            if let Some(subquery) = self
+                .clauses
+                .subquery_select_expressions
+                .iter()
+                .find(|s| s.alias == name)
+            {
+                return subquery.column_type.clone();
+            }
             if let Some((_, column_type)) = output_types.iter().find(|(output, _)| output == name) {
                 return Some(column_type.clone());
             }
@@ -160,7 +168,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         let rows = db.__raw_json_typed(sql, params, &model_type);
         let mut rows = self.logged(sql, rows, |rows| rows.len() as u64).await?;
-        crate::model::decrypt_json_rows::<M>(&mut rows, &outputs)?;
+        self.decrypt_projected_rows(&mut rows, outputs)?;
         Ok(rows)
     }
 
@@ -197,8 +205,23 @@ impl<M: Model> QueryBuilder<M> {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        crate::model::decrypt_json_rows::<M>(&mut rows, &outputs)?;
+        self.decrypt_projected_rows(&mut rows, outputs)?;
         Ok(rows)
+    }
+
+    fn decrypt_projected_rows(
+        &self,
+        rows: &mut [serde_json::Value],
+        outputs: Vec<(String, Option<(String, String)>)>,
+    ) -> Result<()> {
+        let outputs = outputs
+            .into_iter()
+            .map(|(name, source)| {
+                let encrypted = self.projected_encrypted_column(&name, source.as_ref())?;
+                Ok((name, encrypted))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        crate::model::decrypt_json_rows::<M>(rows, &outputs)
     }
 
     /// Run a mutation and drop every cached result it may have made stale.
@@ -364,7 +387,7 @@ impl<M: Model> QueryBuilder<M> {
         self.clauses.group_by.hash(&mut hasher);
 
         for (having, bindings) in self.having_clauses() {
-            hash_fragment(having, bindings, &mut hasher);
+            hash_fragment(having, &bindings, &mut hasher);
         }
 
         for union in &self.clauses.unions {
@@ -517,6 +540,9 @@ impl<M: Model> QueryBuilder<M> {
     /// callback in the same batch, so a key that repeats more often than `chunk_size` fails the
     /// call. A `union()` is refused, since its other branches do not follow the cursor.
     /// GROUP BY and HAVING are refused because the cursor would change group membership.
+    /// Window functions are also refused: each cursor step would change their input.
+    /// The projection must keep the original primary key; aliasing a different
+    /// value to its column name is refused before any callback runs.
     ///
     /// Run this example with the `sqlite` feature.
     ///
@@ -547,6 +573,12 @@ impl<M: Model> QueryBuilder<M> {
             ));
         }
 
+        if !self.clauses.window_functions.is_empty() {
+            return Err(Error::query(
+                "chunk() does not support window functions: its cursor changes the window input; use get() or page()",
+            ));
+        }
+
         if !self.clauses.group_by.is_empty() || !self.clauses.having_conditions.is_empty() {
             return Err(Error::query(
                 "chunk() does not support GROUP BY or HAVING: its primary-key cursor changes group membership; read grouped results with get() or page()",
@@ -566,6 +598,7 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         let primary_key = self.chunk_primary_key_column()?;
+        self.ensure_chunk_key_is_original(primary_key)?;
         let cursor_column = format!("{}.{}", M::table_name(), primary_key);
         let order = self.chunk_order(primary_key)?;
         let mut remaining = self.clauses.limit_value;

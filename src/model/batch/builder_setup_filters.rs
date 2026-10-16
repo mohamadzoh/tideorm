@@ -69,6 +69,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// when the destination is a JSON column.
     /// The value is bound as a parameter. Setting the same column twice keeps
     /// the last assignment.
+    /// Boolean columns require booleans; binary columns require arrays of
+    /// bytes in `0..=255`. Values assigned to `f32` fields must be within their
+    /// finite range. UUID, date, time and timestamp values must parse as their
+    /// destination type. Invalid values fail before any rows are changed.
+    /// Decimal values must parse and, on SQLite, remain within the model's
+    /// readable range after conversion to REAL.
     #[must_use]
     pub fn set(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
         match crate::query::checked_assignment_value(value) {
@@ -185,6 +191,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
     ///
     /// This is the backfill setter: rows that already hold a value keep it, so
     /// the update is safe to re-run.
+    /// Defaults follow the same type checks as [`set`](Self::set).
     #[must_use]
     pub fn coalesce(self, field: impl IntoColumnName, default: impl serde::Serialize) -> Self {
         match crate::query::checked_assignment_value(default) {

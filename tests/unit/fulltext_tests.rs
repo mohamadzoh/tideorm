@@ -18,9 +18,39 @@ mod builder_test_model {
         pub body: String,
         pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     }
+
+    #[tideorm::model(table = "fulltext_rank_collision")]
+    pub struct RankCollision {
+        #[tideorm(primary_key)]
+        pub id: i64,
+        pub body: String,
+        #[tideorm(column = "_fts_rank")]
+        pub stored_rank: f64,
+        #[tideorm(column = "_fts_rank_")]
+        pub another_rank: f64,
+    }
 }
 
 use builder_test_model::{FullTextTestArticle, FullTextTestNote};
+
+#[test]
+fn ranked_search_avoids_all_model_column_names_on_every_backend() {
+    for backend in [
+        DatabaseType::SQLite,
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+    ] {
+        for query in ["alpha", ""] {
+            let builder =
+                FullTextSearchBuilder::<builder_test_model::RankCollision>::new(&["body"], query);
+            let (sql, _) = builder.build_ranked_sql(backend).unwrap();
+            assert!(sql.contains(" AS _fts_rank__"), "{sql}");
+            if !query.is_empty() && backend != DatabaseType::SQLite {
+                assert!(sql.contains("ORDER BY _fts_rank__ DESC"), "{sql}");
+            }
+        }
+    }
+}
 
 #[test]
 fn test_search_mode_display() {
@@ -244,14 +274,11 @@ fn test_fulltext_index_sqlite() {
         vec!["title".to_string(), "content".to_string()],
     );
     let sqls = index.to_sqlite_sql();
-    assert_eq!(sqls.len(), 6);
-    assert!(sqls[0].contains("CREATE VIRTUAL TABLE"));
-    assert!(sqls[0].contains("fts5"));
+    assert_eq!(sqls.len(), 7);
+    assert!(sqls[1].contains("CREATE VIRTUAL TABLE"));
+    assert!(sqls[1].contains("fts5"));
     // Rows the table held before the index existed are indexed too.
-    assert_eq!(
-        sqls[5],
-        "INSERT INTO \"articles_fts\"(\"articles_fts\") VALUES('rebuild')"
-    );
+    assert_eq!(sqls[6], index.sqlite_rebuild_sql());
 }
 
 #[test]
@@ -274,21 +301,23 @@ fn a_fulltext_index_names_a_qualified_table_part_by_part() {
     // inside it bare, as FTS5 and its triggers require.
     let sqlite = index.to_sqlite_sql();
     assert!(
-        sqlite[0].starts_with(r#"CREATE VIRTUAL TABLE IF NOT EXISTS "tenant"."posts_fts" USING fts5("body", content="posts""#),
+        sqlite[1].starts_with(r#"CREATE VIRTUAL TABLE IF NOT EXISTS "tenant"."posts_fts" USING fts5("body", content="posts""#),
         "{}",
-        sqlite[0]
+        sqlite[1]
     );
     assert!(
-        sqlite[2].starts_with(
+        sqlite[3].starts_with(
             r#"CREATE TRIGGER IF NOT EXISTS "tenant"."posts_ai" AFTER INSERT ON "posts" BEGIN INSERT INTO "posts_fts"("#
         ),
         "{}",
-        sqlite[2]
+        sqlite[3]
     );
-    assert_eq!(
-        index.sqlite_rebuild_sql(),
-        r#"INSERT INTO "tenant"."posts_fts"("posts_fts") VALUES('rebuild')"#
+    let rebuild = index.sqlite_rebuild_sql();
+    assert!(
+        rebuild.starts_with(r#"INSERT INTO "tenant"."posts_fts"("posts_fts") SELECT CASE WHEN "#)
     );
+    assert!(rebuild.contains("pragma_table_xinfo('posts', 'tenant')"));
+    assert!(rebuild.ends_with(" THEN 'rebuild' END"));
 }
 
 #[test]
@@ -312,7 +341,7 @@ fn test_sqlite_fts_triggers_quote_the_virtual_table_consistently() {
 
     // The AFTER INSERT trigger used to write the quotes by hand, which broke on
     // any table name containing a double quote.
-    assert!(sqls[2].contains("INSERT INTO \"art\"\"icles_fts\"(rowid, "));
+    assert!(sqls[3].contains("INSERT INTO \"art\"\"icles_fts\"(rowid, "));
     for sql in &sqls {
         assert!(
             !sql.contains("\"art\"icles_fts\""),
@@ -949,7 +978,10 @@ async fn a_second_sqlite_index_over_other_columns_fails_instead_of_keeping_the_f
         }
     }
     let failure = failure.expect("the second index should be refused");
-    assert!(failure.contains("no such column"), "{failure}");
+    assert!(
+        failure.contains("full-text trigger name conflict"),
+        "{failure}"
+    );
 }
 
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
@@ -1082,10 +1114,10 @@ async fn test_sqlite_search_skips_soft_deleted_rows() {
 fn the_sqlite_rebuild_statement_reindexes_the_table_by_its_current_rowids() {
     let index = FullTextIndex::new("idx_notes", "notes", vec!["body".to_string()]);
 
-    assert_eq!(
-        index.sqlite_rebuild_sql(),
-        r#"INSERT INTO "notes_fts"("notes_fts") VALUES('rebuild')"#
-    );
+    let rebuild = index.sqlite_rebuild_sql();
+    assert!(rebuild.starts_with(r#"INSERT INTO "notes_fts"("notes_fts") SELECT CASE WHEN "#));
+    assert!(rebuild.contains("pragma_table_xinfo('notes')"));
+    assert!(rebuild.ends_with(" THEN 'rebuild' END"));
     assert_eq!(
         index.to_sqlite_sql().last(),
         Some(&index.sqlite_rebuild_sql())

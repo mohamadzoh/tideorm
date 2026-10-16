@@ -298,7 +298,7 @@ impl<M: Model> QueryBuilder<M> {
     /// resolvable column reference by validation. A column that carries its own
     /// `ASC`/`DESC` suffix keeps it, because appending the tuple direction on top
     /// would render `"name" DESC ASC`.
-    fn format_order_by_for_db(
+    pub(in crate::query) fn format_order_by_for_db(
         &self,
         db_type: DatabaseType,
         column: &str,

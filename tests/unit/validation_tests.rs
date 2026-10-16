@@ -298,3 +298,40 @@ fn rules_on_text_decimal_and_uuid_fields_check_them() {
     let fields: Vec<&str> = errors.iter().map(|(field, _)| field.as_str()).collect();
     assert_eq!(fields, ["body", "price", "owner", "stars"]);
 }
+
+#[test]
+fn exact_numeric_bounds_preserve_fractional_and_scientific_precision() {
+    assert!(super::outside_exact(
+        &9007199254740992_i64,
+        "9007199254740992.5",
+        true
+    ));
+    assert!(!super::outside_exact(
+        &9007199254740993_i64,
+        "9007199254740992.5",
+        true
+    ));
+    assert!(!super::outside_exact(
+        &rust_decimal::Decimal::ONE,
+        "1e-2",
+        true
+    ));
+    assert!(super::outside_exact(
+        &rust_decimal::Decimal::ONE,
+        "1.00000000000000000000000000001",
+        true
+    ));
+    for (left, right, expected) in [
+        ("1", "1.000e0", std::cmp::Ordering::Equal),
+        (
+            "-1",
+            "-1.00000000000000000000000000001",
+            std::cmp::Ordering::Greater,
+        ),
+        ("0", "-0e99", std::cmp::Ordering::Equal),
+        ("0.001", "1e-2", std::cmp::Ordering::Less),
+        ("1e1000", "9e999", std::cmp::Ordering::Greater),
+    ] {
+        assert_eq!(super::compare_decimal_text(left, right), Some(expected));
+    }
+}

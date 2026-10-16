@@ -115,7 +115,7 @@ impl<M: Model> QueryBuilder<M> {
         let groups: Vec<String> = self.described_or_groups().collect();
         let having: Vec<String> = self
             .having_clauses()
-            .map(|(template, bindings)| Self::describe_having_clause(template, bindings))
+            .map(|(template, bindings)| Self::describe_having_clause(template, &bindings))
             .collect();
 
         let mut operator_chain = Vec::new();

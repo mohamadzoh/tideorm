@@ -119,14 +119,14 @@ impl<M: Model> QueryBuilder<M> {
                 M::table_name()
             )));
         }
+        let columns = M::primary_key_names();
         let values = match serde_json::to_value(primary_key)
             .map_err(|e| Error::conversion(format!("Failed to serialize primary key: {}", e)))?
         {
-            serde_json::Value::Array(values) => values,
+            serde_json::Value::Array(values) if columns.len() != 1 => values,
             value => vec![value],
         };
 
-        let columns = M::primary_key_names();
         if values.len() != columns.len() {
             return Err(Error::query(format!(
                 "Primary key value for {} did not match declared key columns",
@@ -202,6 +202,9 @@ impl<M: Model> QueryBuilder<M> {
     /// `.distinct().pluck("country")` lists each country once. On a
     /// `union()`, whose other queries keep the projection they were given,
     /// the column is read off the union's rows.
+    /// With extra projections or a union, the database groups equal scalar
+    /// values using its own comparison and collation rules. Pagination happens
+    /// after fetching the ordered rows and keeping the first value per group.
     ///
     /// Run this example with the `sqlite` feature.
     ///
@@ -225,7 +228,7 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Result<Vec<T>> {
         let column = crate::columns::column_reference(&column, Some(M::table_name()));
         let union_distinct = (!self.clauses.unions.is_empty()).then(|| self.is_distinct());
-        let query = match union_distinct {
+        let mut query = match union_distinct {
             None => self.select(vec![column.as_str()]),
             Some(_) => self,
         };
@@ -237,13 +240,42 @@ impl<M: Model> QueryBuilder<M> {
                 column
             ))
         })?;
-        let rows = query.get_json().await?;
+        // Extra projections and compound operands may make distinct rows share
+        // a scalar. Apply scalar pagination after deduplication, preserving the
+        // query's row order. The ordinary single-column path stays in SQL.
+        let scalar_distinct = query.is_distinct()
+            && (union_distinct.is_some()
+                || query.raw_projection().next().is_some()
+                || !query.clauses.subquery_select_expressions.is_empty()
+                || !query.clauses.window_functions.is_empty());
+        query.ensure_query_is_executable()?;
+        let (offset, limit) = if scalar_distinct {
+            (
+                query.clauses.offset_value.take().unwrap_or(0),
+                query.clauses.limit_value.take(),
+            )
+        } else {
+            (0, None)
+        };
+        let (rows, group) = if scalar_distinct {
+            let (rows, group) = query.fetch_distinct_pluck_rows(&column, &output).await?;
+            (rows, Some(group))
+        } else {
+            (query.get_json().await?, None)
+        };
         let mut seen = std::collections::HashSet::new();
         rows.into_iter()
             .filter(|row| {
-                union_distinct != Some(true)
-                    || seen.insert(row.get(output.as_str()).map(ToString::to_string))
+                group.as_ref().is_none_or(|group| {
+                    seen.insert(row.get(group.as_str()).map(ToString::to_string))
+                })
             })
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(
+                limit
+                    .and_then(|n| usize::try_from(n).ok())
+                    .unwrap_or(usize::MAX),
+            )
             .map(|mut row| {
                 let value = row
                     .get_mut(output.as_str())
@@ -264,6 +296,108 @@ impl<M: Model> QueryBuilder<M> {
                 })
             })
             .collect()
+    }
+
+    /// Give equal scalar values the same database-generated group number.
+    /// Comparing decoded JSON in Rust would lose column collations (and SQL
+    /// numeric equality). The original ORDER BY still chooses which spelling
+    /// represents a group, before pluck applies scalar offset/limit.
+    async fn fetch_distinct_pluck_rows(
+        &self,
+        column: &str,
+        output: &str,
+    ) -> Result<(Vec<serde_json::Value>, String)> {
+        let db_type = self.db_type_for_sql();
+        let outputs = self.projection_outputs();
+        let group = db_sql::unused_name("tideorm_pluck_group", |name| {
+            outputs
+                .iter()
+                .map(|(output, _)| output.as_str())
+                .chain(M::column_names().iter().copied())
+                .any(|taken| taken.eq_ignore_ascii_case(name))
+        });
+        let quoted_group = db_sql::quote_ident(db_type, &group);
+        let (sql, params) = if self.clauses.unions.is_empty() {
+            let mut ranked = self.clone();
+            ranked.clauses.raw_select_expressions.push(format!(
+                "DENSE_RANK() OVER (ORDER BY {}) AS {quoted_group}",
+                self.format_column_for_db(db_type, column),
+            ));
+            // The rank is a function of the selected scalar, so it cannot
+            // split otherwise equal DISTINCT rows or alter their ordering.
+            ranked.build_select_sql_with_params_for_db(db_type)
+        } else {
+            // Rank the complete compound result, not each UNION arm. Keep
+            // its projection and parameter order intact in the derived table.
+            let (inner_sql, params) = self.build_select_sql_with_params_for_db(db_type);
+            let mut sql = db_sql::select_from_derived(
+                db_type,
+                &format!(
+                    "*, DENSE_RANK() OVER (ORDER BY {}) AS {quoted_group}",
+                    db_sql::quote_ident(db_type, output),
+                ),
+                &inner_sql,
+                "tideorm_pluck_rows",
+            );
+            // A window may reorder its input; repeat the compound query's
+            // ordering on the outer SELECT, which sees output names only.
+            let ordering = self
+                .clauses
+                .order_by
+                .iter()
+                .map(|(column, direction)| {
+                    match crate::query::builder::raw_order_by_expression(column) {
+                        Some(raw) => {
+                            let expression =
+                                self.raw_order_output(raw, &outputs, db_type).map_or_else(
+                                    || raw.to_string(),
+                                    |output| db_sql::quote_ident(db_type, &output),
+                                );
+                            format!("{expression} {}", direction.as_str())
+                        }
+                        None => self.format_order_by_for_db(db_type, column, *direction),
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !ordering.is_empty() {
+                sql.push_str(&format!(" ORDER BY {}", ordering.join(", ")));
+            }
+            (sql, params)
+        };
+        Ok((self.fetch_json(&sql, params).await?, group))
+    }
+
+    /// The output a compound query's raw ORDER BY expression sorts by: the
+    /// alias of the selected expression it repeats, or the output a qualified
+    /// column is selected as. `None` leaves the expression as written.
+    fn raw_order_output(
+        &self,
+        raw: &str,
+        outputs: &[(String, Option<(String, String)>)],
+        db_type: DatabaseType,
+    ) -> Option<String> {
+        let raw = raw.trim();
+        self.raw_projection()
+            .find_map(|projection| {
+                let (expression, alias) = Self::split_alias(projection);
+                (expression.trim() == raw).then_some(alias).flatten()
+            })
+            .map(str::to_string)
+            .or_else(|| {
+                outputs.iter().find_map(|(output, source)| {
+                    let (table, column) = source.as_ref()?;
+                    let qualified = format!(
+                        "{}.{}",
+                        db_sql::quote_ident(db_type, table),
+                        db_sql::quote_ident(db_type, column),
+                    );
+                    (raw == qualified).then(|| output.clone())
+                })
+            })
+            .or_else(|| {
+                let parts = crate::internal::sql_safety::identifier_reference_parts(raw)?;
+                self.derived_output_name(&parts.join("."))
+            })
     }
 
     /// The column of the first matching row, read as `T`; `None` when no row

@@ -35,6 +35,8 @@ pub(crate) struct PendingInvalidations {
     /// Whether a statement deadlocked, which rolls the whole transaction back
     /// on the server: MySQL and MariaDB then run what follows outside it.
     deadlocked: bool,
+    sqlite_aborted: bool,
+    depth: usize,
 }
 
 impl Drop for PendingInvalidations {
@@ -44,6 +46,9 @@ impl Drop for PendingInvalidations {
     fn drop(&mut self) {
         while let Some(undo) = self.undo.pop() {
             undo();
+        }
+        if self.sqlite_aborted && self.nested {
+            record(|enclosing| enclosing.sqlite_aborted = true);
         }
         if self.deadlocked && self.nested {
             record(|enclosing| enclosing.deadlocked = true);
@@ -67,6 +72,8 @@ impl PendingInvalidations {
             undo: Vec::new(),
             statement_failed: false,
             deadlocked: false,
+            sqlite_aborted: false,
+            depth: if nested { transaction_depth() + 1 } else { 1 },
         }
     }
     pub(super) fn table(&mut self, table: &str) {
@@ -86,6 +93,10 @@ impl PendingInvalidations {
     /// deadlocked.
     pub(crate) fn deadlocked(&self) -> bool {
         self.deadlocked
+    }
+
+    pub(crate) fn sqlite_aborted(&self) -> bool {
+        self.sqlite_aborted
     }
 
     /// Invalidate again what the transaction's writes invalidated, now that it
@@ -157,5 +168,26 @@ pub(crate) fn transaction_deadlocked() -> bool {
         slot.borrow()
             .as_ref()
             .is_some_and(|pending| pending.lock().deadlocked)
+    })
+}
+
+/// SQLite can abort the whole transaction on a constraint or trigger failure.
+pub(crate) fn note_sqlite_aborted(aborted: bool) {
+    record(|pending| pending.sqlite_aborted = aborted);
+}
+
+pub(crate) fn transaction_sqlite_aborted() -> bool {
+    CURRENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|pending| pending.lock().sqlite_aborted)
+    })
+}
+
+pub(crate) fn transaction_depth() -> usize {
+    CURRENT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or(0, |pending| pending.lock().depth)
     })
 }

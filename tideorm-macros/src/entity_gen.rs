@@ -423,9 +423,22 @@ fn sea_orm_field_def(field: &ModelField) -> TokenStream2 {
 fn build_primary_key_display_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_column_names = &ctx.pk_column_names;
     let (bind, components) = ctx.primary_key_components();
+    let displays = ctx
+        .fields
+        .iter()
+        .filter(|field| field.primary_key)
+        .zip(pk_column_names)
+        .zip(components)
+        .map(|((field, column), component)| {
+            if type_string(&field.ty).contains("Vec<") {
+                quote!(format!("{} = {:?}", #column, #component))
+            } else {
+                quote!(format!("{} = {}", #column, #component))
+            }
+        });
     quote! {
         #bind
-        [#(format!("{} = {}", #pk_column_names, #components)),*].join(" AND ")
+        [#(#displays),*].join(" AND ")
     }
 }
 
@@ -725,6 +738,9 @@ fn generate_sync_impl(ctx: &BuildContext) -> TokenStream2 {
                 sync_schema: #struct_name::__get_sync_schema,
                 table_name: <#struct_name as ::tideorm::model::ModelMeta>::table_name,
                 column_type: ::tideorm::internal::__column_type_of::<#struct_name>,
+                schema_name: <#struct_name as ::tideorm::model::ModelMeta>::schema_name,
+                column_names: <#struct_name as ::tideorm::model::ModelMeta>::column_names,
+                encrypted_column: ::tideorm::model::__encrypted_column::<#struct_name>,
             }
         }
     }

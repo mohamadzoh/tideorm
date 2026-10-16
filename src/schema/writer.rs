@@ -45,7 +45,7 @@ impl SchemaWriter {
     /// and triggers follow the tables; their enabled states are retained.
     /// Partition column overrides, replica identities and table storage options
     /// also survive replay.
-    /// Schemas, extensions and collations precede these objects. Unsupported types, custom aggregates, operators and text-search objects fail
+    /// Schemas, extensions and collations precede these objects. Unsupported types, custom aggregates, operators, foreign tables/servers and text-search objects fail
     /// the export instead of producing a file that cannot recreate them.
     ///
     /// SQLite keeps the statement that created each table, view, index and
@@ -679,6 +679,76 @@ async fn introspect_postgres_catalog(conn: &impl ConnectionTrait) -> Result<Cata
          WHERE c.relkind IN ('r','p') AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=c.oid AND d.deptype='e')
          ORDER BY n.nspname,c.relname", Vec::new()).await? {
+        catalog.constraints.push(get(&row, "definition")?);
+    }
+    // Internal trigger names contain source OIDs. Resolve the corresponding
+    // constraint and trigger in the destination instead of replaying that name.
+    for row in query(conn, pg,
+        "SELECT format('DO %L', format('DECLARE trigger_name text; BEGIN
+             WITH RECURSIVE family(oid) AS (
+                 SELECT oid FROM pg_catalog.pg_constraint WHERE conrelid=%L::regclass AND conname=%L
+                 UNION ALL SELECT child.oid FROM pg_catalog.pg_constraint child JOIN family ON child.conparentid=family.oid
+             )
+             SELECT target.tgname INTO STRICT trigger_name FROM pg_catalog.pg_trigger target
+             JOIN family ON target.tgconstraint=family.oid
+             JOIN pg_catalog.pg_constraint constraint_row ON constraint_row.oid=family.oid
+             WHERE target.tgisinternal AND target.tgrelid=%L::regclass AND target.tgtype=%s
+               AND target.tgfoid=%L::regproc
+               AND constraint_row.conrelid=%L::regclass
+               AND constraint_row.confrelid=COALESCE(%L::regclass,0);
+             EXECUTE %L || pg_catalog.quote_ident(trigger_name);
+         END', root.relation, root.name, format('%I.%I', n.nspname,t.relname), tg.tgtype,
+             format('%I.%I', fn.nspname,p.proname), c.conrelid::regclass::text,
+             CASE WHEN c.confrelid=0 THEN NULL ELSE c.confrelid::regclass::text END,
+             format('ALTER TABLE ONLY %I.%I %s TRIGGER ', n.nspname,t.relname,
+                 CASE tg.tgenabled WHEN 'D' THEN 'DISABLE' WHEN 'R' THEN 'ENABLE REPLICA' ELSE 'ENABLE ALWAYS' END))) AS definition
+         FROM pg_catalog.pg_trigger tg
+         JOIN pg_catalog.pg_class t ON t.oid=tg.tgrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+         JOIN pg_catalog.pg_constraint c ON c.oid=tg.tgconstraint
+         JOIN pg_catalog.pg_proc p ON p.oid=tg.tgfoid
+         JOIN pg_catalog.pg_namespace fn ON fn.oid=p.pronamespace
+         CROSS JOIN LATERAL (
+             WITH RECURSIVE ancestors AS (
+                 SELECT c.oid,c.conparentid,c.conrelid,c.conname
+                 UNION ALL SELECT parent.oid,parent.conparentid,parent.conrelid,parent.conname
+                 FROM pg_catalog.pg_constraint parent JOIN ancestors ON parent.oid=ancestors.conparentid
+             ) SELECT conrelid::regclass::text AS relation,conname AS name FROM ancestors WHERE conparentid=0
+         ) root
+         WHERE tg.tgisinternal AND tg.tgenabled <> 'O'
+           AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=t.oid AND d.deptype='e')
+         ORDER BY n.nspname,t.relname,tg.oid", Vec::new()).await? {
+        catalog.constraints.push(get(&row, "definition")?);
+    }
+    // CLUSTER's index designation is separate from CREATE INDEX. Resolve
+    // inherited indexes through their root because their names may change.
+    for row in query(conn, pg,
+        "SELECT format('DO %L', format('DECLARE cluster_index text; BEGIN
+             WITH RECURSIVE family(oid) AS (
+                 SELECT %L::regclass::oid
+                 UNION ALL SELECT inhrelid FROM pg_catalog.pg_inherits JOIN family ON inhparent=family.oid
+             )
+             SELECT idx.relname INTO STRICT cluster_index FROM family
+             JOIN pg_catalog.pg_index pi ON pi.indexrelid=family.oid
+             JOIN pg_catalog.pg_class idx ON idx.oid=pi.indexrelid
+             WHERE pi.indrelid=%L::regclass;
+             EXECUTE %L || pg_catalog.quote_ident(cluster_index);
+         END', root.name, format('%I.%I', n.nspname,t.relname),
+             format('ALTER TABLE %I.%I CLUSTER ON ', n.nspname,t.relname))) AS definition
+         FROM pg_catalog.pg_index ix JOIN pg_catalog.pg_class t ON t.oid=ix.indrelid
+         JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
+         CROSS JOIN LATERAL (
+             WITH RECURSIVE ancestors(oid) AS (
+                 SELECT ix.indexrelid
+                 UNION ALL SELECT inhparent FROM pg_catalog.pg_inherits JOIN ancestors ON inhrelid=ancestors.oid
+             ) SELECT format('%I.%I', ns.nspname,i.relname) AS name FROM ancestors
+             JOIN pg_catalog.pg_class i ON i.oid=ancestors.oid JOIN pg_catalog.pg_namespace ns ON ns.oid=i.relnamespace
+             WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=i.oid)
+         ) root
+         WHERE ix.indisclustered AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=t.oid AND d.deptype='e')
+         ORDER BY n.nspname,t.relname", Vec::new()).await? {
         catalog.constraints.push(get(&row, "definition")?);
     }
     catalog

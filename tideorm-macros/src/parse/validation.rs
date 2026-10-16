@@ -140,8 +140,15 @@ fn parse_rule(
             quote!(#rule_path(#value))
         }
         Arity::Number => {
-            let value = parse_single(meta, &rule_ident, expr_to_f64, "a finite number", "18")?;
-            quote!(#rule_path(#value))
+            let value = parse_single(
+                meta,
+                &rule_ident,
+                expr_to_numeric_text,
+                "a finite number",
+                "18",
+            )?;
+            let exact = format_ident!("{}Exact", variant);
+            quote!(::tideorm::validation::ValidationRule::#exact(#value.to_string()))
         }
         Arity::Text => {
             let value = parse_single(
@@ -155,7 +162,7 @@ fn parse_rule(
         }
         Arity::Range => {
             let (min, max) = parse_range_rule(meta, &rule_ident)?;
-            quote!(#rule_path(#min, #max))
+            quote!(::tideorm::validation::ValidationRule::RangeExact(#min.to_string(), #max.to_string()))
         }
     };
 
@@ -262,12 +269,12 @@ fn parse_single<T>(
     })
 }
 
-fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(f64, f64)> {
+fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(String, String)> {
     let values = rule_values(meta, rule_ident)?;
 
     // `range(min, max)`
     if let [first, second] = values.as_slice() {
-        let bounds = (expr_to_f64(first), expr_to_f64(second));
+        let bounds = (expr_to_numeric_text(first), expr_to_numeric_text(second));
         return match bounds {
             (Some(min), Some(max)) => Ok((min, max)),
             _ => Err(range_error(first, rule_ident)),
@@ -289,8 +296,8 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
                 ),
             ));
         }
-        let min = range.start.as_deref().and_then(expr_to_f64);
-        let max = range.end.as_deref().and_then(expr_to_f64);
+        let min = range.start.as_deref().and_then(expr_to_numeric_text);
+        let max = range.end.as_deref().and_then(expr_to_numeric_text);
         return match (min, max) {
             (Some(min), Some(max)) => Ok((min, max)),
             _ => Err(range_error(value, rule_ident)),
@@ -305,20 +312,13 @@ fn parse_range_rule(meta: &ParseNestedMeta, rule_ident: &Ident) -> syn::Result<(
     }
 }
 
-fn parse_range_text(text: &str) -> Option<(f64, f64)> {
+fn parse_range_text(text: &str) -> Option<(String, String)> {
     let (min, max) = text.split_once("..")?;
-    let max = max.strip_prefix('=').unwrap_or(max);
-    let min = min
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|min| min.is_finite())?;
-    let max = max
-        .trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|max| max.is_finite())?;
-    Some((min, max))
+    let min = min.trim();
+    let max = max.strip_prefix('=').unwrap_or(max).trim();
+    min.parse::<f64>().ok().filter(|n| n.is_finite())?;
+    max.parse::<f64>().ok().filter(|n| n.is_finite())?;
+    Some((min.to_string(), max.to_string()))
 }
 
 fn range_error(value: &Expr, rule_ident: &Ident) -> syn::Error {
@@ -355,18 +355,17 @@ fn expr_to_usize(expr: &Expr) -> Option<usize> {
     }
 }
 
-fn expr_to_f64(expr: &Expr) -> Option<f64> {
+fn expr_to_numeric_text(expr: &Expr) -> Option<String> {
     let (negated, literal) = expr_literal(expr)?;
-    let value = match literal {
-        Lit::Int(value) => value.base10_parse::<f64>().ok()?,
-        Lit::Float(value) => value.base10_parse::<f64>().ok()?,
-        Lit::Str(value) => value.value().trim().parse::<f64>().ok()?,
+    let text = match literal {
+        Lit::Int(value) => value.base10_digits().to_string(),
+        Lit::Float(value) => value.base10_digits().to_string(),
+        Lit::Str(value) => value.value().trim().to_string(),
         _ => return None,
     };
-
-    // A non-finite bound has no literal to emit, and every value fails
-    // `min = inf` or passes `max = inf`.
-    Some(if negated { -value } else { value }).filter(|value| value.is_finite())
+    let text = if negated { format!("-{text}") } else { text };
+    text.parse::<f64>().ok().filter(|value| value.is_finite())?;
+    Some(text)
 }
 
 fn expr_to_string(expr: &Expr) -> Option<String> {

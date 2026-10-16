@@ -1,0 +1,39 @@
+//! Regressions found by code reviews and behavioral audits, reproduced on SQLite.
+//!
+//! Each test owns an in-memory database, so tests share no rows. The modules
+//! follow the area under test; models and databases that several of them use
+//! live in `fixtures`. Run the whole suite with every module feature:
+//!
+//! ```text
+//! cargo test --test sqlite_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+//! ```
+#![cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+
+#[path = "sqlite_regressions/fixtures.rs"]
+mod fixtures;
+
+#[path = "sqlite_regressions/batch_updates.rs"]
+mod batch_updates;
+#[path = "sqlite_regressions/cache.rs"]
+mod cache;
+#[path = "sqlite_regressions/databases.rs"]
+mod databases;
+#[cfg(feature = "encrypted-fields")]
+#[path = "sqlite_regressions/encryption.rs"]
+mod encryption;
+#[cfg(feature = "entity-manager")]
+#[path = "sqlite_regressions/entity_manager.rs"]
+mod entity_manager;
+#[cfg(feature = "fulltext")]
+#[path = "sqlite_regressions/fulltext.rs"]
+mod fulltext;
+#[path = "sqlite_regressions/migrations.rs"]
+mod migrations;
+#[path = "sqlite_regressions/queries.rs"]
+mod queries;
+#[path = "sqlite_regressions/transactions.rs"]
+mod transactions;
+#[path = "sqlite_regressions/validation.rs"]
+mod validation;
+#[path = "sqlite_regressions/writes.rs"]
+mod writes;

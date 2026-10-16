@@ -33,6 +33,11 @@ pub trait ValidatableValue {
         None
     }
 
+    /// Return an exact decimal for decimal-valued fields.
+    fn as_decimal_value(&self) -> Option<rust_decimal::Decimal> {
+        None
+    }
+
     /// `bound` at the precision this value holds a number in, which the
     /// numeric rules compare it with: an `f32` holds `0.7` as `0.699999988`,
     /// so a `min = 0.7` must be rounded the same way or `0.7` fails it.
@@ -78,6 +83,9 @@ impl ValidatableValue for &str {
 }
 
 impl<T: ValidatableValue> ValidatableValue for Option<T> {
+    fn as_decimal_value(&self) -> Option<rust_decimal::Decimal> {
+        self.as_ref().and_then(ValidatableValue::as_decimal_value)
+    }
     fn is_empty_value(&self) -> bool {
         match self {
             Some(value) => value.is_empty_value(),
@@ -152,6 +160,9 @@ impl_validatable_for_number!(
 );
 
 impl ValidatableValue for rust_decimal::Decimal {
+    fn as_decimal_value(&self) -> Option<rust_decimal::Decimal> {
+        Some(*self)
+    }
     fn is_empty_value(&self) -> bool {
         false
     }

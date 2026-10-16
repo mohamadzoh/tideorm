@@ -12,6 +12,11 @@ pub struct CompiledModelRegistration {
     pub sync_schema: fn() -> ModelSchema,
     /// The model's table, which a query joining it names.
     pub table_name: fn() -> &'static str,
+    pub schema_name: fn() -> Option<&'static str>,
+    /// Physical column names used to resolve wildcard projections.
+    pub column_names: fn() -> &'static [&'static str],
+    /// Encryption metadata used by projections of a joined model.
+    pub encrypted_column: fn(&str) -> crate::Result<Option<crate::model::EncryptedColumn>>,
     /// The model's type for one of its columns, which binds a filter value on
     /// that column when another model's query joins the table.
     pub column_type: ColumnTypeOf,
@@ -42,6 +47,34 @@ pub(crate) fn registered_column_type(table: &str, column: &str) -> Option<crate:
     by_table
         .get(table)
         .and_then(|column_type| column_type(column))
+}
+
+/// Columns of the compiled model for a table in the requested schema.
+pub(crate) fn registered_column_names(
+    schema: Option<&str>,
+    table: &str,
+) -> &'static [&'static str] {
+    inventory::iter::<CompiledModelRegistration>
+        .into_iter()
+        .find(|model| (model.table_name)() == table && (model.schema_name)() == schema)
+        .map_or(&[], |model| (model.column_names)())
+}
+
+/// Resolve encryption metadata without conflating same-named tables in different schemas.
+pub(crate) fn registered_encrypted_column(
+    schema: Option<&str>,
+    table: &str,
+    column: &str,
+) -> crate::Result<Option<crate::model::EncryptedColumn>> {
+    for model in inventory::iter::<CompiledModelRegistration> {
+        if (model.table_name)() == table
+            && (model.schema_name)() == schema
+            && let Some(source) = (model.encrypted_column)(column)?
+        {
+            return Ok(Some(source));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn register_compiled_models_matching(pattern: &str) -> usize {

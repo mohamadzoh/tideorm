@@ -58,9 +58,6 @@ where
     // it alone the upsert inserts the row, and otherwise the database numbers
     // it as an insert would, rather than storing its placeholder `0`.
     let key_is_new = auto_increment && model.is_new();
-    if key_is_new && conflict_cols.iter().all(|column| is_key_column(column)) {
-        return super::__insert_row::<M>(model.try_into_active_model()?).await;
-    }
     let include_pk = !key_is_new
         && (conflict_cols.iter().any(|column| is_key_column(column)) || !auto_increment);
 
@@ -126,6 +123,11 @@ where
         .map(|column| resolve(column, "update"))
         .collect::<Result<Vec<_>>>()?;
 
+    // Validate the column lists even when a generated key makes this an insert.
+    if key_is_new && conflict_cols.iter().all(|column| is_key_column(column)) {
+        return super::__insert_row::<M>(active).await;
+    }
+
     let error_context = move || {
         crate::internal::model_error_context::<M>(format!(
             "insert_or_update into {} on conflict ({})",
@@ -136,6 +138,7 @@ where
     let connection = crate::database::__current_connection()?;
     let executor = connection.executor();
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
 
     if Backend::from(executor.get_database_backend()) == Backend::MySql {
         if update_cols.iter().any(|column| is_key_column(column)) {

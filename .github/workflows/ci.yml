@@ -207,10 +207,10 @@ jobs:
           cargo test --package tideorm --test sqlite_integration_tests --no-default-features --features sqlite,runtime-tokio
           cargo test --package tideorm --test sqlite_entity_manager_tests --no-default-features --features sqlite,runtime-tokio,entity-manager
 
-      # Several review regressions are gated on the module features.
-      - name: Run review regressions and developer-experience tests
+      # Several regression modules are gated on the module features.
+      - name: Run SQLite regressions and developer-experience tests
         run: |
-          cargo test --package tideorm --test review_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
+          cargo test --package tideorm --test sqlite_regressions --no-default-features --features "sqlite,runtime-tokio,attachments,translations,fulltext,entity-manager,dirty-tracking,encrypted-fields"
           cargo test --package tideorm --test developer_experience --no-default-features --features sqlite,runtime-tokio
 
   # Integration targets that never touch a database. Targets are named

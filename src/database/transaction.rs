@@ -169,6 +169,9 @@ impl Database {
     /// After a deadlock, subsequent TideORM statements and nested transactions
     /// in this scope fail without reaching the server, even if the closure
     /// catches the original error. Retry the entire transaction instead.
+    /// SQLite errors that roll back the entire transaction also block further
+    /// statements and nested transactions. Ordinary statement-only constraint
+    /// failures can still be caught without aborting the transaction.
     ///
     /// The transaction is always terminated before this returns. If a clone of
     /// the handle escaped the closure — for example a `Database` captured from
@@ -228,6 +231,12 @@ impl Database {
                         source: None,
                     });
                 }
+                if pending.lock().sqlite_aborted() {
+                    let _ = txn.rollback().await;
+                    return Err(Error::transaction(
+                        "SQLite aborted the transaction; further statements were blocked and the transaction was rolled back",
+                    ));
+                }
                 if statement_failed {
                     ensure_transaction_can_commit(&txn).await?;
                 }
@@ -283,6 +292,16 @@ impl ConnectionRef {
             Self::Database(conn) => conn.connection().into(),
             Self::Transaction(tx) => tx.as_ref().into(),
         })
+    }
+
+    /// Whether `self` and `other` are the same pool or the same transaction,
+    /// so statements on either run on one connection.
+    pub(crate) fn is_same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Database(a), Self::Database(b)) => Arc::ptr_eq(a, b),
+            (Self::Transaction(a), Self::Transaction(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
     pub(crate) fn backend(&self) -> Backend {

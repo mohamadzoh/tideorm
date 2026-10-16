@@ -21,7 +21,9 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
     let restore = async {
         for name in [&source_name, &destination_name] {
             admin
-                .exec_raw(&format!("CREATE DATABASE {name} TEMPLATE template0"))
+                .exec_raw(&format!(
+                    "CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8'"
+                ))
                 .await
                 .unwrap();
         }
@@ -50,6 +52,20 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
             "CREATE INDEX items_label ON app.items (lower(name))",
             "CREATE VIEW shared.items AS SELECT id, shared.label(id) AS label FROM app.items",
             "CREATE VIEW app.visible_items AS SELECT * FROM shared.items",
+            "CREATE COLLATION app.eq_ab (provider=icu,locale='und',deterministic=false,rules='& a = b')",
+            "CREATE TABLE app.names(value text COLLATE app.eq_ab UNIQUE)",
+            "ALTER TABLE app.items CLUSTER ON items_label",
+            "CREATE TABLE app.parent(id integer PRIMARY KEY)",
+            "CREATE TABLE app.child(id integer PRIMARY KEY,parent_id integer REFERENCES app.parent(id))",
+            "ALTER TABLE app.child DISABLE TRIGGER ALL",
+            "CREATE TABLE app.self_ref(id integer PRIMARY KEY,parent_id integer REFERENCES app.self_ref(id))",
+            "ALTER TABLE app.self_ref DISABLE TRIGGER ALL",
+            "CREATE TABLE app.part_children(id integer,parent_id integer REFERENCES app.parent(id)) PARTITION BY RANGE(id)",
+            "CREATE TABLE app.child_leaf PARTITION OF app.part_children FOR VALUES FROM (0) TO (100)",
+            "ALTER TABLE ONLY app.child_leaf DISABLE TRIGGER ALL",
+            "CREATE INDEX part_id ON app.part_children(id)",
+            "ALTER INDEX app.child_leaf_id_idx RENAME TO special_cluster",
+            "ALTER TABLE app.child_leaf CLUSTER ON special_cluster",
         ] {
             source.exec_raw(sql).await.unwrap();
         }
@@ -66,6 +82,35 @@ async fn review_postgres_complete_export_restores_cross_schema_dependencies() {
                 .await
                 .unwrap_or_else(|error| panic!("{error}\n{statement}"));
         }
+        // Unique equality, disabled internal triggers and clustering metadata
+        // must survive replay, including self references and partition clones.
+        destination
+            .exec_raw("INSERT INTO app.names VALUES ('a')")
+            .await
+            .unwrap();
+        assert!(
+            destination
+                .exec_raw("INSERT INTO app.names VALUES ('b')")
+                .await
+                .is_err()
+        );
+        destination
+            .exec_raw("INSERT INTO app.child VALUES (1,999)")
+            .await
+            .unwrap();
+        destination
+            .exec_raw("INSERT INTO app.self_ref VALUES (1,999)")
+            .await
+            .unwrap();
+        destination
+            .exec_raw("INSERT INTO app.child_leaf VALUES (1,999)")
+            .await
+            .unwrap();
+        destination.exec_raw("CLUSTER app.items").await.unwrap();
+        destination
+            .exec_raw("CLUSTER app.child_leaf")
+            .await
+            .unwrap();
         destination
             .exec_raw("INSERT INTO app.items(name) VALUES ('Alice')")
             .await
@@ -2214,6 +2259,14 @@ async fn review_postgres_unsupported_dependencies_fail_before_writing_export() {
     let db = tideorm::require_db().unwrap();
     for (fixture, object) in [
         (
+            "CREATE FOREIGN DATA WRAPPER review_fdw; CREATE SERVER review_foreign FOREIGN DATA WRAPPER review_fdw",
+            "foreign server",
+        ),
+        (
+            "CREATE FOREIGN DATA WRAPPER review_fdw; CREATE SERVER review_foreign FOREIGN DATA WRAPPER review_fdw; CREATE FOREIGN TABLE review_unsupported.remote_items(id integer) SERVER review_foreign",
+            "remote_items",
+        ),
+        (
             "CREATE AGGREGATE review_unsupported.total(integer) (SFUNC=int4pl,STYPE=integer,INITCOND='0'); CREATE TABLE review_unsupported.items(n integer); CREATE VIEW review_unsupported.v AS SELECT review_unsupported.total(n) FROM review_unsupported.items",
             "total",
         ),
@@ -2244,7 +2297,7 @@ async fn review_postgres_unsupported_dependencies_fail_before_writing_export() {
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing export");
         std::fs::remove_file(path).unwrap();
-        db.exec_raw("DROP SCHEMA review_unsupported CASCADE")
+        db.exec_raw("DROP SCHEMA review_unsupported CASCADE; DROP SERVER IF EXISTS review_foreign CASCADE; DROP FOREIGN DATA WRAPPER IF EXISTS review_fdw")
             .await
             .unwrap();
     }

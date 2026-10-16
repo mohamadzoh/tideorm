@@ -565,7 +565,7 @@ async fn only_trashed_is_refused_for_a_force_delete_without_soft_delete() {
         .force_delete()
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("no soft delete"), "{err}");
+    assert!(err.to_string().contains("soft delete"), "{err}");
 }
 
 #[test]

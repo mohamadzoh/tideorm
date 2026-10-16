@@ -48,7 +48,10 @@ impl<M: Model> QueryBuilder<M> {
         value: &serde_json::Value,
         negated: bool,
     ) -> SimpleExpr {
-        let column_sql = self.format_column_for_db(db_type, column);
+        let column_sql = self.format_column_for_db(
+            db_type,
+            &self.model_identifier(column, db_type == DatabaseType::SQLite),
+        );
         let bound = db_sql::json_equals_bound(db_type, &column_sql, value, negated);
         self.build_custom_expression(bound.sql, bound.values)
     }
@@ -63,6 +66,27 @@ impl<M: Model> QueryBuilder<M> {
     ) -> SimpleExpr {
         let pattern = crate::internal::json_text(value);
         if escaped {
+            if db_type == DatabaseType::SQLite
+                && let Some((literal, leading, trailing)) = sqlite_literal_pattern(&pattern)
+            {
+                // LIKE stops at a stored NUL. Blob slicing/search after ASCII
+                // case folding preserves the entire string, including NULs.
+                let test = match (leading, trailing) {
+                    (true, true) => "instr(hay, needle) > 0",
+                    (false, true) => "substr(hay, 1, length(needle)) = needle",
+                    (true, false) => "length(needle) = 0 OR substr(hay, -length(needle)) = needle",
+                    (false, false) => "hay = needle",
+                };
+                let sql = format!(
+                    "(SELECT CASE WHEN hay IS NOT NULL THEN {}({test}) END FROM \
+                     (SELECT CAST(CASE WHEN 'a' LIKE 'A' THEN lower(raw_hay) ELSE raw_hay END AS BLOB) AS hay, \
+                     CAST(CASE WHEN 'a' LIKE 'A' THEN lower(raw_needle) ELSE raw_needle END AS BLOB) AS needle \
+                     FROM (SELECT {} AS raw_hay, ? AS raw_needle)))",
+                    if negated { "NOT " } else { "" },
+                    self.format_column_for_db(db_type, column),
+                );
+                return self.build_custom_expression(sql, vec![Value::String(Some(literal))]);
+            }
             let operator = if negated { "NOT LIKE" } else { "LIKE" };
             self.build_custom_expression(
                 format!(
@@ -211,6 +235,32 @@ impl<M: Model> QueryBuilder<M> {
 /// Lists longer than this bind no parameters when every value is an integer,
 /// and one array parameter on PostgreSQL.
 const INLINE_INTEGER_LIST_AFTER: usize = 1_000;
+
+/// Decode the escaped patterns made by the literal contains/starts/ends helpers.
+fn sqlite_literal_pattern(pattern: &str) -> Option<(String, bool, bool)> {
+    let mut chars = pattern.chars();
+    let mut tokens = Vec::new();
+    while let Some(ch) = chars.next() {
+        tokens.push(match ch {
+            '!' => (chars.next()?, false),
+            '_' => return None,
+            '%' => ('%', true),
+            other => (other, false),
+        });
+    }
+    let leading = tokens.first().is_some_and(|(_, wildcard)| *wildcard);
+    let trailing = tokens.last().is_some_and(|(_, wildcard)| *wildcard);
+    let start = usize::from(leading);
+    let end = tokens
+        .len()
+        .saturating_sub(usize::from(trailing))
+        .max(start);
+    let middle = &tokens[start..end];
+    if middle.iter().any(|(_, wildcard)| *wildcard) {
+        return None;
+    }
+    Some((middle.iter().map(|(ch, _)| ch).collect(), leading, trailing))
+}
 
 /// `values` as one PostgreSQL array value, when they share a type.
 #[cfg(feature = "postgres")]

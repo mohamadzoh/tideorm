@@ -75,7 +75,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
             ))
             .raw(", ")
             .raw(&rank)
-            .raw(" AS _fts_rank FROM ")
+            .raw(" AS ")
+            .raw(&Self::rank_alias())
+            .raw(" FROM ")
             .raw(&crate::query::db_sql::quote_table::<T>(DatabaseType::MySQL))
             .raw(" WHERE ")
             .raw(&predicate)
@@ -96,7 +98,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
             sql.push(' ');
         }
 
-        sql.push_str("ORDER BY _fts_rank DESC ");
+        sql.push_str(&format!("ORDER BY {} DESC ", Self::rank_alias()));
 
         self.append_limit_offset(DatabaseType::MySQL, &mut sql, &mut params);
 
@@ -217,7 +219,8 @@ impl<T: Model> FullTextSearchBuilder<T> {
             ))
             .raw(", ")
             .raw(rank.as_deref().unwrap_or("0.0"))
-            .raw(" AS _fts_rank")
+            .raw(" AS ")
+            .raw(&Self::rank_alias())
             .raw(&from)
             .raw(" ")
             .into_sql();
@@ -267,6 +270,17 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// binding the `MATCH` operand.
     fn sqlite_from(&self, operand: Option<String>, params: &mut Vec<Value>) -> String {
         let fts_table = Self::sqlite_fts_table();
+        // The index lives beside the content table. An unqualified join can
+        // resolve to a same-named index in main or another attached database.
+        // MATCH and bm25 still name the FTS table's hidden column, unqualified.
+        let fts_reference = match T::schema_name() {
+            Some(schema) => format!(
+                "{}.{}",
+                quote_ident(DatabaseType::SQLite, schema),
+                quote_ident(DatabaseType::SQLite, &fts_table)
+            ),
+            None => quote_ident(DatabaseType::SQLite, &fts_table),
+        };
         let predicate = sqlite_match_predicate(&fts_table, operand, params);
         let predicate = self.scoped(DatabaseType::SQLite, predicate, Some("t"));
         SqlBuilder::new(DatabaseType::SQLite, params)
@@ -275,7 +289,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
                 DatabaseType::SQLite,
             ))
             .raw(" t INNER JOIN ")
-            .ident(&fts_table)
+            .raw(&fts_reference)
             .raw(" fts ON t.rowid = fts.rowid WHERE ")
             .raw(&predicate)
             .into_sql()

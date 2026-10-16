@@ -98,6 +98,10 @@ pub(crate) struct SubquerySelect {
     pub(crate) query_sql: String,
     pub(crate) alias: String,
     pub(crate) params: Vec<Value>,
+    pub(crate) source: Option<(String, String)>,
+    /// Captured before the subquery loses its model and join-alias scope.
+    pub(crate) encrypted_column: Option<crate::model::EncryptedColumn>,
+    pub(crate) column_type: Option<crate::orm::ColumnType>,
 }
 
 /// Which compound-select operator joins two result sets.
@@ -144,6 +148,39 @@ pub struct UnionClause {
     pub(crate) params: Vec<Value>,
     /// Whether the operand is caller-written SQL of unknown shape.
     pub(crate) raw: bool,
+    /// Captured while a typed operand still has its model and projection scope.
+    pub(crate) projection: Option<UnionProjection>,
+}
+
+/// Types and encryption scopes in SQL projection order. Unknown shapes cannot safely
+/// share a decoder with a known encrypted projection.
+#[derive(Debug, Clone)]
+pub(crate) struct UnionProjection {
+    pub(crate) columns: Vec<Option<crate::model::EncryptedColumn>>,
+    pub(crate) types: Vec<Option<crate::orm::ColumnType>>,
+    pub(crate) complete: bool,
+    pub(crate) has_encrypted: bool,
+}
+
+/// Types that use the same model JSON decoder. Keep integer widths and float
+/// precision distinct: decoding another arm through a narrower type can lose data.
+pub(crate) fn union_column_types_compatible(
+    a: &crate::orm::ColumnType,
+    b: &crate::orm::ColumnType,
+) -> bool {
+    use crate::orm::ColumnType::*;
+    a == b
+        || matches!(
+            (a, b),
+            (Char(_) | String(_) | Text, Char(_) | String(_) | Text)
+                | (
+                    Binary(_) | VarBinary(_) | Blob,
+                    Binary(_) | VarBinary(_) | Blob
+                )
+                | (Decimal(_) | Money(_), Decimal(_) | Money(_))
+                | (Json | JsonBinary, Json | JsonBinary)
+                | (DateTime | Timestamp, DateTime | Timestamp)
+        )
 }
 
 impl UnionClause {
@@ -159,6 +196,7 @@ impl UnionClause {
             query_sql,
             params: Vec::new(),
             raw: true,
+            projection: None,
         }
     }
 
@@ -322,6 +360,22 @@ impl WindowFunctionType {
             | Self::Ntile(_)
             | Self::Count(None)
             | Self::Custom(_) => None,
+        }
+    }
+
+    /// The column whose own values this function returns (`LAG`, `LEAD`, the
+    /// `*_VALUE` functions, `MIN`, `MAX`), so its output decodes and decrypts
+    /// as that column. A sum, an average or a count is a new value.
+    pub(crate) fn value_column(&self) -> Option<&str> {
+        match self {
+            Self::Lag(column, ..)
+            | Self::Lead(column, ..)
+            | Self::FirstValue(column)
+            | Self::LastValue(column)
+            | Self::NthValue(column, _)
+            | Self::Min(column)
+            | Self::Max(column) => Some(column),
+            _ => None,
         }
     }
 

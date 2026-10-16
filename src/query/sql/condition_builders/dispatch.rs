@@ -8,7 +8,12 @@ impl<M: Model> QueryBuilder<M> {
     ) -> Option<SimpleExpr> {
         let column = condition.column.as_str();
         let column_expr = || self.sea_column_expr(db_type, column);
-        let column_sql = || self.format_column_for_db(db_type, column);
+        let column_sql = || {
+            self.format_column_for_db(
+                db_type,
+                &self.model_identifier(column, db_type == DatabaseType::SQLite),
+            )
+        };
 
         Some(match Self::condition_spec(condition)? {
             ConditionSpec::Raw {
