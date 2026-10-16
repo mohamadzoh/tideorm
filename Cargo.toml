@@ -36,6 +36,7 @@ exclude = [
     "tests/edge_case/**",
     "tests/or_clause/**",
     "tests/sqlite_ci_smoke_test/**",
+    "tests/sqlite_regressions/**",
     "tests/tokenization_tests/**",
     "tests/typed_columns_and_join_tests/**",
     "tests/ui/**",
