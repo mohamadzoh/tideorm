@@ -11,7 +11,7 @@ pub struct OrGroup {
 /// An OR group belongs to no model yet, so a typed column in it keeps its
 /// table; a query of that model reads the qualified name as its own column.
 impl crate::columns::ConditionOwner for OrGroup {
-    fn own_table() -> Option<&'static str> {
+    fn own_table() -> Option<(&'static str, Option<&'static str>)> {
         None
     }
 }
@@ -76,30 +76,42 @@ impl OrGroup {
     /// assert!(OrGroup::new().is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
-        self.conditions.is_empty() && self.nested_groups.is_empty()
+        self.conditions.is_empty() && self.nested_groups.iter().all(OrGroup::is_empty)
     }
 
-    /// True when this group still restricts the row set.
+    /// True when this group still restricts the row set, with `is_vacuous`
+    /// telling which conditions restrict nothing (the caller's model-aware
+    /// [`condition_is_vacuous`](super::condition_is_vacuous)).
     ///
     /// The two combinators are not symmetric. An `And` group survives as long as
     /// one member restricts; a single vacuous member of an `Or` group makes the
     /// whole group true, so an `Or` group only counts when *every* member
-    /// restricts. See [`condition_is_vacuous`](super::condition_is_vacuous).
-    pub(crate) fn is_restrictive(&self) -> bool {
+    /// restricts. An empty nested group renders nothing, and is no member.
+    pub(crate) fn is_restrictive_with(
+        &self,
+        is_vacuous: &impl Fn(&WhereCondition) -> bool,
+    ) -> bool {
         match self.combine_with {
             LogicalOp::And => {
                 self.conditions
                     .iter()
-                    .any(|condition| !super::condition_is_vacuous(condition))
-                    || self.nested_groups.iter().any(OrGroup::is_restrictive)
+                    .any(|condition| !is_vacuous(condition))
+                    || self
+                        .nested_groups
+                        .iter()
+                        .any(|group| group.is_restrictive_with(is_vacuous))
             }
             LogicalOp::Or => {
                 !self.is_empty()
                     && self
                         .conditions
                         .iter()
-                        .all(|condition| !super::condition_is_vacuous(condition))
-                    && self.nested_groups.iter().all(OrGroup::is_restrictive)
+                        .all(|condition| !is_vacuous(condition))
+                    && self
+                        .nested_groups
+                        .iter()
+                        .filter(|group| !group.is_empty())
+                        .all(|group| group.is_restrictive_with(is_vacuous))
             }
         }
     }

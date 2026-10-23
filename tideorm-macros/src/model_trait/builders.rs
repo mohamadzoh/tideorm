@@ -1,6 +1,11 @@
 use super::*;
 
-use crate::meta_support::{auto_timestamp_value, auto_updated_at_value, is_managed_created_at};
+use quote::format_ident;
+use syn::Ident;
+
+use crate::meta_support::{
+    auto_timestamp_value, auto_updated_at_value, clock_binding, is_managed_created_at,
+};
 use crate::parse::ModelField;
 
 pub(super) fn build_primary_key_value_impl(ctx: &BuildContext) -> TokenStream2 {
@@ -63,23 +68,74 @@ pub(super) enum Conversion {
     ToEntity { encrypt: bool },
 }
 
+/// What an INSERT or UPDATE conversion's initializers read besides the
+/// model, which its bindings provide before any field moves.
+#[derive(Default)]
+struct Reads {
+    /// The write's one clock reading, which every timestamp it stamps holds.
+    clock: bool,
+    /// Whether the auto-increment key is still the unsaved default.
+    key_is_new: bool,
+}
+
+/// The variable holding whether an INSERT's auto-increment key is new.
+fn key_is_new_ident() -> Ident {
+    format_ident!("__tideorm_key_is_new")
+}
+
+/// The bindings and the `field: value` initializers of an INSERT or UPDATE
+/// conversion, the bindings to place before the initializers: exactly what
+/// they read, decided where they read it.
+pub(super) fn write_conversion(
+    ctx: &BuildContext,
+    conversion: Conversion,
+) -> (TokenStream2, Vec<TokenStream2>) {
+    let mut reads = Reads::default();
+    let initializers = initializers(ctx, conversion, &mut reads);
+    let clock = reads.clock.then(clock_binding);
+    let key_is_new = reads.key_is_new.then(|| {
+        let key_is_new = key_is_new_ident();
+        quote!(let #key_is_new = <Self as ::tideorm::model::Model>::is_new(&self);)
+    });
+    (quote!(#clock #key_is_new), initializers)
+}
+
+/// The `field: value` initializers of a conversion between the model and its
+/// entity `Model`, which read nothing but the model.
+pub(super) fn column_initializers(ctx: &BuildContext, conversion: Conversion) -> Vec<TokenStream2> {
+    debug_assert!(matches!(
+        conversion,
+        Conversion::FromEntity | Conversion::ToEntity { .. }
+    ));
+    initializers(ctx, conversion, &mut Reads::default())
+}
+
 /// The `field: value` initializers of one conversion, one per persisted column.
 ///
 /// Every conversion routes encrypted columns through the cipher hooks and the
 /// rest straight through; the INSERT and UPDATE setters additionally manage
 /// keys and timestamps, and have to agree with each other on both.
-pub(super) fn column_initializers(ctx: &BuildContext, conversion: Conversion) -> Vec<TokenStream2> {
+fn initializers(
+    ctx: &BuildContext,
+    conversion: Conversion,
+    reads: &mut Reads,
+) -> Vec<TokenStream2> {
     ctx.db_fields
         .iter()
         .map(|field| {
             let ident = field.ident();
-            let value = column_value(ctx, field, conversion);
+            let value = column_value(ctx, field, conversion, reads);
             quote!(#ident: #value)
         })
         .collect()
 }
 
-fn column_value(ctx: &BuildContext, field: &ModelField, conversion: Conversion) -> TokenStream2 {
+fn column_value(
+    ctx: &BuildContext,
+    field: &ModelField,
+    conversion: Conversion,
+    reads: &mut Reads,
+) -> TokenStream2 {
     let ident = field.ident();
     let encrypted = ctx.is_encrypted(field);
 
@@ -99,11 +155,16 @@ fn column_value(ctx: &BuildContext, field: &ModelField, conversion: Conversion) 
         ),
         Conversion::ToEntity { .. } => quote!(self.#ident.clone()),
         Conversion::Insert { encrypt } => {
+            // The database numbers a key still at its unsaved default; one the
+            // model holds is written, as an upsert writes it.
             if field.primary_key && field.auto_increment {
-                quote!(ActiveValue::NotSet)
+                reads.key_is_new = true;
+                let key_is_new = key_is_new_ident();
+                quote!(::tideorm::model::__auto_increment_key(#key_is_new, self.#ident))
             } else if field.primary_key && field.is_uuid() {
                 quote!(ActiveValue::Set(::tideorm::model::__uuid_key(self.#ident)))
             } else if let Some(now) = auto_timestamp_value(field) {
+                reads.clock = true;
                 quote!(ActiveValue::Set(#now))
             } else if encrypted && !encrypt {
                 quote!(ActiveValue::NotSet)
@@ -115,6 +176,7 @@ fn column_value(ctx: &BuildContext, field: &ModelField, conversion: Conversion) 
             if field.primary_key {
                 quote!(ActiveValue::Unchanged(self.#ident))
             } else if let Some(now) = auto_updated_at_value(field) {
+                reads.clock = true;
                 quote!(ActiveValue::Set(#now))
             } else if is_managed_created_at(field) {
                 quote!(ActiveValue::NotSet)

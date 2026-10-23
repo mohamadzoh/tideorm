@@ -48,6 +48,12 @@ pub(in crate::query) fn split_direction(term: &str) -> Option<(&str, super::Orde
     Some((column.trim_end(), direction))
 }
 
+/// The column reference of an ORDER BY term, without its direction.
+fn order_reference(term: &str) -> &str {
+    let term = term.trim();
+    split_direction(term).map_or(term, |(reference, _)| reference)
+}
+
 /// Sentinel entry recorded in `raw_select_expressions` by
 /// [`QueryBuilder::distinct`](super::QueryBuilder::distinct).
 ///
@@ -173,6 +179,17 @@ impl<M: Model> QueryBuilder<M> {
         match crate::internal::sql_safety::identifier_reference_parts(value)?.as_slice() {
             [column] => Some(("", *column)),
             [table, column] => Some((*table, *column)),
+            [_, _, column] => {
+                let table = value.rsplit_once('.')?.0;
+                Some((
+                    if M::owns_table_reference(table) {
+                        M::table_name()
+                    } else {
+                        table
+                    },
+                    *column,
+                ))
+            }
             _ => None,
         }
     }
@@ -193,7 +210,7 @@ impl<M: Model> QueryBuilder<M> {
         };
         db_sql::validate_identifier_reference(kind, &reference)?;
 
-        if table.is_empty() || table == M::table_name() {
+        if table.is_empty() || M::owns_table_reference(table) {
             if M::canonical_column_name(column).is_some() {
                 Ok(())
             } else {
@@ -313,24 +330,27 @@ impl<M: Model> QueryBuilder<M> {
     ///
     /// The engine reads an unselected `Option` column as `None`, so such a model
     /// looks complete, and saving it writes those `None`s over the stored
-    /// values. A projection with raw SQL in it is the caller's to vouch for.
+    /// values. A raw expression's alias counts as the column it names; a raw
+    /// expression without one, such as a wildcard, may hold any column and is
+    /// the caller's to vouch for.
     ///
     /// Over a join, a wildcard that reaches another table is refused too: its
     /// columns come back under the same names as the model's (`id`,
     /// `created_at`), and the model would be filled from whichever came last.
     pub(in crate::query) fn ensure_projection_covers_model(&self) -> Result<()> {
-        if self
-            .clauses
-            .select_columns
-            .as_ref()
-            .is_none_or(Vec::is_empty)
+        let columns = self.clauses.select_columns.as_deref().unwrap_or_default();
+        if columns.is_empty()
+            && self.raw_projection().next().is_none()
             && self.clauses.subquery_select_expressions.is_empty()
         {
             return Ok(());
         }
-        let columns = self.clauses.select_columns.as_deref().unwrap_or_default();
-        if self.raw_projection().next().is_some() {
-            return Ok(());
+        let mut raw_aliases = Vec::new();
+        for expression in self.raw_projection() {
+            match Self::split_alias(expression).1 {
+                Some(alias) => raw_aliases.push(alias),
+                None => return Ok(()),
+            }
         }
 
         let own_wildcard = format!("{}.*", M::table_name());
@@ -366,7 +386,7 @@ impl<M: Model> QueryBuilder<M> {
                 }
                 None => match column.rsplit_once('.') {
                     // Another table's column fills none of the model's.
-                    Some((table, _)) if table != M::table_name() => continue,
+                    Some((table, _)) if !M::owns_table_reference(table) => continue,
                     Some((_, name)) => name,
                     None => column,
                 },
@@ -376,8 +396,14 @@ impl<M: Model> QueryBuilder<M> {
             }
         }
 
-        // Scalar subqueries suppress the default model projection too. Their
-        // aliases can complete an explicit projection, but cannot hide omissions.
+        // Raw expressions and scalar subqueries suppress the default model
+        // projection too. Their aliases can complete an explicit projection,
+        // but cannot hide omissions.
+        for alias in raw_aliases {
+            if M::column_names().contains(&alias) {
+                covered.insert(alias);
+            }
+        }
         for subquery in &self.clauses.subquery_select_expressions {
             if M::column_names().contains(&subquery.alias.as_str()) {
                 covered.insert(subquery.alias.as_str());
@@ -531,7 +557,7 @@ impl<M: Model> QueryBuilder<M> {
     /// Whether a qualifier names this model's table, including a self-join
     /// alias. Keep explicit schemas distinct from a same-named table elsewhere.
     pub(in crate::query) fn is_model_table_qualifier(&self, qualifier: &str) -> bool {
-        qualifier == M::table_name()
+        M::owns_table_reference(qualifier)
             || self.clauses.joins.iter().any(|join| {
                 join.qualifier() == qualifier
                     && match (M::schema_name(), join.table.split_once('.')) {
@@ -553,12 +579,9 @@ impl<M: Model> QueryBuilder<M> {
         if self.is_model_table_qualifier(table) {
             return crate::model::__encrypted_column::<M>(column);
         }
-        let Some(join) = self
-            .clauses
-            .joins
-            .iter()
-            .find(|join| join.qualifier() == table)
-        else {
+        let Some(join) = self.clauses.joins.iter().find(|join| {
+            join.qualifier() == table || (join.alias.is_none() && join.table == table)
+        }) else {
             return Ok(None);
         };
         let (schema, table) = match join.table.split_once('.') {
@@ -747,9 +770,28 @@ impl<M: Model> QueryBuilder<M> {
         Ok(projection)
     }
 
-    fn ensure_union_projections_are_valid(&self) -> Result<()> {
+    /// Whether the query's default projection is `table.*`: a raw union arm's
+    /// shape is unknown, typically `SELECT *`, so it reads the table's
+    /// columns in the table's order rather than the model's.
+    pub(in crate::query) fn reads_table_wildcard(&self) -> bool {
+        !self.has_explicit_projection() && self.clauses.unions.iter().any(|union| union.raw)
+    }
+
+    pub(in crate::query) fn ensure_union_projections_are_valid(&self) -> Result<()> {
         if self.clauses.unions.is_empty() {
             return Ok(());
+        }
+        // A raw arm makes the default projection `table.*`, in the table's
+        // column order, while a typed arm reads the model's declared order: a
+        // column the two order differently would land under another's name.
+        if self.reads_table_wildcard() && self.clauses.unions.iter().any(|union| !union.raw) {
+            return Err(Error::query(format!(
+                "a query of '{}' with a raw union arm reads its rows as {}.*, in the table's \
+                 column order, which a typed arm does not follow; use raw arms only, typed arms \
+                 only, or select() explicit columns in every arm",
+                M::table_name(),
+                M::table_name()
+            )));
         }
         let left = self.compound_projection()?;
         for union in &self.clauses.unions {
@@ -926,10 +968,8 @@ impl<M: Model> QueryBuilder<M> {
                 continue;
             }
 
-            let trimmed = column.trim();
-            let reference = split_direction(trimmed).map_or(trimmed, |(reference, _)| reference);
-
-            let Some((qualifier, name)) = Self::simple_column_reference(reference) else {
+            let Some((qualifier, name)) = Self::simple_column_reference(order_reference(column))
+            else {
                 continue;
             };
 
@@ -941,7 +981,7 @@ impl<M: Model> QueryBuilder<M> {
 
             return Err(format!(
                 "ORDER BY '{}' is not part of the distinct() projection of model '{}'; a SELECT DISTINCT can only be ordered by expressions it selects, so add the column to select() or drop distinct()",
-                trimmed,
+                column.trim(),
                 M::table_name()
             ));
         }
@@ -1119,6 +1159,9 @@ impl<M: Model> QueryBuilder<M> {
         }
 
         for (column, _) in &self.clauses.order_by {
+            if raw_order_by_expression(column).is_none() {
+                self.ensure_encrypted_input_is_comparable(order_reference(column), "ORDER BY")?;
+            }
             Self::validate_order_or_group_value("ORDER BY column", column, true, qualifiers)
                 .map_err(Error::query)?;
         }
@@ -1210,9 +1253,15 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query) fn known_qualifiers(&self) -> BTreeSet<String> {
         let mut qualifiers = BTreeSet::new();
         qualifiers.insert(M::table_name().to_string());
+        if let Some(schema) = M::schema_name() {
+            qualifiers.insert(format!("{schema}.{}", M::table_name()));
+        }
         // A `schema.table` join is referenced by its table name.
         for join in &self.clauses.joins {
             qualifiers.insert(join.qualifier().to_string());
+            if join.alias.is_none() {
+                qualifiers.insert(join.table.clone());
+            }
         }
         qualifiers
     }
@@ -1256,7 +1305,7 @@ impl<M: Model> QueryBuilder<M> {
     ///     .await?;
     /// ```
     ///
-    /// Unlike [`Model::update_all`], trashed
+    /// As with [`Model::update_all`], trashed
     /// rows stay out unless the query includes them. A query that joins,
     /// groups, pages or unions cannot be an `UPDATE`, and running one fails.
     ///
@@ -1269,6 +1318,19 @@ impl<M: Model> QueryBuilder<M> {
     #[must_use]
     pub fn update_all(self) -> crate::model::BatchUpdateBuilder<M> {
         crate::model::BatchUpdateBuilder::from_query(self)
+    }
+
+    /// Refuse a key lookup on a paged query: the page would decide whether
+    /// the row is found, missing one inside it and finding one outside it.
+    pub(crate) fn ensure_key_lookup_is_unpaged(&self) -> Result<()> {
+        if self.clauses.limit_value.is_some() || self.clauses.offset_value.is_some() {
+            return Err(Error::query(format!(
+                "find() looks a {} row up by its key, so it takes no limit() or offset(); \
+                 filter the query instead",
+                M::table_name()
+            )));
+        }
+        Ok(())
     }
 
     /// The first part of this query an `UPDATE` cannot keep, if any: one

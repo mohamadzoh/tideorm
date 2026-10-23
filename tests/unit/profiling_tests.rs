@@ -3,6 +3,67 @@ use std::time::Duration;
 use super::*;
 
 #[test]
+fn report_select_star_uses_sql_tokens_like_the_analyzer() {
+    for (sql, expected) in [
+        ("SELECT 'SELECT *' AS label", false),
+        ("SELECT id /* SELECT * */ FROM users", false),
+        ("SELECT\n /* columns */ * FROM users", true),
+    ] {
+        let mut profiler = Profiler::start();
+        for _ in 0..6 {
+            profiler.record(sql, Duration::ZERO);
+        }
+        assert_eq!(
+            profiler
+                .stop()
+                .suggestions()
+                .iter()
+                .any(|s| s.contains("SELECT *")),
+            expected,
+            "{sql}"
+        );
+        assert_eq!(
+            QueryAnalyzer::analyze(sql)
+                .iter()
+                .any(|s| s.title.contains("SELECT *")),
+            expected,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn report_n_plus_one_counts_database_reads_only() {
+    let mut profiler = Profiler::start();
+    for _ in 0..11 {
+        profiler.record_full(
+            ProfiledQuery::new("SELECT id FROM users", Duration::ZERO)
+                .with_table("users")
+                .cached(),
+        );
+        profiler.record_full(
+            ProfiledQuery::new("UPDATE users SET active = 1", Duration::ZERO).with_table("users"),
+        );
+    }
+    for _ in 0..10 {
+        profiler.record_full(
+            ProfiledQuery::new("SELECT id FROM users", Duration::ZERO).with_table("users"),
+        );
+    }
+    let mut report = profiler.stop();
+    assert!(!report.suggestions().iter().any(|s| s.contains("N+1")));
+    report
+        .queries
+        .push(ProfiledQuery::new("SELECT id FROM users", Duration::ZERO).with_table("users"));
+    assert!(
+        report
+            .suggestions()
+            .iter()
+            .any(|s| s.contains("11 database reads"))
+    );
+}
+
+#[test]
 fn test_query_analyzer() {
     let suggestions = QueryAnalyzer::analyze("SELECT * FROM users");
     assert!(!suggestions.is_empty());

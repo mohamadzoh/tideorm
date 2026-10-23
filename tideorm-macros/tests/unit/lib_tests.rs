@@ -42,7 +42,8 @@ fn field_with_type(ty: Type) -> ModelField {
 }
 
 fn build_context_for(input: &DeriveInput) -> syn::Result<BuildContext> {
-    let indexes = parse_index_attributes(&input.attrs);
+    let mut indexes = parse_index_attributes(&input.attrs);
+    indexes.extend(crate::parse::parse_field_index_attributes(&input.data));
     let existing_derives = detect_existing_derives(&input.attrs);
     let model_input = ModelInput::from_derive_input(input).expect("model input should parse");
     BuildContext::new(&model_input, indexes, &existing_derives)
@@ -662,7 +663,7 @@ fn deserialize_impl_defaults_managed_timestamps_and_skipped_fields() {
 /// while `has_timestamps()` still claimed the model was managed.
 #[test]
 fn timestamp_population_and_has_timestamps_agree() {
-    let now = "ActiveValue::Set(::tideorm::chrono::Utc::now())";
+    let now = "ActiveValue::Set(__tideorm_now)";
 
     // A lone `created_at` is still populated, and reported.
     let lone = expand_model_tokens(parse_quote! {
@@ -737,10 +738,20 @@ fn insert_and_update_agree_on_optional_timestamp_columns() {
         }
     });
 
-    let now = "ActiveValue::Set(Some(::tideorm::chrono::Utc::now()))";
+    // Both columns of one write take one clock reading, bound once.
+    let now = "ActiveValue::Set(Some(__tideorm_now))";
     let insert = insert_setters(&expanded);
     assert!(insert.contains(&format!("created_at:{now}")));
     assert!(insert.contains(&format!("updated_at:{now}")));
+    assert!(expanded.contains("let__tideorm_now=::tideorm::chrono::Utc::now();"));
+    // The auto-increment key is written when the model holds one.
+    assert!(
+        insert.contains("id:::tideorm::model::__auto_increment_key(__tideorm_key_is_new,self.id)")
+    );
+    assert!(
+        expanded
+            .contains("let__tideorm_key_is_new=<Selfas::tideorm::model::Model>::is_new(&self);")
+    );
 
     let update = update_setters(&expanded);
     assert!(update.contains(&format!("updated_at:{now}")));
@@ -761,7 +772,7 @@ fn naive_timestamp_columns_are_populated() {
         }
     });
 
-    let now = "::tideorm::chrono::Utc::now().naive_utc()";
+    let now = "__tideorm_now.naive_utc()";
     let insert = insert_setters(&expanded);
     assert!(insert.contains(&format!("created_at:ActiveValue::Set({now})")));
     assert!(insert.contains(&format!("updated_at:ActiveValue::Set(Some({now}))")));
@@ -1547,4 +1558,509 @@ fn qualified_generic_column_types_match_unqualified_types() {
         };
         assert_eq!(column(plain), column(qualified), "{qualified}");
     }
+}
+
+/// The `pub` methods with a receiver that TideORM's source under `src`
+/// defines on `QueryBuilder`: in its inherent impls, and through
+/// `condition_methods!` and `conditional_methods!`.
+fn query_builder_methods_in(src: &std::path::Path) -> std::collections::BTreeSet<String> {
+    use proc_macro2::{TokenStream, TokenTree};
+    use std::collections::{BTreeSet, HashMap};
+
+    fn rust_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    /// Every token of `tokens`, groups opened.
+    fn flatten(tokens: TokenStream, out: &mut Vec<TokenTree>) {
+        for token in tokens {
+            if let TokenTree::Group(group) = &token {
+                flatten(group.stream(), out);
+            }
+            out.push(token);
+        }
+    }
+
+    fn ident(token: Option<&TokenTree>) -> Option<String> {
+        match token {
+            Some(TokenTree::Ident(ident)) => Some(ident.to_string()),
+            _ => None,
+        }
+    }
+
+    /// `Target` in a macro invocation that starts `impl[..] Target`.
+    fn impl_target(tokens: &TokenStream) -> Option<String> {
+        let tokens: Vec<TokenTree> = tokens.clone().into_iter().collect();
+        (ident(tokens.first()).as_deref() == Some("impl")).then(|| ident(tokens.get(2)))?
+    }
+
+    fn is_query_builder(ty: &Type) -> bool {
+        matches!(ty, Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "QueryBuilder"))
+    }
+
+    fn collect(
+        items: &[syn::Item],
+        methods: &mut BTreeSet<String>,
+        invocations: &mut Vec<(String, TokenStream)>,
+        definitions: &mut HashMap<String, TokenStream>,
+    ) {
+        for item in items {
+            match item {
+                syn::Item::Impl(item)
+                    if item.trait_.is_none() && is_query_builder(&item.self_ty) =>
+                {
+                    for item in &item.items {
+                        if let syn::ImplItem::Fn(method) = item
+                            && matches!(method.vis, syn::Visibility::Public(_))
+                            && method.sig.receiver().is_some()
+                        {
+                            methods.insert(method.sig.ident.to_string());
+                        }
+                    }
+                }
+                syn::Item::Macro(item) if item.mac.path.is_ident("macro_rules") => {
+                    let name = item.ident.as_ref().expect("a macro_rules! name");
+                    definitions.insert(name.to_string(), item.mac.tokens.clone());
+                }
+                syn::Item::Macro(item)
+                    if impl_target(&item.mac.tokens).as_deref() == Some("QueryBuilder") =>
+                {
+                    let name = &item.mac.path.segments.last().unwrap().ident;
+                    invocations.push((name.to_string(), item.mac.tokens.clone()));
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        collect(items, methods, invocations, definitions);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    rust_files(src, &mut files);
+    let mut methods = BTreeSet::new();
+    let mut invocations = Vec::new();
+    let mut definitions = HashMap::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file).unwrap();
+        let parsed = syn::parse_file(&source)
+            .unwrap_or_else(|error| panic!("{} does not parse: {error}", file.display()));
+        collect(
+            &parsed.items,
+            &mut methods,
+            &mut invocations,
+            &mut definitions,
+        );
+    }
+
+    for (name, invocation) in invocations {
+        let mut definition = Vec::new();
+        let tokens = definitions.get(&name);
+        flatten(
+            tokens
+                .unwrap_or_else(|| panic!("no definition of {name}!"))
+                .clone(),
+            &mut definition,
+        );
+        match name.as_str() {
+            // Its methods are spelled out: `pub fn when(..)`.
+            "conditional_methods" => {
+                for window in definition.windows(3) {
+                    if ident(window.first()).as_deref() == Some("pub")
+                        && ident(window.get(1)).as_deref() == Some("fn")
+                        && let Some(method) = ident(window.get(2))
+                    {
+                        methods.insert(method);
+                    }
+                }
+            }
+            // Its methods come from one table, for each family the invocation
+            // names: `where + raw => push_condition, "..";`.
+            "condition_methods" => {
+                let Some(TokenTree::Group(body)) = invocation.into_iter().last() else {
+                    panic!("condition_methods! takes a braced body");
+                };
+                let tokens: Vec<TokenTree> = body.stream().into_iter().collect();
+                let entries = tokens.split(
+                    |token| matches!(token, TokenTree::Punct(punct) if punct.as_char() == ';'),
+                );
+                for entry in entries {
+                    let Some(family) = ident(entry.first()) else {
+                        continue;
+                    };
+                    let with_raw = ident(entry.get(2)).as_deref() == Some("raw");
+                    let raw = [format!("{family}_raw"), format!("{family}_raw_with")];
+                    for method in definition.iter().filter_map(|token| ident(Some(token))) {
+                        if method.starts_with(&format!("{family}_"))
+                            && (with_raw || !raw.contains(&method))
+                        {
+                            methods.insert(method);
+                        }
+                    }
+                }
+            }
+            other => panic!("{other}! emits QueryBuilder methods this test cannot read"),
+        }
+    }
+    methods
+}
+
+#[test]
+fn reserved_scope_names_are_query_builders_own_methods() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+    // A published `tideorm-macros` ships without TideORM's source.
+    if !src.join("query").is_dir() {
+        return;
+    }
+    let methods = query_builder_methods_in(&src);
+    for method in [
+        "latest",
+        "limit",
+        "where_eq",
+        "or_where_raw_with",
+        "when_some",
+    ] {
+        assert!(methods.contains(method), "{method} was not found");
+    }
+
+    let listed = crate::scope_gen::QUERY_BUILDER_METHODS.to_vec();
+    let mut sorted = listed.clone();
+    sorted.sort_unstable();
+    assert_eq!(listed, sorted, "QUERY_BUILDER_METHODS must stay sorted");
+    let actual: Vec<&str> = methods.iter().map(String::as_str).collect();
+    assert_eq!(
+        listed, actual,
+        "QUERY_BUILDER_METHODS must list exactly QueryBuilder's own methods"
+    );
+}
+
+#[test]
+fn scopes_cannot_take_a_query_builder_method_name() {
+    for name in [
+        "latest",
+        "limit",
+        "distinct",
+        "where_eq",
+        "or_where_raw",
+        "when",
+    ] {
+        let method = syn::Ident::new(name, proc_macro2::Span::call_site());
+        let item: syn::ItemImpl = parse_quote! {
+            impl Post {
+                fn #method(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+                    query
+                }
+            }
+        };
+        let error = crate::scope_gen::generate_query_scope_support(item)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("a scope cannot be named `{name}`")),
+            "{error}"
+        );
+    }
+
+    let item: syn::ItemImpl = parse_quote! {
+        impl Post {
+            fn published(query: QueryBuilder<Self>) -> QueryBuilder<Self> {
+                query
+            }
+        }
+    };
+    assert!(crate::scope_gen::generate_query_scope_support(item).is_ok());
+}
+
+/// A model maps one struct to one table. Parameters used to surface as a
+/// page of E0107s inside the generated impls, which name the bare struct.
+#[test]
+fn generic_models_are_refused_with_one_error() {
+    let inputs: [DeriveInput; 3] = [
+        parse_quote! {
+            struct Boxed<T> {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[tideorm(skip)]
+                marker: std::marker::PhantomData<T>,
+            }
+        },
+        parse_quote! {
+            struct Borrowed<'a> {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                name: &'a str,
+            }
+        },
+        parse_quote! {
+            struct Fixed<const N: usize> {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+            }
+        },
+    ];
+    for input in inputs {
+        let error = build_error_for(&input);
+        assert!(
+            error.contains("a TideORM model cannot be generic"),
+            "{error}"
+        );
+        let expanded = expand_model_tokens(input);
+        assert_eq!(expanded.matches("compile_error!").count(), 1, "{expanded}");
+    }
+}
+
+/// Every write stores a fresh ciphertext, so an index over an encrypted
+/// column enforces and finds nothing: two equal emails both inserted under
+/// a unique index.
+#[test]
+fn indexes_and_full_text_columns_cannot_cover_encrypted_fields() {
+    let error = build_error_for(&parse_quote! {
+        #[tideorm(encrypted = "email")]
+        struct Member {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[unique_index]
+            email: String,
+        }
+    });
+    assert!(
+        error.contains("#[unique_index(..)] cannot cover encrypted field `email`"),
+        "{error}"
+    );
+
+    // Named by its column, in a composite index.
+    let error = build_error_for(&parse_quote! {
+        #[tideorm(encrypted = "email")]
+        #[index("tenant_id", "mail")]
+        struct Member {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            tenant_id: i64,
+            #[tideorm(column = "mail")]
+            email: String,
+        }
+    });
+    assert!(
+        error.contains("#[index(..)] cannot cover encrypted field `email`"),
+        "{error}"
+    );
+
+    let error = build_error_for(&parse_quote! {
+        #[tideorm(encrypted = "notes", searchable = "title,notes")]
+        struct Member {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            title: String,
+            notes: String,
+        }
+    });
+    assert!(
+        error.contains("#[tideorm(searchable = ...)] cannot name encrypted field `notes`"),
+        "{error}"
+    );
+
+    let ctx = build_context_for(&parse_quote! {
+        #[tideorm(encrypted = "notes", searchable = "title")]
+        #[index("title")]
+        struct Member {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            title: String,
+            notes: String,
+        }
+    })
+    .expect("indexes over plaintext columns stay legal beside encrypted ones");
+    assert_eq!(ctx.searchable_fields, vec!["title"]);
+}
+
+/// `email` is one field's name and the other's column. Resolved by
+/// declaration order, `encrypted = "email"` could encrypt the other field
+/// and store this one in plaintext.
+#[test]
+fn a_name_that_is_one_fields_name_and_anothers_column_is_refused() {
+    let attributes = [
+        quote!(#[tideorm(encrypted = "email")]),
+        quote!(#[tideorm(translatable = "email")]),
+        quote!(#[unique_index("email")]),
+    ];
+    for attribute in attributes {
+        let error = build_error_for(&parse_quote! {
+            #attribute
+            struct Account {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[tideorm(column = "email_plain")]
+                email: String,
+                #[tideorm(column = "email")]
+                email_enc: String,
+            }
+        });
+        assert!(
+            error.contains(
+                "'email' is both the name of field `email` and the column of field `email_enc`"
+            ),
+            "{attribute}: {error}"
+        );
+    }
+
+    let error = build_error_for(&parse_quote! {
+        struct Membership {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "org_ref")]
+            org: i64,
+            #[tideorm(column = "org")]
+            org_id: i64,
+            #[tideorm(belongs_to = "Organization", foreign_key = "org")]
+            organization: BelongsTo<Organization>,
+        }
+    });
+    assert!(
+        error.contains("relation key: 'org' is both the name of field `org`"),
+        "{error}"
+    );
+
+    // The other name of either field is unambiguous.
+    for (name, field) in [("email_enc", "email_enc"), ("email_plain", "email")] {
+        let ctx = build_context_for(&parse_quote! {
+            #[tideorm(encrypted = #name)]
+            struct Account {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[tideorm(column = "email_plain")]
+                email: String,
+                #[tideorm(column = "email")]
+                email_enc: String,
+            }
+        })
+        .expect("an unambiguous name resolves");
+        assert_eq!(ctx.encrypted_fields, vec![field]);
+    }
+}
+
+/// A name no attribute gave, an index on the field it means, and `hidden`,
+/// where hiding both fields cannot show what was meant to be hidden, are not
+/// ambiguous: these models compiled before the ambiguity check and still do.
+#[test]
+fn names_that_cannot_pick_the_wrong_field_are_not_refused() {
+    let tokens = |items: &[TokenStream2]| {
+        normalize_tokens(&items.iter().map(ToString::to_string).collect::<String>())
+    };
+
+    // An index on a field covers that field's column, in either order.
+    for model in [
+        quote! {
+            struct Account {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[unique_index]
+                #[tideorm(column = "email_address")]
+                email: String,
+                #[tideorm(column = "email")]
+                legacy_email: Option<String>,
+            }
+        },
+        quote! {
+            struct Account {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[tideorm(column = "email")]
+                legacy_email: Option<String>,
+                #[unique_index]
+                #[tideorm(column = "email_address")]
+                email: String,
+            }
+        },
+    ] {
+        let ctx = build_context_for(&syn::parse2(model).unwrap())
+            .unwrap_or_else(|error| panic!("an index on a field names that field: {error}"));
+        let indexes = tokens(&ctx.unique_index_impls);
+        assert!(
+            indexes.contains("vec![\"email_address\".to_string()]"),
+            "{indexes}"
+        );
+    }
+
+    // `hidden` naming a skip field that is another field's column hides both.
+    for hidden in ["password", "password, password_hash"] {
+        let ctx = build_context_for(&parse_quote! {
+            #[tideorm(hidden = #hidden)]
+            struct User {
+                #[tideorm(primary_key, auto_increment)]
+                id: i64,
+                #[tideorm(skip)]
+                password: Option<String>,
+                #[tideorm(column = "password")]
+                password_hash: String,
+            }
+        })
+        .unwrap_or_else(|error| panic!("{hidden}: {error}"));
+        assert_eq!(
+            ctx.hidden_attrs,
+            vec!["password", "password_hash"],
+            "{hidden}"
+        );
+    }
+
+    // A relation naming no local key keys by the primary key itself.
+    let ctx = build_context_for(&parse_quote! {
+        struct Author {
+            #[tideorm(primary_key, auto_increment, column = "user_id")]
+            id: i64,
+            #[tideorm(column = "creator")]
+            user_id: i64,
+            #[tideorm(has_many = "Book", foreign_key = "author_id")]
+            books: HasMany<Book>,
+        }
+    })
+    .unwrap_or_else(|error| panic!("the default local key is the primary key: {error}"));
+    let wiring = tokens(&ctx.relation_wiring);
+    assert!(wiring.contains("json!(self.id.clone())"), "{wiring}");
+    assert!(!wiring.contains("self.user_id"), "{wiring}");
+
+    // The default soft-delete column and a morph's columns are columns.
+    let ctx = build_context_for(&parse_quote! {
+        #[tideorm(soft_delete)]
+        struct Post {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "removed_at")]
+            deleted_at: Option<DateTime<Utc>>,
+            #[tideorm(column = "deleted_at")]
+            archived_at: Option<DateTime<Utc>>,
+        }
+    })
+    .unwrap_or_else(|error| panic!("the default soft-delete column: {error}"));
+    let (ident, column) = ctx.soft_delete.expect("soft delete should be resolved");
+    assert_eq!(
+        (ident.to_string(), column.as_str()),
+        ("archived_at".into(), "deleted_at")
+    );
+
+    let ctx = build_context_for(&parse_quote! {
+        struct Comment {
+            #[tideorm(primary_key, auto_increment)]
+            id: i64,
+            #[tideorm(column = "legacy_ref")]
+            commentable_id: i64,
+            #[tideorm(column = "commentable_id")]
+            target_id: i64,
+            commentable_type: String,
+            #[tideorm(morph_name = "commentable")]
+            commentable: MorphTo<Commentable>,
+        }
+    })
+    .unwrap_or_else(|error| panic!("a morph's derived columns: {error}"));
+    let wiring = tokens(&ctx.relation_wiring);
+    assert!(wiring.contains("json!(self.target_id.clone())"), "{wiring}");
 }

@@ -85,9 +85,10 @@ A typed column names its model's table, so in another model's query it means tha
 Values are anything `serde::Serialize`, and they are bound as the column's own type, so pass the native value: a `Uuid`, a `chrono` date or timestamp, or a `Decimal` compares correctly on every backend (`where_eq("id", user_id)`, `where_gt("created_at", since)`). A few rules worth knowing:
 
 - **NULL.** `where_eq(col, None::<T>)` is `IS NULL`. `where_not` and `where_not_in` follow SQL and never match a NULL column. A `None` inside `where_in` also matches NULL rows, and one inside `where_not_in` keeps the non-NULL rows outside the list.
+- **JSON `null`.** On a JSON column, `where_eq(col, serde_json::Value::Null)` (or `Some(Value::Null)`) matches the rows holding the JSON `null` document, and `None` the SQL NULL ones; inside `where_in` and `where_not_in` the two read the same way.
 - **NaN and infinity.** A filter value holding a NaN or infinite float fails the query, as does `set()` or `having()` given one: JSON has no such number, and the `null` it would become means SQL NULL. Check a float parsed from a request with `is_finite()`.
 - **Columns are identifiers.** The column argument is a column, `table.column`, or a typed column; anything else is rejected when the query runs. SQL expressions go through `where_raw()`, whose SQL you vouch for — never pass user input to it. When the expression needs a value, write a `?` for it and pass the value to `where_raw_with()`, which binds it: `where_raw_with("LOWER(email) = LOWER(?)", vec![email.into()])`. The `?` works on every backend, and `or_where_raw_with`/`and_where_raw_with` join an OR group the same way.
-- **Long lists.** A `where_in`/`where_not_in` list of more than 1,000 integers is rendered inline instead of bound, so an id list of any length works. Other values are bound one parameter each, which caps them at the backend's limit: 32,766 on SQLite, 65,535 on PostgreSQL and MySQL.
+- **Long lists.** A `where_in`/`where_not_in` list of more than 1,000 values that share a type is bound as one array on PostgreSQL (`= ANY($1)`), and a list of more than 1,000 strings as one JSON value on SQLite (`IN (SELECT value FROM json_each(?))`); anywhere else a list of more than 1,000 integers is written inline instead of bound. So a list of ids or text of any length works. Other long lists, such as UUIDs or timestamps on SQLite and MySQL, are bound one parameter each, which caps them at the backend's limit: 32,766 on SQLite, 65,535 on PostgreSQL and MySQL.
 - **`LIKE` and case.** `where_contains`/`where_starts_with`/`where_ends_with` escape `%` and `_`, so they are safe for user input. Whether they are case-sensitive is the backend's: PostgreSQL is, MySQL (with its default collations) and SQLite (for ASCII) are not.
 - **Text equality follows the collation.** MySQL's default collation ignores case and accents, so there `where_eq("email", "ada@example.com")` finds `Ada@Example.com`, `"cafe"` finds `café`, and a unique index refuses both spellings; MariaDB's default collations also ignore trailing spaces, so `"a "` finds `"a"`. PostgreSQL and SQLite compare text exactly. Normalize values you look up, such as lowercasing emails before saving, to get the same answer everywhere.
 
@@ -433,7 +434,20 @@ A query reads the model's columns by name rather than `SELECT *`, so a column ad
 
 `get()` builds complete models, so it refuses a `select()` that leaves model columns out: the missing ones would read as `None` or a default, and saving such a model would write those back over the stored values. Read a partial row with `get_json()`.
 
-`get_json()` returns each model column exactly as the model's own JSON has it, on every backend — SQLite stores booleans as integers and JSON and dates as text, and the model's types are what put them back. Other columns (aliases, aggregates, window values) are decoded by the type the database declares: text comes back verbatim, binary as an array of bytes, `NUMERIC`/`DECIMAL` as a decimal string. SQLite declares no type for an expression, so it is read by what SQLite stores: a float sum or a running total is a number. `Database::raw_json` has no model, so it reports what the database stores: on SQLite a boolean is `0`/`1` and a JSON column is its text, as it is on MariaDB, which declares JSON columns as text, and a MySQL `DATETIME` has no offset.
+`get_json()` uses the model's column types to decode its columns on every backend — SQLite stores booleans as integers and JSON and dates as text, and the model's types are what put them back. Other columns (aliases, aggregates, window values) are decoded by the type the database declares: text comes back verbatim, binary as an array of bytes, `NUMERIC`/`DECIMAL` as a decimal string. SQLite declares no type for an expression, so it is read by what SQLite stores: a float sum or a running total is a number, and text is a string however it looks, unless a document-returning SQLite JSON function or `->` computed an object or array. A single-path `json_extract` returns a string member as plain SQL text, so its text cannot tell `"[2]"` from `[2]` and stays a string; read a document with `->` instead (`doc -> '$.tags'`), which always returns JSON, in any form: chained, after another call, or with a parameter as its path. With multiple paths, `json_extract` returns a JSON array and is decoded as one. Any other expression over a JSON value, such as `COALESCE`, `CASE`, `MAX` or a scalar subquery reading a JSON column, reads as text. `Database::raw_json` has no model, so it reports what the database declares and stores: on SQLite a boolean expression is `0`/`1` and a `JSON` column's object or array is a document, while MariaDB declares JSON columns as text and returns their text, and a MySQL `DATETIME` has no offset. A MySQL `TIME` is a signed duration, such as `-01:30:00` or `100:00:00`. PostgreSQL types with no Rust counterpart come back as the server prints them: an `INTERVAL` as its ISO 8601 duration, `TIMETZ`, `INET`, `CIDR` and the built-in ranges as their text, a `MONEY` as a decimal string; an array keeps its `NULL`s and dimensions. A value TideORM cannot read fails the call rather than reading as `null`.
+
+Floating-point NaN and infinities are returned as the strings `"NaN"`, `"inf"`, and
+`"-inf"`, including inside PostgreSQL arrays. They remain distinct from SQL NULL,
+which is returned as JSON `null`.
+
+SQLite follows selected JSON expressions through subqueries, CTEs and the views a statement
+reads, including renamed columns. An inner alias does not change an unrelated outer text expression's type. If a
+`UNION` combines a JSON expression with ordinary text in the same output column, that
+column keeps SQLite's stored text rather than guessing which rows are JSON documents. SQLite
+describes a compound's columns by its first arm, though, so a `JSON` table column there makes
+the column a document for every row. A table column is a document only when it is declared
+`JSON` or `JSONB`: an untyped column, or one of a type SQLite's driver does not name, reads its
+text as a string however it looks.
 
 ### Joins
 
@@ -713,7 +727,7 @@ TideORM provides full-text search capabilities across PostgreSQL (tsvector/tsque
 Enable the feature explicitly when you need the full-text search API:
 
 ```toml
-tideorm = { version = "0.15.0", features = ["postgres", "fulltext"] }
+tideorm = { version = "0.16.0", features = ["postgres", "fulltext"] }
 ```
 
 ### Search Basics
@@ -976,10 +990,10 @@ Product::query()
 | Operation | PostgreSQL | MySQL | SQLite |
 |-----------|------------|-------|--------|
 | JSON Contains | `(col)::jsonb @> '{"key":1}'` | `JSON_CONTAINS(col, '{"key":1}')` | `json_each(col)` + subquery |
-| Key Exists | `(col)::jsonb ? 'key'` | `JSON_CONTAINS_PATH(col, 'one', '$.key')` | `json_type(col, '$.key') IS NOT NULL` |
-| Path Exists | `(col)::jsonb @? '$.path'` | `JSON_CONTAINS_PATH(col, 'one', '$.path')` | `json_type(col, '$.path') IS NOT NULL` |
+| Key Exists | `jsonb_typeof(col) = 'object' AND (col)::jsonb ? 'key'` | `JSON_CONTAINS_PATH(col, 'one', '$."key"')` | `json_type(col, '$."key"') IS NOT NULL` |
+| Path Exists | `(col)::jsonb @? 'strict $.path'` | `JSON_CONTAINS_PATH(col, 'one', '$.path')` | `json_type(col, '$.path') IS NOT NULL` |
 
-`where_json_key_not_exists` and `where_json_path_not_exists` negate the two tests. On every backend a member that holds JSON `null` exists, and a `NULL` column matches neither a test nor its negation.
+`where_json_key_not_exists` and `where_json_path_not_exists` negate the two tests. On every backend a member that holds JSON `null` exists, and a `NULL` column matches neither a test nor its negation. A path is `$` followed by `.key`, `."quoted key"` or `[index]` steps, or those steps alone, read from the root (`a.b[0]` is `$.a.b[0]`). Every backend reads it strictly: a key exists only in an object, never as a string element of an array, a step never looks inside an array it does not index, and an index never reads a value that is not an array as an array of one (MySQL's indexed steps check their parent is an array). A path with other steps fails the query, except on PostgreSQL, which reads it as the JSONPath written.
 
 PostgreSQL's JSON operators exist only for `jsonb`, so the column is cast: they work on a `json` column (what `t.json(..)` creates) too, and on a `jsonb` column the cast is dropped at planning, so its GIN index still applies.
 
@@ -1061,7 +1075,7 @@ let affected = Database::execute_with_params(
 
 Name the columns in raw SQL rather than `SELECT *` when the table can change under a running application. Statements are prepared and cached per connection, and after a column is added PostgreSQL rejects a cached `SELECT *` (`cached plan must not change result type`) while SQLite can report the old column list, until the connection is replaced. The query builder is not affected: it always names the model's columns.
 
-A raw statement that is not a plain read clears the whole query cache when it runs, since its tables cannot be known; a read is one statement that starts with `SELECT`, `SHOW`, `EXPLAIN`, `DESCRIBE`, `PRAGMA`, `VALUES` or a `WITH` holding no write. A `SELECT` that calls a function which writes is read as a read, so clear the cache after one yourself: `QueryCache::global().clear()`.
+Every raw statement invalidates cached reads of its database once it has run, reads included, and so does one that fails: its text cannot show which tables it writes, as a `SELECT` can write through a function, a view or a trigger, and a statement before a failing one may already have committed. Independent databases keep their cached results. Separate pools using the same SQLite file or the same PostgreSQL endpoint and database share invalidation; MySQL databases on one endpoint share it because triggers and foreign keys can cross schemas. SQLite handles that use `ATTACH`, and connections whose database cannot be identified, retain conservative global invalidation. Entries inserted manually with `QueryCache::set` or `set_tagged` have no database identity and are invalidated by any database write.
 
 ---
 

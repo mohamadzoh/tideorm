@@ -1,6 +1,5 @@
 use super::{EntityManager, EntityState, managed, save};
 use crate::database::Database;
-use crate::error::Error;
 use crate::model::{Model, ModelMeta, OnConflictBuilder};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -31,32 +30,15 @@ macro_rules! no_declared_relations {
     };
 }
 
-struct NoopCheckpoint;
-
-impl managed::ManagedCheckpoint for NoopCheckpoint {
-    fn rollback(self: Box<Self>, _entity_manager: &EntityManager) {}
-}
-
-struct CountingCheckpoint {
-    rollback_count: Arc<AtomicUsize>,
-}
-
-impl managed::ManagedCheckpoint for CountingCheckpoint {
-    fn rollback(self: Box<Self>, _entity_manager: &EntityManager) {
-        self.rollback_count.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-struct CheckpointedManagedEntry {
+/// An entry that registers `child` the first time it flushes.
+struct AppendingManagedEntry {
     flush_count: Arc<AtomicUsize>,
-    rollback_count: Arc<AtomicUsize>,
     appended: AtomicBool,
     child: Option<Arc<dyn managed::ManagedOps>>,
-    fail: bool,
 }
 
 #[async_trait]
-impl managed::ManagedOps for CheckpointedManagedEntry {
+impl managed::ManagedOps for AppendingManagedEntry {
     fn current_state(&self) -> EntityState {
         EntityState::Managed
     }
@@ -64,12 +46,6 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
 
     no_declared_relations!();
-
-    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
-        Box::new(CountingCheckpoint {
-            rollback_count: self.rollback_count.clone(),
-        })
-    }
 
     async fn flush(
         self: Arc<Self>,
@@ -81,10 +57,6 @@ impl managed::ManagedOps for CheckpointedManagedEntry {
             && !self.appended.swap(true, Ordering::SeqCst)
         {
             entity_manager.managed_entries.write().push(child.clone());
-        }
-
-        if self.fail {
-            return Err(Error::query("forced flush failure".to_string()));
         }
 
         Ok(())
@@ -315,10 +287,6 @@ impl managed::ManagedOps for RunawayManagedEntry {
 
     no_declared_relations!();
 
-    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
-        Box::new(NoopCheckpoint)
-    }
-
     async fn flush(
         self: Arc<Self>,
         entity_manager: &Arc<EntityManager>,
@@ -336,20 +304,16 @@ impl managed::ManagedOps for RunawayManagedEntry {
 async fn flush_in_scope_processes_entries_added_during_flush() -> crate::error::Result<()> {
     let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
     let child_flush_count = Arc::new(AtomicUsize::new(0));
-    let child: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
+    let child: Arc<dyn managed::ManagedOps> = Arc::new(AppendingManagedEntry {
         flush_count: child_flush_count.clone(),
-        rollback_count: Arc::default(),
         appended: AtomicBool::new(false),
         child: None,
-        fail: false,
     });
     let parent_flush_count = Arc::new(AtomicUsize::new(0));
-    let parent: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
+    let parent: Arc<dyn managed::ManagedOps> = Arc::new(AppendingManagedEntry {
         flush_count: parent_flush_count.clone(),
-        rollback_count: Arc::default(),
         appended: AtomicBool::new(false),
         child: Some(child),
-        fail: false,
     });
 
     entity_manager.managed_entries.write().push(parent);
@@ -393,7 +357,7 @@ async fn flush_in_scope_rejects_runaway_managed_entry_growth() {
     entity_manager.managed_entries.write().push(runaway);
 
     let error = entity_manager
-        .flush_in_scope_with_checkpoints(None)
+        .flush_in_scope()
         .await
         .expect_err("runaway flush growth should fail once the pass guard is exceeded");
 
@@ -452,109 +416,6 @@ fn detach_removes_managed_entry_immediately_without_flush() -> crate::error::Res
     Ok(())
 }
 
-#[tokio::test]
-async fn rollback_entity_manager_state_restores_managed_entries_and_checkpoints()
--> crate::error::Result<()> {
-    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    let managed = entity_manager.merge(EntityManagerModTestUser {
-        id: 42,
-        name: "Before".to_string(),
-    })?;
-
-    let rollback_state = save::capture_entity_manager_rollback_state(entity_manager.as_ref());
-    let checkpoints = save::capture_managed_checkpoints(entity_manager.as_ref());
-
-    managed.edit(|user| user.name = "After".to_string());
-    let _orphan = entity_manager.merge(EntityManagerModTestUser {
-        id: 84,
-        name: "Orphan".to_string(),
-    })?;
-    entity_manager.snapshot::<EntityManagerModTestUser>(
-        "entity_manager_mod_test_users",
-        "42",
-        "posts",
-        &["84".to_string()],
-    );
-
-    let identity_rollback = save::new_identity_rollback_log();
-    save::rollback_entity_manager_state(
-        entity_manager.as_ref(),
-        checkpoints,
-        rollback_state,
-        &identity_rollback,
-    );
-
-    assert_eq!(managed.get().name, "Before");
-    assert_eq!(entity_manager.managed_entries.read().len(), 1);
-    assert_eq!(entity_manager.managed_identity_map.read().len(), 1);
-    assert!(
-        entity_manager
-            .get_managed_by_key::<EntityManagerModTestUser>("42")
-            .is_some()
-    );
-    assert!(
-        entity_manager
-            .get_managed_by_key::<EntityManagerModTestUser>("84")
-            .is_none()
-    );
-    assert!(entity_manager.snapshots.read().is_empty());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn flush_collects_checkpoints_for_entries_added_during_flush() {
-    let entity_manager = EntityManager::new(Arc::new(Database::disconnected()));
-    let grandchild_flush_count = Arc::new(AtomicUsize::new(0));
-    let grandchild_rollback_count = Arc::new(AtomicUsize::new(0));
-    let grandchild: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
-        flush_count: grandchild_flush_count.clone(),
-        rollback_count: grandchild_rollback_count.clone(),
-        appended: AtomicBool::new(false),
-        child: None,
-        fail: true,
-    });
-    let child_flush_count = Arc::new(AtomicUsize::new(0));
-    let child_rollback_count = Arc::new(AtomicUsize::new(0));
-    let child: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
-        flush_count: child_flush_count.clone(),
-        rollback_count: child_rollback_count.clone(),
-        appended: AtomicBool::new(false),
-        child: Some(grandchild),
-        fail: false,
-    });
-    let parent_flush_count = Arc::new(AtomicUsize::new(0));
-    let parent_rollback_count = Arc::new(AtomicUsize::new(0));
-    let parent: Arc<dyn managed::ManagedOps> = Arc::new(CheckpointedManagedEntry {
-        flush_count: parent_flush_count.clone(),
-        rollback_count: parent_rollback_count.clone(),
-        appended: AtomicBool::new(false),
-        child: Some(child),
-        fail: false,
-    });
-    let checkpoints = Arc::new(parking_lot::Mutex::new(Vec::<
-        Box<dyn managed::ManagedCheckpoint>,
-    >::new()));
-
-    entity_manager.managed_entries.write().push(parent);
-
-    let result = entity_manager
-        .flush_in_scope_with_checkpoints(Some(&checkpoints))
-        .await;
-    assert!(result.is_err());
-
-    for checkpoint in std::mem::take(&mut *checkpoints.lock()) {
-        checkpoint.rollback(entity_manager.as_ref());
-    }
-
-    assert_eq!(parent_flush_count.load(Ordering::SeqCst), 1);
-    assert_eq!(child_flush_count.load(Ordering::SeqCst), 1);
-    assert_eq!(grandchild_flush_count.load(Ordering::SeqCst), 1);
-    assert_eq!(parent_rollback_count.load(Ordering::SeqCst), 1);
-    assert_eq!(child_rollback_count.load(Ordering::SeqCst), 1);
-    assert_eq!(grandchild_rollback_count.load(Ordering::SeqCst), 1);
-}
-
 struct OrderRecordingManagedEntry {
     state: EntityState,
     label: &'static str,
@@ -570,10 +431,6 @@ impl managed::ManagedOps for OrderRecordingManagedEntry {
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
 
     no_declared_relations!();
-
-    fn checkpoint(self: Arc<Self>) -> Box<dyn managed::ManagedCheckpoint> {
-        Box::new(NoopCheckpoint)
-    }
 
     async fn flush(
         self: Arc<Self>,
@@ -829,7 +686,7 @@ async fn another_managers_save_inside_a_unit_of_work_uses_its_own_database()
     let outer = EntityManager::new(outer_db.clone());
     let inner = EntityManager::new(inner_db.clone());
 
-    save::in_unit_of_work(&outer, Vec::new, move |_| async move {
+    save::in_unit_of_work(&outer, move || async move {
         inner
             .save(&ScopeNote {
                 id: 0,

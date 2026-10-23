@@ -27,10 +27,7 @@ where
         }
     }
 
-    let inserted = crate::internal::QueryExecutor::insert_many::<M>(models).await;
-    // Triggers and foreign keys can change tables beyond the inserted model.
-    crate::QueryCache::global().clear();
-    inserted
+    crate::internal::QueryExecutor::insert_many::<M>(models).await
 }
 
 type EntityModel<M> =
@@ -50,12 +47,22 @@ where
     let executor = connection.executor();
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
     crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
-    let row = crate::internal::run_profiled(active.insert(&executor), || {
-        crate::internal::model_error_context::<M>(format!("insert into {}", M::table_name()))
-    })
-    .await;
-    crate::QueryCache::global().clear();
+    let explicit_key = crate::internal::holds_auto_increment_key::<M>(&active);
+    let row = connection
+        .invalidating(crate::internal::run_profiled(
+            active.insert(&executor),
+            || {
+                crate::internal::model_error_context::<M>(format!(
+                    "insert into {}",
+                    M::table_name()
+                ))
+            },
+        ))
+        .await;
     let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
+    if explicit_key {
+        crate::internal::advance_key_sequence::<M>(&executor, [model.primary_key()]).await?;
+    }
     Ok(model)
 }
 
@@ -73,14 +80,17 @@ where
     let executor = connection.executor();
     crate::internal::ensure_fields_storable::<M, _>(&executor)?;
     crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
-    let row = crate::internal::run_profiled(active.update(&executor), || {
-        crate::internal::primary_key_error_context::<M>(
-            primary_key,
-            format!("update where {}", M::primary_key_display(primary_key)),
-        )
-    })
-    .await;
-    crate::QueryCache::global().clear();
+    let row = connection
+        .invalidating(crate::internal::run_profiled(
+            active.update(&executor),
+            || {
+                crate::internal::primary_key_error_context::<M>(
+                    primary_key,
+                    format!("update where {}", M::primary_key_display(primary_key)),
+                )
+            },
+        ))
+        .await;
     let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
     Ok(model)
 }
@@ -95,24 +105,24 @@ pub async fn __delete_row<M: Model>(model: &M) -> Result<u64> {
     let connection = crate::database::__current_connection()?;
     // The key condition binds a `u64` past `i64::MAX` as a decimal, where the
     // model's own value would panic the driver.
-    let result = crate::internal::run_profiled(
-        <M as InternalModel>::Entity::delete_many()
-            .filter(M::primary_key_condition(&primary_key))
-            .exec(&connection.executor()),
-        || {
-            crate::internal::primary_key_error_context::<M>(
-                &primary_key,
-                format!("delete where {}", M::primary_key_display(&primary_key)),
-            )
-        },
-    )
-    .await;
-    crate::QueryCache::global().clear();
-    let result = result?;
-    if result.rows_affected > 0 {
-        super::__forget_dirty_snapshot(model);
+    let executor = connection.executor();
+    let result = connection
+        .invalidating(crate::internal::run_profiled(
+            <M as InternalModel>::Entity::delete_many()
+                .filter(M::primary_key_condition(&primary_key))
+                .exec(&executor),
+            || {
+                crate::internal::primary_key_error_context::<M>(
+                    &primary_key,
+                    format!("delete where {}", M::primary_key_display(&primary_key)),
+                )
+            },
+        ))
+        .await;
+    if result.as_ref().is_ok_and(|result| result.rows_affected > 0) {
+        connection.recording(|| super::__forget_dirty_snapshot(model));
     }
-    Ok(result.rows_affected)
+    Ok(result?.rows_affected)
 }
 
 pub(crate) async fn transaction<F, T>(f: F) -> Result<T>

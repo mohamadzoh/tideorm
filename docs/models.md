@@ -38,6 +38,8 @@ pub struct User {
 
 Your derive then decides the JSON: `to_json()` and hidden attributes follow its renames, but relation fields serialize as `null` until loaded, and a body that leaves out a relation or a managed timestamp only deserializes if the field is `#[serde(default)]`.
 
+Do not use `#[serde(flatten)]` on a hidden field or typed relation when calling `to_json()`: flattening removes the boundary needed to filter its contents safely. `try_to_json()` reports an error, `to_json()` returns `{}`, and an affected nested model becomes `{}`. Remove `flatten` or use `skip_serializing` on that field. Public JSON fields can still be flattened.
+
 ### Reserved Attribute Names
 
 `params` is reserved.
@@ -90,7 +92,7 @@ Use these inline in `#[tideorm::model(...)]`, or in a `#[tideorm(...)]` attribut
 | `#[tideorm(soft_delete)]` | Soft deletes through a `deleted_at` column (see [Soft Deletes](#soft-deletes)) |
 | `#[tideorm(deleted_at_column = "name")]` | The soft-delete column, when it is not `deleted_at` |
 | `#[tideorm(timestamps)]` | Mark the model as timestamped; `created_at`/`updated_at` fields are managed either way |
-| `#[tideorm(hidden = "field_a,field_b")]` | Leave these fields out of `to_json()`: fields, columns (which hide their field) or attachment relations; any other name is a compile error. Without it the soft-delete field is hidden. Plain `serde` serialization and `query().get_json()` still include them |
+| `#[tideorm(hidden = "field_a,field_b")]` | Leave these fields out of `to_json()`: fields, columns (which hide their field) or attachment relations; a name that is one field's name and another field's column hides both, and any other name is a compile error. Without it the soft-delete field is hidden. Plain `serde` serialization and `query().get_json()` still include them |
 | `#[tideorm(tokenize)]` | Enable [record tokenization](#record-tokenization) |
 | `#[tideorm(translatable = "..", languages = "..", fallback_language = "..")]` | Translated fields; requires the `translations` feature and a manual `HasTranslations` impl (see [Relations](relations.md)) |
 | `#[tideorm(has_one_files = "..", has_many_files = "..")]` | File attachment slots; requires the `attachments` feature and a manual `HasAttachments` impl |
@@ -128,7 +130,7 @@ Enable the `encrypted-fields` Cargo feature before using `encrypted = "..."`.
 
 ```toml
 [dependencies]
-tideorm = { version = "0.15.0", features = ["postgres", "encrypted-fields"] }
+tideorm = { version = "0.16.0", features = ["postgres", "encrypted-fields"] }
 ```
 
 Use `encrypted = "..."` on the model when specific persisted string columns should be stored encrypted in the database but remain plain strings in your Rust model.
@@ -156,13 +158,14 @@ Encrypted field behavior:
 - Each encrypted field uses a scoped key derived from the configured encryption secret plus the model table and column name, so ciphertext from one attribute does not decrypt under another attribute's context.
 - Encrypted columns must contain TideORM encrypted payloads or `NULL`. Plaintext legacy rows and older global-scope payloads are rejected on load; migrate that data explicitly before enabling the feature.
 - Query predicates are not rewritten yet. Filters such as `where_eq("customer_phone_number", "...")` still compare against the stored database value, so plaintext lookups on encrypted columns are not currently transparent.
-- Typed `DISTINCT`, `GROUP BY`, `MIN`, `MAX`, `SUM`, and `AVG` operations reject encrypted columns, including projection aliases, joined model columns, and scalar subquery outputs. Randomized ciphertext does not preserve plaintext equality or order; load and decrypt the values before comparing or aggregating them.
+- Typed `DISTINCT`, `GROUP BY`, `ORDER BY`, `MIN`, `MAX`, `SUM`, and `AVG` operations reject encrypted columns, including projection aliases, joined model columns, and scalar subquery outputs. Randomized ciphertext does not preserve plaintext equality or order; load and decrypt the values before comparing or aggregating them.
 - Typed unions reject known incompatible output types, such as a boolean and an integer at the same position, because all rows share one decoder.
 - `UNION` rejects encrypted projections because deduplication compares ciphertext. `UNION ALL` supports explicit columns (or the default model projection) when each output position has the same encryption table and column in every operand. Incompatible scopes and unknown shapes such as raw SQL or wildcards are rejected when an encrypted projection is involved; read those queries separately.
 - Configure the encryption key once during startup with `TideConfig::init().encryption_key("...")` or `TokenConfig::set_encryption_key("...")`.
 - Supported encrypted field types are `String`, `Text`, `Option<String>`, and `Option<Text>`. A batch `set()` of an encrypted field takes a string or `None`.
 - `pluck`, `value`, `get_json` and `get_as` decrypt encrypted columns from the query model or joined models. Named projections in `get_json` and `get_as` retain decryption through aliases and scalar subqueries.
 - A primary key cannot be encrypted: every write stores a new ciphertext, which no lookup by the key could match, so `#[tideorm(encrypted = "..")]` on one is a compile error.
+- For the same reason an `#[index]` or `#[unique_index]` over an encrypted field, or `searchable = ".."` naming one, is a compile error (a unique index would never see two equal values), and a full-text search over an encrypted column fails with an error.
 
 ---
 
@@ -208,7 +211,7 @@ let user = user.save().await?;
 println!("Created user with id: {}", user.id);
 ```
 
-For auto-increment primary keys, TideORM treats `0` as an unsaved record marker internally. You usually do not need to assign it yourself when constructing a new model. Natural keys, composite keys, and non-auto-increment primary keys are considered persisted unless the primary key value is empty.
+For auto-increment primary keys, TideORM treats `0` as an unsaved record marker internally. You usually do not need to assign it yourself when constructing a new model. `create()` and `insert_all()` let the database number a key still at `0` and write one the model holds, as an upsert (`on_conflict`) does, so reset a loaded model's key to `0` before creating a copy of it. After writing a key the model holds, TideORM moves PostgreSQL's sequence for the key past it (MySQL and SQLite do so themselves), so the next key the database numbers does not collide with it; this needs `UPDATE` on the sequence, and without it the sequence is left alone. Natural keys, composite keys, and non-auto-increment primary keys are considered persisted unless the primary key value is empty.
 
 ### Read
 
@@ -425,7 +428,7 @@ let users = User::query()
     .await?;
 ```
 
-A model takes one `#[tideorm::scopes]` block, which generates its `UserQueryScopes` trait; put every scope in it. A scope's parameters after the query can be `mut` and can name the model as `Self`.
+A model takes one `#[tideorm::scopes]` block, which generates its `UserQueryScopes` trait; put every scope in it. A scope's parameters after the query can be `mut` and can name the model as `Self`. A scope cannot take the name of a `QueryBuilder` method (`latest`, `limit`, `distinct`, `where_eq`, ..): the builder's own method would answer the call, so such a name is a compile error.
 
 If you call a model's named scopes from a different module than the `#[tideorm::scopes]` block, bring the generated extension trait into scope first:
 
@@ -608,7 +611,7 @@ impl Callbacks for User {
 | `before_update` | Before updating existing record |
 | `after_update` | After updating existing record |
 | `before_delete` | Before deleting record |
-| `after_delete` | After deleting record |
+| `after_delete` | After deleting record; not when no row matched |
 
 An `Err` from a `before_*` hook stops the operation before anything is written. An `after_*` hook runs once the statement has succeeded: its `Err` is returned from `save()`, `update()` or `delete()`, but the row is already written. Inside `Database::transaction`, propagating that error with `?` rolls the write back with the rest of the transaction; outside one, it stays. Callbacks run for single-model writes only — `insert_all()`, `update_all()`, upserts and `query().delete()` skip them.
 
@@ -763,7 +766,7 @@ TokenConfig::set_encryption_key("your-32-byte-secret-key-here-xx");
 
 // Tokenize a record
 let user = User::find(1).await?.unwrap();
-let token = user.to_token()?;  // "iIBmdKYhJh4_vSKFlBTP..."
+let token = user.to_token()?;  // "v2.iIBmdKYhJh4_vSKFlBTP..."
 
 // Decode token to the model's primary key type (doesn't hit database)
 let id = User::decode_token(&token)?;  // 1
@@ -798,7 +801,7 @@ When a model has `#[tideorm(tokenize)]`, these methods are available:
 
 ### Model-Specific Tokens
 
-Tokens are bound to their model type. A User token cannot decode a Product:
+Tokens are bound to their model's table. A User token cannot decode a Product:
 
 ```rust
 #[tideorm::model(table = "users", tokenize)]
@@ -815,6 +818,8 @@ assert_ne!(user_token, product_token);  // Different!
 // Cross-model decoding fails
 assert!(User::decode_token(&product_token).is_err());  // Error!
 ```
+
+A token is bound to the model's schema and table rather than its struct name, so two `User` models in different modules, on different tables, cannot open each other's tokens either, while two models over the same table can. Such a token starts with `v2.`; one issued before (bound to the struct name) still decodes for a model of that name. Encoder and decoder overrides receive the struct name, as before.
 
 ### Using Tokens in APIs
 
@@ -837,8 +842,8 @@ async fn get_user(token: String) -> tideorm::Result<Json<serde_json::Value>> {
 }
 
 // Example URLs:
-// GET /api/users/iIBmdKYhJh4_vSKFlBTPgWRlbW8tZW5isZqLo_EU4YI
-// GET /api/products/1NhY5XxAm_D53flvEc-5JmRlbW8tZW5iShKwXZjCb9s
+// GET /api/users/v2.iIBmdKYhJh4_vSKFlBTPgWRlbW8tZW5isZqLo_EU4YI
+// GET /api/products/v2.1NhY5XxAm_D53flvEc-5JmRlbW8tZW5iShKwXZjCb9s
 ```
 
 ### Custom Encoders

@@ -155,6 +155,63 @@ async fn raw_json_decodes_each_column_by_its_declaration() {
     );
 }
 
+/// A `TIME` is a signed duration of up to 838 hours rather than a time of
+/// day, and reads as one; a time of day reads as a `NaiveTime` writes it.
+#[tokio::test]
+async fn raw_time_values_keep_their_sign_and_hours() {
+    if !backend::connect().await {
+        return;
+    }
+    let rows = Database::raw_json(
+        "SELECT CAST('-01:30:00' AS TIME) AS negative, CAST('25:00:00' AS TIME) AS past_a_day, \
+         CAST('838:59:59' AS TIME) AS longest, CAST('-838:59:59' AS TIME) AS shortest, \
+         CAST('-00:00:01.000001' AS TIME(6)) AS micros, CAST('10:20:30.5' AS TIME(6)) AS half, \
+         CAST('12:00:00' AS TIME) AS noon, CAST(NULL AS TIME) AS missing",
+    )
+    .await
+    .expect("failed to read the times");
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "negative": "-01:30:00",
+            "past_a_day": "25:00:00",
+            "longest": "838:59:59",
+            "shortest": "-838:59:59",
+            "micros": "-00:00:01.000001",
+            "half": serde_json::to_value(chrono::NaiveTime::from_hms_milli_opt(10, 20, 30, 500))
+                .unwrap(),
+            "noon": "12:00:00",
+            "missing": null,
+        })]
+    );
+
+    // A model's `TIME` column, which the driver reads without its sign.
+    #[tideorm::model(table = "test_time_spans")]
+    struct TimeSpan {
+        #[tideorm(primary_key)]
+        id: i64,
+        spent: Option<chrono::NaiveTime>,
+    }
+    Database::execute("DROP TABLE IF EXISTS `test_time_spans`")
+        .await
+        .expect("failed to drop test_time_spans");
+    Database::execute(
+        "CREATE TABLE `test_time_spans` (`id` BIGINT PRIMARY KEY, `spent` TIME(6) NULL); \
+         INSERT INTO `test_time_spans` VALUES (1, '-01:30:00'), (2, '100:00:00.25'), (3, '08:15:00')",
+    )
+    .await
+    .expect("failed to create test_time_spans");
+    let spans = TimeSpan::query()
+        .order_asc("id")
+        .pluck::<String>("spent")
+        .await
+        .expect("failed to read the spans");
+    assert_eq!(spans, ["-01:30:00", "100:00:00.250", "08:15:00"]);
+    Database::execute("DROP TABLE `test_time_spans`")
+        .await
+        .expect("failed to drop test_time_spans");
+}
+
 #[tokio::test]
 async fn json_extract_filters_on_a_json_column() {
     if !parity::setup().await {
@@ -318,4 +375,64 @@ async fn a_seeder_in_a_transaction_on_a_one_connection_pool_uses_its_ledger() {
         .transaction(|_| Box::pin(async { Seeder::new().run().await }))
         .await;
     assert!(seeded.is_ok(), "{seeded:?}");
+}
+
+#[tideorm::model(table = "dialect_documents")]
+pub struct DialectDocument {
+    #[tideorm(primary_key)]
+    pub id: i64,
+    pub data: serde_json::Value,
+}
+
+/// The SQL a statement renders follows the pool it runs on, which asked the
+/// server what it is when it opened, never the configured backend: inside a
+/// transaction on a pool that is not the global one, and under a
+/// configuration naming the other server.
+#[tokio::test]
+async fn json_equality_follows_the_pool_not_the_configuration() {
+    if !backend::connect().await {
+        return;
+    }
+    Database::execute("DROP TABLE IF EXISTS `dialect_documents`")
+        .await
+        .expect("failed to drop dialect_documents");
+    Database::execute(
+        "CREATE TABLE `dialect_documents` (`id` BIGINT NOT NULL PRIMARY KEY, `data` JSON NOT NULL)",
+    )
+    .await
+    .expect("failed to create dialect_documents");
+    Database::execute(r#"INSERT INTO `dialect_documents` VALUES (1, '{"a": 1}'), (2, '{"a": 2}')"#)
+        .await
+        .expect("failed to insert dialect_documents");
+    let pool = Database::connect(backend::database_url())
+        .await
+        .expect("failed to open a second pool");
+    let other = match backend::DATABASE_TYPE {
+        DatabaseType::MariaDB => DatabaseType::MySQL,
+        _ => DatabaseType::MariaDB,
+    };
+    let matching =
+        || DialectDocument::query().where_eq(DialectDocument::DATA, serde_json::json!({ "a": 2 }));
+
+    for configured in [None, Some(other)] {
+        let config = tideorm::TideConfig::init();
+        match configured {
+            Some(database_type) => config.database_type(database_type).apply(),
+            None => config.apply(),
+        }
+        let in_transaction = pool
+            .transaction(|_| Box::pin(async move { matching().get().await }))
+            .await
+            .unwrap_or_else(|error| panic!("configured {configured:?}: {error}"));
+        assert_eq!(in_transaction.len(), 1, "configured {configured:?}");
+        assert_eq!(in_transaction[0].id, 2);
+
+        let with_handle = DialectDocument::query_with(&pool)
+            .where_eq(DialectDocument::DATA, serde_json::json!({ "a": 2 }))
+            .get()
+            .await
+            .unwrap_or_else(|error| panic!("configured {configured:?}: {error}"));
+        assert_eq!(with_handle.len(), 1, "configured {configured:?}");
+    }
+    tideorm::TideConfig::reset();
 }

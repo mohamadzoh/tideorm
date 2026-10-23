@@ -3,6 +3,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::time::Instant;
 
+const INVALIDATION_HISTORY_LIMIT: usize = 1024;
+
 /// A cache entry storing query results
 #[derive(Debug, Clone)]
 pub(super) struct CacheEntry {
@@ -16,6 +18,7 @@ pub(super) struct CacheEntry {
     /// — records all of those tables here, so a write to any one of them evicts
     /// the entry and not only a write to the primary model.
     tables: HashSet<String>,
+    pub(super) database: Option<std::sync::Arc<str>>,
     /// Monotonic insertion sequence used by FIFO/TTL eviction indexes.
     insert_order: u64,
     /// Monotonic access sequence used by the LRU eviction index.
@@ -34,6 +37,7 @@ impl CacheEntry {
                 .or_else(|| now.checked_add(Duration::from_secs(100 * 365 * 24 * 60 * 60)))
                 .unwrap_or(now),
             tables,
+            database: None,
             insert_order: order,
             access_order: order,
         }
@@ -96,7 +100,9 @@ pub(super) struct CacheStore {
     invalidation_seq: u64,
     /// The `invalidation_seq` at which each table was last invalidated.
     invalidated_at: HashMap<String, u64>,
-    /// The `invalidation_seq` of the last `clear()`.
+    invalidated_databases: HashMap<std::sync::Arc<str>, u64>,
+    unscoped_invalidated_at: u64,
+    /// Last global fill barrier: a clear, or compaction of invalidation history.
     cleared_at: u64,
 }
 
@@ -166,14 +172,39 @@ impl CacheStore {
         self.invalidation_seq += 1;
         self.cleared_at = self.invalidation_seq;
         self.invalidated_at.clear();
+        self.invalidated_databases.clear();
         removed
     }
 
     /// Record that the entries reading `table` were invalidated.
     pub(super) fn note_invalidated(&mut self, table: &str) {
         self.invalidation_seq += 1;
+        // Forget old names only behind a fill barrier: a read started before
+        // compaction must not repopulate a table whose marker was discarded.
+        if self.invalidated_at.len() >= INVALIDATION_HISTORY_LIMIT
+            && !self.invalidated_at.contains_key(table)
+        {
+            self.cleared_at = self.invalidation_seq;
+            self.invalidated_at.clear();
+        }
         self.invalidated_at
             .insert(table.to_string(), self.invalidation_seq);
+    }
+
+    pub(super) fn note_database_invalidated(&mut self, database: std::sync::Arc<str>) {
+        self.invalidation_seq += 1;
+        self.unscoped_invalidated_at = self.invalidation_seq;
+        // Short-lived databases must not leave an unbounded history behind.
+        // A global fill barrier rejects older in-flight reads without evicting
+        // any live entries; they were already handled by their invalidations.
+        if self.invalidated_databases.len() >= INVALIDATION_HISTORY_LIMIT
+            && !self.invalidated_databases.contains_key(&database)
+        {
+            self.cleared_at = self.invalidation_seq;
+            self.invalidated_databases.clear();
+        }
+        self.invalidated_databases
+            .insert(database, self.invalidation_seq);
     }
 
     /// The point a read starts from, for [`invalidated_since`](Self::invalidated_since).
@@ -182,8 +213,16 @@ impl CacheStore {
     }
 
     /// Whether any of `tables` was invalidated after `seq`.
-    pub(super) fn invalidated_since(&self, seq: u64, tables: &HashSet<String>) -> bool {
+    pub(super) fn invalidated_since(&self, point: &FillPoint, tables: &HashSet<String>) -> bool {
+        let seq = point.sequence;
         self.cleared_at > seq
+            || match &point.database {
+                Some(database) => self
+                    .invalidated_databases
+                    .get(database)
+                    .is_some_and(|&at| at > seq),
+                None => self.unscoped_invalidated_at > seq,
+            }
             || tables
                 .iter()
                 .any(|table| self.invalidated_at.get(table).is_some_and(|&at| at > seq))
@@ -289,5 +328,44 @@ impl CacheStats {
     /// Calculate the cache hit ratio
     pub fn hit_ratio(&self) -> f64 {
         crate::cache::toggle::hit_ratio(self.hits, self.misses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_history_is_bounded_and_compaction_blocks_old_fills() {
+        let mut store = CacheStore::default();
+        store.insert(
+            "live".into(),
+            CacheEntry::new(
+                vec![1],
+                Duration::from_secs(60),
+                HashSet::from(["stable".into()]),
+                1,
+            ),
+        );
+        let old = FillPoint {
+            sequence: store.invalidation_seq(),
+            database: Some("database".into()),
+        };
+        let tables = HashSet::from(["old-table".into()]);
+        store.note_invalidated("old-table");
+        for index in 0..(INVALIDATION_HISTORY_LIMIT * 3) {
+            store.note_invalidated(&format!("temporary-{index}"));
+            assert!(store.invalidated_at.len() <= INVALIDATION_HISTORY_LIMIT);
+        }
+        assert!(!store.invalidated_at.contains_key("old-table"));
+        assert!(store.invalidated_since(&old, &tables));
+        assert!(store.get("live").is_some());
+        let fresh = FillPoint {
+            sequence: store.invalidation_seq(),
+            database: old.database,
+        };
+        assert!(!store.invalidated_since(&fresh, &tables));
+        store.note_invalidated("old-table");
+        assert!(store.invalidated_since(&fresh, &tables));
     }
 }

@@ -809,6 +809,7 @@ impl<M: Model> EagerQueryBuilder<M> {
     where
         M: EagerLoadModel,
     {
+        self.query.ensure_key_lookup_is_unpaged()?;
         self.query = self.query.where_primary_key(&id)?.limit(1);
         self.first().await
     }

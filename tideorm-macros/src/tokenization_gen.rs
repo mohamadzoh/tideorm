@@ -22,6 +22,14 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
                 #struct_name_str
             }
 
+            // The table, not the struct name a model in another module may share.
+            fn token_table() -> Option<::tideorm::tokenization::TokenTable> {
+                Some((
+                    <Self as ::tideorm::model::ModelMeta>::schema_name(),
+                    <Self as ::tideorm::model::ModelMeta>::table_name(),
+                ))
+            }
+
             fn token_primary_key(&self) -> Self::TokenPrimaryKey {
                 self.#pk_ident.clone()
             }
@@ -30,7 +38,8 @@ pub(crate) fn generate_tokenizable_impl(ctx: &BuildContext) -> TokenStream2 {
             // token is for, and errors travel to logs and responses.
             async fn from_token(token: &str) -> ::tideorm::Result<Self> {
                 let id = Self::decode_token(token)?;
-                Self::find(id)
+                // Qualified: the model's module need not import `Model`.
+                <Self as ::tideorm::model::Model>::find(id)
                     .await?
                     .ok_or_else(|| ::tideorm::Error::not_found(
                         format!("no {} matches this token", #struct_name_str)

@@ -35,7 +35,8 @@ TideConfig::init()
 ```
 
 `auto_models()` discovers inventory metadata; no file glob is needed. It includes
-models from linked dependencies. Use `.models::<(User, Post)>()` to sync a subset.
+models from linked dependencies. Use `.models::<User>()` or `.models::<(User, Post)>()`
+to sync a subset.
 Registration is process-wide and idempotent per schema/table. Registration alone
 does not run SQL. For deployed schemas, use migrations instead of sync.
 
@@ -147,7 +148,7 @@ Default features: `postgres`, `runtime-tokio`. To use only SQLite:
 
 ```toml
 [dependencies]
-tideorm = { version = "0.15.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

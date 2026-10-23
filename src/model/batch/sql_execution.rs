@@ -521,15 +521,21 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         col, col, placeholder
                     )
                 }
+                // A document that is no array becomes the first element of
+                // one, as MySQL's `JSON_ARRAY_APPEND` wraps it.
                 crate::config::DatabaseType::SQLite => {
-                    let placeholder = push_param(
-                        db_type,
-                        params,
-                        crate::query::db_sql::json_scalar_parameter(value),
-                    );
+                    let mut element = || {
+                        push_param(
+                            db_type,
+                            params,
+                            crate::query::db_sql::json_scalar_parameter(value),
+                        )
+                    };
+                    let (first, appended, wrapped) = (element(), element(), element());
                     format!(
-                        "{} = json_insert(COALESCE({}, '[]'), '$[#]', json({}))",
-                        col, col, placeholder
+                        "{col} = CASE WHEN {col} IS NULL THEN json_array(json({first})) \
+                         WHEN json_type({col}) = 'array' THEN json_insert({col}, '$[#]', json({appended})) \
+                         ELSE json_array(json({col}), json({wrapped})) END"
                     )
                 }
             }),
@@ -565,7 +571,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         ""
                     };
                     format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL WHEN JSON_TYPE({col}) <> 'ARRAY' THEN {col} ELSE (SELECT COALESCE(JSON_ARRAYAGG(JSON_EXTRACT(tideorm_element.v, '$')), JSON_ARRAY()) FROM JSON_TABLE({col}, '$[*]' COLUMNS (v JSON PATH '$')) AS tideorm_element WHERE {null_guard}NOT COALESCE({}, FALSE)) END",
                         equal.sql
                     )
                 }
@@ -582,7 +588,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                         col
                     );
                     format!(
-                        "{col} = CASE WHEN {col} IS NULL THEN NULL ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({source}) AS tideorm_element WHERE NOT {}) END",
+                        "{col} = CASE WHEN {col} IS NULL THEN NULL WHEN json_type({col}) <> 'array' THEN {col} ELSE (SELECT json_group_array({element} ORDER BY tideorm_element.key) FROM json_each({source}) AS tideorm_element WHERE NOT {}) END",
                         equal.sql
                     )
                 }
@@ -596,48 +602,30 @@ impl<M: Model> BatchUpdateBuilder<M> {
                             path
                         ))
                     })?;
-                let bound_path = match db_type {
-                    crate::config::DatabaseType::Postgres => {
-                        crate::query::db_sql::postgres_json_path_array(&steps)
-                    }
-                    crate::config::DatabaseType::MySQL
-                    | crate::config::DatabaseType::MariaDB
-                    | crate::config::DatabaseType::SQLite => {
-                        crate::query::db_sql::json_path_text(&steps)
-                    }
-                };
-                let path_placeholder = push_param(
-                    db_type,
-                    params,
-                    crate::internal::Value::String(Some(bound_path)),
-                );
-                let value_placeholder = push_param(
-                    db_type,
-                    params,
-                    crate::query::db_sql::json_scalar_parameter(value),
-                );
-
+                let mut bind = |value: crate::internal::Value| push_param(db_type, params, value);
+                let document = || crate::query::db_sql::json_scalar_parameter(value);
                 Ok(match db_type {
-                    crate::config::DatabaseType::Postgres => format!(
-                        "{} = jsonb_set({}, {}::text[], CAST({} AS jsonb))",
-                        col,
-                        crate::query::db_sql::postgres_jsonb(&col),
-                        path_placeholder,
-                        value_placeholder
-                    ),
+                    crate::config::DatabaseType::Postgres => {
+                        let path = bind(crate::internal::Value::String(Some(
+                            crate::query::db_sql::postgres_json_path_array(&steps),
+                        )));
+                        let value = bind(document());
+                        format!(
+                            "{col} = jsonb_set({}, {path}::text[], CAST({value} AS jsonb))",
+                            crate::query::db_sql::postgres_jsonb(&col)
+                        )
+                    }
                     // `JSON_EXTRACT(?, '$')` reads the text as JSON on both
                     // servers; MariaDB has no `CAST(.. AS JSON)`.
                     crate::config::DatabaseType::MySQL | crate::config::DatabaseType::MariaDB => {
-                        format!(
-                            "{} = JSON_SET({}, {}, JSON_EXTRACT({}, '$'))",
-                            col, col, path_placeholder, value_placeholder
-                        )
+                        let path = bind(crate::internal::Value::String(Some(
+                            crate::query::db_sql::json_path_text(&steps),
+                        )));
+                        let value = bind(document());
+                        format!("{col} = JSON_SET({col}, {path}, JSON_EXTRACT({value}, '$'))")
                     }
                     crate::config::DatabaseType::SQLite => {
-                        format!(
-                            "{} = json_set({}, {}, json({}))",
-                            col, col, path_placeholder, value_placeholder
-                        )
+                        Self::sqlite_json_set(&col, &steps, document, bind)
                     }
                 })
             }
@@ -650,6 +638,53 @@ impl<M: Model> BatchUpdateBuilder<M> {
                 Ok(format!("{} = COALESCE({}, {})", col, col, placeholder))
             }
         }
+    }
+
+    /// `json_set` on SQLite, writing what PostgreSQL's `jsonb_set` and MySQL's
+    /// `JSON_SET` write: a path whose parent is missing, or is not the object
+    /// its member step needs or the array its index step needs, leaves the
+    /// document as it is (SQLite would create the missing parents), and an
+    /// index past an array's end appends the value (SQLite would ignore it).
+    fn sqlite_json_set(
+        col: &str,
+        steps: &[crate::query::db_sql::JsonPathStep],
+        document: impl Fn() -> crate::internal::Value,
+        mut bind: impl FnMut(crate::internal::Value) -> String,
+    ) -> String {
+        use crate::query::db_sql::{JsonPathStep, json_path_text};
+
+        let path = |steps: &[JsonPathStep], suffix: &str| {
+            crate::internal::Value::String(Some(format!("{}{suffix}", json_path_text(steps))))
+        };
+        let (last, parent) = steps.split_last().expect("json_set paths have a step");
+        // `json_type` of a missing parent is NULL, which `IS NOT` counts as
+        // another type.
+        let set = match last {
+            JsonPathStep::Member(_) => {
+                let parent_path = bind(path(parent, ""));
+                let target = bind(path(steps, ""));
+                let value = bind(document());
+                format!(
+                    "CASE WHEN json_type({col}, {parent_path}) IS NOT 'object' THEN {col} \
+                     ELSE json_set({col}, {target}, json({value})) END"
+                )
+            }
+            JsonPathStep::Element(index) => {
+                let parent_path = bind(path(parent, ""));
+                let length_path = bind(path(parent, ""));
+                let target = bind(path(steps, ""));
+                let replaced = bind(document());
+                let end = bind(path(parent, "[#]"));
+                let appended = bind(document());
+                format!(
+                    "CASE WHEN json_type({col}, {parent_path}) IS NOT 'array' THEN {col} \
+                     WHEN json_array_length({col}, {length_path}) > {index} \
+                     THEN json_set({col}, {target}, json({replaced})) \
+                     ELSE json_insert({col}, {end}, json({appended})) END"
+                )
+            }
+        };
+        format!("{col} = {set}")
     }
 
     fn build_set_clause_with_params_for_db(
@@ -802,6 +837,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         let table = crate::query::db_sql::quote_table::<M>(db_type);
         let mut sql = format!("UPDATE {} SET {}", table, set_parts.join(", "));
+        // The rows a limit keeps are the first in the query's order, as a
+        // read of them would have it.
+        let order_by = match self.limit_value {
+            Some(_) => query.order_by_sql(db_type),
+            None => String::new(),
+        };
 
         match self.limit_value {
             // Postgres and SQLite reject `UPDATE .. LIMIT`, so the cap is
@@ -818,6 +859,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     sql.push_str(" WHERE ");
                     sql.push_str(&where_sql);
                 }
+                sql.push_str(&order_by);
                 // `limit` is a `u64`, so it can only ever render as digits.
                 sql.push_str(&format!(" LIMIT {})", limit));
             }
@@ -827,6 +869,7 @@ impl<M: Model> BatchUpdateBuilder<M> {
                     sql.push_str(&where_sql);
                 }
                 if let Some(limit) = limit {
+                    sql.push_str(&order_by);
                     sql.push_str(&format!(" LIMIT {}", limit));
                 }
             }
@@ -865,9 +908,12 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
         let (sql, params) = self.build_update_statement(db_type)?;
 
-        let result = db.__execute_with_params(&sql, params).await;
-        QueryBuilder::<M>::invalidate_model_state(result.as_ref().copied().unwrap_or(1));
-        result
+        QueryBuilder::<M>::invalidating_model_state(
+            &db,
+            db.__execute_with_params(&sql, params),
+            |rows| *rows,
+        )
+        .await
     }
 
     /// Run the update and return the rows it wrote.
@@ -903,15 +949,16 @@ impl<M: Model> BatchUpdateBuilder<M> {
         sql.push_str(" RETURNING ");
         sql.push_str(&crate::query::db_sql::model_columns_sql::<M>(db_type, None));
 
-        let models = db.__raw_with_params::<M>(&sql, params).await;
         // A row that fails to decode was still written, so the table's cached
         // reads are dropped whether or not the decoding succeeds.
-        QueryBuilder::<M>::invalidate_model_state(
-            models.as_ref().map_or(1, |models| models.len() as u64),
-        );
-        let models = models?;
+        let models = QueryBuilder::<M>::invalidating_model_state(
+            &db,
+            db.__raw_with_params::<M>(&sql, params),
+            |models| models.len() as u64,
+        )
+        .await?;
         #[cfg(feature = "dirty-tracking")]
-        crate::model::__remember_dirty_snapshots(&models);
+        db.recording(|| crate::model::__remember_dirty_snapshots(&models));
         Ok(models)
     }
 }

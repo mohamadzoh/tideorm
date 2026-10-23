@@ -306,23 +306,28 @@ fn batch_json_set_binds_the_backend_path_then_the_value() {
 #[test]
 fn batch_json_set_takes_indexes_and_quoted_keys() {
     let path = r#"$.items[0]."a \"b\"""#;
-    let bound_path = |db_type| {
+    let bound = |db_type| {
         let (_, params) = BatchUpdateBuilder::<BatchJsonUser>::new()
             .json_set("name", path, 1)
             .where_eq("id", 1)
             .build_update_statement(db_type)
             .expect("statement should build");
-        params[0].clone()
+        params
     };
+    let text = |text: &str| crate::internal::Value::String(Some(text.to_string()));
 
     assert_eq!(
-        bound_path(crate::config::DatabaseType::Postgres),
-        crate::internal::Value::String(Some(r#"{"items","0","a \"b\""}"#.to_string()))
+        bound(crate::config::DatabaseType::Postgres)[0],
+        text(r#"{"items","0","a \"b\""}"#)
     );
     assert_eq!(
-        bound_path(crate::config::DatabaseType::SQLite),
-        crate::internal::Value::String(Some(r#"$."items"[0]."a \"b\"""#.to_string()))
+        bound(crate::config::DatabaseType::MySQL)[0],
+        text(r#"$."items"[0]."a \"b\"""#)
     );
+    // SQLite checks the parent first, then sets the member.
+    let sqlite = bound(crate::config::DatabaseType::SQLite);
+    assert_eq!(sqlite[0], text(r#"$."items"[0]"#));
+    assert_eq!(sqlite[1], text(r#"$."items"[0]."a \"b\"""#));
 
     for path in ["$", "$.*", "$.items[*]", "items"] {
         let error = BatchUpdateBuilder::<BatchJsonUser>::new()
@@ -342,4 +347,22 @@ struct BatchJsonUser {
     #[tideorm(primary_key)]
     id: i64,
     name: serde_json::Value,
+}
+
+#[test]
+fn mysql_array_remove_guards_non_array_documents() {
+    for backend in [
+        crate::config::DatabaseType::MySQL,
+        crate::config::DatabaseType::MariaDB,
+    ] {
+        let (sql, params) = BatchUpdateBuilder::<BatchJsonUser>::new()
+            .array_remove("name", serde_json::json!(999))
+            .build_update_statement(backend)
+            .unwrap();
+        assert!(
+            sql.contains("WHEN JSON_TYPE(`name`) <> 'ARRAY' THEN `name` ELSE"),
+            "{sql}"
+        );
+        assert!(!params.is_empty());
+    }
 }

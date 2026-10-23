@@ -1,0 +1,5 @@
+error: #[tideorm(encrypted = ...)]: 'email' is both the name of field `email` and the column of field `email_enc`; refer to `email` by its column 'email_plain' or to `email_enc` by its name 'email_enc', or rename one of them
+ --> tests/ui/invalid_ambiguous_field_name.rs:4:8
+  |
+4 | struct Account {
+  |        ^^^^^^^

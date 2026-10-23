@@ -60,6 +60,16 @@ struct AliasedKeyModel {
     account_id: i64,
 }
 
+#[tideorm::model(table = "composite_tree_nodes")]
+struct CompositeTreeNode {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(primary_key)]
+    tenant: i64,
+    code: String,
+    parent_code: Option<String>,
+}
+
 #[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
 async fn setup_direct_relation_test_db() -> Database {
     crate::test_support::install_sqlite_global(&[]).await

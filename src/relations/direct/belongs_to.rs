@@ -212,6 +212,6 @@ where
             .foreign_key_value(CONTEXT)
             .cloned()
             .and_then(|key| Ok((self.owner_key, key, self.query(CONTEXT)?)));
-        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, None).await
+        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, false).await
     }
 }

@@ -50,6 +50,14 @@ impl<M: Model> QueryBuilder<M> {
                 value,
                 matches!(operator, ComparisonOperator::NotEq),
             ),
+            // Any other column holds no JSON document: a null is SQL NULL.
+            ConditionSpec::Compare {
+                operator: operator @ (ComparisonOperator::Eq | ComparisonOperator::NotEq),
+                value: serde_json::Value::Null,
+            } => self.build_null_check_expression(
+                column_expr(),
+                matches!(operator, ComparisonOperator::NotEq),
+            ),
             ConditionSpec::Compare { operator, value } => {
                 self.build_compare_expression(column, column_expr(), operator, value)
             }
@@ -61,9 +69,18 @@ impl<M: Model> QueryBuilder<M> {
                 escaped,
                 value,
             } => self.build_pattern_expression(db_type, column, negated, escaped, value),
-            ConditionSpec::List { operator, values } => {
-                self.build_list_expression(db_type, column, column_expr(), operator, values)
-            }
+            ConditionSpec::List {
+                operator,
+                values,
+                documents,
+            } => self.build_list_expression(
+                db_type,
+                column,
+                column_expr(),
+                operator,
+                values,
+                documents,
+            ),
             ConditionSpec::NullCheck { negated } => {
                 self.build_null_check_expression(column_expr(), negated)
             }

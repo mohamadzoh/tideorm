@@ -28,25 +28,16 @@ pub type ColumnTypeOf = fn(&str) -> Option<crate::orm::ColumnType>;
 
 inventory::collect!(CompiledModelRegistration);
 
-/// The column type a compiled model declares for `column` of `table`, for a
-/// query that joins the table: `None` when no model has that table.
+/// The column type a compiled model declares for `column` of `table`, including
+/// its schema when qualified: `None` when no model matches that identity.
 pub(crate) fn registered_column_type(table: &str, column: &str) -> Option<crate::orm::ColumnType> {
-    static BY_TABLE: std::sync::OnceLock<std::collections::HashMap<&'static str, ColumnTypeOf>> =
-        std::sync::OnceLock::new();
-
-    let by_table = BY_TABLE.get_or_init(|| {
-        let mut by_table = std::collections::HashMap::new();
-        for model in inventory::iter::<CompiledModelRegistration> {
-            // Two models may share a table; the first one's types serve both.
-            by_table
-                .entry((model.table_name)())
-                .or_insert(model.column_type);
-        }
-        by_table
-    });
-    by_table
-        .get(table)
-        .and_then(|column_type| column_type(column))
+    let (schema, table) = table
+        .rsplit_once('.')
+        .map_or((None, table), |(schema, table)| (Some(schema), table));
+    inventory::iter::<CompiledModelRegistration>
+        .into_iter()
+        .find(|model| (model.table_name)() == table && (model.schema_name)() == schema)
+        .and_then(|model| (model.column_type)(column))
 }
 
 /// Columns of the compiled model for a table in the requested schema.
@@ -156,13 +147,19 @@ pub trait SyncModel {
     }
 }
 
-/// Trait for registering multiple models at once
+/// Trait for registering one model or several at once
 ///
-/// This is implemented for tuples of up to 16 model types.
-/// Used by `TideConfig::models::<(Model1, Model2, ...)>()`.
+/// This is implemented for every model and for tuples of up to 16 model types.
+/// Used by `TideConfig::models::<User>()` and `TideConfig::models::<(User, Post)>()`.
 pub trait RegisterModels {
-    /// Register all models in this tuple
+    /// Register the model, or every model in the tuple
     fn register_all();
+}
+
+impl<M: SyncModel> RegisterModels for M {
+    fn register_all() {
+        M::register_for_sync();
+    }
 }
 
 impl RegisterModels for () {

@@ -206,13 +206,13 @@ macro_rules! condition_methods {
                 (key: &str)
                 => JsonKeyNotExists, $crate::query::ConditionValue::text(key);
             [where_json_path_exists, or_where_json_path_exists, and_where_json_path_exists]
-                "Match rows whose JSON `column` has a member at `path` (`a.b.c`), one holding JSON `null` included."
+                "Match rows whose JSON `column` has a member at `path` (`$.a.b[0]`, or `a.b[0]` from the root), one holding JSON `null` included. A step never looks inside an array it does not index, nor indexes a value that is not an array; a path of other steps is an error, except on PostgreSQL, which reads it as a JSONPath."
                 (path: &str)
-                => JsonPathExists, $crate::query::ConditionValue::text(path);
+                => JsonPathExists, $crate::query::ConditionValue::json_path(path);
             [where_json_path_not_exists, or_where_json_path_not_exists, and_where_json_path_not_exists]
-                "Match rows whose JSON `column` has no member at `path`; a NULL column matches neither this nor `where_json_path_exists`."
+                "Match rows whose JSON `column` has no member at `path`, read as for `where_json_path_exists`; a NULL column matches neither."
                 (path: &str)
-                => JsonPathNotExists, $crate::query::ConditionValue::text(path);
+                => JsonPathNotExists, $crate::query::ConditionValue::json_path(path);
             [where_array_contains, or_where_array_contains, and_where_array_contains] <V: serde::Serialize>
                 "Match rows whose array `column` holds every one of `values` (`@>`), any list of any serializable value."
                 (values: impl IntoIterator<Item = V>)
@@ -316,7 +316,7 @@ macro_rules! condition_methods {
                     <Self as $crate::columns::ConditionOwner>::own_table(),
                 ),
                 operator: $crate::query::Operator::$operator,
-                value: $crate::query::ConditionValue::list(values.into_iter().map(C::convert_value)),
+                value: $crate::query::ConditionValue::members(values.into_iter().map(C::convert_value)),
             })
         }
     };
@@ -587,6 +587,16 @@ pub(crate) fn filter_value(value: impl serde::Serialize) -> serde_json::Value {
 pub enum ConditionValue {
     Single(serde_json::Value),
     List(Vec<serde_json::Value>),
+    /// The members of a `where_in`/`where_not_in` that hold a JSON `null`
+    /// document (`Value::Null`, `Some(Value::Null)`) as well as their other
+    /// values: a JSON column compares every value as a document, the `null`
+    /// one included, and `sql_null` says whether a `None`, SQL NULL, was among
+    /// them too. Any other column reads a `null` as SQL NULL, as in a
+    /// [`List`](Self::List).
+    DocumentList {
+        values: Vec<serde_json::Value>,
+        sql_null: bool,
+    },
     Range(serde_json::Value, serde_json::Value),
     None,
     RawExpr(String),
@@ -633,6 +643,13 @@ impl std::fmt::Display for ConditionValue {
         match self {
             Self::Single(value) => write!(f, "{}", value),
             Self::List(values) => write!(f, "{}", serde_json::Value::Array(values.clone())),
+            Self::DocumentList { values, sql_null } => {
+                write!(f, "{}", serde_json::Value::Array(values.clone()))?;
+                if *sql_null {
+                    f.write_str(" or NULL")?;
+                }
+                Ok(())
+            }
             Self::Range(low, high) => write!(f, "{}..{}", low, high),
             Self::None => f.write_str("NULL"),
             Self::RawExpr(sql)
@@ -646,8 +663,16 @@ impl std::fmt::Display for ConditionValue {
 
 impl ConditionValue {
     /// One filter value; [`Invalid`](Self::Invalid) for one SQL cannot compare.
+    ///
+    /// A top-level `None` is SQL NULL, [`None`](Self::None). Any other null,
+    /// such as `serde_json::Value::Null` or `Some(Value::Null)`, stays a value,
+    /// which a JSON column compares as the JSON `null` document.
     pub(crate) fn single(value: impl serde::Serialize) -> Self {
-        checked_filter_value(value).map_or_else(Self::Invalid, Self::Single)
+        match checked_assignment_value(value) {
+            Ok((_, true)) => Self::None,
+            Ok((json, false)) => Self::Single(json),
+            Err(reason) => Self::Invalid(reason),
+        }
     }
 
     /// A list of filter values, refused as a whole when one cannot be compared.
@@ -657,6 +682,36 @@ impl ConditionValue {
             .map(checked_filter_value)
             .collect::<Result<Vec<_>, _>>()
             .map_or_else(Self::Invalid, Self::List)
+    }
+
+    /// The members of a `where_in`/`where_not_in`. A `None` is SQL NULL, and
+    /// any other null a value, which a JSON column compares as the JSON `null`
+    /// document; a list holding one is a
+    /// [`DocumentList`](Self::DocumentList).
+    pub(crate) fn members<V: serde::Serialize>(values: impl IntoIterator<Item = V>) -> Self {
+        let checked = match values
+            .into_iter()
+            .map(checked_assignment_value)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(checked) => checked,
+            Err(reason) => return Self::Invalid(reason),
+        };
+        if !checked
+            .iter()
+            .any(|(value, sql_null)| value.is_null() && !sql_null)
+        {
+            return Self::List(checked.into_iter().map(|(value, _)| value).collect());
+        }
+        let sql_null = checked.iter().any(|(_, sql_null)| *sql_null);
+        Self::DocumentList {
+            values: checked
+                .into_iter()
+                .filter(|(_, sql_null)| !sql_null)
+                .map(|(value, _)| value)
+                .collect(),
+            sql_null,
+        }
     }
 
     /// The bounds of a range.
@@ -670,6 +725,21 @@ impl ConditionValue {
     /// One text value: a `LIKE` pattern, a JSON key or path.
     pub(crate) fn text(text: impl Into<String>) -> Self {
         Self::Single(serde_json::Value::String(text.into()))
+    }
+
+    /// A JSON path for an existence test: `$` and its steps, or plain steps
+    /// read from the root (`a.b[0]` is `$.a.b[0]`). Anything else is kept as
+    /// written, for PostgreSQL to read as a JSONPath.
+    pub(crate) fn json_path(path: &str) -> Self {
+        let rooted = match path.chars().next() {
+            Some('$') | None => None,
+            Some('[') => Some(format!("${path}")),
+            Some(_) => Some(format!("$.{path}")),
+        };
+        match rooted.filter(|rooted| crate::query::db_sql::parse_json_path(rooted).is_some()) {
+            Some(rooted) => Self::text(rooted),
+            None => Self::text(path),
+        }
     }
 
     /// The `LIKE` pattern matching text that contains `value` literally.
@@ -722,14 +792,32 @@ impl LogicalOp {
 /// rather than the literal `1 = 1`, and a soft-delete model appends its own
 /// `deleted_at IS NULL` conjunct to whatever the caller declared — so neither
 /// shape survives a comparison against a fixed set of constant-true spellings.
-pub(crate) fn condition_is_vacuous(condition: &WhereCondition) -> bool {
+///
+/// `is_json` tells the columns holding JSON, where a JSON `null` is the `null`
+/// document rather than SQL NULL, so a test against it keeps some rows.
+pub(crate) fn condition_is_vacuous(
+    condition: &WhereCondition,
+    is_json: impl Fn(&str) -> bool,
+) -> bool {
     match (&condition.operator, &condition.value) {
         (Operator::NotIn, ConditionValue::List(values)) => {
             values.iter().all(serde_json::Value::is_null)
         }
+        (Operator::NotIn, ConditionValue::DocumentList { values, .. }) => {
+            values.iter().all(serde_json::Value::is_null) && !is_json(&condition.column)
+        }
         // `where_not(col, None)` renders the same `col IS NOT NULL`.
-        (Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => true,
+        (Operator::NotEq, ConditionValue::None) => true,
+        (Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => {
+            !is_json(&condition.column)
+        }
         (Operator::ArrayContains, ConditionValue::List(values)) => values.is_empty(),
+        // A pattern of `%` alone matches every value: an empty `contains`,
+        // `starts_with` or `ends_with`, or `where_like(col, "%")`.
+        (
+            Operator::Like | Operator::LikeEscaped,
+            ConditionValue::Single(serde_json::Value::String(pattern)),
+        ) => !pattern.is_empty() && pattern.chars().all(|character| character == '%'),
         // Every object document contains `{}`, and every array `[]`.
         (Operator::JsonContains, ConditionValue::Single(document)) => {
             document.as_object().is_some_and(serde_json::Map::is_empty)

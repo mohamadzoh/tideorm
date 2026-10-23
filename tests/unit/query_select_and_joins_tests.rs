@@ -312,7 +312,7 @@ fn a_typed_column_of_another_model_in_a_window_keeps_its_table() {
     );
 }
 
-#[tideorm::model(table = "linked_audit_events")]
+#[tideorm::model(table = "linked_audit_events", schema = "audit")]
 struct LinkedAuditEvent {
     #[tideorm(primary_key, auto_increment)]
     id: i64,
@@ -338,6 +338,30 @@ fn a_schema_qualified_join_binds_its_columns_as_their_types() {
         params
             .iter()
             .any(|value| matches!(value, crate::internal::Value::Uuid(Some(_)))),
+        "{params:?}"
+    );
+}
+
+#[test]
+fn a_join_in_another_schema_does_not_reuse_column_types() {
+    let (_, params) = LinkedSelectUser::query()
+        .inner_join(
+            "other.linked_audit_events",
+            "linked_select_users.id",
+            "linked_audit_events.id",
+        )
+        .where_eq("linked_audit_events.token", uuid::Uuid::nil().to_string())
+        .build_select_sql_with_params_for_db(crate::config::DatabaseType::Postgres);
+    assert!(
+        params
+            .iter()
+            .any(|value| matches!(value, crate::internal::Value::String(Some(_)))),
+        "{params:?}"
+    );
+    assert!(
+        !params
+            .iter()
+            .any(|value| matches!(value, crate::internal::Value::Uuid(_))),
         "{params:?}"
     );
 }

@@ -10,4 +10,8 @@ fn invalid_relation_columns_fail_at_compile_time() {
     t.compile_fail("tests/ui/invalid_hidden_field.rs");
     t.compile_fail("tests/ui/invalid_validate_bounds.rs");
     t.compile_fail("tests/ui/invalid_field_index.rs");
+    t.compile_fail("tests/ui/invalid_encrypted_lookup.rs");
+    t.compile_fail("tests/ui/invalid_ambiguous_field_name.rs");
+    t.compile_fail("tests/ui/invalid_generic_model.rs");
+    t.compile_fail("tests/ui/invalid_scope_name.rs");
 }

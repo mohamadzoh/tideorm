@@ -159,7 +159,7 @@ impl<M: Model> QueryBuilder<M> {
         // statement. A raw UNION arm's shape is unknown, typically `SELECT *`,
         // so a query with one keeps `table.*` to stay aligned with it.
         if expressions.is_empty() {
-            if self.clauses.unions.iter().any(|union| union.raw) {
+            if self.reads_table_wildcard() {
                 expressions.push(format!("{}.*", db_sql::quote_ident(db_type, table)));
             } else {
                 expressions.push(db_sql::model_columns_sql::<M>(db_type, Some(table)));
@@ -291,6 +291,20 @@ impl<M: Model> QueryBuilder<M> {
         }
     }
 
+    /// ` ORDER BY ..` for the query's ordering, or nothing without one.
+    pub(crate) fn order_by_sql(&self, db_type: DatabaseType) -> String {
+        if self.clauses.order_by.is_empty() {
+            return String::new();
+        }
+        let order_parts: Vec<String> = self
+            .clauses
+            .order_by
+            .iter()
+            .map(|(column, direction)| self.format_order_by_for_db(db_type, column, *direction))
+            .collect();
+        format!(" ORDER BY {}", order_parts.join(", "))
+    }
+
     /// Render a single ORDER BY term.
     ///
     /// Entries created by `order_by_raw()` carry the raw-expression marker and
@@ -347,15 +361,7 @@ impl<M: Model> QueryBuilder<M> {
         db_type: DatabaseType,
         params: &mut Vec<Value>,
     ) {
-        if !self.clauses.order_by.is_empty() {
-            let order_parts: Vec<String> = self
-                .clauses
-                .order_by
-                .iter()
-                .map(|(column, direction)| self.format_order_by_for_db(db_type, column, *direction))
-                .collect();
-            sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
-        }
+        sql.push_str(&self.order_by_sql(db_type));
 
         db_sql::append_limit_offset(
             sql,

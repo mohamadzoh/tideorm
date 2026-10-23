@@ -628,6 +628,9 @@ async fn review_postgres_failed_batch_commit_restores_snapshots() {
         name: String,
     }
     let db = tideorm::require_db().unwrap();
+    db.exec_raw("DROP TABLE IF EXISTS review_batch_commit")
+        .await
+        .unwrap();
     db.exec_raw("CREATE TABLE review_batch_commit(id BIGINT PRIMARY KEY,name TEXT UNIQUE DEFERRABLE INITIALLY DEFERRED)").await.unwrap();
     let first = Inserted {
         id: 391,
@@ -897,6 +900,9 @@ async fn review_mysql_export_preserves_mixed_index_directions() {
         return;
     }
     let db = tideorm::require_db().unwrap();
+    db.exec_raw("DROP TABLE IF EXISTS review_index_directions")
+        .await
+        .unwrap();
     db.exec_raw("CREATE TABLE review_index_directions(id BIGINT PRIMARY KEY,a INTEGER,b INTEGER,label VARCHAR(50),INDEX review_mixed(a DESC,b ASC),INDEX review_prefixed(label(10) DESC,b ASC))").await.unwrap();
     let lookup = "SELECT INDEX_NAME AS name,SEQ_IN_INDEX AS position,COLLATION AS direction FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='review_index_directions' ORDER BY INDEX_NAME,SEQ_IN_INDEX";
     let before = db.query_raw_json(lookup).await.unwrap();
@@ -2372,4 +2378,421 @@ async fn review_mysql_upsert_refuses_natural_and_composite_primary_key_changes()
         );
         db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
     }
+}
+
+/// A one-connection pool of the backend under test with a fresh table, so the
+/// transaction tests below run on a connection of their own.
+async fn private_table(prefix: &str) -> (Database, String) {
+    let db = Database::builder()
+        .url(backend::database_url())
+        .max_connections(1)
+        .build()
+        .await
+        .unwrap();
+    let table = format!("{prefix}_{}", uuid::Uuid::new_v4().simple());
+    db.exec_raw(&format!("CREATE TABLE {table}(id BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    (db, table)
+}
+
+async fn table_ids(db: &Database, table: &str) -> Vec<i64> {
+    db.query_raw_json(&format!("SELECT id FROM {table} ORDER BY id"))
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_i64().unwrap())
+        .collect()
+}
+
+#[tideorm::model(table = "review_abort_rows")]
+struct ReviewAbortRow {
+    #[tideorm(primary_key)]
+    id: i64,
+}
+
+/// After a caught failure PostgreSQL refuses the SAVEPOINT a nested
+/// transaction or `insert_all` opens, and the driver then rolls the enclosing
+/// transaction back: it must fail at commit, not commit what followed.
+#[tokio::test]
+async fn review_postgres_savepoint_after_a_failed_statement_aborts_the_transaction() {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    let (db, table) = private_table("review_failed_savepoint").await;
+    db.exec_raw("CREATE TABLE IF NOT EXISTS review_abort_rows(id BIGINT PRIMARY KEY)")
+        .await
+        .unwrap();
+    for nested_insert_all in [false, true] {
+        db.exec_raw(&format!("DELETE FROM {table}")).await.unwrap();
+        let (handle, name) = (db.clone(), table.clone());
+        let result: tideorm::Result<()> = db
+            .transaction(move |_| {
+                Box::pin(async move {
+                    handle
+                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                        .await?;
+                    let duplicate = handle
+                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                        .await;
+                    assert!(duplicate.is_err());
+                    let nested = if nested_insert_all {
+                        ReviewAbortRow::insert_all(vec![
+                            ReviewAbortRow { id: 5 },
+                            ReviewAbortRow { id: 6 },
+                        ])
+                        .await
+                        .map(|_| ())
+                    } else {
+                        let inner_handle = handle.clone();
+                        handle
+                            .transaction(move |_| {
+                                Box::pin(async move {
+                                    inner_handle.exec_raw("SELECT 1").await?;
+                                    Ok(())
+                                })
+                            })
+                            .await
+                    };
+                    assert!(nested.is_err(), "the nested savepoint opened: {nested:?}");
+                    let after = handle
+                        .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
+                        .await;
+                    assert!(after.is_err(), "a statement ran after the abort: {after:?}");
+                    Ok(())
+                })
+            })
+            .await;
+        assert!(result.is_err(), "the aborted transaction committed");
+        assert_eq!(table_ids(&db, &table).await, Vec::<i64>::new());
+    }
+    assert_eq!(table_ids(&db, "review_abort_rows").await, Vec::<i64>::new());
+    db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
+    db.exec_raw("DROP TABLE review_abort_rows").await.unwrap();
+}
+
+/// A statement that fails on a transaction marks that transaction, even when
+/// it runs through an outer database's handle inside another database's
+/// transaction: PostgreSQL's aborted transaction must then refuse to commit
+/// rather than roll back silently, and the inner one still commits.
+#[tokio::test]
+async fn review_postgres_failure_through_an_outer_handle_marks_its_own_transaction() {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    let (outer, table) = private_table("review_outer_failure").await;
+    let (inner, inner_table) = private_table("review_inner_commit").await;
+    let (outer_handle, inner_handle) = (outer.clone(), inner.clone());
+    let (name, inner_name) = (table.clone(), inner_table.clone());
+    let result: tideorm::Result<()> = outer
+        .transaction(move |_| {
+            Box::pin(async move {
+                outer_handle
+                    .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                    .await?;
+                let (failing, writer) = (outer_handle.clone(), inner_handle.clone());
+                inner_handle
+                    .transaction(move |_| {
+                        Box::pin(async move {
+                            let missing = failing
+                                .exec_raw("SELECT * FROM review_outer_failure_missing")
+                                .await;
+                            assert!(missing.is_err());
+                            writer
+                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
+                                .await?;
+                            Ok(())
+                        })
+                    })
+                    .await
+            })
+        })
+        .await;
+    assert!(result.is_err(), "the aborted transaction committed");
+    assert_eq!(table_ids(&outer, &table).await, Vec::<i64>::new());
+    assert_eq!(table_ids(&inner, &inner_table).await, vec![2]);
+    outer
+        .exec_raw(&format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+    inner
+        .exec_raw(&format!("DROP TABLE {inner_table}"))
+        .await
+        .unwrap();
+}
+
+/// A value of a type no typed decoder reads comes back as PostgreSQL prints
+/// it, an array of one with its `NULL`s and dimensions, and never as `null`;
+/// a value nothing can read fails the read.
+#[tokio::test]
+async fn review_postgres_raw_rows_read_types_without_a_typed_decoder() {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    // Each value beside `format('%s', v)`, the server's own text for it, in
+    // one transaction holding the settings that text follows.
+    let checks: [(&str, &[&str]); 10] = [
+        (
+            "interval",
+            &[
+                "1 year 2 months 3 days 04:05:06.789",
+                "-1 year -2 months +3 days -04:05:06",
+                "0",
+                "-0.000001 seconds",
+                "100 hours",
+                "1 mon -1 day",
+            ],
+        ),
+        (
+            "timetz",
+            &[
+                "10:30:00+02",
+                "10:30:00.25-05:30",
+                "12:00:00+05:30:15",
+                "24:00:00-01",
+            ],
+        ),
+        (
+            "inet",
+            &[
+                "192.168.1.5",
+                "192.168.1.0/24",
+                "::1",
+                "::1.2.3.4",
+                "::ffff:1.2.3.4",
+                "2001:db8:0:0:1:0:0:1",
+                "2001:db8::1/64",
+            ],
+        ),
+        ("cidr", &["10.0.0.0/8", "192.168.1.5/32", "2001:db8::/32"]),
+        ("int4range", &["[1,10)", "empty", "(,5]", "(,)"]),
+        ("int8range", &["[9000000000,9000000001]"]),
+        (
+            "numrange",
+            &["[1.5,2.25)", "(,1234567890123456789012345678901.5]"],
+        ),
+        (
+            "daterange",
+            &[
+                "[2020-01-01,2020-01-31]",
+                "[2020-01-01,infinity)",
+                "[0044-03-15 BC,0001-01-01)",
+            ],
+        ),
+        (
+            "tsrange",
+            &[
+                "[2020-01-01 10:00,2020-01-01 10:30:00.5)",
+                "[2020-01-01,infinity)",
+            ],
+        ),
+        ("tstzrange", &["[2020-01-01 10:00+02,2020-01-02 00:00+00)"]),
+    ];
+    let db = tideorm::require_db().unwrap();
+    let rows = db
+        .transaction(move |_| {
+            Box::pin(async move {
+                Database::execute("SET LOCAL intervalstyle = 'iso_8601'").await?;
+                Database::execute("SET LOCAL timezone = 'UTC'").await?;
+                Database::execute("SET LOCAL datestyle = 'ISO, MDY'").await?;
+                let mut rows = Vec::new();
+                for (type_name, values) in checks {
+                    let values = values
+                        .iter()
+                        .map(|value| format!("('{value}'::{type_name})"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    rows.extend(
+                        Database::raw_json(&format!(
+                            "SELECT v, format('%s', v) AS text FROM (VALUES {values}) AS t(v)"
+                        ))
+                        .await?,
+                    );
+                }
+                // A MONEY is its amount, which the server prints by locale.
+                rows.extend(
+                    Database::raw_json(
+                        "SELECT v, v::numeric::text AS text FROM (VALUES ('1234.56'::money), \
+                         ('-0.01'::money), ('92233720368547758.07'::money)) AS t(v)",
+                    )
+                    .await?,
+                );
+                Ok(rows)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 36);
+    for row in &rows {
+        assert!(row["v"].is_string(), "{row}");
+        assert_eq!(row["v"], row["text"], "{row}");
+    }
+
+    let row = Database::raw_json(
+        "SELECT ARRAY['2020-01-01', NULL, 'infinity']::date[] AS dates, \
+         ARRAY[['2020-01-01 10:00', '2020-01-02'], [NULL, '-infinity']]::timestamp[] AS stamps, \
+         ARRAY['2020-01-01 10:00+00']::timestamptz[] AS zoned, \
+         ARRAY['10:00:00.5', '24:00:00']::time[] AS times, \
+         ARRAY['10:30:00+02', NULL]::timetz[] AS zoned_times, \
+         ARRAY['1 day', NULL]::interval[] AS intervals, \
+         ARRAY['10.0.0.1', '::1/64']::inet[] AS addresses, \
+         ARRAY['1.50']::money[] AS amounts, \
+         ARRAY['[1,2)', 'empty']::int4range[] AS ranges, \
+         ARRAY[1, NULL]::int4[] AS numbers, \
+         date '2020-01-01' AS date, timestamp '2020-01-01 10:00' AS stamp, \
+         timestamp '2020-01-02' AS midnight, timestamptz '2020-01-01 10:00+00' AS zoned_stamp, \
+         NULL::point AS no_point",
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    let expected = serde_json::json!({
+        "dates": [row["date"], null, "infinity"],
+        "stamps": [[row["stamp"], row["midnight"]], [null, "-infinity"]],
+        "zoned": [row["zoned_stamp"]],
+        "times": ["10:00:00.500", "24:00:00"],
+        "zoned_times": ["10:30:00+02", null],
+        "intervals": ["P1D", null],
+        "addresses": ["10.0.0.1", "::1/64"],
+        "amounts": ["1.50"],
+        "ranges": ["[1,2)", "empty"],
+        "numbers": [1, null],
+        "no_point": null,
+    });
+    for (column, value) in expected.as_object().unwrap() {
+        assert_eq!(&row[column], value, "{column}: {row}");
+    }
+
+    // An enum's labels, which only their text names; the type lives and dies
+    // inside the transaction.
+    let rows = db
+        .transaction(|_| {
+            Box::pin(async {
+                Database::execute("CREATE TYPE review_decoded_mood AS ENUM ('happy', 'sad')")
+                    .await?;
+                let rows = Database::raw_json(
+                    "SELECT 'sad'::review_decoded_mood AS mood, \
+                     ARRAY['happy', NULL]::review_decoded_mood[] AS moods",
+                )
+                .await?;
+                Database::execute("DROP TYPE review_decoded_mood").await?;
+                Ok(rows)
+            })
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({"mood": "sad", "moods": ["happy", null]})]
+    );
+
+    let error = Database::raw_json("SELECT point(1, 2) AS p")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("column 'p' of type POINT holds a value TideORM cannot read as JSON"),
+        "{error}"
+    );
+}
+
+#[tideorm::model(table = "review_special_moments")]
+struct ReviewSpecialMoment {
+    #[tideorm(primary_key)]
+    id: i64,
+    at: chrono::DateTime<chrono::Utc>,
+}
+
+/// sqlx panics on a date or timestamp holding `infinity` and reads `TIME
+/// '24:00:00'` as midnight; JSON reads give PostgreSQL's own text for them,
+/// raw and through a model, and other values as before.
+#[tokio::test]
+async fn review_postgres_special_dates_and_times_read_as_postgres_prints_them() {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    let db = tideorm::require_db().unwrap();
+    let rows = db
+        .query_raw_json(
+            "SELECT 'infinity'::date AS d, '-infinity'::timestamp AS t, \
+             'infinity'::timestamptz AS tz, '24:00:00'::time AS tm, \
+             '2024-01-02'::date AS normal_date, '10:30:00'::time AS normal_time",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        serde_json::json!({
+            "d": "infinity",
+            "t": "-infinity",
+            "tz": "infinity",
+            "tm": "24:00:00",
+            "normal_date": "2024-01-02",
+            "normal_time": "10:30:00",
+        })
+    );
+
+    db.exec_raw("DROP TABLE IF EXISTS review_special_moments")
+        .await
+        .unwrap();
+    db.exec_raw(
+        "CREATE TABLE review_special_moments(id BIGINT PRIMARY KEY, at TIMESTAMPTZ NOT NULL); \
+         INSERT INTO review_special_moments VALUES (1, 'infinity'), (2, '2024-01-02 03:04:05+00')",
+    )
+    .await
+    .unwrap();
+    let rows = ReviewSpecialMoment::query_with(&db)
+        .order_asc("id")
+        .get_json()
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["at"], "infinity");
+    assert_eq!(rows[1]["at"], "2024-01-02T03:04:05Z");
+
+    // A typed read cannot hold the value: an error, not the driver's panic.
+    for result in [
+        ReviewSpecialMoment::find_with(1, &db).await.map(drop),
+        ReviewSpecialMoment::query_with(&db).get().await.map(drop),
+    ] {
+        let error = result.unwrap_err();
+        assert!(
+            matches!(error, tideorm::Error::Conversion { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("'at'"), "{error}");
+    }
+    assert_eq!(
+        ReviewSpecialMoment::find_with(2, &db)
+            .await
+            .unwrap()
+            .unwrap()
+            .at
+            .to_rfc3339(),
+        "2024-01-02T03:04:05+00:00"
+    );
+    db.exec_raw("DROP TABLE review_special_moments")
+        .await
+        .unwrap();
+}
+
+/// sqlx cannot read PostgreSQL's multirange types; the error says so and how
+/// to read one, and the text of one reads.
+#[tokio::test]
+async fn review_postgres_multiranges_fail_with_a_way_to_read_them() {
+    if backend::DATABASE_TYPE != DatabaseType::Postgres || !backend::connect().await {
+        return;
+    }
+    let db = tideorm::require_db().unwrap();
+    let error = db
+        .query_raw_json("SELECT '{[1,3)}'::int4multirange AS m")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("multirange"), "{error}");
+    assert!(error.contains("::text"), "{error}");
+    let rows = db
+        .query_raw_json("SELECT '{[1,3)}'::int4multirange::text AS m")
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["m"], "{[1,3)}");
 }

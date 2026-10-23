@@ -192,11 +192,20 @@ impl ProfileReport {
     pub fn suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
 
-        for (table, count) in &self.tables {
-            if *count > 10 {
+        let mut reads = HashMap::new();
+        for query in &self.queries {
+            if !query.cached
+                && query.operation.eq_ignore_ascii_case("SELECT")
+                && let Some(table) = &query.table
+            {
+                *reads.entry(table).or_insert(0_u64) += 1;
+            }
+        }
+        for (table, count) in reads {
+            if count > 10 {
                 suggestions.push(format!(
-                    "Potential N+1 query detected: {} queries on '{}' table. Consider using eager loading with `.with(\"{}\")` or batch queries.",
-                    count, table, table
+                    "Potential N+1 query detected: {} database reads on '{}' table. Consider eager loading the relevant relation or using batch queries.",
+                    count, table
                 ));
             }
         }
@@ -215,7 +224,11 @@ impl ProfileReport {
         let select_star = self
             .queries
             .iter()
-            .filter(|query| query.sql.to_uppercase().contains("SELECT *"))
+            .filter(|query| {
+                super::analyzer::selects_star(
+                    &crate::internal::sql_lexer::significant(&query.sql).collect::<Vec<_>>(),
+                )
+            })
             .count();
 
         if select_star > 5 {

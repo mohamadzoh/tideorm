@@ -239,7 +239,7 @@ fn capture_snapshot<M: Model>(model: &M) -> Result<SnapshotValues> {
     let mut snapshot = HashMap::with_capacity(M::field_names().len());
 
     for field in M::field_names() {
-        if let Some(value) = model.field_json_value(field)? {
+        if let Some(value) = model.field_compare_value(field)? {
             snapshot.insert((*field).to_string(), value);
         }
     }
@@ -369,7 +369,7 @@ pub(crate) fn changed_fields<M: Model>(model: &M) -> Result<Option<Vec<&'static 
     let mut changed = Vec::new();
     for field in M::field_names() {
         let previous = snapshot.get(*field).cloned();
-        if model.field_json_value(field)? != previous {
+        if model.field_compare_value(field)? != previous {
             changed.push(*field);
         }
     }

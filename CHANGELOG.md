@@ -5,6 +5,288 @@ All notable changes to TideORM will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-10-23
+
+### Added
+
+- `Migration::foreign_keys_off()`: on SQLite, a migration returning true runs on a connection of
+  its own with foreign key enforcement off, as rebuilding a table requires, and is rolled back if
+  `PRAGMA foreign_key_check` then finds a row pointing nowhere; a database that already has such
+  rows is refused before the migration runs, with the first of them named. SQLite ignores
+  `PRAGMA foreign_keys = OFF` inside the transaction a migration runs in, so a rebuild's
+  `DROP TABLE` deleted the rows pointing at the table. `Schema::raw` now refuses it there, and
+  outside a migration, where it turns foreign keys off on one pooled connection only, in any form
+  SQLite reads (`PRAGMA main.foreign_keys(0)`, quoted names, comments, any value SQLite takes for
+  false) and anywhere in a script, before running any of it.
+- `Tokenizable::token_table()` and `tokenization::TokenTable`: the schema and table a model's
+  tokens are bound to. The derive fills them in; a hand-written impl keeps the struct-name binding,
+  and so does a model while an encoder or decoder override is set, since an override receives the
+  model name (one wrapping `default_decode` could not open a table-bound token).
+- `TideConfig::models::<User>()` registers one model; it needed the one-element tuple
+  `models::<(User,)>()`.
+- `Column::of_schema` and `IntoColumnName::column_schema()`: a model's typed columns carry its
+  schema, so a bulk update of `main.records` refuses a column of `aux.records` as it refuses one of
+  another table; it updated its own column of that name.
+
+### Changed
+
+- **Breaking:** model definitions that compiled and then misbehaved are now compile errors:
+  - an `#[index]` or `#[unique_index]` over an encrypted field, or `searchable` naming one (a
+    unique index over randomized ciphertext enforced nothing);
+  - a name in `encrypted`, `translatable`, `searchable`, a struct-level index, a relation key or
+    `deleted_at_column` that is one field's name and another field's column (it resolved by
+    declaration order, so a field listed as encrypted could be stored in plaintext). Such a
+    name in `hidden` hides both fields. An `#[index]` on a field covers that field's column,
+    and keys TideORM derives (the default local key, `deleted_at`, `{morph}_type`/`{morph}_id`,
+    `parent_id`) go by column, so neither is refused;
+  - a `#[tideorm::scopes]` method named after a `QueryBuilder` method (`latest`, `limit`,
+    `distinct`, `where_eq`, ..), which the builder's own method used to answer;
+  - a generic or lifetime-parameterized model, now one clear error instead of a page of E0107s.
+- **Breaking:** operations that returned wrong results now fail instead:
+  - sorting by an encrypted column (`order_asc`, `order_desc`, `order_by`, `sort`), which sorted
+    ciphertext, and a full-text search over one, which matched nothing;
+  - `find(id)` on a query with `limit()` or `offset()`, whose page decided whether the row was found;
+  - `get()` with a `select_raw()` whose aliases leave model columns out, which loaded them as
+    `None` for a later save to write back;
+  - a query mixing a raw union arm with a typed one over the default projection, whose columns
+    could land under each other's names; a typed arm whose own query has a raw arm counts as
+    a raw one, and a query whose only arms are such reads `table.*` too;
+  - `where_json_path_exists`/`_not_exists` on MySQL, MariaDB and SQLite with a path of other
+    steps than `.key`, `."key"` and `[index]`, which matched nothing, test and negation alike;
+  - a filter value no parameter can hold, such as an `i128` past 64 bits, which panicked;
+  - `get_json`, `get_as`, `pluck`, `value` and the raw JSON calls on a value TideORM cannot read
+    (a PostgreSQL `point`, a MySQL `GEOMETRY`), which returned `null`, read as SQL `NULL`;
+  - `max_connections(0)`, which panicked in the driver, and a `min_connections` above
+    `max_connections`: both are configuration errors.
+- **Breaking:** on SQLite, `get_json`, `get_as`, `pluck`, `value` and the raw JSON calls tell an
+  expression column holding a JSON document by the expression, not by how its text looks: only a
+  call of a SQLite function returning a document (`json`, `json_object`, `json_group_array`, a
+  `json_extract` of several paths, ..) and `->` in any form yield one, followed through
+  subqueries, CTEs and the views the statement reads, and under an outer alias or a qualified
+  name. Text that looked like JSON (`'[1,2]'`, a concatenation, a `CAST`) read as a document, and
+  so did a single-path `json_extract`, whose text cannot tell a string member from an array, and
+  `COALESCE`, `CASE` or `MAX` over a JSON column; these now read as strings. Read a document with
+  `doc -> '$.path'`. A table column is a document when it is declared `JSON` or `JSONB`; an
+  untyped column, or one of another type the driver does not name, reads its text as a string,
+  where JSON-looking text read as a document.
+- On a JSON column, a JSON `null` filter value (`Value::Null`, `Some(Value::Null)`) compares as the
+  `null` document, and `None` is SQL NULL, in `where_eq`/`where_not` and among the members of
+  `where_in`/`where_not_in`; both used to mean SQL NULL, so a delete by the document removed the
+  NULL rows instead. **Breaking:** `ConditionValue` has a `DocumentList` variant for such members.
+- JSON key and path existence read paths strictly on every backend: a key exists only in an
+  object (PostgreSQL's `?` also found a string element of an array), a step never looks inside an
+  array it does not index, and an index never reads a non-array as an array of one. A path of
+  plain steps without `$` (the documented `a.b.c`) starts at the root.
+- MySQL- or MariaDB-specific SQL follows what the pool found when it opened, inside transactions
+  too; a configured backend no longer overrides it, and a MariaDB pool that is not the global one
+  no longer renders MySQL's SQL.
+- A limited `update_all()` started from an ordered query updates the first rows in that order, as
+  reading them would; the order was dropped, and arbitrary rows were updated.
+- On SQLite, `json_set` writes what PostgreSQL and MySQL write: a path whose parent is missing
+  changes nothing and an index past the end appends. `array_append` on MySQL, MariaDB and SQLite
+  wraps a document that is no array, as MySQL's `JSON_ARRAY_APPEND` does.
+- `cache_with_key` adds its key to the query's shape instead of replacing it: two different
+  queries with one key no longer share an entry.
+- Tokens of `#[tideorm(tokenize)]` models are bound to the model's schema and table and start with
+  `v2.`, so same-named models in different modules no longer open each other's tokens. Tokens
+  issued by 0.15.0 still decode for a model of the struct name they were bound to. Encoder and
+  decoder overrides still receive the struct name.
+- **Breaking:** `create()` and `insert_all()` write an auto-increment key the model holds, as an
+  upsert does, instead of silently discarding it; a key still at `0` is numbered by the database
+  as before. Reset a loaded model's key to `0` before creating a copy of it. On PostgreSQL the
+  key's sequence then moves past the key, as MySQL's `AUTO_INCREMENT` and SQLite's rowid do by
+  themselves, so the rows the database numbers next do not collide with it (where the role may
+  update the sequence); an upsert writing a key moves it too. An `insert_all` where every model
+  holds its key is one statement per chunk, matched back by key; a batch mixing held and unset
+  keys is written row by row.
+- `after_delete` runs only when a row was deleted, not for a `delete()` that matched none.
+- Schema sync of a table two models share creates the columns and indexes of both; the second
+  model's were dropped.
+- An in-memory SQLite pool keeps its connections open, whatever its idle timeout and maximum
+  lifetime say: the database was lost when the pool recycled its last connection.
+- `QueryLogger` keeps history and statistics whenever it is enabled; the level, `Off` by default,
+  decides only what is printed, so `TIDE_LOG_QUERIES` or `enable()` alone recorded nothing.
+- Dirty tracking sees a change to or from a NaN or infinite float, and `original_value` reports one
+  as its text (`"NaN"`, `"inf"`), which JSON holds no number for.
+- A write invalidates the cached reads of its own database only; it cleared those of every
+  database. Pools reaching one database share invalidation (one SQLite file, one PostgreSQL
+  database, every database of one MySQL or MariaDB server, whose triggers and foreign keys reach
+  across them), and an SQLite connection that has run `ATTACH` still clears every entry.
+- **Breaking:** a model whose own serde derive flattens a hidden field, or flattens a relation, is
+  not filtered: `try_to_json()` fails with a configuration error and `to_json()` returns `{}`, for
+  such a model nested in another's payload too. Its hidden contents, or the related model's hidden
+  fields, were written out. Query results of a model whose serde flattens a field are not cached,
+  since a cached read returned `None` for it.
+- Seed runs, rollbacks, resets and refreshes hold a database lock of their own (not the migration
+  lock) for their whole run, and inside a transaction until the outermost one ends: two runners
+  starting together both ran a pending seed, and the second then failed on `_seeds.name`'s unique
+  constraint after its callback had run. A seed callback must not start another seed operation. On
+  SQLite, a run inside a transaction whose snapshot predates another runner's commit fails before
+  any seed runs; restart the transaction.
+- `Migrator::reset()`, a rollback of several steps and `refresh()` hold the migration lock across
+  every step: a `run()` between two steps of a concurrent `reset()` made it roll one migration back
+  twice, leave another applied, and report success.
+- The `sqlite` feature depends on `async-io`, for lock waits that can be cancelled.
+
+### Removed
+
+- `HasOne::with_owner_key`, `HasMany::with_owner_key` and `HasManyThrough::with_owner_key`
+  (`entity-manager`): each copy of a relation now keeps the keys it loaded itself.
+
+### Fixed
+
+- Nested transactions and batch inserts opened side by side in one transaction, as `join!` runs
+  them, take turns. The driver names a savepoint by how many are open on the connection, so one
+  that ended while a later one was open ended that one in its place, and the later one's
+  rollback then undid the rows the first had committed.
+- A nested transaction cancelled or failing while its savepoint starts ends the enclosing
+  transaction, whose statements then fail and whose commit is refused; the driver had already
+  rolled it back, and what followed ran outside it and committed. On PostgreSQL this also covers a
+  savepoint (a nested transaction, `insert_all`) opened after a caught error.
+- A nested transaction or an `insert_all` savepoint cancelled while something else holds its
+  connection no longer makes the driver panic ("Dropping a locked Transaction"): one still waiting
+  for the connection never started, and one already open is rolled back by the enclosing
+  transaction once the connection is free, which then refuses to commit. Statements, savepoints,
+  commits and rollbacks of one transaction now take its connection in turn. One cancelled while it
+  commits or rolls back ends the enclosing transaction too, as one cancelled while it starts does.
+- A nested transaction whose handle leaked outside its closure ends the enclosing transaction,
+  whose statements then fail and whose commit is refused. Its savepoint stays open until the stray
+  handle drops, and the enclosing commit used to release that savepoint in its own place and
+  report success while the transaction stayed open, to be rolled back when the handle dropped.
+- A statement refused because its transaction was aborted is an `Error::Transaction` saying
+  why (a deadlock, a SQLite rollback, a cancelled or leaked savepoint), retryable after a
+  deadlock, as the refused commit is; it was an `Error::Internal` with no reason.
+- A failed statement marks the transaction it ran on, so PostgreSQL's aborted-commit guard holds
+  for a statement run through an outer database's handle inside another database's transaction.
+- A handle on database A inside B's transaction nested in A's runs in A's transaction, and a
+  savepoint of A opened there keeps its database; the statement ran outside A's transaction, or
+  on the wrong database. What such a write invalidates in the query cache, and the dirty-tracking
+  baselines it records, now belong to A's transaction too, which replays or restores them as it
+  ends; B's commit replayed them while A was still open, so a read cached meanwhile stayed stale.
+- An entity manager's unit of work inside another database's transaction no longer hands its
+  rollback to that transaction: rolling it back restored the identity map to before a save the
+  manager's own database had committed, and detached handles found meanwhile.
+- Entity manager:
+  - a stale copy of an aggregate deletes only the children it removed, never ones another copy
+    added; `HasManyThrough` detaches alike;
+  - a NULL key loads no row through the manager, and a save no longer deletes one it matched;
+  - an aggregate the manager inserted, and its new children, load relations from the manager's
+    database rather than the global one;
+  - a flush that fails undoes what it wrote and nothing else: an entity persisted while it ran
+    still flushes, and an edit or removal made meanwhile stays; its relations go back too, so the
+    next flush deletes the children it removed and inserts the ones it added, with their owner;
+  - the identity map no longer files a row with the relations one copy loaded: a copy `find`
+    hands out loads its relations afresh, and saving it no longer writes stale children over
+    newer edits;
+  - a relation edited while a flush wrote its entity made the flush drop the edit (a child added
+    meanwhile was never inserted); the flush now fails and rolls back, keeping the edit for the
+    next flush;
+  - a flush or save of a row holding a NaN or infinite float (PostgreSQL) no longer fails: the
+    merge of the stored row read the value back through JSON, as `null`.
+- A write cancelled once sent (by `select!` or a timeout) still invalidates the query cache, as
+  the database applies it all the same; a read cached before it used to be served for its whole
+  TTL. A commit that fails or is cancelled replays what its transaction invalidated too, since it
+  may have committed.
+- `Migrator::run()` inside a transaction on a one-connection SQLite pool no longer waits for a
+  second connection.
+- An empty `where_contains`/`where_starts_with`/`where_ends_with`, or a `LIKE` pattern of `%`
+  alone, no longer passes the unfiltered-mutation guard.
+- An OR group holding only empty groups no longer empties the query, and an empty group beside a
+  filter (a `when(false, ..)`) no longer makes the unfiltered-mutation guard refuse a filtered
+  mutation.
+- A boolean full-text search of exclusions alone (`-spam`) matches no row on PostgreSQL, as on
+  MySQL and SQLite; it matched every row without the word.
+- The raw-SQL guard refuses a PostgreSQL dollar-quoted string (`$$..$$`) and square brackets
+  holding a quote, SQLite's quoted identifier: a quote inside either looked like a string literal
+  to it, so a `--` after them could comment out the soft-delete scope and the `LIMIT` the builder
+  appends.
+- MariaDB JSON equality no longer matches a NULL column against the `null` document.
+- On SQLite, comparing a JSON column with a number whose exponent no `i64` holds matches nothing
+  instead of panicking; serde_json's `arbitrary_precision` feature, which another crate can turn
+  on, keeps such a number from a request as written.
+- `created_at` and `updated_at` of one insert hold the same instant.
+- A batch update writes a name to the column it names, also when that name is another,
+  encrypted field's name: `set("token", ..)` on a model whose plaintext field `note` has
+  `column = "token"` and whose encrypted field is named `token` encrypted the value into `note`'s
+  column. An upsert reads its conflict columns the same way.
+- On SQLite, adding a unique column through `alter_table` creates a unique index instead of failing
+  ("Cannot add a UNIQUE column"), and dropping such a column drops the index first: the one on
+  that table over that column alone, never another table's index of the same name.
+- URLs in errors and logs mask a password holding an unencoded `?` or `#`, which used to print.
+- The query cache no longer stores rows that JSON cannot hold exactly, with a JSON `null` in an
+  `Option` field or a NaN or infinite float: a cached read returned `None` for them, and a save
+  after the hit wrote `NULL`.
+- A query cache write with a zero TTL no longer evicts live entries for a value that expires at
+  once. A replacement counts only its own payload against the byte budget and follows a lowered
+  entry limit, and one that cannot be cached (too large, an empty result, a value JSON does not
+  hold exactly) removes the entry it replaces, which went on serving the old value.
+- An explicit cache key no longer makes `first()`, `find(id)`, each page of `paginate()` and the
+  eager `first`/`find` share one entry and return one another's rows.
+- PostgreSQL `INTERVAL` (as its ISO 8601 duration), `INET`, `CIDR`, `TIMETZ` and the built-in ranges
+  (as their text), `MONEY` (as an exact decimal), and arrays of dates and times read as values
+  instead of `null`; arrays keep `NULL` elements and nested dimensions, and a float array's NaN
+  and infinities read as strings, as a lone float's do.
+- PostgreSQL dates and timestamps holding `infinity` or `-infinity` read as those words in raw
+  SQL and `get_json`, models included, instead of panicking in the driver, and `TIME '24:00:00'`
+  reads as itself rather than as midnight. A typed read of such a value, which no Rust date or
+  time type can hold, fails with a conversion error naming the column instead of panicking, or
+  reading `24:00:00` as midnight for a later save to write back.
+- Selecting a PostgreSQL multirange, which the driver cannot read, fails with an error that says
+  so and to select it as text, instead of "unknown type code 109".
+- A MySQL `TIME` reads as a signed duration (`-01:30:00`, `100:00:00`) instead of losing its sign
+  or reading as raw protocol bytes.
+- `decode_token` no longer puts the decrypted payload in its error.
+- `to_json` skips a malformed translations field, or a payload that is not an object, instead of
+  returning `{}` for the whole model.
+- A hasMany attachment relation holding one attachment instead of a list keeps it on attach and
+  detach, and reads it as a one-element list.
+- An `Option<..>` primary key is one compile error saying so, instead of errors about `Display`
+  and `TryFromU64` from inside the generated code.
+- Generated query scopes keep the `cfg` and `cfg_attr` gates of their impl block, methods and
+  parameters: a scope behind a disabled feature made the generated trait forward to a method or an
+  argument that did not exist.
+- Models with `_`-prefixed or camelCase fields compile without `non_snake_case` warnings, and a
+  tokenized model's generated `from_token` no longer needs `Model` imported.
+- `load_tree()` on a model with a composite primary key matches the rows it walked by every key
+  column; matching by the first alone also returned another tenant's rows with the same id.
+- A related model's payload nested in another's no longer carries a hidden field's translations in
+  its raw `translations` column, nor a hidden attachment in its raw `files` column.
+- `try_to_json()` no longer writes in a translation of a field the model's own serde skips (`skip`,
+  `skip_serializing`), and a nested payload's raw `translations` leave it out too.
+- `to_json` filters a relation with the related model's hidden list also when the relation's name
+  is one of the model's columns; that payload was left unfiltered.
+- Cancelling a wait for the SQLite migration lock no longer leaves a thread blocked on the lock
+  file until the lock is released, and the locks of in-memory databases no longer pile up in a
+  process-wide map.
+- The query cache's table invalidation finds the first table inside parentheses
+  (`FROM (posts JOIN flags ..)`), matches table names regardless of case, and notices an `ATTACH`
+  behind a byte-order mark or a nested comment; each left cached reads stale. The invalidation
+  history it keeps per table name is pruned, as the per-database one was.
+- `PreparedStatementCache::get_or_prepare` counts a hit as a use, so eviction no longer drops the
+  entry it has just served.
+- Profiling reports no longer warn about a `SELECT *` written inside a string literal, nor count
+  reads served from the cache toward an N+1 warning.
+- On SQLite, a JSON document read through a view of an attached database reads as a document, and
+  a view named with its schema (`main.v`) reads as that view when `temp` holds one of the same name.
+- SQLite schema export keeps the indexes and triggers of `main` tables whose names match the shadow
+  tables of an attached database's FTS table; they were left out of the export.
+- Schema sync fails when an index name it would create belongs to another table, instead of
+  reporting success and leaving the table without that index (`IF NOT EXISTS` hid the collision).
+- An entity manager's identity map stays empty after `clear()` when an enclosing transaction rolls
+  back; the rollback restored its rows, and a later `find()` returned a stale one.
+- A joined table's column types follow its schema: a same-named table of another schema no longer
+  decides how filter values on it are bound.
+- `array_remove()` leaves a document that is no array, and SQL `NULL`, unchanged on MySQL, MariaDB
+  and SQLite; on SQLite it turned `{"a":1,"b":2}` into `[1,2]` and `5` into `[5]` even when the
+  value was absent.
+- On SQLite, `alter_table` names the table's schema in the index statements it writes, so dropping a
+  column no longer drops a `temp` or attached index of the same name in place of the table's own,
+  and dropping a unique column after renaming it or its table, also within one `alter_table`, drops
+  its index instead of failing.
+- Docs: `Model::query_with` joins only a transaction of its own database, `TideConfig::migration`
+  migrations run in version order, every raw statement clears the query cache, and long lists
+  bind as one array on PostgreSQL and one JSON value on SQLite.
+
 ## [0.15.0] - 2026-10-16
 
 ### Added
@@ -2569,6 +2851,7 @@ This is the first public release of TideORM, a developer-friendly ORM for Rust w
 - **Repository:** [https://github.com/mohamadzoh/tideorm](https://github.com/mohamadzoh/tideorm)
 - **Documentation:** See README.md and examples/
 
+[0.16.0]: https://github.com/mohamadzoh/tideorm/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/mohamadzoh/tideorm/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/mohamadzoh/tideorm/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/mohamadzoh/tideorm/compare/v0.13.1...v0.14.0

@@ -18,6 +18,84 @@ pub async fn memory_database(schema: &str) -> Database {
     db
 }
 
+/// A path of its own under the target directory, whose file and migration
+/// lock file are removed when this drops.
+pub struct TempFile(std::path::PathBuf);
+
+impl TempFile {
+    pub fn new(tag: &str, extension: &str) -> Self {
+        Self(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("tideorm-{tag}-{}.{extension}", Uuid::new_v4())),
+        )
+    }
+}
+
+impl std::ops::Deref for TempFile {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(format!("{}.tideorm-migrations.lock", self.0.display()));
+        let _ = std::fs::remove_file(format!("{}.tideorm-seeds.lock", self.0.display()));
+    }
+}
+
+/// A database in a file of its own under the target directory, with a pool
+/// of two connections: unlike an in-memory one, a second connection reads
+/// what the database held before a transaction open on the first commits.
+pub async fn file_database(tag: &str) -> (Database, TempFile) {
+    let file = TempFile::new(tag, "sqlite");
+    let db = Database::builder()
+        .url(format!("sqlite://{}?mode=rwc", file.display()))
+        .max_connections(2)
+        .build()
+        .await
+        .unwrap();
+    (db, file)
+}
+
+/// The global query cache, enabled and empty until this drops, when it is
+/// disabled and emptied again, also if the test fails.
+pub struct GlobalCache(&'static tideorm::QueryCache);
+
+pub fn global_cache() -> GlobalCache {
+    let cache = tideorm::QueryCache::global();
+    cache.enable();
+    cache.clear();
+    GlobalCache(cache)
+}
+
+impl std::ops::Deref for GlobalCache {
+    type Target = tideorm::QueryCache;
+
+    fn deref(&self) -> &tideorm::QueryCache {
+        self.0
+    }
+}
+
+impl Drop for GlobalCache {
+    fn drop(&mut self) {
+        self.0.disable();
+        self.0.clear();
+    }
+}
+
+/// The slowest statement the timing tests run: a recursive count to
+/// `limit`, as an expression.
+pub fn slow_count(limit: u32) -> String {
+    format!(
+        "(WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {limit}) \
+         SELECT count(*) FROM c)"
+    )
+}
+
 /// [`memory_database`], also installed as the global connection.
 pub async fn global_memory_database(schema: &str) -> Database {
     let db = memory_database(schema).await;

@@ -113,6 +113,10 @@ enum ConditionSpec<'a> {
     List {
         operator: ListOperator,
         values: &'a [serde_json::Value],
+        /// For a [`DocumentList`](crate::query::ConditionValue::DocumentList),
+        /// whether SQL NULL is among the members; `None` for a plain list,
+        /// whose nulls are SQL NULL.
+        documents: Option<bool>,
     },
     NullCheck {
         negated: bool,

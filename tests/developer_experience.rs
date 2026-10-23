@@ -131,6 +131,25 @@ fn pathless_discovery_is_idempotent() {
     SyncRegistry::clear();
 }
 
+#[test]
+fn one_model_registers_without_a_tuple() {
+    use tideorm::sync::SyncRegistry;
+    let registered = || {
+        let mut tables: Vec<_> = SyncRegistry::get_all_schemas()
+            .into_iter()
+            .map(|s| s.table_name)
+            .collect();
+        tables.sort();
+        tables
+    };
+    SyncRegistry::clear();
+    let _ = TideConfig::init().models::<User>();
+    assert_eq!(registered(), ["dx_users"]);
+    let _ = TideConfig::init().models::<(User, Post)>();
+    assert_eq!(registered(), ["dx_posts", "dx_users"]);
+    SyncRegistry::clear();
+}
+
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn missing_sync_registration_names_available_models() {

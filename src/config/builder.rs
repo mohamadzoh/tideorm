@@ -67,12 +67,13 @@ impl TideConfig {
         Self::default()
     }
 
-    /// Register one migration, appended after any already registered.
+    /// Register one migration.
     ///
     /// Registering is not running: migrations only execute if
     /// [`run_migrations(true)`](TideConfig::run_migrations) is also set, and
-    /// then only from [`connect`](TideConfig::connect). They run in registration
-    /// order.
+    /// then only from [`connect`](TideConfig::connect). They run in the order
+    /// of their versions, whatever order they were registered in, as
+    /// [`Migrator::run`](crate::migration::Migrator::run) runs them.
     #[must_use]
     pub fn migration<M: Migration + 'static>(mut self, migration: M) -> Self {
         self.migrations.push(Box::new(migration));
@@ -128,7 +129,8 @@ impl TideConfig {
 
     /// Register models explicitly, by type.
     ///
-    /// `T` is a tuple of model types. Registration is what makes a model visible
+    /// `T` is a model type (`models::<User>()`) or a tuple of model types
+    /// (`models::<(User, Post)>()`). Registration is what makes a model visible
     /// to schema sync and schema export; use
     /// [`auto_models`](TideConfig::auto_models) to discover all linked models
     /// instead.
@@ -145,8 +147,9 @@ impl TideConfig {
     /// let config = TideConfig::init().auto_models().sync(true);
     /// ```
     ///
-    /// Call `models::<(User, Post)>()` instead when only a subset should be
-    /// synced. Discovery itself does not connect or change database tables.
+    /// Call `models::<User>()` or `models::<(User, Post)>()` instead when only
+    /// a subset should be synced. Discovery itself does not connect or change
+    /// database tables.
     #[must_use]
     pub fn auto_models(self) -> Self {
         crate::sync::SyncRegistry::register_all_models();

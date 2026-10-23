@@ -29,12 +29,9 @@ where
     crate::validation::Validate::validate(&model).map_err(Error::from)?;
     let table = M::table_name();
 
-    let encrypted = super::encrypted_field_columns::<M>()?;
     for column in &builder.conflict_columns {
-        if encrypted
-            .iter()
-            .any(|(field, encrypted_column)| column == field || column == encrypted_column)
-        {
+        // Compared as the column it names, as the conflict target is.
+        if super::__encrypted_column::<M>(column)?.is_some() {
             return Err(Error::query(format!(
                 "encrypted field '{}' cannot be used as an insert_or_update conflict column for {}; encrypted fields use randomized ciphertext, so use a plaintext unique key instead",
                 column, table
@@ -75,10 +72,15 @@ where
     let lookup = model.to_entity_model();
     let mut active = model.try_into_active_model()?;
     // The insert half stamps managed timestamps like `create()` does; a
-    // conflict on the key needs the key in the insert as well.
-    if include_pk && auto_increment {
+    // conflict on the key needs the key in the insert as well, and any other
+    // conflict leaves an auto-increment key to the database.
+    if auto_increment {
         for key in M::primary_key_columns() {
-            active.set(key, lookup.get(key));
+            if include_pk {
+                active.set(key, lookup.get(key));
+            } else {
+                active.not_set(key);
+            }
         }
     }
 
@@ -171,15 +173,20 @@ where
     } else {
         on_conflict.update_columns(update_columns);
     }
-    let row = crate::internal::run_profiled(
-        M::Entity::insert(active)
-            .on_conflict(on_conflict)
-            .exec_with_returning(&executor),
-        error_context,
-    )
-    .await;
-    crate::QueryCache::global().clear();
-    super::__loading_through(&connection, || M::try_from_entity_model(row?))
+    let explicit_key = crate::internal::holds_auto_increment_key::<M>(&active);
+    let row = connection
+        .invalidating(crate::internal::run_profiled(
+            M::Entity::insert(active)
+                .on_conflict(on_conflict)
+                .exec_with_returning(&executor),
+            error_context,
+        ))
+        .await;
+    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
+    if explicit_key {
+        crate::internal::advance_key_sequence::<M>(&executor, [model.primary_key()]).await?;
+    }
+    Ok(model)
 }
 
 /// The MySQL-family upsert. `ON DUPLICATE KEY UPDATE` fires on a conflict

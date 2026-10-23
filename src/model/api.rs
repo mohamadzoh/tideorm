@@ -56,13 +56,13 @@ pub trait Model:
     /// Use this for a replica, a second tenant database, or any case where the
     /// global connection is not the one that should serve the query.
     ///
-    /// **An ambient transaction still wins.** Inside
-    /// `Database::transaction(..)` every query runs on the transaction's
-    /// connection, including one pinned with `query_with`, because that is what
-    /// makes a plain `Model::find()` inside the closure join the transaction at
-    /// all. Rendering follows execution, so the SQL is at least built for the
-    /// backend it actually reaches. Run replica reads outside the transaction if
-    /// you need them to go to the replica.
+    /// **A transaction of the same database wins.** Inside a
+    /// `Database::transaction(..)` opened on `db`'s pool, the query runs on
+    /// that transaction, as a plain `Model::find()` inside the closure does,
+    /// and so does one inside another database's transaction nested in it. A
+    /// transaction of another database is not joined: the query runs on
+    /// `db`'s own connection, so a replica read inside a primary's
+    /// transaction still goes to the replica, outside that transaction.
     fn query_with(db: &crate::database::Database) -> QueryBuilder<Self> {
         QueryBuilder::new().with_database(db.clone())
     }
@@ -107,6 +107,9 @@ pub trait Model:
     /// them back with one `SELECT`, and insert other models one at a time, so
     /// database-generated fields such as auto-incremented IDs are still
     /// reflected in the result.
+    ///
+    /// An auto-increment key still at `0` is numbered by the database, and one
+    /// the model holds is written, as with [`create`](Model::create).
     async fn insert_all(models: Vec<Self>) -> Result<Vec<Self>>
     where
         <<Self as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
@@ -250,6 +253,10 @@ pub trait Model:
     ///
     /// This always performs an `INSERT`. To get create-or-update behavior,
     /// use `save()` instead.
+    ///
+    /// An auto-increment key still at `0` is numbered by the database; one the
+    /// model holds is written as it is. So creating a copy of a loaded model
+    /// fails on its key unless the copy's key is reset to `0` first.
     async fn create(model: Self) -> Result<Self>;
 
     /// Delete the record with this primary key.
@@ -364,7 +371,8 @@ pub trait Model:
     ///
     /// - `Ok(None)` — no baseline exists, so no original value is known.
     /// - `Ok(Some(None))` — a baseline exists but held no value for this field.
-    /// - `Ok(Some(Some(value)))` — the remembered value.
+    /// - `Ok(Some(Some(value)))` — the remembered value; a NaN or infinite
+    ///   float, which JSON holds no number for, as its text (`"NaN"`, `"inf"`).
     ///
     /// Returns an error when `field` names neither a field nor a column of this
     /// model, whether or not a baseline exists.
@@ -388,6 +396,10 @@ pub trait Model:
     }
 
     /// Render JSON while reporting serialization or translation decoding errors.
+    /// A hidden field or typed relation using `#[serde(flatten)]` is an error because its keys
+    /// cannot safely be separated from the rest of the object. Remove flattening
+    /// or skip serialization for that field. An eager-loaded relation with this
+    /// conflict is rendered as an empty object to keep its contents private.
     fn try_to_json(&self, options: Option<HashMap<String, String>>) -> Result<serde_json::Value> {
         serialization::try_to_json::<Self>(self, options.as_ref())
     }

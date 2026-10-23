@@ -82,6 +82,8 @@ pub(crate) use helpers::soft_delete_clause;
 pub use many_to_many::HasManyThrough;
 pub use polymorphic::{MorphMany, MorphOne, MorphTo};
 pub use self_referencing::{SelfRef, SelfRefMany};
+#[cfg(feature = "entity-manager")]
+pub(crate) use state::RelationState;
 
 #[doc(hidden)]
 pub use eager::{

@@ -168,7 +168,6 @@ async fn hasone_cached_load_keeps_the_tracked_instance() -> crate::error::Result
 
     let mut relation = HasOne::<DirectEntityManagerRelationProfile>::new("user_id", "id")
         .with_metadata("profile", USER_TABLE)
-        .with_owner_key("1".to_string())
         .with_parent_pk(json!(1));
     relation.set_cached(Some(DirectEntityManagerRelationProfile {
         id: 7,
@@ -297,7 +296,6 @@ async fn hasmany_cached_load_keeps_the_tracked_instances() -> crate::error::Resu
 
     let mut relation = HasMany::<DirectEntityManagerRelationProfile>::new("user_id", "id")
         .with_metadata("profiles", USER_TABLE)
-        .with_owner_key("1".to_string())
         .with_parent_pk(json!(1));
     relation.set_cached(vec![DirectEntityManagerRelationProfile {
         id: 7,

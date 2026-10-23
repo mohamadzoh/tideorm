@@ -78,6 +78,11 @@ pub trait TideEntityManagerMeta {
     }
 
     fn tide_attach_entity_manager_database(&mut self, _database: &crate::database::Database) {}
+
+    /// Drop every relation's cached rows and load, keeping the relations
+    /// wired to this entity's keys: the identity map holds a row, not the
+    /// relations one copy of it loaded.
+    fn tide_unload_relations(&mut self) {}
 }
 
 #[doc(hidden)]
@@ -93,6 +98,15 @@ pub trait TideEntityManagerSync:
 #[doc(hidden)]
 pub trait TideEntityManagerMergePersisted {
     fn tide_merge_persisted(&mut self, persisted: Self);
+
+    /// Take every relation wrapper of `source`, its cache, load and the keys
+    /// a save diffs it against included.
+    fn tide_relations_from(&mut self, _source: &Self) {}
+
+    /// Whether every relation of `other` caches what this entity's does.
+    fn tide_relations_match(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 #[doc(hidden)]

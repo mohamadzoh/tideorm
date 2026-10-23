@@ -21,7 +21,7 @@ impl std::future::Future for OverrideVisibleAcrossPolls {
     ) -> std::task::Poll<Self::Output> {
         assert!(matches!(
             super::__current_connection(),
-            Ok(super::ConnectionRef::Transaction(_))
+            Ok(super::ConnectionRef::Transaction(..))
         ));
         self.polled_threads
             .lock()
@@ -100,12 +100,10 @@ async fn transaction_override_remains_visible_when_scoped_future_moves_threads()
         .begin()
         .await
         .expect("transaction should begin successfully");
-    let handle = super::ConnectionRef::Transaction(Arc::new(transaction));
+    let handle = super::ConnectionRef::Transaction(Arc::new(transaction), Default::default());
     let polled_threads = Arc::new(Mutex::new(Vec::new()));
     let mut future = Box::pin(super::state::with_connection_override(
         handle,
-        None,
-        None,
         OverrideVisibleAcrossPolls {
             polled_threads: polled_threads.clone(),
             stage: 0,

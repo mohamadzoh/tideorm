@@ -238,6 +238,7 @@ impl PreparedStatementCache {
             .get(&hash)
             .is_some_and(|stmt| stmt.sql == sql && stmt.prepared_at.elapsed() < config.max_age);
         if hit {
+            statements.get_mut(&hash).unwrap().last_used = Instant::now();
             self.hits.fetch_add(1, Ordering::Relaxed);
         } else {
             self.misses.fetch_add(1, Ordering::Relaxed);

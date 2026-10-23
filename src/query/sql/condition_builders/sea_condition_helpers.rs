@@ -120,13 +120,11 @@ impl<M: Model> QueryBuilder<M> {
     /// a joined table or its alias, so a value compared with a joined table's
     /// UUID or timestamp column is bound as one, not as text.
     fn joined_model_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
-        let (qualifier, name) = column.split_once('.')?;
-        let join = self
-            .clauses
-            .joins
-            .iter()
-            .find(|join| join.qualifier() == qualifier)?;
-        crate::sync::registered_column_type(join.bare_table(), name)
+        let (qualifier, name) = column.rsplit_once('.')?;
+        let join = self.clauses.joins.iter().find(|join| {
+            join.qualifier() == qualifier || (join.alias.is_none() && join.table == qualifier)
+        })?;
+        crate::sync::registered_column_type(&join.table, name)
     }
 
     pub(crate) fn sea_column_expr(&self, db_type: DatabaseType, column: &str) -> SimpleExpr {
@@ -199,10 +197,11 @@ impl<M: Model> QueryBuilder<M> {
                 other,
             }),
             // `col = NULL` and `col != NULL` are UNKNOWN for every row, so binding
-            // the JSON null as a parameter would silently match nothing with no
-            // error to explain it. Rewriting here makes both emit the null check
-            // `where_null()` and `where_not_null()` build.
-            (Operator::Eq | Operator::NotEq, ConditionValue::Single(serde_json::Value::Null)) => {
+            // the NULL as a parameter would silently match nothing with no error
+            // to explain it. Rewriting here makes both emit the null check
+            // `where_null()` and `where_not_null()` build. A JSON null value is
+            // a comparison, which a JSON column reads as the `null` document.
+            (Operator::Eq | Operator::NotEq, ConditionValue::None) => {
                 Some(ConditionSpec::NullCheck {
                     negated: matches!(operator, Operator::NotEq),
                 })
@@ -263,8 +262,14 @@ impl<M: Model> QueryBuilder<M> {
                 None => Some(ConditionSpec::List {
                     operator: ListOperator::of(operator)?,
                     values,
+                    documents: None,
                 }),
             },
+            (_, ConditionValue::DocumentList { values, sql_null }) => Some(ConditionSpec::List {
+                operator: ListOperator::of(operator)?,
+                values,
+                documents: Some(*sql_null),
+            }),
             _ => None,
         }
     }
@@ -279,13 +284,33 @@ impl<M: Model> QueryBuilder<M> {
     pub(in crate::query::sql) fn ensure_conditions_are_representable(&self) -> Result<()> {
         for condition in self.all_conditions() {
             Self::ensure_condition_is_representable(condition)?;
-            if self.db_type_for_sql() == DatabaseType::SQLite
+            let db_type = self.db_type_for_sql();
+            if db_type == DatabaseType::SQLite
                 && matches!(condition.operator, Operator::LikeEscaped)
                 && matches!(&condition.value, ConditionValue::Single(serde_json::Value::String(text)) if text.contains('\0'))
             {
                 return Err(Error::query(
                     "SQLite literal text filters cannot represent a NUL character",
                 ));
+            }
+            // Matching nothing, both the test and its negation, would hide the
+            // mistake; only PostgreSQL reads other JSONPath syntax.
+            if db_type != DatabaseType::Postgres
+                && matches!(
+                    condition.operator,
+                    Operator::JsonPathExists | Operator::JsonPathNotExists
+                )
+                && let ConditionValue::Single(serde_json::Value::String(path)) = &condition.value
+                && db_sql::parse_json_path(path).is_none()
+            {
+                return Err(Error::query(format!(
+                    "WHERE condition on '{}' for model '{}': '{}' is not a JSON path {:?} \
+                     can test; write `$` followed by `.key`, `.\"quoted key\"` or `[index]` steps",
+                    condition.column,
+                    M::table_name(),
+                    path,
+                    db_type
+                )));
             }
         }
 
@@ -303,7 +328,7 @@ impl<M: Model> QueryBuilder<M> {
         let has_null_bound = match (&condition.operator, &condition.value) {
             (
                 Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte,
-                ConditionValue::Single(serde_json::Value::Null),
+                ConditionValue::None | ConditionValue::Single(serde_json::Value::Null),
             ) => true,
             (Operator::Between | Operator::NotBetween, ConditionValue::Range(low, high)) => {
                 low.is_null() || high.is_null()

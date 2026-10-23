@@ -11,8 +11,8 @@ use super::*;
 ///   collects into one `OR` group that is then `AND`ed with the rest. At least
 ///   one filter is required: an unfiltered batch update is refused.
 impl<M: Model> crate::columns::ConditionOwner for BatchUpdateBuilder<M> {
-    fn own_table() -> Option<&'static str> {
-        Some(M::table_name())
+    fn own_table() -> Option<(&'static str, Option<&'static str>)> {
+        Some((M::table_name(), M::schema_name()))
     }
 }
 
@@ -158,7 +158,8 @@ impl<M: Model> BatchUpdateBuilder<M> {
 
     /// Remove a value from an array or JSON array column.
     ///
-    /// Every backend drops all matching elements. Non-finite floats are rejected.
+    /// Every backend drops all matching elements. Non-array JSON documents and
+    /// SQL NULL stay unchanged. Non-finite floats are rejected.
     #[must_use]
     pub fn array_remove(self, field: impl IntoColumnName, value: impl serde::Serialize) -> Self {
         match crate::query::checked_assignment_value(value) {
@@ -220,13 +221,15 @@ impl<M: Model> BatchUpdateBuilder<M> {
     /// Typed columns must belong to the model being updated.
     fn assign(mut self, field: impl IntoColumnName, value: UpdateValue) -> Self {
         if let Some(table) = field.column_table()
-            && table != M::table_name()
+            && (table != M::table_name() || field.column_schema() != M::schema_name())
         {
             return self.invalidate(format!(
-                "cannot update {} with typed column {}.{}",
+                "cannot update {} (schema {:?}) with typed column {}.{} (schema {:?})",
                 M::table_name(),
+                M::schema_name(),
                 table,
-                field.column_name()
+                field.column_name(),
+                field.column_schema()
             ));
         }
         let name = field.column_name();

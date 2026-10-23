@@ -264,6 +264,11 @@ impl ModelField {
         ])
     }
 
+    /// Whether the field is an `f32` or `f64`, optionally inside an `Option`.
+    pub(crate) fn is_float(&self) -> bool {
+        self.base_type_is(&["f32", "f64"])
+    }
+
     /// Integers, floats, decimals, and text, which the numeric rules read as
     /// a length.
     pub(crate) fn supports_numeric_validations(&self) -> bool {
@@ -351,6 +356,70 @@ impl ModelField {
 /// The field `name` refers to, by field name or column name.
 pub(crate) fn find_db_field<'a>(fields: &'a [ModelField], name: &str) -> Option<&'a ModelField> {
     fields.iter().find(|field| field.is_named(name))
+}
+
+/// [`find_db_field`] for a name an attribute gives, or an error message when
+/// the name is one field's name and another field's column: found by
+/// declaration order, it could silently pick the other field, and a field
+/// listed as `encrypted` would then be stored in plaintext.
+pub(crate) fn resolve_db_field<'a>(
+    fields: &'a [ModelField],
+    name: &str,
+) -> Result<Option<&'a ModelField>, String> {
+    let (named, column) = db_field_candidates(fields, name);
+    if let (Some(named), Some(column)) = (named, column) {
+        return Err(format!(
+            "'{name}' is both the name of field `{}` and the column of field `{}`; refer to `{}` \
+             by its column '{}' or to `{}` by its name '{}', or rename one of them",
+            named.name(),
+            column.name(),
+            named.name(),
+            named.column_name(),
+            column.name(),
+            column.name(),
+        ));
+    }
+    Ok(named.or(column))
+}
+
+/// The field `found` holds, or the error an attribute `subject` naming `name`
+/// reports: the name is one field's name and another's column, or no field's.
+pub(crate) fn required_field<'a>(
+    found: Result<Option<&'a ModelField>, String>,
+    subject: &str,
+    name: &str,
+) -> Result<&'a ModelField, String> {
+    found
+        .map_err(|ambiguity| format!("{subject}: {ambiguity}"))?
+        .ok_or_else(|| format!("{subject} references unknown field or column '{name}'"))
+}
+
+/// The field named `name`, and another field whose column is `name`.
+pub(crate) fn db_field_candidates<'a>(
+    fields: &'a [ModelField],
+    name: &str,
+) -> (Option<&'a ModelField>, Option<&'a ModelField>) {
+    let named = fields.iter().find(|field| field.name() == name);
+    let column = fields.iter().find(|field| {
+        field.is_column()
+            && field.column_name() == name
+            && named.is_none_or(|named| named.ident() != field.ident())
+    });
+    (named, column)
+}
+
+/// The field a name TideORM derives itself refers to (`deleted_at`,
+/// `{morph}_id`, `parent_id`): no attribute gave it, so nothing in it can be
+/// ambiguous, and as the column the runtime queries by, a field with that
+/// column wins over a field of that name.
+pub(crate) fn find_derived_db_field<'a>(
+    fields: &'a [ModelField],
+    name: &str,
+) -> Option<&'a ModelField> {
+    fields
+        .iter()
+        .find(|field| field.is_column() && field.column_name() == name)
+        .or_else(|| fields.iter().find(|field| field.name() == name))
 }
 
 /// Strip module paths recursively, including paths inside generic arguments.
@@ -476,6 +545,8 @@ fn relation_wrapper(ty: &Type) -> Option<(RelationKind, &PathSegment)> {
 #[darling(attributes(tideorm), supports(struct_named), forward_attrs(serde))]
 pub(crate) struct ModelInput {
     pub(crate) ident: Ident,
+    /// Read only to refuse them: a model maps one table to one struct.
+    pub(crate) generics: syn::Generics,
     /// The struct's `#[serde(..)]` attributes.
     pub(crate) attrs: Vec<syn::Attribute>,
     pub(crate) data: Data<(), ModelField>,

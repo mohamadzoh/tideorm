@@ -16,17 +16,44 @@ pub use config::{CacheConfig, CacheStrategy};
 #[cfg(any(feature = "entity-manager", feature = "dirty-tracking"))]
 pub(crate) use pending::undo_on_rollback;
 pub(crate) use pending::{
-    PendingInvalidations, install as install_pending_invalidations, note_failed_statement,
-    note_sqlite_aborted, transaction_deadlocked, transaction_depth, transaction_sqlite_aborted,
+    Abort, PendingInvalidations, Record, install as install_pending_invalidations,
+    replace as replace_pending_invalidations,
 };
 pub use store::CacheStats;
 use store::{CacheEntry, CacheStore};
 
+/// Generation and database of a read that may populate the cache.
+#[derive(Clone)]
+pub(crate) struct FillPoint {
+    sequence: u64,
+    database: Option<std::sync::Arc<str>>,
+}
+
+/// `value` as a cache payload, or `None` when its JSON would not read back as
+/// the value, so a cached copy would differ from what the database returned:
+/// a NaN or infinite float, or a `null` inside a `Some`, each written as a
+/// `null`. A serializer's own failure is an error, not a reason to drop the
+/// entry it was meant to replace.
+fn serialize_payload<T: Serialize + ?Sized>(
+    value: &T,
+) -> std::result::Result<Option<Vec<u8>>, serde_json::Error> {
+    // Serialize first: a lossy field must not hide a real serialization error
+    // elsewhere in the payload.
+    let data = serde_json::to_vec(value)?;
+    if !data.windows(4).any(|window| window == b"null") {
+        return Ok(Some(data));
+    }
+    let loss = crate::internal::json_loss(value)?;
+    Ok((!loss.non_finite && !loss.null_in_some).then_some(data))
+}
+
 /// Query result cache
 ///
 /// Caches the results of database queries to avoid repeated round-trips
-/// for frequently accessed data. Successful database writes clear the global
-/// query cache because foreign-key actions and triggers may write other tables.
+/// for frequently accessed data. Database writes invalidate reads of that
+/// database because foreign-key actions and triggers may write other tables.
+/// Independent databases keep their entries; manually inserted entries with
+/// no database identity are invalidated conservatively by any write.
 /// Transactions repeat this invalidation on commit to evict results cached
 /// by other connections while the write was still uncommitted.
 #[derive(Debug)]
@@ -135,6 +162,14 @@ impl QueryCache {
     ///
     /// The entry is tagged with `model_name` alone; use
     /// [`QueryCache::set_tagged`] for a query that reads more than one table.
+    ///
+    /// Entries are stored as JSON, so a value whose JSON would not read back
+    /// as itself is not cached: one holding a NaN or infinite float, which
+    /// JSON writes as `null`, or a `Some` of a JSON `null`, which reads back
+    /// as `None`. While caching is enabled, a replacement that cannot be
+    /// cached removes the old entry so it cannot serve the previous value.
+    /// A zero TTL also skips caching. Serialization errors are returned and
+    /// leave the previous entry unchanged.
     pub fn set<T: Serialize>(
         &self,
         key: &str,
@@ -169,8 +204,19 @@ impl QueryCache {
 
     /// Where a read that may fill the cache starts: pass it to
     /// [`fill_tagged`](Self::fill_tagged) with what the read returned.
-    pub(crate) fn fill_point(&self) -> u64 {
-        self.cache.read().invalidation_seq()
+    #[cfg(test)]
+    pub(crate) fn fill_point(&self) -> FillPoint {
+        self.fill_point_for_database(None)
+    }
+
+    pub(crate) fn fill_point_for_database(
+        &self,
+        database: Option<std::sync::Arc<str>>,
+    ) -> FillPoint {
+        FillPoint {
+            sequence: self.cache.read().invalidation_seq(),
+            database,
+        }
     }
 
     /// [`set_tagged`](Self::set_tagged) for rows read since `fill_point`,
@@ -178,7 +224,7 @@ impl QueryCache {
     /// may predate that write, and would outlive it for the whole TTL.
     pub(crate) fn fill_tagged<T: Serialize>(
         &self,
-        fill_point: u64,
+        fill_point: FillPoint,
         key: &str,
         value: &T,
         ttl: Option<Duration>,
@@ -201,41 +247,56 @@ impl QueryCache {
         value: &T,
         ttl: Option<Duration>,
         tables: HashSet<String>,
-        fill_point: Option<u64>,
+        fill_point: Option<FillPoint>,
     ) -> Result<()> {
         if !self.is_enabled() {
             return Ok(());
         }
 
-        let config = self.config.read().clone();
-        let data = serde_json::to_vec(value)
+        // Conservatively fold tags, including quoted identifiers. Different
+        // case-sensitive tables may share an invalidation, but case-insensitive
+        // SQL must never retain stale rows because of its spelling.
+        let tables = tables
+            .into_iter()
+            .map(|table| table.to_ascii_lowercase())
+            .collect();
+
+        // A cached copy has to be what the caller stored, or a hit hands
+        // back different values than the database did.
+        let data = serialize_payload(value)
             .map_err(|e| Error::internal(format!("Failed to serialize cache value: {}", e)))?;
-
-        if data == b"[]" && !config.cache_empty_results {
-            return Ok(());
-        }
-
-        let entry_size = data.len();
-        if config.max_entries == 0 {
-            return Ok(());
-        }
-
-        let max_size_bytes = config.max_size_bytes;
-        if max_size_bytes > 0 && entry_size > max_size_bytes {
-            // A payload larger than the whole budget can never fit; caching it
-            // would evict every other entry and still overflow.
-            return Ok(());
-        }
-
+        let config = self.config.read().clone();
         let ttl = ttl.unwrap_or(config.default_ttl);
+        let data = data.filter(|data| {
+            !ttl.is_zero()
+                && config.max_entries > 0
+                && (config.cache_empty_results || data.as_slice() != b"[]")
+                && (config.max_size_bytes == 0 || data.len() <= config.max_size_bytes)
+        });
+
         let mut cache = self.cache.write();
-        if fill_point.is_some_and(|point| cache.invalidated_since(point, &tables)) {
+        if fill_point
+            .as_ref()
+            .is_some_and(|point| cache.invalidated_since(point, &tables))
+        {
             return Ok(());
         }
-        let entry = CacheEntry::new(data, ttl, tables, self.next_order());
-        let replacing_existing = cache.get(key).is_some();
+        // A rejected replacement must not leave an old value behind. Check
+        // the fill point first: a stale read must not remove a newer entry.
+        // For an accepted replacement, free the old payload before enforcing
+        // budgets, so it is not counted alongside the new payload.
+        let replaced = cache.remove(key).is_some();
+        let Some(data) = data else {
+            if replaced {
+                self.invalidations.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok(());
+        };
+        let entry_size = data.len();
+        let mut entry = CacheEntry::new(data, ttl, tables, self.next_order());
+        entry.database = fill_point.and_then(|point| point.database);
 
-        while !replacing_existing && cache.len() >= config.max_entries {
+        while cache.len() >= config.max_entries {
             if !self.evict_one(&mut cache, config.strategy) {
                 break;
             }
@@ -243,7 +304,7 @@ impl QueryCache {
 
         // Make room inside the byte budget as well. `entry_size` is known to fit
         // on its own, so this terminates once the store is empty.
-        while max_size_bytes > 0 && cache.size_bytes() + entry_size > max_size_bytes {
+        while config.max_size_bytes > 0 && cache.size_bytes() + entry_size > config.max_size_bytes {
             if !self.evict_one(&mut cache, config.strategy) {
                 break;
             }
@@ -268,16 +329,19 @@ impl QueryCache {
     /// An entry is removed when the table is anywhere in its tag set, so a
     /// cached join, union, or CTE result is dropped by a write to any of its
     /// source tables and not only to the primary one.
+    /// Table tags are compared without ASCII case sensitivity; quoted tables
+    /// differing only in case may therefore be evicted together.
     pub fn invalidate_model(&self, model_name: &str) {
+        let model_name = model_name.to_ascii_lowercase();
         let removed = {
             let mut cache = self.cache.write();
-            cache.note_invalidated(model_name);
-            cache.remove_where(|entry| entry.reads_table(model_name))
+            cache.note_invalidated(&model_name);
+            cache.remove_where(|entry| entry.reads_table(&model_name))
         };
         self.invalidations
             .fetch_add(removed as u64, Ordering::Relaxed);
         if self.is_global() {
-            pending::record(|pending| pending.table(model_name));
+            pending::record(|pending| pending.table(&model_name));
         }
     }
 
@@ -289,6 +353,27 @@ impl QueryCache {
         let removed = self.cache.write().clear();
         self.invalidations
             .fetch_add(removed as u64, Ordering::Relaxed);
+    }
+
+    /// Invalidate every table in this database, including trigger/cascade
+    /// effects. Manually inserted entries have no database, so remain
+    /// conservative and are invalidated by any database's write.
+    pub(crate) fn invalidate_database(&self, database: std::sync::Arc<str>) {
+        let removed = {
+            let mut cache = self.cache.write();
+            cache.note_database_invalidated(database.clone());
+            cache.remove_where(|entry| {
+                entry
+                    .database
+                    .as_ref()
+                    .is_none_or(|scope| scope == &database)
+            })
+        };
+        self.invalidations
+            .fetch_add(removed as u64, Ordering::Relaxed);
+        if self.is_global() {
+            pending::record(|pending| pending.database(database));
+        }
     }
 
     /// Get cache statistics

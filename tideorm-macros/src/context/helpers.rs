@@ -1,6 +1,9 @@
 use super::*;
 
-use crate::parse::{RelationKind, is_utc_datetime_type, option_inner_type};
+use crate::parse::{
+    RelationKind, db_field_candidates, find_db_field, find_derived_db_field, is_utc_datetime_type,
+    option_inner_type, required_field, resolve_db_field,
+};
 
 /// The names a comma-separated attribute lists, trimmed; an empty one, such as
 /// a trailing comma leaves, is an error.
@@ -36,14 +39,9 @@ pub(super) fn resolve_field_list<'a>(
 ) -> syn::Result<Vec<&'a ModelField>> {
     let mut resolved: Vec<&ModelField> = Vec::new();
     for name in names {
-        let field = find_db_field(fields, name).ok_or_else(|| {
-            syn::Error::new_spanned(
-                struct_ident,
-                format!(
-                    "#[tideorm({attribute} = ...)] references unknown field or column '{name}'"
-                ),
-            )
-        })?;
+        let subject = format!("#[tideorm({attribute} = ...)]");
+        let field = required_field(resolve_db_field(fields, name), &subject, name)
+            .map_err(|message| syn::Error::new_spanned(struct_ident, message))?;
         if !resolved.iter().any(|seen| seen.name() == field.name()) {
             resolved.push(field);
         }
@@ -105,6 +103,19 @@ pub(super) fn validate_primary_key_fields(
             );
         }
         into_result(errors)?;
+    }
+
+    // A key type the generated code cannot take would fail inside it, with
+    // errors about traits the model never named.
+    if let Some(field) = primary_key_fields
+        .iter()
+        .find(|field| crate::parse::is_optional_type(&field.ty))
+    {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "a #[tideorm(primary_key)] field cannot be an Option: every row has its key, and a \
+             model not inserted yet holds the type's default (0 for an auto_increment key)",
+        ));
     }
 
     for field in fields {
@@ -225,19 +236,27 @@ pub(super) fn resolve_encrypted_fields<'a>(
     Ok(resolved)
 }
 
-/// The soft-delete timestamp field `key` names, which has to be an
+/// The soft-delete timestamp field `deleted_at_column` names, else the
+/// `deleted_at` column's, which has to be an
 /// `Option<chrono::DateTime<chrono::Utc>>` in some spelling.
 pub(super) fn resolve_soft_delete_field(
     struct_ident: &Ident,
     fields: &[ModelField],
-    key: &str,
+    deleted_at_column: Option<&str>,
 ) -> syn::Result<(Ident, String)> {
-    let field = find_db_field(fields, key).ok_or_else(|| {
+    let key = deleted_at_column.unwrap_or("deleted_at");
+    let field = match deleted_at_column {
+        Some(key) => resolve_db_field(fields, key).map_err(|ambiguity| {
+            syn::Error::new_spanned(struct_ident, format!("soft_delete: {ambiguity}"))
+        })?,
+        None => find_derived_db_field(fields, key),
+    }
+    .ok_or_else(|| {
         syn::Error::new_spanned(
             struct_ident,
             format!(
-                "soft_delete requires a field or column named '{}'; set #[tideorm(deleted_at_column = \"...\")] to override",
-                key
+                "soft_delete requires a field or column named '{key}'; set \
+                 #[tideorm(deleted_at_column = \"...\")] to override"
             ),
         )
     })?;
@@ -266,14 +285,56 @@ pub(super) fn validate_index_definitions(
             continue;
         }
 
+        let subject = format!("#[{}(..)]", index.attribute_name());
         for column in &index.columns {
-            if find_db_field(db_fields, column).is_none() {
-                let attribute = index.attribute_name();
-                let message =
-                    format!("#[{attribute}(..)] references unknown field or column '{column}'");
+            if let Err(message) = required_field(index.field(db_fields, column), &subject, column) {
                 combine_error(&mut errors, syn::Error::new(index.span, message));
             }
         }
+    }
+
+    into_result(errors)
+}
+
+/// Rejects indexes and full-text columns over encrypted fields. Every write
+/// stores a fresh ciphertext, so equal values never match: a unique index
+/// would enforce nothing, and neither an index nor a search could find a
+/// plaintext value.
+pub(super) fn reject_encrypted_lookups(
+    struct_ident: &Ident,
+    indexes: &[IndexDef],
+    db_fields: &[ModelField],
+    encrypted: &[&ModelField],
+    searchable: &[&ModelField],
+) -> syn::Result<()> {
+    let is_encrypted =
+        |field: &ModelField| encrypted.iter().any(|other| other.ident() == field.ident());
+    let mut errors = None;
+
+    for index in indexes {
+        let attribute = index.attribute_name();
+        for field in index
+            .resolved_columns(db_fields)
+            .filter_map(|(_, field)| field)
+            .filter(|field| is_encrypted(field))
+        {
+            let message = format!(
+                "#[{attribute}(..)] cannot cover encrypted field `{}`: every write stores a fresh \
+                 ciphertext, so the index never sees two equal values and no lookup by plaintext \
+                 can use it",
+                field.name()
+            );
+            combine_error(&mut errors, syn::Error::new(index.span, message));
+        }
+    }
+
+    for field in searchable.iter().filter(|field| is_encrypted(field)) {
+        let message = format!(
+            "#[tideorm(searchable = ...)] cannot name encrypted field `{}`: a full-text index \
+             over it would hold ciphertext, which no search matches",
+            field.name()
+        );
+        combine_error(&mut errors, syn::Error::new_spanned(struct_ident, message));
     }
 
     into_result(errors)
@@ -292,9 +353,9 @@ pub(super) fn build_index_impls(
         .filter(|index| index.unique == unique)
         .map(|index| {
             // An index may name a field; the table knows its column.
-            let columns = index.columns.iter().map(|column| {
-                find_db_field(db_fields, column).map_or_else(|| column.clone(), ModelField::column_name)
-            });
+            let columns = index
+                .resolved_columns(db_fields)
+                .map(|(column, field)| field.map_or_else(|| column.clone(), ModelField::column_name));
             let columns = quote!(vec![#(#columns.to_string()),*]);
             match &index.name {
                 Some(name) => quote!(::tideorm::model::IndexDefinition::new(#name, #columns, #unique)),
@@ -321,14 +382,18 @@ pub(super) fn resolve_hidden_fields(
         )]);
     };
 
-    requested
-        .iter()
-        .map(|name| {
-            fields
-                .iter()
-                .find(|field| field.is_named(name))
-                .map(ModelField::name)
-                .or_else(|| attachments.contains(&name).then(|| name.clone()))
+    let mut hidden: Vec<String> = Vec::new();
+    for name in &requested {
+        let names = match db_field_candidates(fields, name) {
+            // A name that is one field's name and another field's column hides
+            // both: either may be the one meant, and hiding the other as well
+            // only leaves a key out, where picking one could show the value.
+            (Some(named), Some(column)) => vec![named.name(), column.name()],
+            (named, column) => named
+                .or(column)
+                .or_else(|| find_db_field(fields, name))
+                .map(|field| vec![field.name()])
+                .or_else(|| attachments.contains(&name).then(|| vec![name.clone()]))
                 .ok_or_else(|| {
                     syn::Error::new_spanned(
                         struct_ident,
@@ -337,7 +402,13 @@ pub(super) fn resolve_hidden_fields(
                             name
                         ),
                     )
-                })
-        })
-        .collect()
+                })?,
+        };
+        for name in names {
+            if !hidden.contains(&name) {
+                hidden.push(name);
+            }
+        }
+    }
+    Ok(hidden)
 }

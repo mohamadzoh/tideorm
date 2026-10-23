@@ -41,14 +41,15 @@ pub struct HasMany<E: Model> {
     /// Column on *this* model whose value the foreign key matches — the primary
     /// key unless `local_key = ".."` overrides it.
     pub local_key: &'static str,
-    /// Name of the model field this relation was declared on, used as the
-    /// entity manager's relation-snapshot key.
+    /// Name of the model field this relation was declared on: with
+    /// `owner_table`, what tells it apart from another relation when a
+    /// rebuilt model takes over a previous copy's state.
     #[cfg(feature = "entity-manager")]
     pub relation_name: &'static str,
     /// Table of the model owning the relation.
     #[cfg(feature = "entity-manager")]
     pub owner_table: &'static str,
-    state: RelationState<Vec<E>>,
+    pub(crate) state: RelationState<Vec<E>>,
 }
 
 impl<E: Model> HasMany<E> {
@@ -89,20 +90,12 @@ impl<E: Model> HasMany<E> {
         self
     }
 
-    /// Record the names the entity manager keys its relation snapshots by;
-    /// see [`HasOne::with_metadata`](super::HasOne::with_metadata).
+    /// Record the relation's field name and its owner's table; see
+    /// [`HasOne::with_metadata`](super::HasOne::with_metadata).
     #[cfg(feature = "entity-manager")]
     pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
         self.relation_name = relation_name;
         self.owner_table = owner_table;
-        self
-    }
-
-    /// Record the owning model's entity-manager identity key; see
-    /// [`HasOne::with_owner_key`](super::HasOne::with_owner_key).
-    #[cfg(feature = "entity-manager")]
-    pub fn with_owner_key(mut self, owner_key: String) -> Self {
-        self.state.owner_key = Some(owner_key);
         self
     }
 
@@ -235,7 +228,8 @@ relation_serde!(HasMany<E>);
 
 /// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
 /// keeps the rows cached already, or reads them, hands each to the manager's
-/// identity map and records a relation snapshot.
+/// identity map and records the keys it holds, which a later save compares
+/// against to delete or detach the rows it no longer holds.
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for HasMany<E>
 where
@@ -250,10 +244,8 @@ where
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
     ) -> Result<Self::Output<'a>> {
-        let owner =
-            SnapshotOwner::new(self.owner_table, &self.state.owner_key, self.relation_name)?;
         self.state.source.entity_manager = Some(entity_manager.clone());
         let query = self.query("HasMany::load");
-        load_many_in_entity_manager(&mut self.state, entity_manager, query, owner).await
+        load_many_in_entity_manager(&mut self.state, entity_manager, query).await
     }
 }

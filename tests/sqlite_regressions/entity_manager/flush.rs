@@ -1,7 +1,8 @@
 //! A save in flight racing a removal, a detach or further edits.
 
+use super::Pause;
 use crate::fixtures::memory_database;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tideorm::entity_manager::{EntityManager, EntityState, Managed};
 use tideorm::prelude::*;
 
@@ -12,24 +13,13 @@ struct Row {
     name: String,
 }
 
-type Pause = (
-    tokio::sync::oneshot::Sender<()>,
-    std::sync::mpsc::Receiver<()>,
-);
-
-static PAUSE: Mutex<Option<Pause>> = Mutex::new(None);
+static PAUSE: Pause = Pause::new();
 
 static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl tideorm::callbacks::Callbacks for Row {
     fn before_save(&mut self) -> tideorm::Result<()> {
-        let pause = PAUSE.lock().unwrap().take();
-        if let Some((entered, resume)) = pause {
-            entered.send(()).unwrap();
-            resume
-                .recv_timeout(std::time::Duration::from_secs(10))
-                .unwrap();
-        }
+        PAUSE.wait();
         Ok(())
     }
 }
@@ -51,24 +41,6 @@ async fn pending_row(manager: &Arc<EntityManager>, insert: bool) -> Managed<Row>
     }
 }
 
-async fn pause_flush(
-    manager: &Arc<EntityManager>,
-) -> (
-    tokio::task::JoinHandle<tideorm::Result<()>>,
-    std::sync::mpsc::Sender<()>,
-) {
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
-    *PAUSE.lock().unwrap() = Some((entered_tx, resume_rx));
-    let manager = manager.clone();
-    let task = tokio::spawn(async move { manager.flush().await });
-    tokio::time::timeout(std::time::Duration::from_secs(10), entered_rx)
-        .await
-        .unwrap()
-        .unwrap();
-    (task, resume_tx)
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removal_during_insert_or_update_remains_scheduled() {
     let _serial = TEST_LOCK.lock().await;
@@ -76,7 +48,7 @@ async fn removal_during_insert_or_update_remains_scheduled() {
         let db = database().await;
         let manager = EntityManager::new(Arc::new(db.clone()));
         let managed = pending_row(&manager, insert).await;
-        let (task, resume) = pause_flush(&manager).await;
+        let (task, resume) = PAUSE.flush(&manager).await;
         manager.remove(&managed);
         assert_eq!(managed.state(), EntityState::Removed);
         resume.send(()).unwrap();
@@ -99,7 +71,7 @@ async fn detach_or_clear_during_save_does_not_restore_the_handle() {
             let db = database().await;
             let manager = EntityManager::new(Arc::new(db.clone()));
             let managed = pending_row(&manager, insert).await;
-            let (task, resume) = pause_flush(&manager).await;
+            let (task, resume) = PAUSE.flush(&manager).await;
             if clear {
                 manager.clear();
             } else {
@@ -129,7 +101,7 @@ async fn edits_during_save_remain_dirty_for_the_next_flush() {
     let db = database().await;
     let manager = EntityManager::new(Arc::new(db.clone()));
     let managed = pending_row(&manager, false).await;
-    let (task, resume) = pause_flush(&manager).await;
+    let (task, resume) = PAUSE.flush(&manager).await;
     managed.edit(|row| row.name = "later edit".into());
     resume.send(()).unwrap();
     task.await.unwrap().unwrap();
@@ -144,6 +116,63 @@ async fn edits_during_save_remain_dirty_for_the_next_flush() {
         Row::find_with(1, &db).await.unwrap().unwrap().name,
         "later edit"
     );
+}
+
+/// A flush that fails undoes what it wrote and nothing else: an entity
+/// persisted while it ran still flushes next time, and an edit or a removal
+/// of the entity it was writing stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_flush_keeps_work_done_while_it_ran() {
+    let _serial = TEST_LOCK.lock().await;
+    for remove in [false, true] {
+        let db = memory_database(
+            "CREATE TABLE flush_behavior_rows(id INTEGER PRIMARY KEY, name TEXT CHECK (name <> 'bad')); \
+             INSERT INTO flush_behavior_rows VALUES(1, 'original')",
+        )
+        .await;
+        let manager = EntityManager::new(Arc::new(db.clone()));
+        let failing = manager.find_managed::<Row>(1).await.unwrap().unwrap();
+        failing.edit(|row| row.name = "bad".into());
+        let inserted = pending_row(&manager, true).await;
+        let (task, resume) = PAUSE.flush(&manager).await;
+        let persisted = manager.persist(Row {
+            id: 0,
+            name: "persisted meanwhile".into(),
+        });
+        if remove {
+            manager.remove(&inserted);
+        } else {
+            inserted.edit(|row| row.name = "edited meanwhile".into());
+        }
+        resume.send(()).unwrap();
+        assert!(task.await.unwrap().is_err());
+
+        assert_eq!(inserted.get().id, 0);
+        let expected = if remove {
+            EntityState::Removed
+        } else {
+            assert_eq!(inserted.get().name, "edited meanwhile");
+            EntityState::New
+        };
+        assert_eq!(inserted.state(), expected);
+        assert_eq!(persisted.state(), EntityState::New);
+
+        failing.edit(|row| row.name = "fixed".into());
+        manager.flush().await.unwrap();
+        let mut names: Vec<String> = Row::query_with(&db)
+            .get()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.name)
+            .collect();
+        names.sort();
+        let mut expected = vec!["fixed", "persisted meanwhile"];
+        if !remove {
+            expected.insert(0, "edited meanwhile");
+        }
+        assert_eq!(names, expected);
+    }
 }
 
 #[tokio::test]

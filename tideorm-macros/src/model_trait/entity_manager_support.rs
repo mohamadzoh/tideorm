@@ -5,21 +5,49 @@ use crate::parse::{ModelField, RelationKind};
 pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let field_idents = &ctx.field_idents;
+    let relation_idents: Vec<_> = ctx
+        .relation_fields
+        .iter()
+        .map(|field| field.ident())
+        .collect();
+
+    // A model without relations keeps the traits' defaults.
+    let relation_copy_impl = (!relation_idents.is_empty()).then(|| {
+        quote! {
+            fn tide_relations_from(&mut self, source: &Self) {
+                #(self.#relation_idents = ::std::clone::Clone::clone(&source.#relation_idents);)*
+            }
+
+            fn tide_relations_match(&self, other: &Self) -> bool {
+                #(::tideorm::serde_json::to_value(&self.#relation_idents).ok()
+                    == ::tideorm::serde_json::to_value(&other.#relation_idents).ok())&&*
+            }
+        }
+    });
+    let unload_relations_impl = (!relation_idents.is_empty()).then(|| {
+        quote! {
+            fn tide_unload_relations(&mut self) {
+                #(self.#relation_idents = ::std::default::Default::default();)*
+                self.__wire_relations(::std::option::Option::None);
+            }
+        }
+    });
 
     let merge_impl = quote! {
         impl ::tideorm::entity_manager::TideEntityManagerMergePersisted for #struct_name {
             fn tide_merge_persisted(&mut self, persisted: Self) {
                 #(self.#field_idents = persisted.#field_idents;)*
             }
+
+            #relation_copy_impl
         }
     };
 
     // Every relation of a model a manager loaded queries its database, the
     // polymorphic and self-referencing ones too.
-    let relation_database_attach_blocks = ctx.relation_fields.iter().map(|field| {
-        let ident = field.ident();
-        quote!(self.#ident.attach_query_database(database);)
-    });
+    let relation_database_attach_blocks = relation_idents
+        .iter()
+        .map(|ident| quote!(self.#ident.attach_query_database(database);));
 
     let relation_sync_blocks: Vec<TokenStream2> = ctx
         .relation_fields
@@ -30,11 +58,9 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
     // a model with nothing to sync emits no unused bindings.
     let sync_preamble = (!relation_sync_blocks.is_empty()).then(|| {
         quote! {
-            let owner_key = ::tideorm::entity_manager::__identity_key::<Self>(self);
             let owner = ::tideorm::entity_manager::__SyncOwner {
                 entity_manager,
                 table: <Self as ::tideorm::model::ModelMeta>::table_name(),
-                key: &owner_key,
             };
         }
     });
@@ -58,10 +84,11 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
         };
         let table_name = quote!(<#related_ty as ::tideorm::model::ModelMeta>::table_name());
         let foreign_key = field.foreign_key.as_deref();
-        let local_key = field
-            .local_key
-            .as_deref()
-            .unwrap_or(ctx.default_local_key());
+        let local_key = || {
+            ctx.relation_local_field(field)
+                .expect("relation local keys resolve when the context is built")
+                .column_name()
+        };
 
         match field.relation_kind() {
             Some(RelationKind::BelongsTo) => {
@@ -73,12 +100,14 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             }
             Some(RelationKind::HasOne | RelationKind::HasMany) => {
                 if let Some(foreign_key) = foreign_key {
+                    let local_key = local_key();
                     row_references.push(quote!((#table_name, #foreign_key, #local_key)));
                 }
                 child_tables.push(table_name);
             }
             Some(RelationKind::SelfRef | RelationKind::SelfRefMany) => {
                 let foreign_key = foreign_key.unwrap_or("parent_id");
+                let local_key = local_key();
                 row_references.push(quote!((
                     <Self as ::tideorm::model::ModelMeta>::table_name(),
                     #foreign_key,
@@ -113,8 +142,7 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             }
 
             fn tide_pk_is_new(&self) -> bool {
-                let primary_key = <Self as ::tideorm::model::Model>::primary_key(self);
-                <Self as ::tideorm::model::ModelMeta>::primary_key_is_new(&primary_key)
+                <Self as ::tideorm::model::Model>::is_new(self)
             }
 
             fn tide_parent_tables() -> Vec<&'static str>
@@ -139,6 +167,8 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
             ) {
                 #(#relation_database_attach_blocks)*
             }
+
+            #unload_relations_impl
         }
 
         impl ::tideorm::entity_manager::TideEntityManagerSync for #struct_name {
@@ -169,26 +199,22 @@ pub(super) fn generate_entity_manager_support_impl(ctx: &BuildContext) -> TokenS
 /// detach) the ones the relation no longer holds and record what it holds now.
 fn build_relation_sync_block(ctx: &BuildContext, field: &ModelField) -> Option<TokenStream2> {
     let ident = field.ident();
-    let local_key = field
-        .local_key
-        .as_deref()
-        .unwrap_or(ctx.default_local_key());
-    let owner_value = |ident: &syn::Ident| {
+    let owner_value = || {
         let local_key_ident = ctx
-            .resolve_local_key_ident(local_key, ident)
+            .relation_local_ident(field)
             .expect("relation local keys resolve when the context is built");
         quote!(::tideorm::serde_json::to_value(self.#local_key_ident.clone())?)
     };
 
     Some(match field.relation_kind()? {
         RelationKind::HasMany => {
-            let owner_value = owner_value(ident);
+            let owner_value = owner_value();
             quote! {
                 ::tideorm::entity_manager::__sync_has_many(&owner, &mut self.#ident, #owner_value).await?;
             }
         }
         RelationKind::HasOne => {
-            let owner_value = owner_value(ident);
+            let owner_value = owner_value();
             quote! {
                 ::tideorm::entity_manager::__sync_has_one(&owner, &mut self.#ident, #owner_value).await?;
             }

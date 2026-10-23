@@ -8,8 +8,9 @@ mod save;
 mod state;
 
 use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 
@@ -29,8 +30,6 @@ pub use save::{
 };
 
 type IdentityKey = (TypeId, String);
-type SnapshotKey = (&'static str, TypeId, String, &'static str);
-type SharedManagedCheckpoints = Arc<parking_lot::Mutex<save::ManagedCheckpoints>>;
 const MAX_FLUSH_PASSES: usize = 16;
 
 impl std::fmt::Debug for EntityManager {
@@ -42,7 +41,6 @@ impl std::fmt::Debug for EntityManager {
                 &self.managed_identity_map.read().len(),
             )
             .field("managed_entries_len", &self.managed_entries.read().len())
-            .field("snapshots_len", &self.snapshots.read().len())
             .finish()
     }
 }
@@ -78,9 +76,10 @@ pub trait EntityManagerLoad {
 /// serving rows other connections have changed since.
 pub struct EntityManager {
     identity_map: Arc<RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>>,
+    /// Changed under the identity-map write lock when clear invalidates rollback snapshots.
+    identity_generation: AtomicU64,
     managed_identity_map: RwLock<HashMap<IdentityKey, Arc<dyn Any + Send + Sync>>>,
     managed_entries: RwLock<Vec<Arc<dyn managed::ManagedOps>>>,
-    snapshots: RwLock<HashMap<SnapshotKey, HashSet<String>>>,
     /// Held by the flush or save running as this context's unit of work.
     unit_of_work: futures_util::lock::Mutex<()>,
     /// Serialize the lookup and registration of a managed identity. Separate from
@@ -94,9 +93,9 @@ impl EntityManager {
     pub fn new(db: Arc<crate::database::Database>) -> Arc<Self> {
         Arc::new(Self {
             identity_map: Arc::new(RwLock::new(HashMap::new())),
+            identity_generation: AtomicU64::new(0),
             managed_identity_map: RwLock::new(HashMap::new()),
             managed_entries: RwLock::new(Vec::new()),
-            snapshots: RwLock::new(HashMap::new()),
             unit_of_work: futures_util::lock::Mutex::new(()),
             managed_registration: parking_lot::Mutex::new(()),
             db,
@@ -291,25 +290,15 @@ impl EntityManager {
         }
 
         let entity_manager = self.clone();
-        save::in_unit_of_work(self, Vec::new, move |checkpoints| async move {
-            entity_manager
-                .flush_in_scope_with_checkpoints(Some(&checkpoints))
-                .await
+        save::in_unit_of_work(self, move || async move {
+            entity_manager.flush_in_scope().await
         })
         .await
     }
 
     async fn flush_in_scope(self: &Arc<Self>) -> crate::error::Result<()> {
-        self.flush_in_scope_with_checkpoints(None).await
-    }
-
-    async fn flush_in_scope_with_checkpoints(
-        self: &Arc<Self>,
-        checkpoints: Option<&SharedManagedCheckpoints>,
-    ) -> crate::error::Result<()> {
         let mut processed = 0;
         let mut passes = 0;
-        let mut checkpointed = HashSet::<usize>::new();
         loop {
             let (mut entries, entries_len) = {
                 let all_entries = self.managed_entries.read();
@@ -338,13 +327,6 @@ impl EntityManager {
             managed::order_self_references(&mut entries);
 
             for entry in entries {
-                if let Some(checkpoints) = checkpoints {
-                    let entry_ptr = Arc::as_ptr(&entry).cast::<()>() as usize;
-                    if checkpointed.insert(entry_ptr) {
-                        checkpoints.lock().push(entry.clone().checkpoint());
-                    }
-                }
-
                 let table = entry.table_name();
                 if let Err(error) = entry.flush(self).await {
                     return Err(managed::explain_flush_ordering_failure(
@@ -370,10 +352,13 @@ impl EntityManager {
             entry.detach_from_context(self);
         }
 
-        self.identity_map.write().clear();
+        {
+            let mut map = self.identity_map.write();
+            self.identity_generation.fetch_add(1, Ordering::Relaxed);
+            map.clear();
+        }
         self.managed_identity_map.write().clear();
         self.managed_entries.write().clear();
-        self.snapshots.write().clear();
     }
 
     /// Load `relation` through this context, so its rows are the identity map's
@@ -430,7 +415,7 @@ impl EntityManager {
         // stop this newly attached handle from participating in later flushes.
         let manager = self.clone();
         let rollback_entry = managed.entry.clone();
-        crate::cache::undo_on_rollback(move || {
+        self.on_rollback_of_read(move || {
             if manager
                 .get_managed_by_key::<T>(&key)
                 .is_some_and(|current| Arc::ptr_eq(&current.entry, &rollback_entry))
@@ -439,6 +424,15 @@ impl EntityManager {
             }
         });
         managed
+    }
+
+    /// Run `undo` if the transaction of this manager's database that a read
+    /// just ran in does not commit; a read outside one is final, even inside
+    /// another database's transaction.
+    fn on_rollback_of_read(&self, undo: impl FnOnce() + Send + 'static) {
+        if let Ok(connection) = self.database().__get_connection() {
+            connection.recording(|| crate::cache::undo_on_rollback(undo));
+        }
     }
 
     /// File `entity` in the identity map and return the instance the map holds
@@ -479,7 +473,7 @@ impl EntityManager {
         map.insert(key.clone(), stored.clone());
         drop(map);
         let identity_map = self.identity_map.clone();
-        crate::cache::undo_on_rollback(move || {
+        self.on_rollback_of_read(move || {
             let mut map = identity_map.write();
             if map
                 .get(&key)

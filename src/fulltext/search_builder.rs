@@ -241,8 +241,23 @@ impl<T: Model> FullTextSearchBuilder<T> {
         crate::internal::count_to_u64(count, "fulltext count")
     }
 
+    /// Refuse to search an encrypted column: it holds a fresh ciphertext per
+    /// write, which no search text matches.
+    fn refuse_encrypted_columns(&self) -> Result<()> {
+        for column in &self.columns {
+            if let Some(encrypted) = crate::model::__encrypted_column::<T>(column)? {
+                return Err(encrypted.refuse(
+                    "full-text search",
+                    "an index over randomized ciphertext matches no search text",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Build the SQL query for the current database type
     pub(crate) fn build_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
+        self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_sql(),
@@ -273,6 +288,11 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Whether the search text holds a word to search for.
     fn has_search_terms(&self) -> bool {
+        // A boolean search of exclusions alone has nothing to subtract them
+        // from, and matches no row: MySQL and FTS5 read it so.
+        if self.config.mode == SearchMode::Boolean {
+            return has_searchable_char(&self.highlight_terms());
+        }
         has_searchable_char(&self.query_text())
     }
 
@@ -315,6 +335,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Build ranked SQL query
     pub(crate) fn build_ranked_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
+        self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_ranked_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_ranked_sql(),
@@ -324,6 +345,7 @@ impl<T: Model> FullTextSearchBuilder<T> {
 
     /// Build count SQL query
     pub(crate) fn build_count_sql(&self, db_type: DatabaseType) -> Result<(String, Vec<Value>)> {
+        self.refuse_encrypted_columns()?;
         match db_type {
             DatabaseType::Postgres => self.build_postgres_count_sql(),
             DatabaseType::MySQL | DatabaseType::MariaDB => self.build_mysql_count_sql(),

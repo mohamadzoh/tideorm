@@ -5,8 +5,9 @@
 /// This is the *configured* backend and is deliberately finer-grained than the
 /// driver's: MySQL and MariaDB are separate variants here even though the
 /// driver reports one dialect for both, so an application can tell which
-/// server it reached. Code that needs that distinction must read
-/// `TideConfig::get_database_type()` rather than asking the connection.
+/// server it reached. Code that needs that distinction must ask the database
+/// handle (`Database::backend()`), whose pool asked the server when it opened,
+/// rather than the driver.
 ///
 /// Non-exhaustive: match with a `_` arm so a future backend does not break the
 /// build.

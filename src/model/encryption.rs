@@ -88,7 +88,14 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
     field_or_column: &str,
     value: UpdateValue,
 ) -> Result<UpdateValue> {
-    let Some((field_name, column_name)) = resolve_encrypted_field::<M>(field_or_column)? else {
+    // A name is the column it names, as the update writes it: one field's
+    // name that is another field's column names that column.
+    let Some(super::EncryptedColumn {
+        field: field_name,
+        column: column_name,
+        ..
+    }) = super::__encrypted_column::<M>(field_or_column)?
+    else {
         return Ok(value);
     };
 
@@ -107,15 +114,6 @@ pub(crate) fn prepare_batch_update_value<M: ModelMeta>(
         UpdateValue::JsonSet(_, _) => "json set",
     };
     unsupported_batch_operation(operation, field_name, column_name)
-}
-
-/// The encrypted field `name`, a field or column name, names, with its column.
-fn resolve_encrypted_field<M: ModelMeta>(
-    name: &str,
-) -> Result<Option<(&'static str, &'static str)>> {
-    Ok(super::encrypted_field_columns::<M>()?
-        .into_iter()
-        .find(|(field_name, column_name)| *field_name == name || *column_name == name))
 }
 
 fn encrypt_batch_json_value(

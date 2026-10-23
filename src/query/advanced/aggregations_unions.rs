@@ -277,7 +277,7 @@ impl<M: Model> QueryBuilder<M> {
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
         self.clauses.group_by.push(crate::columns::column_reference(
             &column,
-            Some(M::table_name()),
+            Some((M::table_name(), M::schema_name())),
         ));
         self
     }
@@ -854,7 +854,7 @@ impl<M: Model> QueryBuilder<M> {
             return Some((M::table_name().to_string(), column.to_string()));
         }
         column
-            .split_once('.')
+            .rsplit_once('.')
             .map(|(table, field)| (table.to_string(), field.to_string()))
     }
 
@@ -940,13 +940,13 @@ impl<M: Model> QueryBuilder<M> {
         source: Option<crate::model::EncryptedColumn>,
         operation: &str,
     ) -> Result<()> {
-        if let Some(source) = source {
-            return Err(Error::query(format!(
-                "{operation} is not supported for encrypted column {}.{}: randomized ciphertext cannot compare plaintext values; read the values and compare them after decryption",
-                source.table, source.column,
-            )));
+        match source {
+            Some(source) => Err(source.refuse(
+                operation,
+                "randomized ciphertext cannot compare plaintext values; read the values and                  compare them after decryption",
+            )),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn aggregate_column_type(&self, column: &str) -> Option<crate::orm::ColumnType> {
@@ -984,7 +984,7 @@ impl<M: Model> QueryBuilder<M> {
     /// The column a terminal aggregates: another model's typed column is
     /// qualified with its table.
     fn aggregated_column(column: &impl crate::columns::IntoColumnName) -> String {
-        crate::columns::column_reference(column, Some(M::table_name()))
+        crate::columns::column_reference(column, Some((M::table_name(), M::schema_name())))
     }
 
     /// Run a scalar aggregate selected as `alias` and decode its value as `T`.
@@ -1208,9 +1208,18 @@ impl<M: Model> QueryBuilder<M> {
         let db_type = self.db_type_for_sql();
         let (query_sql, params) = other.build_compound_operand_sql_for_db(db_type);
         let mut operand = UnionClause::with_params(union_type, query_sql, params);
-        match other.compound_projection() {
-            Ok(projection) => operand.projection = Some(projection),
-            Err(error) => self.invalidate_query(error.to_string()),
+        // An operand with a raw arm of its own reads `table.*`, in the table's
+        // column order, as a raw arm does; mixing arms is refused inside it too.
+        operand.raw = other.reads_table_wildcard();
+        if let Err(error) = other.ensure_union_projections_are_valid() {
+            self.invalidate_query(error.to_string());
+        }
+        // Such an operand's columns are as unknown as a raw arm's.
+        if !operand.raw {
+            match other.compound_projection() {
+                Ok(projection) => operand.projection = Some(projection),
+                Err(error) => self.invalidate_query(error.to_string()),
+            }
         }
         self.clauses.unions.push(operand);
         self

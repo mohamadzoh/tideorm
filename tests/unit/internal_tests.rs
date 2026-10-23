@@ -469,4 +469,15 @@ fn masking_covers_the_whole_userinfo_and_nothing_else() {
         mask_url_credentials("mysql://app:pw@db/app?ssl-mode=REQUIRED&tag=a@b"),
         "mysql://***@db/app?ssl-mode=REQUIRED&tag=a@b"
     );
+    assert_eq!(
+        mask_url_credentials("postgres://db/app?tag=a@b"),
+        "postgres://db/app?tag=a@b"
+    );
+
+    // An unencoded `?` or `#` in a password ends the authority early; the
+    // password is masked all the same, never printed as a query.
+    for password in ["p?ss", "p#ss", "p?a@ss", "p?ss&password=x"] {
+        let shown = mask_url_credentials(&format!("mysql://app:{password}@db:3306/app?a=1"));
+        assert_eq!(shown, "mysql://***@db:3306/app?a=1", "{password}");
+    }
 }

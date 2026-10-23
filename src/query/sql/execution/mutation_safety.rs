@@ -12,11 +12,18 @@ impl<M: Model> QueryBuilder<M> {
     }
 
     fn has_explicit_mutation_filters(&self) -> bool {
+        let is_vacuous = |condition: &crate::query::WhereCondition| {
+            crate::query::condition_is_vacuous(condition, |column| self.is_json_column(column))
+        };
         self.clauses
             .conditions
             .iter()
-            .any(|condition| !crate::query::condition_is_vacuous(condition))
-            || self.clauses.or_groups.iter().any(OrGroup::is_restrictive)
+            .any(|condition| !is_vacuous(condition))
+            || self
+                .clauses
+                .or_groups
+                .iter()
+                .any(|group| group.is_restrictive_with(&is_vacuous))
     }
 
     pub(crate) fn ensure_mutation_has_explicit_filters(&self, operation: &str) -> Result<()> {

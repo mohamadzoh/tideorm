@@ -222,3 +222,41 @@ fn column_diff_is_empty_when_the_table_matches_the_model() {
     assert!(missing.is_empty());
     assert!(extra.is_empty());
 }
+
+/// Two models of one table each register the columns they read: the second
+/// adds what the first lacks, and a column both declare keeps the first.
+#[test]
+fn a_second_model_of_a_table_adds_its_columns() {
+    let table = "sync_shared_table_for_two_models";
+    SyncRegistry::register_schema(
+        ModelSchema::new(table)
+            .column(ColumnDef::new("id", "i64").primary_key())
+            .column(ColumnDef::new("name", "String")),
+    );
+    SyncRegistry::register_schema(
+        ModelSchema::new(table)
+            .column(ColumnDef::new("id", "i64").primary_key())
+            .column(ColumnDef::new("name", "Option<String>"))
+            .column(ColumnDef::new("score", "i32"))
+            .indexes(vec![IndexDefinition::new(
+                "idx_shared_score",
+                vec!["score".to_string()],
+                false,
+            )]),
+    );
+    let schemas: Vec<ModelSchema> = SyncRegistry::get_all_schemas()
+        .into_iter()
+        .filter(|schema| schema.table_name == table)
+        .collect();
+    assert_eq!(schemas.len(), 1);
+    let columns: Vec<(&str, &str)> = schemas[0]
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column.col_type.as_str()))
+        .collect();
+    assert_eq!(
+        columns,
+        [("id", "i64"), ("name", "String"), ("score", "i32")]
+    );
+    assert_eq!(schemas[0].indexes.len(), 1);
+}

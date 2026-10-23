@@ -156,3 +156,60 @@ fn an_element_equals_a_scalar_by_type_and_value() {
         )
     );
 }
+
+/// A number whose exponent no `i64` holds, which a request can send once
+/// serde_json keeps numbers' text (`arbitrary_precision`), used to panic,
+/// or to overflow the scale.
+#[test]
+fn a_number_past_every_exponent_has_no_scale() {
+    assert_eq!(
+        super::decimal_parts("-12.50e3"),
+        (true, "125".to_string(), Some(2))
+    );
+    assert_eq!(super::decimal_parts("0.000").1, "");
+    for text in [
+        "1e99999999999999999999",
+        "10e9223372036854775807",
+        "1.5e-9223372036854775808",
+    ] {
+        assert_eq!(super::decimal_parts(text).2, None, "{text}");
+    }
+}
+
+/// The comparison with such a number is one SQLite runs, and matches no
+/// stored number, where a number with an ordinary exponent still matches.
+#[cfg(all(feature = "sqlite", feature = "runtime-tokio"))]
+#[tokio::test]
+async fn a_number_past_every_exponent_matches_no_stored_number() {
+    let _lock = crate::test_support::global_db_lock().lock().await;
+    let db = crate::test_support::install_sqlite_global(&[
+        "CREATE TABLE json_numbers(doc TEXT)",
+        "INSERT INTO json_numbers VALUES ('10'), ('1e5'), ('[10]')",
+    ])
+    .await;
+    let matching = |text: &'static str| {
+        let db = db.clone();
+        async move {
+            let mut tests = JsonTests::default();
+            let predicate = tests.number_equals(&Node::document("doc"), text);
+            let rows = db
+                .__raw_json_with_params(
+                    &format!("SELECT count(*) AS n FROM json_numbers WHERE {predicate}"),
+                    tests.values,
+                )
+                .await
+                .unwrap();
+            (predicate, rows[0]["n"].as_i64().unwrap())
+        }
+    };
+
+    let (predicate, found) = matching("10e9223372036854775807").await;
+    assert!(
+        predicate.contains("SELECT 0 FROM tide_num_normal"),
+        "{predicate}"
+    );
+    assert_eq!(found, 0);
+    assert_eq!(matching("1.0e1").await.1, 1);
+    assert_eq!(matching("100000").await.1, 1);
+    crate::test_support::reset_globals();
+}

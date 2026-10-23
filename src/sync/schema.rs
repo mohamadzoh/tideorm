@@ -148,6 +148,7 @@ async fn sync_indexes(
     new_table: bool,
 ) -> Result<()> {
     for index in &model.indexes {
+        check_index_owner(conn, model, backend, &index.name).await?;
         // MySQL has no `CREATE INDEX IF NOT EXISTS`, so ask the catalog first.
         if backend == Backend::MySql
             && ddl::mysql_index_exists(
@@ -167,7 +168,7 @@ async fn sync_indexes(
             &table_reference(model, backend),
             &index.columns,
             index.unique,
-            true,
+            !new_table,
         );
         match execute_ddl(conn, backend, model, sql).await {
             Ok(()) => tide_debug!(
@@ -186,6 +187,48 @@ async fn sync_indexes(
         }
     }
 
+    Ok(())
+}
+
+/// Index names are schema-wide on SQLite and PostgreSQL. IF NOT EXISTS
+/// otherwise hides a collision with another table, including on repeated syncs.
+async fn check_index_owner(
+    conn: &OrmConnection,
+    model: &ModelSchema,
+    backend: Backend,
+    index: &str,
+) -> Result<()> {
+    let statement = match backend {
+        Backend::Sqlite => build_statement_with_values(
+            backend,
+            "SELECT tbl_name FROM main.sqlite_master WHERE type = 'index' AND name = ? COLLATE NOCASE",
+            vec![index.into()],
+        ),
+        Backend::Postgres => build_statement_with_values(
+            backend,
+            "SELECT tablename::text FROM pg_indexes WHERE schemaname = COALESCE($1, current_schema()) AND indexname = $2",
+            vec![qualifying_schema(model, backend).into(), index.into()],
+        ),
+        Backend::MySql => return Ok(()),
+    };
+    if let Some(row) = conn
+        .query_one_raw(statement)
+        .await
+        .map_err(translate_error)?
+    {
+        let owner: String = row.try_get_by_index(0).map_err(translate_error)?;
+        let matches = if backend == Backend::Sqlite {
+            owner.eq_ignore_ascii_case(&model.table_name)
+        } else {
+            owner == model.table_name
+        };
+        if !matches {
+            return Err(Error::configuration(format!(
+                "Index '{index}' belongs to table '{owner}', not '{}'; choose a distinct index name",
+                model.table_name
+            )));
+        }
+    }
     Ok(())
 }
 

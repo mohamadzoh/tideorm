@@ -102,8 +102,7 @@ async fn relations_keep_the_read_database_including_cache_and_transactions() {
     let tenant = users_and_posts("tenant", 10).await;
     let global = users_and_posts("global", 20).await;
     Database::set_global(global.clone()).unwrap();
-    let cache = tideorm::QueryCache::global();
-    cache.enable();
+    let _cache = crate::fixtures::global_cache();
     let query = User::query_with(&tenant).cache(Duration::from_secs(60));
     for _ in 0..2 {
         let user = query.clone().first_or_fail().await.unwrap();
@@ -135,8 +134,6 @@ async fn relations_keep_the_read_database_including_cache_and_transactions() {
         .await
         .unwrap();
     assert_eq!(user.posts.load().await.unwrap()[0].id, 10);
-    cache.disable();
-    cache.clear();
     Database::reset_global();
 }
 
@@ -317,4 +314,62 @@ async fn composed_queries_reject_other_databases_before_mutation() {
     })
     .await
     .unwrap();
+}
+
+/// An in-memory database lives only while a connection to it is open, so its
+/// pool closes none for being old or idle, and holds one connection when the
+/// database is private to each; a pool size it cannot have is a configuration
+/// error rather than a panic.
+#[tokio::test]
+async fn an_in_memory_pool_keeps_its_database_and_pool_sizes_are_checked() {
+    let db = Database::builder()
+        .url("sqlite::memory:")
+        .max_connections(1)
+        .max_lifetime(std::time::Duration::from_millis(20))
+        .idle_timeout(std::time::Duration::from_millis(20))
+        .build()
+        .await
+        .unwrap();
+    db.exec_raw("CREATE TABLE kept(id INTEGER PRIMARY KEY); INSERT INTO kept VALUES (1)")
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let rows = db.query_raw_json("SELECT id FROM kept").await.unwrap();
+    assert_eq!(rows.len(), 1);
+
+    // With a private cache each connection opens its own database, so the pool
+    // holds one: concurrent reads wait for it instead of opening an empty one.
+    let private = Database::builder()
+        .url("sqlite::memory:?cache=private")
+        .build()
+        .await
+        .unwrap();
+    private
+        .exec_raw("CREATE TABLE kept(id INTEGER PRIMARY KEY); INSERT INTO kept VALUES (1)")
+        .await
+        .unwrap();
+    let read = || private.query_raw_json("SELECT id FROM kept");
+    let (first, second, third) = tokio::join!(read(), read(), read());
+    for rows in [first, second, third] {
+        assert_eq!(rows.unwrap().len(), 1);
+    }
+
+    for builder in [
+        Database::builder()
+            .url("sqlite::memory:")
+            .max_connections(0),
+        Database::builder()
+            .url("sqlite::memory:")
+            .min_connections(3)
+            .max_connections(2),
+        Database::builder()
+            .url("sqlite::memory:?cache=private")
+            .max_connections(2),
+    ] {
+        let error = builder.build().await.unwrap_err();
+        assert!(
+            matches!(error, tideorm::Error::Configuration { .. }),
+            "{error:?}"
+        );
+    }
 }

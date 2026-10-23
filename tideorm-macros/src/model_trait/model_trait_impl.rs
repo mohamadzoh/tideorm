@@ -36,10 +36,11 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
             (&model).run_before_delete()?;
             let rows =
                 ::tideorm::model::__soft_delete_by_primary_key::<Self>(&model.primary_key()).await?;
+            // Nothing was deleted when no row matched: no after-delete hook.
             if rows > 0 {
                 ::tideorm::model::__forget_dirty_snapshot(&model);
+                (&model).run_after_delete()?;
             }
-            (&model).run_after_delete()?;
             Ok(rows)
         }
     } else {
@@ -97,7 +98,9 @@ pub(super) fn generate_model_trait_impl(ctx: &BuildContext) -> TokenStream2 {
                 let model = self;
                 (&model).run_before_delete()?;
                 let rows = ::tideorm::model::__delete_row(&model).await?;
-                (&model).run_after_delete()?;
+                if rows > 0 {
+                    (&model).run_after_delete()?;
+                }
                 Ok(rows)
             }
 

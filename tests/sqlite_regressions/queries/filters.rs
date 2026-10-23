@@ -269,3 +269,61 @@ async fn sqlite_array_filters_exclude_non_arrays_even_on_delete() {
         vec![2, 3, 4, 5, 6, 7]
     );
 }
+
+/// A search for nothing, or a pattern of `%` alone, filters nothing, so it
+/// cannot license a destructive mutation, and a group of empty groups is no
+/// filter at all; a value no parameter can hold fails the query instead of
+/// panicking.
+#[tokio::test]
+async fn vacuous_filters_neither_license_mutations_nor_empty_queries() {
+    let db = memory_database(
+        "CREATE TABLE audit_rows(id INTEGER PRIMARY KEY,amount INTEGER,aggregate_1 INTEGER); \
+         INSERT INTO audit_rows VALUES(1,20,7),(2,30,8)",
+    )
+    .await;
+    let count = || async { AuditRow::query_with(&db).count().await.unwrap() };
+    for refused in [
+        AuditRow::query_with(&db)
+            .where_contains("amount", "")
+            .delete()
+            .await,
+        AuditRow::query_with(&db)
+            .where_starts_with("amount", "")
+            .delete()
+            .await,
+        AuditRow::query_with(&db)
+            .where_ends_with("amount", "")
+            .delete()
+            .await,
+        AuditRow::query_with(&db)
+            .where_like("amount", "%%")
+            .delete()
+            .await,
+    ] {
+        assert!(refused.is_err(), "{refused:?}");
+    }
+    assert_eq!(count().await, 2);
+    assert_eq!(
+        AuditRow::query_with(&db)
+            .where_contains("amount", "2")
+            .delete()
+            .await
+            .unwrap(),
+        1
+    );
+
+    let rows = AuditRow::query_with(&db)
+        .or_where(|group| group.nested_or(|inner| inner.nested_and(|deepest| deepest)))
+        .get()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+
+    let error = AuditRow::query_with(&db)
+        .where_eq("amount", i128::MAX)
+        .get()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("cannot be bound"), "{error}");
+}

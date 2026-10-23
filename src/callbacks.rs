@@ -135,7 +135,8 @@ pub trait Callbacks: Sized {
     /// Called after deleting a record
     ///
     /// Use this for post-delete cleanup like removing files
-    /// or updating statistics.
+    /// or updating statistics. It runs only when a row was deleted: a
+    /// `delete()` that matched none returns `0` without calling it.
     fn after_delete(&self) -> Result<()> {
         Ok(())
     }

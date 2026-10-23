@@ -158,16 +158,12 @@ fn keyed_lookup(
     related_ty: &syn::Type,
     kind: RelationKind,
 ) -> Option<TokenStream2> {
-    let local_key = field
-        .local_key
-        .as_deref()
-        .unwrap_or(ctx.default_local_key());
     let (parent_key_ident, related_key, morph_type) = match kind {
         RelationKind::MorphOne | RelationKind::MorphMany => {
             let morph_name = field.morph_name.as_deref()?;
             let type_column = format!("{}_type", morph_name);
             (
-                ctx.resolve_local_key_ident(local_key, field.ident()).ok()?,
+                ctx.relation_local_ident(field).ok()?,
                 format!("{}_id", morph_name),
                 quote!(Some((#type_column, <Self as ::tideorm::model::ModelMeta>::table_name()))),
             )
@@ -179,7 +175,7 @@ fn keyed_lookup(
             quote!(None),
         ),
         _ => (
-            ctx.resolve_local_key_ident(local_key, field.ident()).ok()?,
+            ctx.relation_local_ident(field).ok()?,
             field.foreign_key.clone()?,
             quote!(None),
         ),
@@ -204,11 +200,7 @@ fn through_lookup(
     related_ty: &syn::Type,
 ) -> Option<TokenStream2> {
     let pivot_ty = field.related_types().get(1)?.clone();
-    let local_key = field
-        .local_key
-        .as_deref()
-        .unwrap_or(ctx.default_local_key());
-    let parent_key_ident = ctx.resolve_local_key_ident(local_key, field.ident()).ok()?;
+    let parent_key_ident = ctx.relation_local_ident(field).ok()?;
     let foreign_key = field.foreign_key.as_deref()?;
     let related_key = field.related_key.as_deref()?;
     let related_local_key = field.owner_key.as_deref().unwrap_or("id");

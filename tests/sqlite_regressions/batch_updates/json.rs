@@ -14,6 +14,50 @@ struct Doc {
 }
 
 #[tokio::test]
+async fn array_remove_preserves_non_arrays_and_sql_null() {
+    let db = memory_database(
+        r#"CREATE TABLE resume_docs(id INTEGER PRIMARY KEY,payload TEXT,amount INTEGER);
+        INSERT INTO resume_docs VALUES
+        (1,'{"a":1,"b":2}',0),(2,'5',0),(3,'null',0),(4,NULL,0),
+        (5,'[999,1,999,null,{"a":1}]',0),(6,'[]',0),(7,'"text"',0),(8,'true',0)"#,
+    )
+    .await;
+    for candidate in [json!(999), json!(null)] {
+        Doc::query_with(&db)
+            .where_gte("id", 1)
+            .update_all()
+            .array_remove("payload", candidate.clone())
+            .execute()
+            .await
+            .unwrap();
+        let values = db
+            .query_raw_json("SELECT payload FROM resume_docs ORDER BY id")
+            .await
+            .unwrap();
+        for (index, expected) in [
+            (0, json!(r#"{"a":1,"b":2}"#)),
+            (1, json!("5")),
+            (2, json!("null")),
+            (3, json!(null)),
+            (5, json!("[]")),
+            (6, json!(r#""text""#)),
+            (7, json!("true")),
+        ] {
+            assert_eq!(values[index]["payload"], expected);
+        }
+        let array: Json = serde_json::from_str(values[4]["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            array,
+            if candidate.is_null() {
+                json!([1,{"a":1}])
+            } else {
+                json!([1,null,{"a":1}])
+            }
+        );
+    }
+}
+
+#[tokio::test]
 async fn structured_setters_reject_scalar_destinations() {
     let db = memory_database("CREATE TABLE resume_docs(id INTEGER PRIMARY KEY,payload TEXT,amount INTEGER); INSERT INTO resume_docs VALUES(1,'[1,2]',10)").await;
     for operation in 0..3 {

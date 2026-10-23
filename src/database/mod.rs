@@ -23,8 +23,9 @@
 //! global handle.
 
 mod builder;
+pub(crate) mod cache_scope;
 mod core;
-mod json_rows;
+pub(crate) mod json_rows;
 mod raw;
 mod state;
 mod transaction;
@@ -35,21 +36,21 @@ pub use builder::DatabaseBuilder;
 pub use core::Database;
 #[cfg(feature = "dirty-tracking")]
 pub(crate) use state::__scope_origin;
+pub(crate) use state::connection_identity;
 pub use state::{__current_connection, __current_db, db, has_global_db, require_db};
-pub(crate) use state::{connection_identity, origin_of};
 pub(crate) use state::{loading_database, with_loading_connection};
 pub use transaction::Transaction;
+pub(crate) use transaction::{SavepointEnd, TransactionScope};
 
 #[doc(hidden)]
-pub use transaction::ConnectionRef;
+pub use transaction::{ConnectionRef, TransactionSource};
 
 pub(crate) async fn __in_db_scope<F, T>(db: &Database, future: F) -> crate::error::Result<T>
 where
     F: Future<Output = crate::error::Result<T>>,
 {
     let connection = db.__get_connection()?;
-    let origin = state::origin_of(&connection);
-    state::with_connection_override(connection, origin, None, future).await
+    state::with_connection_override(connection, future).await
 }
 
 #[cfg(test)]

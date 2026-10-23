@@ -3,7 +3,8 @@ use super::*;
 pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let insert_setters = column_initializers(ctx, Conversion::Insert { encrypt: false });
+    let (insert_bindings, insert_setters) =
+        write_conversion(ctx, Conversion::Insert { encrypt: false });
     let from_entity_fields = column_initializers(ctx, Conversion::FromEntity);
     let to_entity_fields = column_initializers(ctx, Conversion::ToEntity { encrypt: false });
     // Relation wrappers and `#[tideorm(skip)]` fields have no column to read.
@@ -18,15 +19,36 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
     let pk_column_variants = &ctx.pk_column_variants;
     let name_patterns = build_name_patterns(ctx);
     let field_idents = &ctx.field_idents;
+    // JSON writes a NaN or infinite float as `null`; dirty tracking compares
+    // float fields by a value that tells them apart.
+    let (float_patterns, float_idents): (Vec<_>, Vec<_>) = ctx
+        .db_fields
+        .iter()
+        .zip(&name_patterns)
+        .filter(|(field, _)| field.is_float())
+        .map(|(field, pattern)| (pattern.clone(), field.ident().clone()))
+        .unzip();
+    let field_compare_value = (!float_idents.is_empty()).then(|| {
+        quote! {
+            fn field_compare_value(&self, field: &str) -> ::tideorm::Result<Option<::tideorm::serde_json::Value>> {
+                match field {
+                    #(#float_patterns => Ok(Some(::tideorm::model::__FloatCompare::__compare_value(&self.#float_idents))),)*
+                    _ => self.field_json_value(field),
+                }
+            }
+        }
+    });
     let primary_key_condition_impl = build_primary_key_condition_impl(ctx);
     // The trait's defaults bridge the fallible conversions to the plaintext ones,
     // which is exactly right until a column is encrypted.
     let encrypted_conversions = (!ctx.encrypted_fields.is_empty()).then(|| {
-        let insert_setters = column_initializers(ctx, Conversion::Insert { encrypt: true });
+        let (insert_bindings, insert_setters) =
+            write_conversion(ctx, Conversion::Insert { encrypt: true });
         let to_entity_fields = column_initializers(ctx, Conversion::ToEntity { encrypt: true });
         quote! {
             fn try_into_active_model(self) -> ::tideorm::Result<Self::ActiveModel> {
                 use ::tideorm::orm::ActiveValue;
+                #insert_bindings
                 Ok(#internal_entity_mod::ActiveModel {
                     #(#insert_setters),*
                 })
@@ -48,6 +70,7 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
 
             fn into_active_model(self) -> Self::ActiveModel {
                 use ::tideorm::orm::ActiveValue;
+                #insert_bindings
                 #internal_entity_mod::ActiveModel {
                     #(#insert_setters),*
                 }
@@ -99,6 +122,18 @@ pub(super) fn generate_internal_model_impl(ctx: &BuildContext) -> TokenStream2 {
                             e
                         ))),)*
                     _ => Ok(None),
+                }
+            }
+
+            #field_compare_value
+
+            fn copy_field_from(&mut self, source: &Self, field: &str) -> ::tideorm::Result<bool> {
+                match field {
+                    #(#name_patterns => {
+                        self.#field_idents = ::std::clone::Clone::clone(&source.#field_idents);
+                        Ok(true)
+                    })*
+                    _ => Ok(false),
                 }
             }
 

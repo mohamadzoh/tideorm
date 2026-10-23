@@ -204,7 +204,7 @@ fn bulk_invalidation_rollback_does_not_overwrite_a_later_read() {
     model.id = 71;
     remember_model(&model).unwrap();
     let pending = std::sync::Arc::new(parking_lot::Mutex::new(
-        crate::cache::PendingInvalidations::new(false),
+        crate::cache::PendingInvalidations::new(None),
     ));
     let scope = crate::cache::install_pending_invalidations(&pending);
     invalidate_model::<BaselineUser>();
@@ -228,7 +228,7 @@ fn a_committed_bulk_invalidation_drops_all_origin_tombstones() {
         loading_from(origin, || remember_model(&model)).unwrap();
     }
     let pending = std::sync::Arc::new(parking_lot::Mutex::new(
-        crate::cache::PendingInvalidations::new(false),
+        crate::cache::PendingInvalidations::new(None),
     ));
     let scope = crate::cache::install_pending_invalidations(&pending);
     invalidate_model::<BaselineUser>();
@@ -243,4 +243,45 @@ fn a_committed_bulk_invalidation_drops_all_origin_tombstones() {
         original_value(&model, "name").unwrap(),
         Some(Some(serde_json::json!("Alice")))
     );
+}
+
+#[tideorm::model(table = "dirty_tracking_measurements")]
+struct Measurement {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    value: f64,
+    ratio: Option<f32>,
+}
+
+/// JSON writes a NaN or an infinite float as `null`, which no longer hides a
+/// change to or from one, nor one between them.
+#[test]
+fn a_change_to_or_from_a_non_finite_float_shows() {
+    let model = Measurement {
+        id: 3,
+        value: f64::NAN,
+        ratio: None,
+    };
+    remember_model(&model).unwrap();
+    assert_eq!(changed_fields(&model).unwrap(), Some(Vec::new()));
+    assert_eq!(
+        original_value(&model, "value").unwrap(),
+        Some(Some(serde_json::json!("NaN")))
+    );
+
+    let mut edited = model.clone();
+    edited.value = f64::INFINITY;
+    edited.ratio = Some(f32::NAN);
+    assert_eq!(
+        changed_fields(&edited).unwrap(),
+        Some(vec!["value", "ratio"])
+    );
+
+    edited.value = 1.5;
+    edited.ratio = Some(f32::NEG_INFINITY);
+    remember_model(&edited).unwrap();
+    let mut back = edited.clone();
+    back.ratio = None;
+    assert_eq!(changed_fields(&back).unwrap(), Some(vec!["ratio"]));
+    forget_model(&edited).unwrap();
 }

@@ -150,6 +150,25 @@ async fn down(&self, schema: &mut Schema) -> Result<()> {
 
 MySQL and MariaDB run `RENAME TABLE`, PostgreSQL and SQLite `ALTER TABLE ... RENAME TO`. The rows, columns and indexes move with the table, and foreign keys in other tables follow it.
 
+### Rebuilding a SQLite Table
+
+SQLite cannot change a column's type, so the change is a rebuild: create the new table, copy the rows, drop the old one and rename the new one. With foreign keys enforced, which is the driver's default, the `DROP TABLE` deletes the rows of other tables that point at the table with `ON DELETE CASCADE`, or fails on them. SQLite only turns enforcement off outside a transaction, and every migration runs in one, so `PRAGMA foreign_keys = OFF` inside it is refused. Ask for it instead:
+
+```rust
+fn foreign_keys_off(&self) -> bool {
+    true
+}
+
+async fn up(&self, schema: &mut Schema) -> Result<()> {
+    schema.raw("CREATE TABLE users_new (id INTEGER PRIMARY KEY, age INTEGER NOT NULL)").await?;
+    schema.raw("INSERT INTO users_new SELECT id, CAST(age AS INTEGER) FROM users").await?;
+    schema.raw("DROP TABLE users").await?;
+    schema.raw("ALTER TABLE users_new RENAME TO users").await
+}
+```
+
+The migration then runs on a connection of its own with enforcement off, and before it commits TideORM runs `PRAGMA foreign_key_check`: a row whose foreign key matches no row fails the migration, which rolls back. The check runs before the migration as well, so a database that already has such rows is refused with the first of them named, rather than the migration being blamed for them. A migration that cascades on purpose keeps the default. The CLI release that tracks TideORM 0.16 runs a `tideorm migrate` migration the same way when its `foreign_keys_off()` returns a literal `true`, or when it opens with `PRAGMA foreign_keys = OFF`; it refuses a `foreign_keys_off()` that returns anything else, which it cannot evaluate from the source.
+
 ---
 
 ## Schema Synchronization (Development Only)

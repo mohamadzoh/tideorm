@@ -60,11 +60,11 @@ macro_rules! impl_ord {
 macro_rules! impl_in {
     (@methods $value:ty) => {
         fn is_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
-            self.cond(Operator::In, ConditionValue::list(values))
+            self.cond(Operator::In, ConditionValue::members(values))
         }
 
         fn not_in(self, values: impl IntoIterator<Item = $value>) -> ColumnCondition {
-            self.cond(Operator::NotIn, ConditionValue::list(values))
+            self.cond(Operator::NotIn, ConditionValue::members(values))
         }
     };
     (<$lifetime:lifetime> $value:ty => $($column:ty),+) => {$(

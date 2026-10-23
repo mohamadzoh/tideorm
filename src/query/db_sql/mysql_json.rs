@@ -45,11 +45,24 @@ pub(super) fn mysql_json_contained_by(
 
 /// What the column's value at a path must be.
 #[derive(Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Object,
+    Array,
     NotArray,
     NotObject,
     ArrayOrAbsent,
+}
+
+/// The test that the column's value at the bound path is `kind`.
+pub(super) fn guard_sql(column_sql: &str, kind: Kind) -> String {
+    let value_type = format!("JSON_TYPE(JSON_EXTRACT({column_sql}, ?))");
+    match kind {
+        Kind::Object => format!("{value_type} = 'OBJECT'"),
+        Kind::Array => format!("{value_type} = 'ARRAY'"),
+        Kind::NotArray => format!("{value_type} <> 'ARRAY'"),
+        Kind::NotObject => format!("{value_type} <> 'OBJECT'"),
+        Kind::ArrayOrAbsent => format!("COALESCE({value_type}, 'ARRAY') = 'ARRAY'"),
+    }
 }
 
 /// A candidate object only matches an object, and a scalar below the top level
@@ -94,15 +107,8 @@ fn render(
     let mut sql = containment;
     let mut values = vec![json_scalar_parameter(document)];
     for (path, kind) in guards {
-        let value_type = format!("JSON_TYPE(JSON_EXTRACT({column_sql}, ?))");
-        let check = match kind {
-            Kind::Object => format!("{value_type} = 'OBJECT'"),
-            Kind::NotArray => format!("{value_type} <> 'ARRAY'"),
-            Kind::NotObject => format!("{value_type} <> 'OBJECT'"),
-            Kind::ArrayOrAbsent => format!("COALESCE({value_type}, 'ARRAY') = 'ARRAY'"),
-        };
         sql.push_str(" AND ");
-        sql.push_str(&check);
+        sql.push_str(&guard_sql(column_sql, kind));
         values.push(Value::String(Some(path)));
     }
     (sql, values)

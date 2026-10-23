@@ -100,10 +100,8 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<T>> {
-        let models = self.__raw_with_params::<T>(sql, params).await;
-        Self::invalidate_cache_after_raw_sql(sql);
-
-        models
+        self.invalidating(self.__raw_with_params::<T>(sql, params))
+            .await
     }
 
     /// Run a statement TideORM rendered itself and decode it into models.
@@ -125,16 +123,44 @@ impl Database {
         crate::model::__loading_through(&self.__get_connection()?, || Self::rows_to_models(rows))
     }
 
-    /// Run a row-returning statement on this handle's connection.
+    /// Run a row-returning statement on this handle's connection, for rows
+    /// decoded into Rust types.
     pub(crate) async fn fetch_rows(
         &self,
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<crate::internal::QueryResult>> {
+        self.fetch_rows_as(sql, params, false).await
+    }
+
+    /// Run a row-returning statement on this handle's connection, for rows
+    /// read as JSON, which takes values no Rust type holds.
+    async fn fetch_json_rows(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+    ) -> Result<Vec<crate::internal::QueryResult>> {
+        self.fetch_rows_as(sql, params, true).await
+    }
+
+    /// Run a row-returning statement on this handle's connection; `json`
+    /// when the rows are read as JSON.
+    async fn fetch_rows_as(
+        &self,
+        sql: &str,
+        params: Vec<DbValue>,
+        json: bool,
+    ) -> Result<Vec<crate::internal::QueryResult>> {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
         let connection = self.__get_connection()?;
+        connection.observe_cache_sql(sql);
         let executor = connection.executor();
+        let executor = if json {
+            executor.reading_json()
+        } else {
+            executor
+        };
         let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
         crate::profiling::__profile_future(executor.query_all_raw(statement))
             .await
@@ -179,11 +205,15 @@ impl Database {
 
         let connection = self.__get_connection()?;
         let started = std::time::Instant::now();
-        let result =
-            crate::profiling::__profile_future(connection.executor().execute_unprepared(sql)).await;
+        connection.observe_cache_sql(sql);
+        let executor = connection.executor();
+        let result = connection
+            .invalidating(crate::profiling::__profile_future(
+                executor.execute_unprepared(sql),
+            ))
+            .await;
         // The engine reports no unprepared statement to the logging callback.
         crate::logging::log_statement(sql, started.elapsed(), result.is_err());
-        Self::invalidate_cache_after_raw_sql(sql);
 
         Ok(result.map_err(translate_error)?.rows_affected())
     }
@@ -205,10 +235,8 @@ impl Database {
     ///
     /// The instance form of [`Database::execute_with_params`].
     pub async fn exec_raw_with_params(&self, sql: &str, params: Vec<DbValue>) -> Result<u64> {
-        let result = self.__execute_with_params(sql, params).await;
-        Self::invalidate_cache_after_raw_sql(sql);
-
-        result
+        self.invalidating(self.__execute_with_params(sql, params))
+            .await
     }
 
     /// Run a statement TideORM rendered itself and report rows affected.
@@ -221,6 +249,7 @@ impl Database {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
         let connection = self.__get_connection()?;
+        connection.observe_cache_sql(sql);
         let executor = connection.executor();
         let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
         let result = crate::profiling::__profile_future(executor.execute_raw(statement))
@@ -273,10 +302,8 @@ impl Database {
         sql: &str,
         params: Vec<DbValue>,
     ) -> Result<Vec<serde_json::Value>> {
-        let rows = self.__raw_json_with_params(sql, params).await;
-        Self::invalidate_cache_after_raw_sql(sql);
-
-        rows
+        self.invalidating(self.__raw_json_with_params(sql, params))
+            .await
     }
 
     /// Run a statement TideORM rendered itself and return the rows as JSON.
@@ -299,16 +326,9 @@ impl Database {
         params: Vec<DbValue>,
         model_type: ColumnTypeLookup<'_>,
     ) -> Result<Vec<serde_json::Value>> {
-        let rows = self.fetch_rows(sql, params).await?;
-        Ok(Self::query_rows_to_json(&rows, model_type))
-    }
-
-    /// Raw SQL may write through a SELECT function, view, operator or cast.
-    /// Syntax alone cannot prove otherwise. Flush after every public raw call,
-    /// including errors (a preceding statement may have committed). Internal
-    /// ORM reads use the separate __ entry points and keep targeted caching.
-    fn invalidate_cache_after_raw_sql(_sql: &str) {
-        crate::cache::QueryCache::global().clear();
+        let rows = self.fetch_json_rows(sql, params).await?;
+        let schema = self.sqlite_schema(&rows, sql, model_type).await?;
+        Self::query_rows_to_json(&rows, model_type, &schema)
     }
 }
 

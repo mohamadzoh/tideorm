@@ -242,6 +242,44 @@ impl JsonTests {
         )
     }
 
+    /// The node holds the number whose JSON text is `text`.
+    fn number_equals(&mut self, node: &Node, text: &str) -> String {
+        // Compare decimal tokens, not SQLite's already-rounded REAL.
+        // Normalizing coefficient and exponent also makes 1, 1.0 and
+        // 10e-1 equal without conflating adjacent large decimal values.
+        let (negative, coefficient, scale) = decimal_parts(text);
+        let comparison = match (coefficient.is_empty(), scale) {
+            (true, _) => "coefficient = ''".to_string(),
+            (false, Some(scale)) => {
+                self.values.extend([
+                    Value::from(coefficient),
+                    Value::from(negative),
+                    Value::from(scale),
+                ]);
+                "coefficient = ? AND negative = ? AND scale = ?".to_string()
+            }
+            // SQLite reads no exponent an `i64` cannot hold, so no
+            // stored number has that scale.
+            (false, None) => "0".to_string(),
+        };
+        format!(
+            "({kind} IN ('integer', 'real') AND (WITH \
+             tide_num_token AS (SELECT lower({raw}) AS token), \
+             tide_num_unsigned AS (SELECT substr(token, 1, 1) = '-' AS negative, \
+                CASE WHEN substr(token, 1, 1) = '-' THEN substr(token, 2) ELSE token END AS digits FROM tide_num_token), \
+             tide_num_parts AS (SELECT negative, \
+                CASE WHEN instr(digits, 'e') > 0 THEN substr(digits, 1, instr(digits, 'e') - 1) ELSE digits END AS mantissa, \
+                CASE WHEN instr(digits, 'e') > 0 THEN CAST(substr(digits, instr(digits, 'e') + 1) AS INTEGER) ELSE 0 END AS exponent FROM tide_num_unsigned), \
+             tide_num_digits AS (SELECT negative, replace(mantissa, '.', '') AS digits, \
+                exponent - CASE WHEN instr(mantissa, '.') > 0 THEN length(mantissa) - instr(mantissa, '.') ELSE 0 END AS exponent FROM tide_num_parts), \
+             tide_num_normal AS (SELECT negative, ltrim(rtrim(digits, '0'), '0') AS coefficient, \
+                exponent + length(digits) - length(rtrim(digits, '0')) AS scale FROM tide_num_digits) \
+             SELECT {comparison} FROM tide_num_normal))",
+            kind = node.kind,
+            raw = node.raw_json,
+        )
+    }
+
     fn scalar_equals(&mut self, node: &Node, scalar: &serde_json::Value) -> String {
         use serde_json::Value as Json;
 
@@ -249,50 +287,7 @@ impl JsonTests {
             Json::Null => format!("{} = 'null'", node.kind),
             Json::Bool(true) => format!("{} = 'true'", node.kind),
             Json::Bool(false) => format!("{} = 'false'", node.kind),
-            Json::Number(number) => {
-                // Compare decimal tokens, not SQLite's already-rounded REAL.
-                // Normalizing coefficient and exponent also makes 1, 1.0 and
-                // 10e-1 equal without conflating adjacent large decimal values.
-                let text = number.to_string();
-                let negative = text.starts_with('-');
-                let unsigned = text.trim_start_matches('-');
-                let (mantissa, exponent) = unsigned
-                    .split_once(['e', 'E'])
-                    .map_or((unsigned, 0), |(m, e)| {
-                        (m, e.parse::<i64>().expect("JSON exponent"))
-                    });
-                let fraction = mantissa.split_once('.').map_or(0, |(_, f)| f.len());
-                let digits = mantissa.replace('.', "");
-                let trimmed = digits.trim_end_matches('0');
-                let coefficient = trimmed.trim_start_matches('0');
-                let scale = exponent - fraction as i64 + (digits.len() - trimmed.len()) as i64;
-                let comparison = if coefficient.is_empty() {
-                    "coefficient = ''".to_string()
-                } else {
-                    self.values.extend([
-                        Value::from(coefficient.to_string()),
-                        Value::from(negative),
-                        Value::from(scale),
-                    ]);
-                    "coefficient = ? AND negative = ? AND scale = ?".to_string()
-                };
-                format!(
-                    "({kind} IN ('integer', 'real') AND (WITH \
-                     tide_num_token AS (SELECT lower({raw}) AS token), \
-                     tide_num_unsigned AS (SELECT substr(token, 1, 1) = '-' AS negative, \
-                        CASE WHEN substr(token, 1, 1) = '-' THEN substr(token, 2) ELSE token END AS digits FROM tide_num_token), \
-                     tide_num_parts AS (SELECT negative, \
-                        CASE WHEN instr(digits, 'e') > 0 THEN substr(digits, 1, instr(digits, 'e') - 1) ELSE digits END AS mantissa, \
-                        CASE WHEN instr(digits, 'e') > 0 THEN CAST(substr(digits, instr(digits, 'e') + 1) AS INTEGER) ELSE 0 END AS exponent FROM tide_num_unsigned), \
-                     tide_num_digits AS (SELECT negative, replace(mantissa, '.', '') AS digits, \
-                        exponent - CASE WHEN instr(mantissa, '.') > 0 THEN length(mantissa) - instr(mantissa, '.') ELSE 0 END AS exponent FROM tide_num_parts), \
-                     tide_num_normal AS (SELECT negative, ltrim(rtrim(digits, '0'), '0') AS coefficient, \
-                        exponent + length(digits) - length(rtrim(digits, '0')) AS scale FROM tide_num_digits) \
-                     SELECT {comparison} FROM tide_num_normal))",
-                    kind = node.kind,
-                    raw = node.raw_json,
-                )
-            }
+            Json::Number(number) => self.number_equals(node, &number.to_string()),
             Json::String(text) => {
                 self.values.push(Value::from(text.clone()));
                 format!("({} = 'text' AND {} = ?)", node.kind, node.atom)
@@ -309,6 +304,31 @@ fn any_of(alternatives: Vec<String>) -> String {
     } else {
         format!("({})", alternatives.join(" OR "))
     }
+}
+
+/// A JSON number's text as its sign, its coefficient without leading or
+/// trailing zeros (empty for zero) and the power of ten that multiplies it,
+/// `None` when no `i64` holds that power: a number whose text keeps its
+/// source digits (serde_json's `arbitrary_precision`) can carry any exponent.
+fn decimal_parts(text: &str) -> (bool, String, Option<i64>) {
+    let negative = text.starts_with('-');
+    let unsigned = text.trim_start_matches('-');
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()),
+        None => (unsigned, Some(0)),
+    };
+    let fraction = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let digits = mantissa.replace('.', "");
+    let trimmed = digits.trim_end_matches('0');
+    let coefficient = trimmed.trim_start_matches('0').to_string();
+    let scale = exponent.and_then(|exponent| {
+        exponent
+            .checked_sub(i64::try_from(fraction).ok()?)?
+            .checked_add(i64::try_from(digits.len() - trimmed.len()).ok()?)
+    });
+    (negative, coefficient, scale)
 }
 
 #[cfg(test)]

@@ -1,6 +1,183 @@
 use super::{hash_map_output_key, to_json};
 use serde_json::json;
 
+#[tideorm::model(table = "serialization_column_collision")]
+struct ColumnCollision {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(column = "author")]
+    author_id: i64,
+    #[tideorm(belongs_to = "SerializationAuthor", foreign_key = "author_id")]
+    author: crate::relations::BelongsTo<SerializationAuthor>,
+}
+
+#[test]
+fn relation_filter_takes_precedence_over_a_matching_database_column() {
+    let mut post = ColumnCollision {
+        id: 1,
+        author_id: 7,
+        ..Default::default()
+    };
+    post.author.set_cached(Some(serialization_test_author()));
+    let value = to_json(&post, None);
+    assert_eq!(value["author_id"], 7);
+    assert_eq!(value["author"]["name"], "Ada");
+    assert!(value["author"].get("password_hash").is_none());
+    assert_eq!(value["author"]["internal_notes"], "author notes");
+}
+
+#[tideorm::model(table = "serialization_flattened", hidden = "private")]
+#[derive(serde::Serialize)]
+struct HiddenFlattened {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[serde(flatten)]
+    private: Option<serde_json::Value>,
+}
+
+#[tideorm::model(table = "serialization_public_flattened")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PublicFlattened {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[serde(flatten)]
+    extra: Option<serde_json::Value>,
+}
+
+#[tideorm::model(table = "serialization_skipped_flattened", hidden = "private")]
+#[derive(serde::Serialize)]
+struct SkippedFlattened {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[serde(flatten, skip_serializing)]
+    private: Option<serde_json::Value>,
+}
+
+#[tideorm::model(table = "serialization_flattened_parent")]
+struct FlattenedParent {
+    #[tideorm(primary_key)]
+    id: i64,
+    child_id: i64,
+    #[tideorm(belongs_to = "HiddenFlattened", foreign_key = "child_id")]
+    child: crate::relations::BelongsTo<HiddenFlattened>,
+}
+
+#[test]
+fn flattened_hidden_fields_fail_closed_in_root_and_nested_payloads() {
+    use crate::model::Model;
+    // The flattened value even overwrites a normal field: removing unknown
+    // keys alone would still leave this secret under the public `id` key.
+    let model = HiddenFlattened {
+        id: 1,
+        private: Some(json!({"api_token": "secret", "id": "secret"})),
+    };
+    let error = model.try_to_json(None).unwrap_err().to_string();
+    assert!(error.contains("flattened field 'private'"), "{error}");
+    assert_eq!(model.to_json(None), json!({}));
+    let mut parent = FlattenedParent {
+        id: 2,
+        child_id: 1,
+        ..Default::default()
+    };
+    parent.child.set_cached(Some(model));
+    let value = parent.to_json(None);
+    assert_eq!(value["id"], 2);
+    assert_eq!(value["child"], json!({}));
+}
+
+#[test]
+fn public_flattened_fields_remain_visible_unless_globally_hidden() {
+    use crate::model::{Model, ModelMeta};
+    let model = PublicFlattened {
+        id: 1,
+        extra: Some(json!({"title": "public"})),
+    };
+    assert_eq!(model.to_json(None), json!({"id": 1, "title": "public"}));
+    assert!(!PublicFlattened::__serde_round_trips());
+    let mut value = serde_json::to_value(&model).unwrap();
+    super::strip_model_payload::<PublicFlattened>(&mut value, &["extra".into()]);
+    assert_eq!(value, json!({}));
+    let skipped = SkippedFlattened {
+        id: 1,
+        private: Some(json!({"secret": true})),
+    };
+    assert_eq!(skipped.try_to_json(None).unwrap(), json!({"id": 1}));
+}
+
+#[tideorm::model(table = "serialization_flattened_relation")]
+#[derive(serde::Serialize)]
+struct FlattenedRelation {
+    #[tideorm(primary_key)]
+    id: i64,
+    author_id: i64,
+    #[serde(flatten, rename = "writer")]
+    #[tideorm(belongs_to = "SerializationAuthor", foreign_key = "author_id")]
+    author: crate::relations::BelongsTo<SerializationAuthor>,
+}
+
+#[tideorm::model(table = "serialization_flattened_relation_parent")]
+struct FlattenedRelationParent {
+    #[tideorm(primary_key)]
+    id: i64,
+    child_id: i64,
+    #[tideorm(belongs_to = "FlattenedRelation", foreign_key = "child_id")]
+    child: crate::relations::BelongsTo<FlattenedRelation>,
+}
+
+#[test]
+fn flattened_relations_cannot_expose_target_hidden_fields_at_any_depth() {
+    use crate::model::Model;
+    let mut row = FlattenedRelation {
+        id: 1,
+        author_id: 7,
+        ..Default::default()
+    };
+    row.author.set_cached(Some(serialization_test_author()));
+    // The target is flattened into the root, including both its password
+    // and its colliding id. Neither can be safely filtered after that merge.
+    let raw = serde_json::to_value(&row).unwrap();
+    assert_eq!(raw["password_hash"], "super-secret");
+    assert_eq!(raw["id"], 7);
+    let error = row.try_to_json(None).unwrap_err().to_string();
+    assert!(error.contains("flattened field 'author'"), "{error}");
+    assert_eq!(row.to_json(None), json!({}));
+    let mut parent = FlattenedRelationParent {
+        id: 2,
+        child_id: 1,
+        ..Default::default()
+    };
+    parent.child.set_cached(Some(row));
+    let public = parent.try_to_json(None).unwrap();
+    assert_eq!(public["id"], 2);
+    assert_eq!(public["child"], json!({}));
+}
+
+#[tideorm::model(table = "serialization_skipped_flattened_relation")]
+#[derive(serde::Serialize)]
+struct SkippedFlattenedRelation {
+    #[tideorm(primary_key)]
+    id: i64,
+    author_id: i64,
+    #[serde(flatten, skip_serializing)]
+    #[tideorm(belongs_to = "SerializationAuthor", foreign_key = "author_id")]
+    author: crate::relations::BelongsTo<SerializationAuthor>,
+}
+
+#[test]
+fn skipped_flattened_relations_leave_public_fields_serializable() {
+    use crate::model::Model;
+    let mut row = SkippedFlattenedRelation {
+        id: 1,
+        author_id: 7,
+        ..Default::default()
+    };
+    row.author.set_cached(Some(serialization_test_author()));
+    assert_eq!(
+        row.try_to_json(None).unwrap(),
+        json!({"id": 1, "author_id": 7})
+    );
+}
+
 #[test]
 fn hash_map_output_key_hides_structured_params() {
     assert_eq!(
@@ -400,8 +577,9 @@ impl crate::translations::HasTranslations for SkippedTranslationsProbe {
     fn get_translations_data(
         &self,
     ) -> Result<crate::translations::TranslationsData, crate::translations::TranslationError> {
-        serde_json::from_value(self.translations.clone().unwrap_or(json!({})))
-            .map_err(|error| crate::translations::TranslationError::ParseError(error.to_string()))
+        Ok(crate::translations::TranslationsData::from_json(
+            self.translations.as_ref().unwrap_or(&json!({})),
+        ))
     }
     fn set_translations_data(
         &mut self,
@@ -434,7 +612,154 @@ fn translation_renderers_share_resolution_when_backing_field_is_skipped() {
     let payload = model.try_to_json(options.clone()).unwrap();
     assert_eq!(payload["title"], "translated");
     assert_eq!(payload, model.try_to_translated_json(options).unwrap());
+    // Both skip a malformed field rather than failing the whole payload.
     model.translations = Some(json!({"title": 42}));
-    assert!(model.try_to_json(None).is_err());
-    assert!(model.try_to_translated_json(None).is_err());
+    let payload = model.try_to_json(None).unwrap();
+    assert_eq!(payload["title"], "default");
+    assert_eq!(payload, model.try_to_translated_json(None).unwrap());
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(
+    table = "serialization_test_nested_translations",
+    translatable = "title,secret",
+    hidden = "secret"
+)]
+struct NestedTranslatable {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    secret: String,
+    translations: Option<serde_json::Value>,
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "serialization_test_translation_parents")]
+struct TranslationParent {
+    #[tideorm(primary_key)]
+    id: i64,
+    child_id: i64,
+    #[tideorm(belongs_to = "NestedTranslatable", foreign_key = "child_id")]
+    child: crate::relations::BelongsTo<NestedTranslatable>,
+}
+
+/// A related model's payload carries its raw `translations` column, which held
+/// the hidden field's translations after `to_json` dropped the field itself.
+#[cfg(feature = "translations")]
+#[test]
+fn a_nested_payload_drops_the_translations_of_a_hidden_field() {
+    let mut parent = TranslationParent {
+        id: 1,
+        child_id: 2,
+        ..Default::default()
+    };
+    parent.child.set_cached(Some(NestedTranslatable {
+        id: 2,
+        title: "title".into(),
+        secret: "secret".into(),
+        translations: Some(json!({
+            "title": {"fr": "titre"},
+            "secret": {"fr": "secret, traduit"},
+        })),
+    }));
+
+    let payload = to_json(&parent, None);
+    let child = &payload["child"];
+    assert!(child.get("secret").is_none(), "{payload}");
+    assert_eq!(
+        child["translations"],
+        json!({"title": {"fr": "titre"}}),
+        "{payload}"
+    );
+}
+
+#[cfg(feature = "attachments")]
+#[tideorm::model(table = "serialization_test_attachment_parents")]
+struct AttachmentParent {
+    #[tideorm(primary_key)]
+    id: i64,
+    child_id: i64,
+    #[tideorm(belongs_to = "HiddenAttachmentModel", foreign_key = "child_id")]
+    child: crate::relations::BelongsTo<HiddenAttachmentModel>,
+}
+
+/// The same for a hidden attachment in a related model's raw `files` column.
+#[cfg(feature = "attachments")]
+#[test]
+fn a_nested_payload_drops_a_hidden_attachment() {
+    let attachment =
+        |key: &str| json!({"key": key, "filename": key, "created_at": "2026-01-01T00:00:00Z"});
+    let mut parent = AttachmentParent {
+        id: 1,
+        child_id: 2,
+        ..Default::default()
+    };
+    parent.child.set_cached(Some(HiddenAttachmentModel {
+        id: 2,
+        files: Some(json!({"avatar": attachment("a.png"), "cover": attachment("c.png")})),
+    }));
+
+    let payload = to_json(&parent, None);
+    let files = &payload["child"]["files"];
+    assert!(files.get("avatar").is_none(), "{payload}");
+    assert_eq!(files["cover"]["key"], "c.png", "{payload}");
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(
+    table = "serialization_test_skipped_translatable",
+    translatable = "title,secret"
+)]
+#[derive(serde::Serialize)]
+struct SkippedTranslatable {
+    #[tideorm(primary_key)]
+    id: i64,
+    title: String,
+    #[serde(skip_serializing)]
+    secret: String,
+    translations: Option<serde_json::Value>,
+}
+
+/// A field the model's own serde skips stayed out until it had a translation,
+/// which `try_to_json` then wrote in.
+#[cfg(feature = "translations")]
+#[test]
+fn a_translation_does_not_bring_back_a_field_serde_skips() {
+    use crate::model::Model;
+    let model = SkippedTranslatable {
+        id: 1,
+        title: "title".into(),
+        secret: "secret".into(),
+        translations: Some(json!({
+            "title": {"en": "title, translated"},
+            "secret": {"en": "secret, translated"},
+        })),
+    };
+
+    let payload = model.try_to_json(None).unwrap();
+    assert_eq!(payload["title"], "title, translated", "{payload}");
+    assert!(payload.get("secret").is_none(), "{payload}");
+
+    let mut parent = SkippedTranslatableParent {
+        id: 1,
+        child_id: 1,
+        ..Default::default()
+    };
+    parent.child.set_cached(Some(model));
+    let payload = to_json(&parent, None);
+    assert_eq!(
+        payload["child"]["translations"],
+        json!({"title": {"en": "title, translated"}}),
+        "{payload}"
+    );
+}
+
+#[cfg(feature = "translations")]
+#[tideorm::model(table = "serialization_test_skipped_translatable_parents")]
+struct SkippedTranslatableParent {
+    #[tideorm(primary_key)]
+    id: i64,
+    child_id: i64,
+    #[tideorm(belongs_to = "SkippedTranslatable", foreign_key = "child_id")]
+    child: crate::relations::BelongsTo<SkippedTranslatable>,
 }

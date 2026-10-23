@@ -23,3 +23,6 @@ mod relations_and_types;
 
 #[path = "public_api_tests/cache_and_seeding.rs"]
 mod cache_and_seeding;
+
+#[path = "public_api_tests/scope_cfg_tests.rs"]
+mod scope_cfg_tests;

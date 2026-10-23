@@ -197,7 +197,10 @@ fn generate_deserialize_impl(ctx: &BuildContext) -> TokenStream2 {
             quote!(let #temp_ident = ::std::default::Default::default();)
         });
 
+    // The temporaries carry the field's name and span, so a `_private` or
+    // `camelCase` field would make them warn in the model's own crate.
     quote! {
+        #[allow(non_snake_case)]
         impl<'de> ::tideorm::serde::Deserialize<'de> for #struct_name {
             fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
             where

@@ -278,3 +278,41 @@ fn an_empty_encryption_key_leaves_encryption_unconfigured() {
     assert!(TokenConfig::has_encryption_key());
     TokenConfig::reset();
 }
+
+#[test]
+fn custom_codec_selectors_can_update_global_configuration() {
+    struct ConfiguringModel;
+    fn encode(payload: &str, model: &str) -> Result<String> {
+        Ok(format!("{model}:{payload}"))
+    }
+    fn decode(token: &str, model: &str) -> Result<Option<String>> {
+        Ok(token.strip_prefix(&format!("{model}:")).map(str::to_owned))
+    }
+    #[async_trait::async_trait]
+    impl Tokenizable for ConfiguringModel {
+        type TokenPrimaryKey = i64;
+        fn token_model_name() -> &'static str {
+            "ConfiguringModel"
+        }
+        fn token_primary_key(&self) -> i64 {
+            42
+        }
+        fn token_encoder() -> Option<TokenEncoder> {
+            TokenConfig::set_encoder(encode);
+            None
+        }
+        fn token_decoder() -> Option<TokenDecoder> {
+            TokenConfig::set_decoder(decode);
+            None
+        }
+        async fn from_token(token: &str) -> Result<Self> {
+            Self::decode_token(token)?;
+            Ok(Self)
+        }
+    }
+    TokenConfig::reset();
+    let token = ConfiguringModel.to_token().unwrap();
+    assert_eq!(token, "ConfiguringModel:42");
+    assert_eq!(ConfiguringModel::decode_token(&token).unwrap(), 42);
+    TokenConfig::reset();
+}

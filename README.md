@@ -138,7 +138,7 @@ Use model-level encrypted fields when you want selected persisted columns, such 
 
 ```toml
 [dependencies]
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 ```rust
@@ -184,31 +184,31 @@ driver stack.
 ```toml
 [dependencies]
 # PostgreSQL
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio"] }
 
 # MySQL / MariaDB
-tideorm = { version = "0.15.0", default-features = false, features = ["mysql", "runtime-tokio"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["mysql", "runtime-tokio"] }
 
 # SQLite
-tideorm = { version = "0.15.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 # Enable attachments support explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "attachments"] }
 
 # Enable translations support explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "translations"] }
 
 # Enable full-text search support explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "fulltext"] }
 
 # Enable the entity manager explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "entity-manager"] }
 
 # Enable model dirty tracking explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "dirty-tracking"] }
 
 # Enable model encrypted fields explicitly
-tideorm = { version = "0.15.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
+tideorm = { version = "0.16.0", default-features = false, features = ["postgres", "runtime-tokio", "encrypted-fields"] }
 ```
 
 Swap `runtime-tokio` for `runtime-async-std` if you run on async-std.
@@ -261,7 +261,7 @@ Schema sync can also register compiled models by source path with glob-style pat
 names such as `User::POSTS`. `where_eq(User::ACTIVE, true)` checks the value's
 Rust type; passing `"yes"` fails to compile. String column names remain supported.
 Use `.auto_models()` to discover linked models without depending on file layout,
-or `.models::<(User, Post)>()` to select a subset for schema sync.
+or `.models::<User>()` / `.models::<(User, Post)>()` to select a subset for schema sync.
 
 Rust **1.94** is required by the current SeaORM 2.0.2 / SQLx 0.9 dependencies and
 verified in CI. Select the toolchain with `cargo +1.94.0`; earlier test results

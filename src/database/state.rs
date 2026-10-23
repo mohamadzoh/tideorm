@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::Weak;
 use std::sync::{Arc, OnceLock};
 
-use crate::cache::{PendingInvalidations, install_pending_invalidations};
+use crate::cache::replace_pending_invalidations;
 use crate::error::{Error, Result};
 use crate::internal::InternalConnection;
 
@@ -14,9 +14,17 @@ use super::{ConnectionRef, Database};
 static GLOBAL_DB: OnceLock<Database> = OnceLock::new();
 static GLOBAL_CONNECTION: RwLock<Option<Arc<InternalConnection>>> = RwLock::new(None);
 
+/// A connection scope: the connection its statements run on, the identity of
+/// the pool that connection belongs to, and the scope it was opened in.
+struct Scope {
+    connection: ConnectionRef,
+    origin: Option<u64>,
+    enclosing: Option<Arc<Scope>>,
+}
+
 thread_local! {
-    /// The scope's connection, and the identity of the pool it belongs to.
-    static DB_OVERRIDE: RefCell<Option<(ConnectionRef, Option<u64>)>> = const { RefCell::new(None) };
+    /// The innermost connection scope, linked to the scopes enclosing it.
+    static DB_OVERRIDE: RefCell<Option<Arc<Scope>>> = const { RefCell::new(None) };
     static LOADING_DATABASE: RefCell<Option<Database>> = const { RefCell::new(None) };
 }
 
@@ -32,7 +40,7 @@ pub(crate) fn with_loading_connection<T>(
 ) -> T {
     let pool = match connection {
         ConnectionRef::Database(pool) => Some(pool.clone()),
-        ConnectionRef::Transaction(_) => origin_of(connection).and_then(|origin| {
+        ConnectionRef::Transaction(_, source) => source.origin.and_then(|origin| {
             CONNECTION_IDENTITIES
                 .get()?
                 .lock()
@@ -104,7 +112,7 @@ pub fn has_global_db() -> bool {
     GLOBAL_CONNECTION.read().is_some()
 }
 
-struct ResetDbOverride(Option<(ConnectionRef, Option<u64>)>);
+struct ResetDbOverride(Option<Arc<Scope>>);
 
 impl Drop for ResetDbOverride {
     fn drop(&mut self) {
@@ -114,25 +122,38 @@ impl Drop for ResetDbOverride {
     }
 }
 
-fn install_db_override(connection: &ConnectionRef, origin: Option<u64>) -> ResetDbOverride {
-    let previous = DB_OVERRIDE.with(|slot| slot.replace(Some((connection.clone(), origin))));
-    ResetDbOverride(previous)
+fn install_db_override(scope: &Arc<Scope>) -> ResetDbOverride {
+    ResetDbOverride(DB_OVERRIDE.with(|slot| slot.replace(Some(scope.clone()))))
 }
 
-/// The identity of the pool `connection` belongs to: its own for a pooled
-/// connection, and for a transaction the one of the scope it was opened in.
-pub(crate) fn origin_of(connection: &ConnectionRef) -> Option<u64> {
-    match connection {
-        ConnectionRef::Database(inner) => Some(connection_identity(inner)),
-        ConnectionRef::Transaction(_) => __scope_origin(),
-    }
+/// The innermost enclosing transaction a handle on the pool `own` joins: the
+/// innermost one opened on that pool, or on a pool that was not recorded.
+/// With `own` unknown (a handle on a transaction), the innermost transaction.
+/// A scope on another database's pool is looked through, so a handle on an
+/// outer database still joins its transaction inside another one's.
+pub(crate) fn enclosing_transaction(own: Option<u64>) -> Option<ConnectionRef> {
+    DB_OVERRIDE.with(|slot| {
+        let mut scope = slot.borrow().clone();
+        while let Some(current) = scope {
+            let joins = match (own, current.origin) {
+                (Some(own), Some(origin)) => own == origin,
+                _ => true,
+            };
+            if joins {
+                return matches!(current.connection, ConnectionRef::Transaction(..))
+                    .then(|| current.connection.clone());
+            }
+            scope = current.enclosing.clone();
+        }
+        None
+    })
 }
 
 /// The identity of the pool the current scope's statements run on: the
 /// enclosing transaction's, if any, otherwise the global connection's.
 #[doc(hidden)]
 pub fn __scope_origin() -> Option<u64> {
-    match DB_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|(_, origin)| *origin)) {
+    match DB_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|scope| scope.origin)) {
         Some(origin) => origin,
         None => GLOBAL_CONNECTION.read().as_ref().map(connection_identity),
     }
@@ -149,35 +170,36 @@ pub fn __current_db() -> Result<Database> {
 /// otherwise the global connection.
 #[doc(hidden)]
 pub fn __current_connection() -> Result<ConnectionRef> {
-    match DB_OVERRIDE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|(connection, _)| connection.clone())
-    }) {
+    match DB_OVERRIDE.with(|slot| slot.borrow().as_ref().map(|scope| scope.connection.clone())) {
         Some(connection) => Ok(connection),
         None => global_connection(),
     }
 }
 
 /// Run `future` with `connection` installed as the scope's connection, and
-/// for a transaction scope, `pending` as the record of what its writes
-/// invalidate in the query cache.
+/// its transaction's record, or none for a pool, as the record of what the
+/// scope's writes invalidate in the query cache and register to undo.
 ///
 /// The override is a thread-local installed around each `poll` and removed
 /// right after, never held across an await, so it follows the future when a
-/// work-stealing runtime moves it to another thread.
+/// work-stealing runtime moves it to another thread. The scope remembers the
+/// one this is called in, which encloses it.
 pub(crate) fn with_connection_override<F>(
     connection: ConnectionRef,
-    origin: Option<u64>,
-    pending: Option<Arc<Mutex<PendingInvalidations>>>,
     future: F,
 ) -> impl Future<Output = F::Output>
 where
     F: Future,
 {
+    let source = connection.source();
+    let scope = Arc::new(Scope {
+        connection,
+        origin: source.origin,
+        enclosing: DB_OVERRIDE.with(|slot| slot.borrow().clone()),
+    });
     crate::internal::per_poll(future, move || {
-        let guard = install_db_override(&connection, origin);
-        let pending = pending.as_ref().map(install_pending_invalidations);
+        let guard = install_db_override(&scope);
+        let pending = replace_pending_invalidations(source.record.clone());
         // A tuple drops its fields in order: the invalidations first.
         (pending, guard)
     })
@@ -195,6 +217,10 @@ struct ConnectionIdentities {
     /// Address of the connection's `Arc` allocation to its identity, alongside a
     /// `Weak` to that allocation.
     assigned: HashMap<usize, (Weak<InternalConnection>, u64)>,
+    /// The same, for a pool lent another one's identity (see
+    /// [`alias_connection_identity`]); kept apart, so an identity still finds
+    /// the pool it was issued to.
+    aliases: HashMap<usize, (Weak<InternalConnection>, u64)>,
 }
 
 impl ConnectionIdentities {
@@ -210,11 +236,17 @@ impl ConnectionIdentities {
     /// inheriting the dropped connection's cached rows.
     fn identify(&mut self, connection: &Arc<InternalConnection>) -> u64 {
         let address = Arc::as_ptr(connection) as usize;
-        if let Some((_, id)) = self.assigned.get(&address) {
+        if let Some((_, id)) = self
+            .assigned
+            .get(&address)
+            .or_else(|| self.aliases.get(&address))
+        {
             return *id;
         }
 
         self.assigned
+            .retain(|_, (tracked, _)| tracked.strong_count() > 0);
+        self.aliases
             .retain(|_, (tracked, _)| tracked.strong_count() > 0);
         self.last_id += 1;
         self.assigned
@@ -233,4 +265,24 @@ pub(crate) fn connection_identity(connection: &Arc<InternalConnection>) -> u64 {
         .get_or_init(|| Mutex::new(ConnectionIdentities::default()))
         .lock()
         .identify(connection)
+}
+
+/// Give `connection`, another pool reaching `original`'s database, the
+/// identity of `original` for as long as it lives.
+#[cfg(feature = "sqlite")]
+pub(crate) fn alias_connection_identity(
+    connection: &Arc<InternalConnection>,
+    original: &Arc<InternalConnection>,
+) {
+    let mut identities = CONNECTION_IDENTITIES
+        .get_or_init(|| Mutex::new(ConnectionIdentities::default()))
+        .lock();
+    let id = identities.identify(original);
+    identities
+        .aliases
+        .retain(|_, (tracked, _)| tracked.strong_count() > 0);
+    identities.aliases.insert(
+        Arc::as_ptr(connection) as usize,
+        (Arc::downgrade(connection), id),
+    );
 }

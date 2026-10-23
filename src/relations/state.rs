@@ -19,10 +19,12 @@ pub(crate) struct RelationState<C> {
     /// the row itself holds for `BelongsTo` and `SelfRef`.
     pub(crate) key: Option<serde_json::Value>,
     pub(crate) source: QuerySource,
-    /// The owning row's entity-manager identity key, which the relation's
-    /// snapshots are recorded under.
+    /// The entity-manager identity keys of the rows this copy of the relation
+    /// held when it loaded through an entity manager, or when a save last
+    /// synced it. A save diffs the relation against them, so it removes only
+    /// what this copy removed, never rows another copy added meanwhile.
     #[cfg(feature = "entity-manager")]
-    pub(crate) owner_key: Option<String>,
+    pub(crate) loaded_keys: Option<Vec<String>>,
 }
 
 impl<C> Default for RelationState<C> {
@@ -33,7 +35,7 @@ impl<C> Default for RelationState<C> {
             key: None,
             source: QuerySource::default(),
             #[cfg(feature = "entity-manager")]
-            owner_key: None,
+            loaded_keys: None,
         }
     }
 }
@@ -103,8 +105,8 @@ impl<C> RelationState<C> {
         if same_relation {
             self.source.preserve_from(&previous.source);
             #[cfg(feature = "entity-manager")]
-            if self.owner_key.is_none() {
-                self.owner_key = previous.owner_key.clone();
+            if self.loaded_keys.is_none() {
+                self.loaded_keys = previous.loaded_keys.clone();
             }
         }
     }

@@ -82,6 +82,11 @@ pub trait IntoColumnName {
     fn column_table(&self) -> Option<&str> {
         None
     }
+
+    /// The declared schema of a typed column, when one was specified.
+    fn column_schema(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A column that accepts `V` as a filter value.
@@ -158,10 +163,16 @@ dynamic_column_value!(&str, String, &String);
 /// by name, qualified with the column's own table when that is another
 /// model's, so `User::columns.id` in a `Post` query means `users.id` rather
 /// than `posts.id`. With no `own_table`, a typed column is always qualified.
-pub(crate) fn column_reference(column: &impl IntoColumnName, own_table: Option<&str>) -> String {
+pub(crate) fn column_reference(
+    column: &impl IntoColumnName,
+    own_table: Option<(&str, Option<&str>)>,
+) -> String {
     match column.column_table() {
-        Some(table) if Some(table) != own_table => {
-            format!("{}.{}", table, column.column_name())
+        Some(table) if Some((table, column.column_schema())) != own_table => {
+            match column.column_schema() {
+                Some(schema) => format!("{schema}.{table}.{}", column.column_name()),
+                None => format!("{table}.{}", column.column_name()),
+            }
         }
         _ => column.column_name().to_string(),
     }
@@ -170,7 +181,7 @@ pub(crate) fn column_reference(column: &impl IntoColumnName, own_table: Option<&
 /// The builders whose `where_*` methods [`column_reference`] qualifies for.
 pub(crate) trait ConditionOwner {
     /// The table of the builder's model, if it has one.
-    fn own_table() -> Option<&'static str>;
+    fn own_table() -> Option<(&'static str, Option<&'static str>)>;
 }
 
 impl IntoColumnName for &str {
@@ -199,6 +210,10 @@ impl<T> IntoColumnName for Column<T> {
     fn column_table(&self) -> Option<&str> {
         self.table
     }
+
+    fn column_schema(&self) -> Option<&str> {
+        self.schema
+    }
 }
 
 /// A strongly-typed column reference
@@ -208,6 +223,7 @@ impl<T> IntoColumnName for Column<T> {
 #[derive(Debug, Clone, Copy)]
 pub struct Column<T> {
     table: Option<&'static str>,
+    schema: Option<&'static str>,
     name: &'static str,
     _phantom: PhantomData<T>,
 }
@@ -217,6 +233,7 @@ impl<T> Column<T> {
     pub const fn new(name: &'static str) -> Self {
         Self {
             table: None,
+            schema: None,
             name,
             _phantom: PhantomData,
         }
@@ -225,8 +242,18 @@ impl<T> Column<T> {
     /// A column of `table`, as a model's generated `columns` name theirs: a
     /// query of another model refers to it as `table.name`.
     pub const fn of(table: &'static str, name: &'static str) -> Self {
+        Self::of_schema(None, table, name)
+    }
+
+    /// A column whose owning table has an optional declared schema.
+    pub const fn of_schema(
+        schema: Option<&'static str>,
+        table: &'static str,
+        name: &'static str,
+    ) -> Self {
         Self {
             table: Some(table),
+            schema,
             name,
             _phantom: PhantomData,
         }

@@ -14,6 +14,8 @@ mod backend;
 mod batch_insert;
 mod column_values;
 mod executor;
+mod json_loss;
+mod key_sequence;
 mod per_poll;
 #[cfg(feature = "fulltext")]
 pub(crate) mod sql_builder;
@@ -27,6 +29,8 @@ pub(crate) use column_values::{
     json_to_column_value,
 };
 pub use executor::Executor;
+pub(crate) use json_loss::json_loss;
+pub(crate) use key_sequence::{advance_key_sequence, holds_auto_increment_key};
 pub(crate) use per_poll::per_poll;
 pub(crate) use topology::topological_order;
 
@@ -347,6 +351,24 @@ pub trait InternalModel: crate::model::ModelMeta + Sized + Send + Sync + Clone {
         Ok(None)
     }
 
+    /// One model field as dirty tracking and the entity manager compare it:
+    /// its JSON, except that a NaN or infinite float, which JSON writes as
+    /// `null`, is its text, so a change to or from one shows.
+    fn field_compare_value(&self, field: &str) -> Result<Option<serde_json::Value>> {
+        self.field_json_value(field)
+    }
+
+    /// Copy one field, by field or column name, from `source`; `false` when
+    /// the model has no such field. The derive copies the value itself, so a
+    /// value JSON cannot hold, such as a NaN float, survives; this default
+    /// goes through the field's JSON.
+    fn copy_field_from(&mut self, source: &Self, field: &str) -> Result<bool> {
+        match source.field_json_value(field)? {
+            Some(value) => self.set_field_json(field, value),
+            None => Ok(false),
+        }
+    }
+
     /// Set one model field, by field or column name, from JSON; `false` when
     /// the model has no such field.
     fn set_field_json(&mut self, _field: &str, _value: serde_json::Value) -> Result<bool> {
@@ -365,6 +387,7 @@ pub(crate) fn quiet_driver_logging(options: &mut ConnectOptions) {
 #[doc(hidden)]
 pub struct InternalConnection {
     pub(crate) conn: OrmConnection,
+    pub(crate) cache_scope: crate::database::cache_scope::CacheScope,
     /// Whether the server behind a MySQL-protocol connection is MariaDB,
     /// which SeaORM cannot tell apart and some SQL is rendered differently
     /// for.
@@ -393,6 +416,8 @@ impl InternalConnection {
                 .map_err(translate_error)?;
             connection.mariadb = version.to_ascii_lowercase().contains("mariadb");
         }
+        let cache_scope = crate::database::cache_scope::identify(&connection.conn).await?;
+        *connection.cache_scope.write() = cache_scope;
         Ok(connection)
     }
 
@@ -402,6 +427,7 @@ impl InternalConnection {
         conn.set_metric_callback(crate::logging::log_engine_statement);
         Self {
             conn,
+            cache_scope: Default::default(),
             mariadb: false,
         }
     }
@@ -521,6 +547,10 @@ pub(crate) fn driver_failure(err: &OrmError) -> Option<DbFailure> {
     Some(failure.with_source(Box::new(err.clone())))
 }
 
+/// What the executor's refusal of a statement on an aborted transaction
+/// starts with, which [`translate_error`] makes a transaction error.
+pub(crate) const TRANSACTION_ABORTED: &str = "tideorm: transaction aborted: ";
+
 /// Translate ORM engine errors to TideORM errors.
 ///
 /// The structured driver detail rides along, so the returned error can answer
@@ -528,13 +558,7 @@ pub(crate) fn driver_failure(err: &OrmError) -> Option<DbFailure> {
 /// driver.
 pub(crate) fn translate_error(err: OrmError) -> Error {
     let failure = driver_failure(&err);
-    let error = translate_engine_error(err).with_db_failure(failure);
-    // A failure inside a transaction can leave it unable to commit; the
-    // transaction asks before it does (see `Database::transaction`).
-    crate::cache::note_failed_statement(
-        error.failure_kind() == crate::error::DbFailureKind::Deadlock,
-    );
-    error
+    translate_engine_error(err).with_db_failure(failure)
 }
 
 /// Translate an engine error from reaching or probing the server.
@@ -557,21 +581,22 @@ pub(crate) fn translate_connect_error(err: OrmError, url: &str) -> Error {
 }
 
 /// `url` with its credentials masked: everything between the scheme and the
-/// last `@` before the query (its user and password, delimited the way a URL
-/// parser delimits them), and the value of a query parameter that carries a
-/// password, which the PostgreSQL driver reads as `?password=..`. The CLI
-/// prints URLs through it too.
+/// `@` that ends the user and password (see [`userinfo_end`]), and the value
+/// of a query parameter that carries a password, which the PostgreSQL driver
+/// reads as `?password=..`. The CLI prints URLs through it too.
 #[doc(hidden)]
 pub fn mask_url_credentials(url: &str) -> String {
-    let (base, query) = match url.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
-        None => (url, None),
+    let (scheme, rest) = match url.find("://") {
+        Some(index) => url.split_at(index + 3),
+        None => ("", url),
     };
-    let base = match (base.find("://"), base.rfind('@')) {
-        (Some(scheme_end), Some(at)) if at > scheme_end => {
-            format!("{}://***{}", &base[..scheme_end], &base[at..])
-        }
-        _ => base.to_string(),
+    let rest = match userinfo_end(rest) {
+        Some(at) => format!("***{}", &rest[at..]),
+        None => rest.to_string(),
+    };
+    let (base, query) = match rest.split_once('?') {
+        Some((base, query)) => (format!("{scheme}{base}"), Some(query)),
+        None => (format!("{scheme}{rest}"), None),
     };
     let Some(query) = query else {
         return base;
@@ -593,6 +618,27 @@ pub fn mask_url_credentials(url: &str) -> String {
     format!("{base}?{}", query.join("&"))
 }
 
+/// Where the user and password of `rest`, a URL after its `://`, end: at the
+/// last `@` of the authority, or, when a password holding an unencoded `/`,
+/// `?` or `#` ended the authority early, at the last `@` a host name follows
+/// once a `:` has begun a password. Masking a little more than the
+/// credentials is better than printing part of them.
+fn userinfo_end(rest: &str) -> Option<usize> {
+    let authority_end = |text: &str| text.find(['/', '?', '#']).unwrap_or(text.len());
+    if let Some(at) = rest[..authority_end(rest)].rfind('@') {
+        return Some(at);
+    }
+    let host_follows = |text: &str| {
+        text[..authority_end(text)].chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '-' | '.' | '_' | ':' | '[' | ']' | '%')
+        })
+    };
+    rest.rmatch_indices('@')
+        .map(|(at, _)| at)
+        .find(|&at| rest[..at].contains(':') && host_follows(&rest[at + 1..]))
+}
+
 pub(crate) fn translate_connection_error(err: OrmError) -> Error {
     reclassify_error(err, |message, source| Error::Connection { message, source })
 }
@@ -612,6 +658,19 @@ pub(crate) fn reclassify_error(
     }
 }
 
+/// `message`, with what to do about a column type the driver cannot read at
+/// all: sqlx 0.9 refuses PostgreSQL's multirange types (type code 109, `m`)
+/// while it reads the statement's columns, before any row arrives.
+fn explain_unreadable_type(message: String) -> String {
+    if message.contains("decoding column \"typtype\": unknown type code 109") {
+        return format!(
+            "{message}: a column of the statement is a PostgreSQL multirange, which the driver \
+             cannot read; select it as text (`column::text`)"
+        );
+    }
+    message
+}
+
 /// Map an engine error onto the TideORM variant that describes it.
 fn translate_engine_error(err: OrmError) -> Error {
     match err {
@@ -619,7 +678,7 @@ fn translate_engine_error(err: OrmError) -> Error {
         OrmError::ConnectionAcquire(e) => Error::connection(e.to_string()),
         OrmError::Conn(e) => Error::connection(e.to_string()),
         OrmError::Exec(e) => Error::query(e.to_string()),
-        OrmError::Query(e) => Error::query(e.to_string()),
+        OrmError::Query(e) => Error::query(explain_unreadable_type(e.to_string())),
         OrmError::ConvertFromU64(msg) => Error::conversion(msg),
         OrmError::TryIntoErr { from, into, source } => {
             Error::conversion(format!("Error converting `{from}` into `{into}`: {source}"))
@@ -653,7 +712,10 @@ fn translate_engine_error(err: OrmError) -> Error {
             resource,
         } => Error::access_denied(permission, resource),
         OrmError::RbacError(msg) => Error::rbac(msg),
-        OrmError::Custom(msg) => Error::internal(msg),
+        OrmError::Custom(msg) => match msg.strip_prefix(TRANSACTION_ABORTED) {
+            Some(message) => Error::transaction(message),
+            None => Error::internal(msg),
+        },
         // Everything left over — a poisoned engine mutex, plus whatever a future
         // engine release adds — has no TideORM counterpart and stays internal on
         // purpose. This arm is deliberately a catch-all so an engine upgrade
@@ -997,7 +1059,10 @@ impl QueryExecutor {
         <<M as InternalModel>::Entity as EntityTrait>::Model: IntoActiveModel<M::ActiveModel>,
     {
         let connection = crate::database::__current_connection()?;
-        batch_insert::insert_many(&connection, models).await
+        // Triggers and foreign keys can change tables beyond the inserted model.
+        connection
+            .invalidating(batch_insert::insert_many(&connection, models))
+            .await
     }
 }
 

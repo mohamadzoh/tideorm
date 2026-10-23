@@ -296,3 +296,35 @@ async fn aggregate_projection_alias_keeps_encryption_source() {
     Database::reset_global();
     TideConfig::reset();
 }
+
+/// Sorting by an encrypted column would order ciphertext: refused however the
+/// column is named, while a raw `ORDER BY` stays the caller's own.
+#[tokio::test]
+async fn encrypted_columns_cannot_order_rows() {
+    let db = crate::fixtures::memory_database(
+        "CREATE TABLE audit_secrets(id INTEGER PRIMARY KEY,value TEXT)",
+    )
+    .await;
+    encrypted_error(Secret::query_with(&db).order_asc("value").get().await);
+    encrypted_error(
+        Secret::query_with(&db)
+            .order_desc(Secret::VALUE)
+            .first()
+            .await,
+    );
+    encrypted_error(
+        Secret::query_with(&db)
+            .order_by("value", Order::Desc)
+            .pluck::<i64>("id")
+            .await,
+    );
+    encrypted_error(Secret::query_with(&db).sort("-value").get().await);
+    assert!(Secret::query_with(&db).order_asc("id").get().await.is_ok());
+    assert!(
+        Secret::query_with(&db)
+            .order_by_raw("id", Order::Asc)
+            .get()
+            .await
+            .is_ok()
+    );
+}

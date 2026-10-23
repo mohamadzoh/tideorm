@@ -189,80 +189,55 @@ impl QuerySource {
     }
 }
 
-/// The owning row a loaded relation's snapshot is recorded under.
-#[cfg(feature = "entity-manager")]
-pub(crate) struct SnapshotOwner {
-    table: &'static str,
-    key: String,
-    relation: &'static str,
-}
-
-#[cfg(feature = "entity-manager")]
-impl SnapshotOwner {
-    /// Fails when the wrapper never received its owner's identity key, which
-    /// the derive supplies through `with_owner_key`.
-    pub(crate) fn new(
-        table: &'static str,
-        key: &Option<String>,
-        relation: &'static str,
-    ) -> Result<Self> {
-        let key = key.clone().ok_or_else(|| {
-            Error::query(format!(
-                "entity manager owner key not set for relation '{relation}'"
-            ))
-        })?;
-        Ok(Self {
-            table,
-            key,
-            relation,
-        })
-    }
-}
-
 /// Load a to-one relation into `entity_manager` and cache it in `state`:
 /// the row the manager already tracks under `lookup`'s column and key, else
 /// the one its query reads. A relation that has loaded keeps what it holds,
 /// which gives way to the instance the manager tracks. The caller ties
 /// `state` to the manager before building the query, so `load` then serves
 /// that cache, which the manager owns, and the query runs on its database.
+/// A NULL key has no related row, as [`where_key`] reads it. An `owned`
+/// relation records the key it holds as the baseline a save diffs it against.
 #[cfg(feature = "entity-manager")]
 pub(crate) async fn load_one_in_entity_manager<'s, E>(
     state: &'s mut RelationState<Box<E>>,
     entity_manager: &Arc<EntityManager>,
     lookup: Result<(&str, serde_json::Value, QueryBuilder<E>)>,
-    owner: Option<SnapshotOwner>,
+    owned: bool,
 ) -> Result<Option<&'s E>>
 where
     E: Model + TideEntityManagerMeta,
 {
     if !state.is_loaded() {
         let (column, key, query) = lookup?;
-        let found = match entity_manager.find_by_field::<E>(column, &key)? {
-            Some(tracked) => Some(tracked),
-            None => query.first().await?,
+        let found = if key.is_null() {
+            None
+        } else {
+            match entity_manager.find_by_field::<E>(column, &key)? {
+                Some(tracked) => Some(tracked),
+                None => query.first().await?,
+            }
         };
         state.set_cached(found.map(Box::new));
     }
 
-    register_loaded(
-        entity_manager,
-        state.cached_mut().map(|model| &mut **model),
-        owner,
-    )
-    .await?;
+    let keys =
+        register_loaded(entity_manager, state.cached_mut().map(|model| &mut **model)).await?;
+    if owned {
+        state.loaded_keys = Some(keys);
+    }
     Ok(state.cached().map(|model| &**model))
 }
 
 /// Load a to-many relation into `entity_manager` and cache it in `state`:
 /// the rows it holds already, else those `query` reads, each giving way to
-/// the instance the manager tracks, and recorded as `owner`'s snapshot;
-/// the caller ties `state` to the manager first, as for a to-one relation.
+/// the instance the manager tracks, and recorded as the baseline a save diffs
+/// the relation against; the caller ties `state` to the manager first, as for
+/// a to-one relation.
 #[cfg(feature = "entity-manager")]
 pub(crate) async fn load_many_in_entity_manager<'s, E>(
     state: &'s mut RelationState<Vec<E>>,
     entity_manager: &Arc<EntityManager>,
     query: Result<QueryBuilder<E>>,
-    owner: SnapshotOwner,
 ) -> Result<&'s Vec<E>>
 where
     E: Model + TideEntityManagerMeta,
@@ -272,8 +247,9 @@ where
         None => query?.get().await?,
     };
     let models = state.insert(models);
-    register_loaded(entity_manager, models.iter_mut(), Some(owner)).await?;
-    Ok(models)
+    let keys = register_loaded(entity_manager, models.iter_mut()).await?;
+    state.loaded_keys = Some(keys);
+    Ok(state.cached().expect("the rows were just cached"))
 }
 
 /// The entity-manager identity keys of the rows `models` holds, skipping
@@ -288,36 +264,29 @@ pub(crate) fn identity_keys<E: Model>(models: Option<&Vec<E>>) -> Result<Vec<Str
 }
 
 /// Hand a relation's loaded models to `entity_manager`, replacing each in place
-/// with the instance its identity map holds.
+/// with the instance its identity map holds, and return the identity keys of
+/// those stored.
 ///
 /// `register` keeps an instance the manager already tracks — in-memory edits
 /// and all — rather than letting this copy, possibly a stale eager load,
 /// overwrite it, so the relation, `find` and the managed baselines share one
-/// instance per row. With an `owner`, the models' keys are then recorded as the
-/// snapshot a later save diffs the relation against.
+/// instance per row.
 #[cfg(feature = "entity-manager")]
 pub(crate) async fn register_loaded<'m, E>(
     entity_manager: &EntityManager,
     models: impl IntoIterator<Item = &'m mut E>,
-    owner: Option<SnapshotOwner>,
-) -> Result<()>
+) -> Result<Vec<String>>
 where
     E: Model + TideEntityManagerMeta,
 {
     let mut keys = Vec::new();
     for model in models {
         *model = entity_manager.register(model.clone()).await;
-        if owner.is_some()
-            && let Some(key) = model_entity_manager_key(&*model)?
-        {
+        if let Some(key) = model_entity_manager_key(&*model)? {
             keys.push(key);
         }
     }
-
-    if let Some(owner) = owner {
-        entity_manager.snapshot::<E>(owner.table, &owner.key, owner.relation, &keys);
-    }
-    Ok(())
+    Ok(keys)
 }
 
 pub(crate) fn scoped_column(
@@ -360,6 +329,10 @@ pub(crate) fn soft_delete_clause<E: Model>(
 /// primary key is used instead of `DISTINCT` because `SELECT DISTINCT` cannot order by
 /// a column outside the select list on PostgreSQL, and because `DISTINCT` over
 /// `result_node.*` is not valid for JSON/BLOB columns on several backends.
+///
+/// The walk carries every primary key column (`pk`, `pk_2`, ..) and the outer
+/// join matches all of them: a composite key's first column alone can name a
+/// row of another tenant.
 pub(crate) fn build_self_ref_tree_sql<E: Model>(
     foreign_key: &str,
     local_key: &str,
@@ -378,7 +351,13 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     };
     let foreign_key = column(foreign_key)?;
     let local_key = column(local_key)?;
-    let primary_key = column(E::primary_key_name())?;
+    let primary_keys = match E::primary_key_names() {
+        [] => vec![column(E::primary_key_name())?],
+        names => names
+            .iter()
+            .map(|name| column(name))
+            .collect::<Result<Vec<_>>>()?,
+    };
 
     let table = crate::query::db_sql::quote_table::<E>(db_type);
     let cte = quote_ident(db_type, "tide_tree");
@@ -386,9 +365,38 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     let child = quote_ident(db_type, "child");
     let tree = quote_ident(db_type, "tree");
     let result = quote_ident(db_type, "result_node");
-    let pk_alias = quote_ident(db_type, "pk");
+    let result_tree = quote_ident(db_type, "result_tree");
+    let pk_aliases: Vec<String> = (1..=primary_keys.len())
+        .map(|position| match position {
+            1 => quote_ident(db_type, "pk"),
+            n => quote_ident(db_type, &format!("pk_{n}")),
+        })
+        .collect();
     let tree_key_alias = quote_ident(db_type, "tree_key");
     let depth_alias = quote_ident(db_type, "depth");
+    let select_keys = |scope: &str| {
+        primary_keys
+            .iter()
+            .zip(&pk_aliases)
+            .map(|(key, alias)| format!("{} AS {alias}", scoped_column(db_type, scope, key)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let grouped_keys = pk_aliases
+        .iter()
+        .map(|alias| format!("{cte}.{alias}"))
+        .collect::<Vec<_>>();
+    let result_join = primary_keys
+        .iter()
+        .zip(&pk_aliases)
+        .map(|(key, alias)| {
+            format!(
+                "{} = {result_tree}.{alias}",
+                scoped_column(db_type, "result_node", key)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
 
     let mut params = Vec::with_capacity(2);
     let parent_placeholder = crate::internal::push_param(
@@ -420,12 +428,12 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
     }
 
     let sql = format!(
-        "WITH RECURSIVE {cte} ({pk_alias}, {tree_key_alias}, {depth_alias}) AS ( \
-         SELECT {node_pk} AS {pk_alias}, {node_local_key} AS {tree_key_alias}, 1 AS {depth_alias} \
+        "WITH RECURSIVE {cte} ({pk_aliases}, {tree_key_alias}, {depth_alias}) AS ( \
+         SELECT {node_keys}, {node_local_key} AS {tree_key_alias}, 1 AS {depth_alias} \
          FROM {table} {node} \
          WHERE {base_where} \
          UNION ALL \
-         SELECT {child_pk} AS {pk_alias}, {child_local_key} AS {tree_key_alias}, {tree}.{depth_alias} + 1 AS {depth_alias} \
+         SELECT {child_keys}, {child_local_key} AS {tree_key_alias}, {tree}.{depth_alias} + 1 AS {depth_alias} \
          FROM {table} {child} \
          INNER JOIN {cte} {tree} ON {child_foreign_key} = {tree}.{tree_key_alias} \
          WHERE {recursive_where} \
@@ -433,30 +441,37 @@ pub(crate) fn build_self_ref_tree_sql<E: Model>(
          SELECT {result_columns} \
          FROM {table} {result} \
          INNER JOIN ( \
-         SELECT {cte}.{pk_alias} AS {pk_alias}, MIN({cte}.{depth_alias}) AS {depth_alias} \
+         SELECT {grouped_select}, MIN({cte}.{depth_alias}) AS {depth_alias} \
          FROM {cte} \
-         GROUP BY {cte}.{pk_alias} \
-         ) {result_tree} ON {result_pk} = {result_tree}.{pk_alias} \
+         GROUP BY {group_by} \
+         ) {result_tree} ON {result_join} \
          ORDER BY {result_tree}.{depth_alias}",
         cte = cte,
         result_columns = crate::query::db_sql::model_columns_sql::<E>(db_type, Some("result_node")),
-        pk_alias = pk_alias,
+        pk_aliases = pk_aliases.join(", "),
         tree_key_alias = tree_key_alias,
         depth_alias = depth_alias,
-        node_pk = scoped_column(db_type, "node", primary_key),
+        node_keys = select_keys("node"),
         node_local_key = scoped_column(db_type, "node", local_key),
         table = table,
         node = node,
         base_where = base_predicates.join(" AND "),
-        child_pk = scoped_column(db_type, "child", primary_key),
+        child_keys = select_keys("child"),
         child_local_key = scoped_column(db_type, "child", local_key),
         child = child,
         tree = tree,
         child_foreign_key = scoped_column(db_type, "child", foreign_key),
         recursive_where = recursive_predicates.join(" AND "),
         result = result,
-        result_tree = quote_ident(db_type, "result_tree"),
-        result_pk = scoped_column(db_type, "result_node", primary_key),
+        grouped_select = grouped_keys
+            .iter()
+            .zip(&pk_aliases)
+            .map(|(key, alias)| format!("{key} AS {alias}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        group_by = grouped_keys.join(", "),
+        result_tree = result_tree,
+        result_join = result_join,
     );
 
     Ok((sql, params))

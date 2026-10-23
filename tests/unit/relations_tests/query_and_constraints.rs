@@ -107,6 +107,34 @@ fn self_ref_tree_sql_collapses_cyclic_duplicates_to_one_row_per_node() {
 }
 
 #[test]
+fn self_ref_tree_sql_matches_every_column_of_a_composite_key() {
+    let (sql, _params) = build_self_ref_tree_sql::<CompositeTreeNode>(
+        "parent_code",
+        "code",
+        &json!("root"),
+        3,
+        DatabaseType::Postgres,
+    )
+    .unwrap();
+
+    assert!(
+        sql.starts_with("WITH RECURSIVE \"tide_tree\" (\"pk\", \"pk_2\", \"tree_key\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("GROUP BY \"tide_tree\".\"pk\", \"tide_tree\".\"pk_2\""),
+        "{sql}"
+    );
+    assert!(
+        sql.contains(
+            "ON \"result_node\".\"id\" = \"result_tree\".\"pk\" \
+             AND \"result_node\".\"tenant\" = \"result_tree\".\"pk_2\""
+        ),
+        "{sql}"
+    );
+}
+
+#[test]
 fn self_ref_tree_sql_renders_a_field_name_as_its_column() {
     let (sql, _params) = build_self_ref_tree_sql::<AliasedKeyModel>(
         "account_id",

@@ -1,18 +1,8 @@
 use super::*;
 
-/// The key a relation snapshot of `owner_key`'s `relation`, holding rows of `T`,
-/// is filed under.
-fn snapshot_key<T: 'static>(
-    owner_table: &'static str,
-    owner_key: &str,
-    relation: &'static str,
-) -> SnapshotKey {
-    (
-        owner_table,
-        TypeId::of::<T>(),
-        owner_key.to_string(),
-        relation,
-    )
+/// The address of a managed entry, the same through every `Arc` of it.
+fn entry_address<T: ?Sized>(entry: &Arc<T>) -> *const () {
+    Arc::as_ptr(entry).cast()
 }
 
 /// The key an entity of `T` with entity-manager key `key` is filed under.
@@ -21,76 +11,6 @@ pub(super) fn identity_key<T: 'static>(key: impl Into<String>) -> IdentityKey {
 }
 
 impl EntityManager {
-    pub(crate) fn snapshot<T: 'static>(
-        &self,
-        owner_table: &'static str,
-        owner_key: &str,
-        relation: &'static str,
-        ids: &[String],
-    ) {
-        let key = snapshot_key::<T>(owner_table, owner_key, relation);
-        let mut snapshots = self.snapshots.write();
-        snapshots.insert(key, ids.iter().cloned().collect());
-    }
-
-    /// The keys recorded for a relation, or `None` when none were.
-    fn recorded<T: 'static>(
-        &self,
-        owner_table: &'static str,
-        owner_key: &str,
-        relation: &'static str,
-    ) -> Option<HashSet<String>> {
-        let key = snapshot_key::<T>(owner_table, owner_key, relation);
-        self.snapshots.read().get(&key).cloned()
-    }
-
-    /// The recorded keys `current_ids` no longer holds; none without a
-    /// snapshot, since nothing can have left a set that was never recorded.
-    pub(crate) fn deletions<T: 'static>(
-        &self,
-        owner_table: &'static str,
-        owner_key: &str,
-        relation: &'static str,
-        current_ids: &[String],
-    ) -> Vec<String> {
-        let Some(previous) = self.recorded::<T>(owner_table, owner_key, relation) else {
-            return Vec::new();
-        };
-        let current: HashSet<&String> = current_ids.iter().collect();
-        previous
-            .into_iter()
-            .filter(|id| !current.contains(id))
-            .collect()
-    }
-
-    /// The keys of `current_ids` not recorded, each once.
-    pub(crate) fn additions<T: 'static>(
-        &self,
-        owner_table: &'static str,
-        owner_key: &str,
-        relation: &'static str,
-        current_ids: &[String],
-    ) -> Vec<String> {
-        let current: HashSet<String> = current_ids.iter().cloned().collect();
-        // No snapshot means no baseline, and that is NOT symmetric with `deletions`:
-        // nothing can have been removed from a set that was never recorded, but
-        // everything currently present is new. Returning empty here loses the
-        // associations permanently — the flush arm attaches `additions()` and then
-        // calls `snapshot()` with the current keys, so the next flush sees them as
-        // already recorded and never inserts the pivot rows.
-        //
-        // Reporting everything used to duplicate pivot rows on a re-flush. It no
-        // longer can: `HasManyThrough::attach` checks for the row first and is a
-        // no-op when the pair is already attached.
-        match self.recorded::<T>(owner_table, owner_key, relation) {
-            Some(previous) => current
-                .into_iter()
-                .filter(|id| !previous.contains(id))
-                .collect(),
-            None => current.into_iter().collect(),
-        }
-    }
-
     pub(crate) fn get<T>(
         &self,
         pk: &<T as crate::model::ModelMeta>::PrimaryKey,
@@ -109,6 +29,8 @@ impl EntityManager {
         self.get_by_key(&identity_key::<T>(key))
     }
 
+    /// A tracked entity of `T` whose `field` holds `value`; the caller skips
+    /// a NULL value, which matches none, as SQL's comparison does.
     pub(crate) fn find_by_field<T>(
         &self,
         field: &str,
@@ -133,11 +55,12 @@ impl EntityManager {
         Ok(None)
     }
 
-    pub(crate) fn put<T>(&self, entity: T)
+    /// File a copy of `entity` in the identity map, attaching its relations to
+    /// this manager's database first, so the caller's copy queries it too.
+    pub(crate) fn put<T>(&self, entity: &mut T)
     where
         T: TideEntityManagerMeta + Clone + Send + Sync + 'static,
     {
-        let mut entity = entity;
         entity.tide_attach_entity_manager_database(self.database());
 
         // Same collision as `register`: an unsaved entity's default primary key
@@ -147,9 +70,15 @@ impl EntityManager {
         }
 
         let key = identity_key::<T>(entity.tide_pk_key());
-        save::record_identity_map_rollback::<T>(self, &key);
+        // A copy the map hands out carries only the relations its caller
+        // loads: one filed with this entity's would serve those rows long
+        // after other saves changed them, and saving it would write them back.
+        let mut stored = entity.clone();
+        stored.tide_unload_relations();
+        stored.tide_attach_entity_manager_database(self.database());
         let mut map = self.identity_map.write();
-        map.insert(key, Arc::new(entity));
+        save::record_identity_map_rollback::<T>(self, &key, &map);
+        map.insert(key, Arc::new(stored));
     }
 
     pub(crate) fn remove_by_entity_manager_key<T>(&self, key: &str)
@@ -157,8 +86,8 @@ impl EntityManager {
         T: Clone + Send + Sync + 'static,
     {
         let key = identity_key::<T>(key);
-        save::record_identity_map_rollback::<T>(self, &key);
         let mut map = self.identity_map.write();
+        save::record_identity_map_rollback::<T>(self, &key, &map);
         map.remove(&key);
     }
 
@@ -190,20 +119,26 @@ impl EntityManager {
     }
 
     pub(super) fn remove_managed_ops_entry<T>(&self, managed: &Managed<T>) {
-        let target = Arc::as_ptr(&managed.entry).cast::<()>();
+        let target = entry_address(&managed.entry);
         self.managed_entries
             .write()
-            .retain(|entry| Arc::as_ptr(entry).cast::<()>() != target);
+            .retain(|entry| entry_address(entry) != target);
     }
 
-    pub(super) fn register_managed_entry<T>(&self, entry: Arc<managed::ManagedEntry<T>>)
-    where
-        T: TideEntityManagerMergePersisted + TideEntityManagerSync,
-        <<T as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
-            PartialEq,
-    {
-        let ops: Arc<dyn managed::ManagedOps> = entry;
-        self.managed_entries.write().push(ops);
+    pub(super) fn register_managed_entry(&self, entry: Arc<dyn managed::ManagedOps>) {
+        self.managed_entries.write().push(entry);
+    }
+
+    /// Register `entry` again, unless it still is.
+    pub(super) fn reregister_managed_entry(&self, entry: Arc<dyn managed::ManagedOps>) {
+        let target = entry_address(&entry);
+        let mut entries = self.managed_entries.write();
+        if !entries
+            .iter()
+            .any(|registered| entry_address(registered) == target)
+        {
+            entries.push(entry);
+        }
     }
 
     pub(super) fn get_by_key<T>(&self, key: &IdentityKey) -> Option<T>

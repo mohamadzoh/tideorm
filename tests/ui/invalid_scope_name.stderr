@@ -1,0 +1,5 @@
+error: a scope cannot be named `latest`: QueryBuilder has its own `latest` method, and `query.latest(..)` cannot call both; rename the scope
+  --> tests/ui/invalid_scope_name.rs:11:8
+   |
+11 |     fn latest(query: tideorm::QueryBuilder<Self>) -> tideorm::QueryBuilder<Self> {
+   |        ^^^^^^

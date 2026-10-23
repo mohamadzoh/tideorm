@@ -301,6 +301,22 @@ fn mutation_guard_rejects_empty_nested_or_groups() {
     );
 }
 
+/// An empty group renders nothing, so it cannot stop an `Or` group beside a
+/// filter from restricting: `when(false, ..)` inside one used to make a
+/// filtered delete look unfiltered.
+#[test]
+fn mutation_guard_skips_empty_nested_groups() {
+    let mut query = MutationGuardUser::query();
+    query
+        .clauses
+        .or_groups
+        .push(OrGroup::new().where_eq("id", 1).nested_and(|group| group));
+
+    query
+        .ensure_mutation_has_explicit_filters("delete")
+        .unwrap();
+}
+
 #[test]
 fn delete_all_accepts_unfiltered_queries() {
     assert!(

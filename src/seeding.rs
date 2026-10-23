@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::database::{Database, require_db};
 use crate::error::{Error, Result};
-use crate::migration::Ledger;
+use crate::migration::{Ledger, with_seed_lock};
 use crate::tide_info;
 
 mod results;
@@ -63,6 +63,11 @@ pub trait Seed: Send + Sync {
 /// Seed runner
 ///
 /// Manages and executes database seeds with tracking to prevent duplicates.
+/// Complete operations take a database lock before reading the ledger, so
+/// concurrent runners cannot execute the same pending seed. Seed callbacks
+/// must not invoke another mutating seed operation: they already hold its lock.
+/// Inside a caller's transaction, the lock stays held until that transaction
+/// ends, including across savepoints and sequential seed operations.
 pub struct Seeder {
     seeds: Vec<Arc<dyn Seed>>,
 }
@@ -99,10 +104,17 @@ impl Seeder {
     /// Seeds that have already been run (tracked in the `_seeds` table) will be skipped.
     /// Each seed runs in one transaction with its ledger entry, so a seed that fails part
     /// way leaves neither rows nor an entry behind and can be fixed and run again.
+    /// An enclosing SQLite transaction with an outdated read snapshot fails before
+    /// any seed callback runs; restart that transaction to see the committed ledger.
     pub async fn run(&self) -> Result<SeedResult> {
-        let (database, ledger) = open_ledger().await?;
+        let database = require_db()?;
+        with_seed_lock(&database, self.run_locked(&database)).await
+    }
 
-        let executed = ledger.keys(&database).await?;
+    async fn run_locked(&self, database: &Database) -> Result<SeedResult> {
+        let ledger = open_ledger(database).await?;
+
+        let executed = ledger.keys(database).await?;
         let mut result = SeedResult::default();
 
         for seed in self.sort_seeds_by_priority_and_deps()? {
@@ -127,7 +139,7 @@ impl Seeder {
             }
 
             log_seed("Seed running", name);
-            apply(Arc::clone(&seed), &database, true).await?;
+            apply(Arc::clone(&seed), database, true).await?;
             log_seed("Seed completed", name);
 
             result.executed.push(SeedInfo {
@@ -142,25 +154,28 @@ impl Seeder {
     ///
     /// This will force-run the seed regardless of whether it's been executed before.
     pub async fn run_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        let (database, ledger) = open_ledger().await?;
-
         let seed = self.find(seed_name)?;
+        let database = require_db()?;
+        with_seed_lock(&database, async {
+            let ledger = open_ledger(&database).await?;
 
-        log_seed("Seed running", seed_name);
-        // A seed that is re-run keeps its original ledger entry.
-        let recorded = ledger
-            .keys(&database)
-            .await?
-            .iter()
-            .any(|executed| executed == seed_name);
-        apply(seed, &database, !recorded).await?;
-        log_seed("Seed completed", seed_name);
+            log_seed("Seed running", seed_name);
+            // A seed that is re-run keeps its original ledger entry.
+            let recorded = ledger
+                .keys(&database)
+                .await?
+                .iter()
+                .any(|executed| executed == seed_name);
+            apply(seed, &database, !recorded).await?;
+            log_seed("Seed completed", seed_name);
 
-        let mut result = SeedResult::default();
-        result.executed.push(SeedInfo {
-            name: seed_name.to_string(),
-        });
-        Ok(result)
+            let mut result = SeedResult::default();
+            result.executed.push(SeedInfo {
+                name: seed_name.to_string(),
+            });
+            Ok(result)
+        })
+        .await
     }
 
     /// Rollback the last executed seed
@@ -169,10 +184,15 @@ impl Seeder {
     /// removed since it ran, is an error: it cannot be reverted, and skipping
     /// it would leave every seed before it recorded as well.
     pub async fn rollback(&self) -> Result<SeedResult> {
-        let (database, ledger) = open_ledger().await?;
+        let database = require_db()?;
+        with_seed_lock(&database, self.rollback_locked(&database)).await
+    }
+
+    async fn rollback_locked(&self, database: &Database) -> Result<SeedResult> {
+        let ledger = open_ledger(database).await?;
 
         let mut result = SeedResult::default();
-        let Some(last_name) = ledger.keys(&database).await?.pop() else {
+        let Some(last_name) = ledger.keys(database).await?.pop() else {
             return Ok(result);
         };
 
@@ -182,28 +202,39 @@ impl Seeder {
                 last_name
             ))
         })?;
-        result.rolled_back.push(revert(seed, &database).await?);
+        result.rolled_back.push(revert(seed, database).await?);
 
         Ok(result)
     }
 
     /// Rollback a specific seed by name
     pub async fn rollback_seed(&self, seed_name: &str) -> Result<SeedResult> {
-        let (database, _) = open_ledger().await?;
-
         let seed = self.find(seed_name)?;
+        let database = require_db()?;
+        with_seed_lock(&database, async {
+            open_ledger(&database).await?;
 
-        let mut result = SeedResult::default();
-        result.rolled_back.push(revert(seed, &database).await?);
-        Ok(result)
+            let mut result = SeedResult::default();
+            result.rolled_back.push(revert(seed, &database).await?);
+            Ok(result)
+        })
+        .await
     }
 
     /// Rollback multiple seeds
     pub async fn rollback_steps(&self, steps: usize) -> Result<SeedResult> {
+        if steps == 0 {
+            return Ok(SeedResult::default());
+        }
+        let database = require_db()?;
+        with_seed_lock(&database, self.rollback_steps_locked(&database, steps)).await
+    }
+
+    async fn rollback_steps_locked(&self, database: &Database, steps: usize) -> Result<SeedResult> {
         let mut result = SeedResult::default();
 
         for _ in 0..steps {
-            let step_result = self.rollback().await?;
+            let step_result = self.rollback_locked(database).await?;
             if step_result.rolled_back.is_empty() {
                 break;
             }
@@ -219,27 +250,36 @@ impl Seeder {
     /// returns an empty result instead of failing on a missing `_seeds` table -
     /// which is what makes "reset then run" usable as a bootstrap.
     pub async fn reset(&self) -> Result<SeedResult> {
-        let (database, ledger) = open_ledger().await?;
+        let database = require_db()?;
+        with_seed_lock(&database, self.reset_locked(&database)).await
+    }
 
-        let executed = ledger.keys(&database).await?;
-        self.rollback_steps(executed.len()).await
+    async fn reset_locked(&self, database: &Database) -> Result<SeedResult> {
+        let ledger = open_ledger(database).await?;
+        let executed = ledger.keys(database).await?;
+        self.rollback_steps_locked(database, executed.len()).await
     }
 
     /// Refresh seeds (reset + run)
     pub async fn refresh(&self) -> Result<SeedResult> {
-        let reset_result = self.reset().await?;
-        let run_result = self.run().await?;
+        let database = require_db()?;
+        with_seed_lock(&database, async {
+            let reset_result = self.reset_locked(&database).await?;
+            let run_result = self.run_locked(&database).await?;
 
-        Ok(SeedResult {
-            executed: run_result.executed,
-            skipped: run_result.skipped,
-            rolled_back: reset_result.rolled_back,
+            Ok(SeedResult {
+                executed: run_result.executed,
+                skipped: run_result.skipped,
+                rolled_back: reset_result.rolled_back,
+            })
         })
+        .await
     }
 
     /// Get seed status
     pub async fn status(&self) -> Result<Vec<SeedStatus>> {
-        let (database, ledger) = open_ledger().await?;
+        let database = require_db()?;
+        let ledger = open_ledger(&database).await?;
 
         let executed = ledger.keys(&database).await?;
 
@@ -314,12 +354,11 @@ impl Seeder {
     }
 }
 
-/// The seed ledger on the global database, created if it is missing.
-async fn open_ledger() -> Result<(Database, Ledger<'static>)> {
-    let database = require_db()?;
+/// The seed ledger on the locked database, created if it is missing.
+async fn open_ledger(database: &Database) -> Result<Ledger<'static>> {
     let ledger = Ledger::seeds();
-    ledger.ensure(&database).await?;
-    Ok((database, ledger))
+    ledger.ensure(database).await?;
+    Ok(ledger)
 }
 
 impl Default for Seeder {

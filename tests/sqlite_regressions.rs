@@ -12,12 +12,17 @@
 #[path = "sqlite_regressions/fixtures.rs"]
 mod fixtures;
 
+#[cfg(feature = "attachments")]
+#[path = "sqlite_regressions/attachments.rs"]
+mod attachments;
 #[path = "sqlite_regressions/batch_updates.rs"]
 mod batch_updates;
 #[path = "sqlite_regressions/cache.rs"]
 mod cache;
 #[path = "sqlite_regressions/databases.rs"]
 mod databases;
+#[path = "sqlite_regressions/derive.rs"]
+mod derive;
 #[cfg(feature = "encrypted-fields")]
 #[path = "sqlite_regressions/encryption.rs"]
 mod encryption;
@@ -31,8 +36,15 @@ mod fulltext;
 mod migrations;
 #[path = "sqlite_regressions/queries.rs"]
 mod queries;
+#[path = "sqlite_regressions/seeding.rs"]
+mod seeding;
+#[path = "sqlite_regressions/tokenization.rs"]
+mod tokenization;
 #[path = "sqlite_regressions/transactions.rs"]
 mod transactions;
+#[cfg(feature = "translations")]
+#[path = "sqlite_regressions/translations.rs"]
+mod translations;
 #[path = "sqlite_regressions/validation.rs"]
 mod validation;
 #[path = "sqlite_regressions/writes.rs"]

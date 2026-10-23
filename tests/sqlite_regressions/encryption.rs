@@ -4,6 +4,10 @@
 #[path = "encryption/aliases_and_aggregates.rs"]
 mod aliases_and_aggregates;
 
+#[cfg(feature = "fulltext")]
+#[path = "encryption/fulltext.rs"]
+mod fulltext;
+
 #[path = "encryption/joins.rs"]
 mod joins;
 

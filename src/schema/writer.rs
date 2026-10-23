@@ -870,7 +870,7 @@ async fn introspect_sqlite(conn: &OrmConnection) -> Result<Catalog> {
              FROM sqlite_master
              WHERE type IN ('view', 'index', 'trigger')
                AND tbl_name NOT GLOB 'sqlite_*'
-               AND tbl_name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow')
+               AND tbl_name NOT IN (SELECT name FROM pragma_table_list WHERE schema = 'main' AND type = 'shadow')
          )
          WHERE sql IS NOT NULL
          ORDER BY rank, name",

@@ -802,6 +802,29 @@ fn test_mysql_fulltext_operands_always_parse() {
     }
 }
 
+/// A boolean search of exclusions alone has nothing to subtract them from:
+/// MySQL and FTS5 match no row for it, where PostgreSQL matched every row
+/// without the excluded word.
+#[test]
+fn test_a_boolean_search_of_exclusions_alone_matches_nothing() {
+    let builder =
+        FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "-spam -\"junk mail\"")
+            .mode(SearchMode::Boolean);
+    for db_type in [
+        DatabaseType::Postgres,
+        DatabaseType::MySQL,
+        DatabaseType::SQLite,
+    ] {
+        let (sql, _) = builder.build_sql(db_type).unwrap();
+        assert!(sql.contains("WHERE 0 = 1"), "{db_type:?}: {sql}");
+    }
+
+    let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "rust -spam")
+        .mode(SearchMode::Boolean);
+    let (sql, _) = builder.build_sql(DatabaseType::Postgres).unwrap();
+    assert!(!sql.contains("0 = 1"), "{sql}");
+}
+
 #[test]
 fn test_mysql_search_without_terms_matches_nothing_instead_of_erroring() {
     let builder = FullTextSearchBuilder::<FullTextTestArticle>::new(&["title"], "* -");

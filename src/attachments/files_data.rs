@@ -63,15 +63,28 @@ impl FilesData {
         self.many_mut(relation).push(attachment.to_json());
     }
 
+    /// The relation's entries as a list to edit. A lone value, as a hasOne
+    /// relation stores one, becomes the list's first entry instead of being
+    /// dropped.
     fn many_mut(&mut self, relation: &str) -> &mut Vec<serde_json::Value> {
         let value = self
             .data
             .entry(relation.to_string())
-            .or_insert_with(|| serde_json::json!([]));
+            .or_insert(serde_json::Value::Null);
         if !value.is_array() {
-            *value = serde_json::json!([]);
+            *value = serde_json::Value::Array(Self::entries(value).to_vec());
         }
         value.as_array_mut().expect("array initialized above")
+    }
+
+    /// The entries of a stored hasMany value: an array's items, or a lone
+    /// value as the only one.
+    fn entries(value: &serde_json::Value) -> &[serde_json::Value] {
+        match value {
+            serde_json::Value::Null => &[],
+            serde_json::Value::Array(items) => items,
+            single => std::slice::from_ref(single),
+        }
     }
 
     /// Remove one key from a hasMany relation.
@@ -101,10 +114,10 @@ impl FilesData {
 
     /// Decode every attachment, reporting malformed entries instead of dropping them.
     pub fn try_get_many(&self, relation: &str) -> Result<Vec<FileAttachment>, serde_json::Error> {
-        match self.data.get(relation) {
-            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
-            Some(value) => serde_json::from_value(value.clone()),
-        }
+        self.get_many_raw(relation)
+            .iter()
+            .map(FileAttachment::deserialize)
+            .collect()
     }
 
     /// Clear all files from array (hasMany)
@@ -117,17 +130,13 @@ impl FilesData {
     /// Use [`Self::try_get_many`] to report malformed data.
     pub fn get_many(&self, relation: &str) -> Vec<FileAttachment> {
         self.get_many_raw(relation)
-            .into_iter()
-            .filter_map(|value| serde_json::from_value(value).ok())
+            .iter()
+            .filter_map(|value| FileAttachment::deserialize(value).ok())
             .collect()
     }
 
-    fn get_many_raw(&self, relation: &str) -> Vec<serde_json::Value> {
-        self.data
-            .get(relation)
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default()
+    fn get_many_raw(&self, relation: &str) -> &[serde_json::Value] {
+        self.data.get(relation).map_or(&[], Self::entries)
     }
 
     /// Check if relation has files
@@ -138,11 +147,6 @@ impl FilesData {
     /// Count raw entries, including malformed attachment data.
     /// Trait-level attachment counts decode first and report errors.
     pub fn count_files(&self, relation: &str) -> usize {
-        match self.data.get(relation) {
-            Some(serde_json::Value::Null) => 0,
-            Some(serde_json::Value::Array(array)) => array.len(),
-            Some(serde_json::Value::Object(_)) => 1,
-            _ => 0,
-        }
+        self.get_many_raw(relation).len()
     }
 }

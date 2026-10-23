@@ -57,6 +57,10 @@ fn hash_condition_value<H: Hasher>(value: &ConditionValue, hasher: &mut H) {
     match value {
         ConditionValue::Single(single) => hash_json_value(single, hasher),
         ConditionValue::List(values) => hash_json_values(values, hasher),
+        ConditionValue::DocumentList { values, sql_null } => {
+            hash_json_values(values, hasher);
+            sql_null.hash(hasher);
+        }
         ConditionValue::Range(start, end) => {
             hash_json_value(start, hasher);
             hash_json_value(end, hasher);

@@ -14,3 +14,6 @@ mod filters;
 
 #[path = "queries/projections.rs"]
 mod projections;
+
+#[path = "queries/schema_columns.rs"]
+mod schema_columns;

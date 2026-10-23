@@ -28,6 +28,19 @@ pub trait Migration: Send + Sync {
 
     /// Revert the migration
     async fn down(&self, schema: &mut Schema) -> Result<()>;
+
+    /// Whether the migration runs with SQLite's foreign key enforcement off,
+    /// as rebuilding a table requires: its `DROP TABLE` deletes the rows that
+    /// point at the table with `ON DELETE CASCADE`, or fails on them. SQLite
+    /// changes the setting only outside a transaction, and a migration runs
+    /// in one, where `PRAGMA foreign_keys = OFF` is refused; this runs it on
+    /// a connection of its own with the setting off instead, and checks the
+    /// foreign keys before committing, failing the migration if one points
+    /// nowhere. Not inside a transaction of the caller's, nor on an
+    /// in-memory database with a private cache. Other backends ignore it.
+    fn foreign_keys_off(&self) -> bool {
+        false
+    }
 }
 
 /// Result of migration operations

@@ -11,8 +11,7 @@ pub enum Backend {
     /// PostgreSQL: `"` identifier quoting, `$n` placeholders.
     Postgres,
     /// MySQL — also reported for MariaDB, which the ORM engine cannot tell
-    /// apart. Consult `TideConfig::get_database_type()` when the distinction
-    /// matters.
+    /// apart. Consult `Database::backend()` when the distinction matters.
     MySql,
     /// SQLite.
     Sqlite,

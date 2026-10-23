@@ -381,3 +381,52 @@ async fn null_related_keys_never_change_the_pivot() {
     assert_eq!(rows[0].related_id, Some(10));
     Database::reset_global();
 }
+
+#[tideorm::model(table = "stamped_rows")]
+struct StampedRow {
+    #[tideorm(primary_key, auto_increment)]
+    id: i64,
+    name: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+thread_local! {
+    static DELETED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+impl tideorm::callbacks::Callbacks for StampedRow {
+    fn after_delete(&self) -> tideorm::Result<()> {
+        DELETED.with(|deleted| deleted.set(deleted.get() + 1));
+        Ok(())
+    }
+}
+
+/// An insert stamps `created_at` and `updated_at` with one instant, and
+/// `after_delete` runs only when a row was deleted.
+#[tokio::test]
+async fn an_insert_stamps_one_instant_and_after_delete_needs_a_deleted_row() {
+    let _db = global_memory_database(
+        "CREATE TABLE stamped_rows(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, \
+         created_at TEXT, updated_at TEXT)",
+    )
+    .await;
+    for name in ["a", "b", "c"] {
+        let row = StampedRow::create(StampedRow {
+            id: 0,
+            name: name.into(),
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(row.created_at, row.updated_at);
+    }
+
+    let row = StampedRow::find(1).await.unwrap().unwrap();
+    let copy = row.clone();
+    assert_eq!(row.delete().await.unwrap(), 1);
+    assert_eq!(copy.delete().await.unwrap(), 0);
+    assert_eq!(DELETED.with(std::cell::Cell::get), 1);
+    Database::reset_global();
+}

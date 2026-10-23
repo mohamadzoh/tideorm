@@ -15,6 +15,9 @@ pub struct AlterTableBuilder {
     /// What MySQL's `MODIFY COLUMN` would drop from a column whose type
     /// changes, by column.
     kept_attributes: std::collections::HashMap<String, KeptAttributes>,
+    /// Explicit single-column indexes over dropped columns, as (column, index).
+    sqlite_column_indexes: Vec<(String, String)>,
+    sqlite_index_schema: Option<String>,
 }
 
 /// A MySQL column's declaration besides its type, as `SHOW CREATE TABLE`
@@ -37,6 +40,8 @@ impl AlterTableBuilder {
             database_type,
             operations: Vec::new(),
             kept_attributes: std::collections::HashMap::new(),
+            sqlite_column_indexes: Vec::new(),
+            sqlite_index_schema: None,
         }
     }
 
@@ -126,18 +131,127 @@ impl AlterTableBuilder {
         }
     }
 
+    /// Columns whose single-column indexes must be inspected before dropping.
+    pub(crate) fn sqlite_dropped_columns(&self) -> Vec<&str> {
+        if self.database_type != DatabaseType::SQLite {
+            return Vec::new();
+        }
+        self.operations
+            .iter()
+            .enumerate()
+            .filter_map(|(position, operation)| {
+                let AlterOperation::DropColumn(name) = operation else {
+                    return None;
+                };
+                let mut original = name.as_str();
+                for earlier in self.operations[..position].iter().rev() {
+                    match earlier {
+                        AlterOperation::RenameColumn(from, to) if to == original => {
+                            original = from;
+                        }
+                        AlterOperation::AddColumn(column) if column.name == original => {
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(original)
+            })
+            .collect()
+    }
+
+    /// The name of the unique index a unique `column` added on SQLite comes
+    /// with.
+    fn sqlite_column_index(&self, column: &str) -> String {
+        ddl::index_name(&self.name, &[column], true)
+    }
+
+    fn sqlite_index_reference(&self, name: &str) -> String {
+        let name = quote_ident(self.database_type, name);
+        match &self.sqlite_index_schema {
+            Some(schema) => format!("{}.{name}", quote_ident(self.database_type, schema)),
+            None => name,
+        }
+    }
+
+    /// Drop these indexes, which [`Schema::alter_table`](super::Schema::alter_table)
+    /// found on the table over a column the alteration drops, with the column.
+    pub(crate) fn drop_sqlite_column_indexes(
+        &mut self,
+        schema: String,
+        names: Vec<(String, String)>,
+    ) {
+        self.sqlite_index_schema = Some(schema);
+        self.sqlite_column_indexes = names;
+    }
+
     /// The statements this alteration renders, for the CLI's migration
-    /// generator, which writes them into a migration file.
+    /// generator, which writes them into a migration file. Without the table
+    /// to read, they drop no index over a dropped SQLite column but one this
+    /// alteration adds.
     #[doc(hidden)]
     pub fn __statements(&self) -> Result<Vec<String>> {
         self.build()
     }
 
     pub(crate) fn build(&self) -> Result<Vec<String>> {
-        self.operations
-            .iter()
-            .map(|operation| self.build_operation(operation))
-            .collect()
+        let mut statements = Vec::with_capacity(self.operations.len());
+        let mut indexes = self.sqlite_column_indexes.clone();
+        for operation in &self.operations {
+            // SQLite refuses to drop a column an index covers, such as the
+            // unique index a unique column added on SQLite comes with. Only
+            // this table's: SQLite names indexes per database, so another
+            // table's index can have the name this one's would get.
+            if let AlterOperation::DropColumn(name) = operation
+                && self.database_type == DatabaseType::SQLite
+            {
+                for (_, existing) in indexes.iter().filter(|(column, _)| column == name) {
+                    statements.push(format!(
+                        "DROP INDEX {}",
+                        self.sqlite_index_reference(existing)
+                    ));
+                }
+                indexes.retain(|(column, _)| column != name);
+            }
+            statements.push(self.build_operation(operation)?);
+            if let Some(column) = self.sqlite_unique_addition(operation) {
+                let index = self.sqlite_column_index(&column.name);
+                statements.push(format!(
+                    "CREATE UNIQUE INDEX {} ON {} ({})",
+                    self.sqlite_index_reference(&index),
+                    quote_ident(self.database_type, &self.name),
+                    quote_ident(self.database_type, &column.name),
+                ));
+                indexes.push((column.name.clone(), index));
+            }
+            if let AlterOperation::RenameColumn(from, to) = operation {
+                for (column, _) in &mut indexes {
+                    if column == from {
+                        column.clone_from(to);
+                    }
+                }
+            }
+        }
+        Ok(statements)
+    }
+
+    /// The column `operation` adds when it is a unique one added on SQLite,
+    /// which refuses `ADD COLUMN .. UNIQUE`: the column is added without the
+    /// constraint and a unique index enforces it.
+    fn sqlite_unique_addition<'a>(
+        &self,
+        operation: &'a AlterOperation,
+    ) -> Option<&'a ddl::ColumnDefinition> {
+        match operation {
+            AlterOperation::AddColumn(column)
+                if self.database_type == DatabaseType::SQLite
+                    && column.unique
+                    && !column.primary_key =>
+            {
+                Some(column)
+            }
+            _ => None,
+        }
     }
 
     fn build_operation(&self, operation: &AlterOperation) -> Result<String> {
@@ -145,7 +259,14 @@ impl AlterTableBuilder {
         let table = quote_ident(db_type, &self.name);
 
         let sql = match operation {
-            AlterOperation::AddColumn(column) => ddl::add_column(db_type, &table, column),
+            AlterOperation::AddColumn(column) => match self.sqlite_unique_addition(operation) {
+                Some(column) => {
+                    let mut plain = column.clone();
+                    plain.unique = false;
+                    ddl::add_column(db_type, &table, &plain)
+                }
+                None => ddl::add_column(db_type, &table, column),
+            },
             AlterOperation::DropColumn(name) => {
                 format!(
                     "ALTER TABLE {} DROP COLUMN {}",
@@ -206,7 +327,8 @@ impl AlterTableBuilder {
                         return Err(Error::backend_not_supported(
                             format!(
                                 "SQLite cannot change the type of column '{}' on table '{}'. \
-                                 Rebuild the table instead: create a new table with the target \
+                                 Rebuild the table instead, in a migration whose \
+                                 `foreign_keys_off()` is true: create a new table with the target \
                                  definition, copy the rows across, drop the old table and rename \
                                  the new one.",
                                 name, self.name

@@ -108,7 +108,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
-        let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        let column =
+            crate::columns::column_reference(&column, Some((M::table_name(), M::schema_name())));
         self.push_subquery_condition("where_in_subquery", &column, "IN", &subquery)
     }
 
@@ -126,7 +127,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl IntoColumnName,
         subquery: QueryBuilder<N>,
     ) -> Self {
-        let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        let column =
+            crate::columns::column_reference(&column, Some((M::table_name(), M::schema_name())));
         self.push_subquery_condition("where_not_in_subquery", &column, "NOT IN", &subquery)
     }
 
@@ -626,8 +628,8 @@ impl<M: Model> QueryBuilder<M> {
     #[must_use]
     pub fn where_col(self, mut condition: crate::columns::ColumnCondition) -> Self {
         // A column of this query's own model needs no qualifier.
-        if let Some((table, name)) = condition.column.split_once('.')
-            && table == M::table_name()
+        if let Some((table, name)) = condition.column.rsplit_once('.')
+            && M::owns_table_reference(table)
         {
             condition.column = name.to_string();
         }
@@ -636,8 +638,8 @@ impl<M: Model> QueryBuilder<M> {
 }
 
 impl<M: Model> crate::columns::ConditionOwner for QueryBuilder<M> {
-    fn own_table() -> Option<&'static str> {
-        Some(M::table_name())
+    fn own_table() -> Option<(&'static str, Option<&'static str>)> {
+        Some((M::table_name(), M::schema_name()))
     }
 }
 

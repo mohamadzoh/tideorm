@@ -18,11 +18,9 @@ use crate::error::Result;
 use crate::model::Model;
 use crate::query::QueryBuilder;
 
-#[cfg(feature = "entity-manager")]
-use super::helpers::{
-    SnapshotOwner, identity_keys, load_many_in_entity_manager, load_one_in_entity_manager,
-};
 use super::helpers::{ensure_relation_configured, owner_is_unsaved, required_key, where_key};
+#[cfg(feature = "entity-manager")]
+use super::helpers::{identity_keys, load_many_in_entity_manager, load_one_in_entity_manager};
 use super::state::{RelationState, relation_serde};
 
 mod belongs_to;

@@ -38,8 +38,9 @@ fn test_a_column_of_any_serializable_type_compares_and_lists() {
         nullable.ne(Status::Banned).value,
         ConditionValue::Single(json!("banned"))
     );
+    // A `None` is SQL NULL, apart from any value that serializes to `null`.
     let nullable: Column<Option<Status>> = Column::new("previous_status");
-    assert_eq!(nullable.eq(None).value, ConditionValue::Single(json!(null)));
+    assert_eq!(nullable.eq(None).value, ConditionValue::None);
     let ids: Column<Option<i64>> = Column::new("owner_id");
     assert_eq!(
         ids.is_in([1, 2]).value,
@@ -67,7 +68,7 @@ fn a_nan_or_infinite_float_is_refused_rather_than_read_as_null() {
     ));
     // A None still means NULL, and a finite float binds.
     let price: Column<Option<f64>> = Column::new("price");
-    assert_eq!(price.eq(None).value, ConditionValue::Single(json!(null)));
+    assert_eq!(price.eq(None).value, ConditionValue::None);
     let price: Column<f64> = Column::new("price");
     assert_eq!(price.eq(1.5).value, ConditionValue::Single(json!(1.5)));
 }

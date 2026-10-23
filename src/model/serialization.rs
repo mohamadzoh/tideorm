@@ -19,6 +19,12 @@ pub(crate) fn try_to_json<M: Model>(
     options: Option<&HashMap<String, String>>,
 ) -> crate::Result<serde_json::Value> {
     let global_hidden = crate::config::Config::get_hidden_attributes();
+    if let Some(field) = unfilterable_flattened_field::<M>(&global_hidden) {
+        return Err(crate::Error::configuration(format!(
+            "Cannot safely filter flattened field '{field}' on '{}': remove #[serde(flatten)] or use #[serde(skip_serializing)]",
+            M::table_name(),
+        )));
+    }
     #[allow(unused_mut)] // Optional translation and attachment renderers mutate this map.
     let mut json = model_to_object(model).map_err(crate::Error::internal)?;
     #[cfg(feature = "translations")]
@@ -26,19 +32,23 @@ pub(crate) fn try_to_json<M: Model>(
         let serialized = json.remove(M::serialized_name("translations"));
         let payload = model.__translation_payload()?.or(serialized);
         if let Some(payload) = payload.filter(|value| !value.is_null()) {
-            let data: crate::translations::TranslationsData = serde_json::from_value(payload)
-                .map_err(|error| {
-                    crate::Error::internal(format!("Invalid translations: {error}"))
-                })?;
+            // A malformed field, or a payload that is no object, is skipped:
+            // it must not blank the whole model.
+            let data = crate::translations::TranslationsData::from_json(&payload);
             let fallback = M::fallback_language();
             let language = options
                 .and_then(|opts| opts.get("language"))
                 .map(String::as_str)
                 .unwrap_or(&fallback);
+            // A field the model's own serde skips stays out, translated or not.
+            let fields = M::translatable_fields()
+                .into_iter()
+                .filter(|field| !M::__skipped_fields().contains(field))
+                .collect();
             crate::translations::render_translations(
                 &mut json,
                 &data,
-                M::translatable_fields(),
+                fields,
                 language,
                 &fallback,
                 M::serialized_name,
@@ -113,19 +123,32 @@ fn strip_hidden_from_non_column_payloads<M>(
     let relation_filters = M::relation_payload_filters();
 
     for (key, value) in object.iter_mut() {
-        if is_persisted_attribute::<M>(key) {
-            continue;
-        }
-
         let filter = relation_filters
             .iter()
             .find_map(|(field, filter)| (*field == key.as_str()).then_some(*filter));
 
         match filter {
             Some(filter) => filter(value, global_hidden),
+            // Database column names may also name a relation in the JSON.
+            // A declared relation always takes precedence over that heuristic.
+            None if is_persisted_attribute::<M>(key) => {}
             None => strip_hidden_attributes(value, &hidden, global_hidden),
         }
     }
+}
+
+fn unfilterable_flattened_field<M: ModelMeta>(global_hidden: &[String]) -> Option<&'static str> {
+    let hidden = M::hidden_attributes();
+    let relations = M::relation_payload_filters();
+    M::__flattened_fields().iter().copied().find(|field| {
+        hidden.contains(field)
+            || global_hidden.iter().any(|attr| attr == field)
+            // Flattening removes the boundary needed to apply the target's
+            // hidden list, including to its own nested relations. Its keys
+            // can also overwrite the parent's, so filtering the merged map
+            // with either model's metadata is unsafe.
+            || relations.iter().any(|(key, _)| *key == M::serialized_name(field))
+    })
 }
 
 /// Filter one already-serialized payload of model `M` in place: drop `M`'s own
@@ -142,6 +165,13 @@ where
 {
     match value {
         serde_json::Value::Object(map) => {
+            // Nested relations arrive already serialized. A flattened field's
+            // keys may overlap any other field, so none of this object can be
+            // trusted when that field is hidden or contains a typed relation.
+            if unfilterable_flattened_field::<M>(global_hidden).is_some() {
+                map.clear();
+                return;
+            }
             for attr in M::hidden_attributes() {
                 map.remove(M::serialized_name(attr));
             }
@@ -150,6 +180,7 @@ where
                 map.remove(M::serialized_name(attr));
             }
 
+            strip_hidden_backing_entries::<M>(map, global_hidden);
             strip_hidden_from_non_column_payloads::<M>(map, global_hidden);
         }
         serde_json::Value::Array(items) => {
@@ -158,6 +189,37 @@ where
             }
         }
         _ => {}
+    }
+}
+
+/// Drop the entries a hidden field keeps in `M`'s raw `translations` column,
+/// and those of a field `M`'s own serde skips, plus a hidden attachment's in
+/// its `files` column.
+///
+/// `try_to_json` renders both columns, leaving those entries out, before it
+/// filters its own payload, so there this finds nothing; a related model's
+/// payload nested in another still carries them as serialized.
+fn strip_hidden_backing_entries<M>(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    global_hidden: &[String],
+) where
+    M: ModelMeta,
+{
+    let hidden = M::hidden_attributes();
+    let is_hidden =
+        |name: &str| hidden.contains(&name) || global_hidden.iter().any(|attr| attr == name);
+    if M::has_translations()
+        && let Some(serde_json::Value::Object(entries)) =
+            map.get_mut(M::serialized_name("translations"))
+    {
+        entries.retain(|field, _| {
+            !is_hidden(field) && !M::__skipped_fields().contains(&field.as_str())
+        });
+    }
+    if M::has_file_attachments()
+        && let Some(serde_json::Value::Object(entries)) = map.get_mut(M::serialized_name("files"))
+    {
+        entries.retain(|relation, _| !is_hidden(relation));
     }
 }
 

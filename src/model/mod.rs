@@ -129,6 +129,17 @@ pub struct EncryptedColumn {
     pub(crate) column: &'static str,
 }
 
+impl EncryptedColumn {
+    /// The error refusing `operation` over the column, whose randomized
+    /// ciphertext matches no plaintext, `reason` saying what that breaks.
+    pub(crate) fn refuse(&self, operation: &str, reason: &str) -> crate::Error {
+        crate::Error::query(format!(
+            "{operation} is not supported for encrypted column {}.{}: {reason}",
+            self.table, self.column
+        ))
+    }
+}
+
 /// `M`'s encrypted column named `column` (by column or field name), if any.
 #[doc(hidden)]
 pub fn __encrypted_column<M: ModelMeta>(column: &str) -> crate::Result<Option<EncryptedColumn>> {
@@ -227,6 +238,53 @@ pub fn __is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
+/// A float field as dirty tracking compares it: a number, or the text of a
+/// NaN or infinite value, which JSON would write as `null`.
+#[doc(hidden)]
+pub trait __FloatCompare {
+    fn __compare_value(&self) -> serde_json::Value;
+}
+
+impl __FloatCompare for f64 {
+    fn __compare_value(&self) -> serde_json::Value {
+        serde_json::Number::from_f64(*self).map_or_else(
+            || serde_json::Value::String(self.to_string()),
+            serde_json::Value::Number,
+        )
+    }
+}
+
+impl __FloatCompare for f32 {
+    fn __compare_value(&self) -> serde_json::Value {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::Null) | Err(_) => serde_json::Value::String(self.to_string()),
+            Ok(value) => value,
+        }
+    }
+}
+
+impl<T: __FloatCompare> __FloatCompare for Option<T> {
+    fn __compare_value(&self) -> serde_json::Value {
+        self.as_ref()
+            .map_or(serde_json::Value::Null, __FloatCompare::__compare_value)
+    }
+}
+
+/// The value an auto-increment key is inserted with: unset while it is still
+/// the unsaved default, for the database to number, and otherwise the key
+/// the model holds.
+#[doc(hidden)]
+pub fn __auto_increment_key<V>(new: bool, key: V) -> crate::orm::ActiveValue<V>
+where
+    V: Into<crate::orm::Value>,
+{
+    if new {
+        crate::orm::ActiveValue::NotSet
+    } else {
+        crate::orm::ActiveValue::Set(key)
+    }
+}
+
 /// The key a `Uuid` primary key is inserted with: `key` itself, or a random
 /// (v4) one when it is still nil, which no row should be keyed by.
 #[doc(hidden)]
@@ -312,8 +370,12 @@ pub fn __loading_through<T>(
     connection: &crate::database::ConnectionRef,
     load: impl FnOnce() -> T,
 ) -> T {
-    crate::database::with_loading_connection(connection, || {
-        __loading_from(crate::database::origin_of(connection), load)
+    // A row read or written in a transaction is that transaction's: the
+    // baselines its load records go back if it rolls back.
+    connection.recording(|| {
+        crate::database::with_loading_connection(connection, || {
+            __loading_from(connection.source().origin, load)
+        })
     })
 }
 

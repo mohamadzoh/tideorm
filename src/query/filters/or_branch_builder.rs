@@ -15,8 +15,8 @@ pub struct OrBranchBuilder<M: Model> {
 }
 
 impl<M: Model> crate::columns::ConditionOwner for OrBranchBuilder<M> {
-    fn own_table() -> Option<&'static str> {
-        Some(M::table_name())
+    fn own_table() -> Option<(&'static str, Option<&'static str>)> {
+        Some((M::table_name(), M::schema_name()))
     }
 }
 

@@ -1,6 +1,5 @@
 #![allow(missing_docs)]
 
-use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -13,14 +12,8 @@ use crate::relations::{HasMany, HasManyThrough, HasOne};
 
 use super::{EntityManager, TideEntityManagerMergePersisted, TideEntityManagerSync};
 
-pub(super) type IdentityRollbackLog = HashMap<super::IdentityKey, Box<dyn IdentityMapRollback>>;
-pub(super) type ManagedCheckpoints = Vec<Box<dyn super::managed::ManagedCheckpoint>>;
-
-pub(super) struct EntityManagerRollbackState {
-    managed_entries: Vec<Arc<dyn super::managed::ManagedOps>>,
-    managed_identity_map: HashMap<super::IdentityKey, Arc<dyn Any + Send + Sync>>,
-    snapshots: HashMap<super::SnapshotKey, HashSet<String>>,
-}
+pub(super) type IdentityRollbackLog =
+    HashMap<(super::IdentityKey, u64), Box<dyn IdentityMapRollback>>;
 
 pub(super) trait IdentityMapRollback: Send {
     fn restore(self: Box<Self>, entity_manager: &EntityManager);
@@ -28,6 +21,7 @@ pub(super) trait IdentityMapRollback: Send {
 
 struct IdentityMapRollbackEntry<T> {
     key: super::IdentityKey,
+    generation: u64,
     original: Option<Arc<T>>,
 }
 
@@ -37,6 +31,13 @@ where
 {
     fn restore(self: Box<Self>, entity_manager: &EntityManager) {
         let mut map = entity_manager.identity_map.write();
+        if entity_manager
+            .identity_generation
+            .load(super::Ordering::Relaxed)
+            != self.generation
+        {
+            return;
+        }
         match self.original {
             Some(entity) => {
                 map.insert(self.key, entity);
@@ -70,7 +71,7 @@ fn scope_owner(entity_manager: &EntityManager) -> usize {
 /// Whether `entity_manager`'s own unit of work is running here. Another
 /// manager's does not count: joining it would run this manager's statements
 /// in that transaction, on that manager's database, without this one's
-/// rollback checkpoints.
+/// identity-map rollback.
 pub(super) fn in_entity_manager_transaction_scope(entity_manager: &EntityManager) -> bool {
     ENTITY_MANAGER_TRANSACTION_SCOPE.with(|owner| owner.get()) == scope_owner(entity_manager)
 }
@@ -124,6 +125,7 @@ where
 pub(super) fn record_identity_map_rollback<T>(
     entity_manager: &EntityManager,
     key: &super::IdentityKey,
+    map: &HashMap<super::IdentityKey, Arc<dyn std::any::Any + Send + Sync>>,
 ) where
     T: Clone + Send + Sync + 'static,
 {
@@ -135,21 +137,27 @@ pub(super) fn record_identity_map_rollback<T>(
         return;
     };
 
+    let generation = entity_manager
+        .identity_generation
+        .load(super::Ordering::Relaxed);
+    let log_key = (key.clone(), generation);
     let mut rollback_log = rollback_log.lock();
-    if rollback_log.contains_key(key) {
+    if rollback_log.contains_key(&log_key) {
         return;
     }
 
-    let original = entity_manager
-        .identity_map
-        .read()
+    let original = map
         .get(key)
         .cloned()
         .and_then(|value| value.downcast::<T>().ok());
     let key = key.clone();
     rollback_log.insert(
-        key.clone(),
-        Box::new(IdentityMapRollbackEntry { key, original }),
+        log_key,
+        Box::new(IdentityMapRollbackEntry {
+            key,
+            generation,
+            original,
+        }),
     );
 }
 
@@ -167,115 +175,6 @@ pub(super) fn rollback_identity_map(
     }
 }
 
-pub(super) fn capture_entity_manager_rollback_state(
-    entity_manager: &EntityManager,
-) -> EntityManagerRollbackState {
-    EntityManagerRollbackState {
-        managed_entries: entity_manager.managed_entries.read().clone(),
-        managed_identity_map: entity_manager.managed_identity_map.read().clone(),
-        snapshots: entity_manager.snapshots.read().clone(),
-    }
-}
-
-pub(super) fn capture_managed_checkpoints(entity_manager: &EntityManager) -> ManagedCheckpoints {
-    entity_manager
-        .managed_entries
-        .read()
-        .iter()
-        .cloned()
-        .map(|entry| entry.checkpoint())
-        .collect()
-}
-
-pub(super) fn rollback_entity_manager_state(
-    entity_manager: &EntityManager,
-    checkpoints: ManagedCheckpoints,
-    rollback_state: EntityManagerRollbackState,
-    identity_rollback: &Arc<Mutex<IdentityRollbackLog>>,
-) {
-    for checkpoint in checkpoints {
-        checkpoint.rollback(entity_manager);
-    }
-
-    *entity_manager.managed_entries.write() = rollback_state.managed_entries;
-    *entity_manager.managed_identity_map.write() = rollback_state.managed_identity_map;
-    rollback_identity_map(entity_manager, identity_rollback);
-    *entity_manager.snapshots.write() = rollback_state.snapshots;
-}
-
-/// The entity manager's state before a unit of work, restored unless the work
-/// commits: when it fails, when its future is dropped part way (which rolls
-/// its transaction back as well), and when a transaction enclosing it rolls
-/// back later. Otherwise the manager would keep ids and clean snapshots for
-/// rows that were never committed.
-pub(super) struct PendingRollback {
-    entity_manager: Arc<EntityManager>,
-    checkpoints: Arc<Mutex<ManagedCheckpoints>>,
-    identity_rollback: Arc<Mutex<IdentityRollbackLog>>,
-    state: Option<EntityManagerRollbackState>,
-}
-
-impl PendingRollback {
-    /// Capture the state to restore, with `checkpoints` taken so far; a flush
-    /// adds the rest through [`checkpoints`](Self::checkpoints) as it goes.
-    pub(super) fn new(
-        entity_manager: &Arc<EntityManager>,
-        checkpoints: ManagedCheckpoints,
-    ) -> Self {
-        Self {
-            state: Some(capture_entity_manager_rollback_state(entity_manager)),
-            entity_manager: entity_manager.clone(),
-            checkpoints: Arc::new(Mutex::new(checkpoints)),
-            identity_rollback: new_identity_rollback_log(),
-        }
-    }
-
-    pub(super) fn checkpoints(&self) -> Arc<Mutex<ManagedCheckpoints>> {
-        self.checkpoints.clone()
-    }
-
-    pub(super) fn identity_rollback(&self) -> Arc<Mutex<IdentityRollbackLog>> {
-        self.identity_rollback.clone()
-    }
-
-    /// The work's transaction committed: keep what it did, unless a
-    /// transaction around it rolls back.
-    pub(super) fn committed(mut self) {
-        let Some(state) = self.state.take() else {
-            return;
-        };
-        let entity_manager = self.entity_manager.clone();
-        let checkpoints = self.checkpoints.clone();
-        let identity_rollback = self.identity_rollback.clone();
-        crate::cache::undo_on_rollback(move || {
-            restore_entity_manager_state(&entity_manager, &checkpoints, state, &identity_rollback);
-        });
-    }
-}
-
-impl Drop for PendingRollback {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            restore_entity_manager_state(
-                &self.entity_manager,
-                &self.checkpoints,
-                state,
-                &self.identity_rollback,
-            );
-        }
-    }
-}
-
-fn restore_entity_manager_state(
-    entity_manager: &EntityManager,
-    checkpoints: &Mutex<ManagedCheckpoints>,
-    state: EntityManagerRollbackState,
-    identity_rollback: &Arc<Mutex<IdentityRollbackLog>>,
-) {
-    let checkpoints = std::mem::take(&mut *checkpoints.lock());
-    rollback_entity_manager_state(entity_manager, checkpoints, state, identity_rollback);
-}
-
 pub(super) async fn save_with_entity_manager<T>(
     entity: &T,
     entity_manager: &Arc<EntityManager>,
@@ -289,45 +188,51 @@ where
 
     let entity_manager_for_work = entity_manager.clone();
     let entity = entity.clone();
-    in_unit_of_work(
-        entity_manager,
-        || capture_managed_checkpoints(entity_manager.as_ref()),
-        move |_| async move { save_in_scope(&entity, &entity_manager_for_work).await },
-    )
+    in_unit_of_work(entity_manager, move || async move {
+        save_in_scope(&entity, &entity_manager_for_work).await
+    })
     .await
 }
 
 /// Run `work` as a unit of work of `entity_manager`: after any the manager is
 /// running already, in one transaction, with the context put back if that
-/// does not commit. `checkpoints` captures the managed entries to restore, once
-/// the manager is this unit's; `work` adds to them through the handle it is
-/// given.
+/// does not commit.
 pub(super) async fn in_unit_of_work<T, Fut>(
     entity_manager: &Arc<EntityManager>,
-    checkpoints: impl FnOnce() -> ManagedCheckpoints,
-    work: impl FnOnce(Arc<Mutex<ManagedCheckpoints>>) -> Fut + Send + 'static,
+    work: impl FnOnce() -> Fut + Send + 'static,
 ) -> Result<T>
 where
     Fut: std::future::Future<Output = Result<T>> + Send + 'static,
     T: Send + 'static,
 {
     let _running = entity_manager.unit_of_work.lock().await;
-    let rollback = PendingRollback::new(entity_manager, checkpoints());
-    let transaction_checkpoints = rollback.checkpoints();
-    let identity_rollback = rollback.identity_rollback();
+    let identity_rollback = new_identity_rollback_log();
     let owner = entity_manager.clone();
-    let result = entity_manager
+    let manager = entity_manager.clone();
+    entity_manager
         .db
         .transaction(move |_| {
+            let restored = identity_rollback.clone();
             Box::pin(with_entity_manager_transaction_scope(
                 owner.as_ref(),
                 identity_rollback,
-                work(transaction_checkpoints),
+                async move {
+                    // The identity-map entries the work replaces are put back
+                    // unless it commits: when it fails, when its future is
+                    // dropped part way, and when a transaction enclosing it
+                    // rolls back later, or the manager would hand out rows
+                    // that were never committed. Registered in the work's own
+                    // transaction, whose commit hands it to a transaction of
+                    // the same database around it and drops it otherwise, as
+                    // final. Managed entries undo their own flushes the same way.
+                    crate::cache::undo_on_rollback(move || {
+                        rollback_identity_map(&manager, &restored);
+                    });
+                    work().await
+                },
             ))
         })
-        .await?;
-    rollback.committed();
-    Ok(result)
+        .await
 }
 
 /// Save `entity` and sync its loaded relations inside the unit of work the caller
@@ -376,7 +281,7 @@ where
     aggregate
         .tide_sync_entity_manager_relations(entity_manager)
         .await?;
-    entity_manager.put(aggregate.clone());
+    entity_manager.put(&mut aggregate);
     Ok(aggregate)
 }
 
@@ -410,7 +315,7 @@ where
         entity
             .tide_sync_entity_manager_relations(entity_manager)
             .await?;
-        entity_manager.put(entity.clone());
+        entity_manager.put(entity);
         return Ok(existing_key);
     }
 
@@ -420,20 +325,44 @@ where
     Ok(saved_key)
 }
 
-/// Deletes the entities an owner's relation held at its last snapshot but no
-/// longer lists in `current_keys`, and drops them from the identity map.
+/// The keys of `baseline` that `current` no longer holds: the rows a copy of a
+/// relation removed since it loaded. None without a baseline, since nothing can
+/// have left a set that was never recorded.
+fn removed_keys(baseline: Option<&[String]>, current: &[String]) -> Vec<String> {
+    let current: HashSet<&String> = current.iter().collect();
+    baseline
+        .unwrap_or_default()
+        .iter()
+        .filter(|key| !current.contains(key))
+        .cloned()
+        .collect()
+}
+
+/// The keys of `current` that `baseline` did not hold, each once. Without a
+/// baseline every key is new: reporting none would lose a relation set before
+/// it ever loaded, and attaching one already attached is a no-op.
+fn added_keys(baseline: Option<&[String]>, current: &[String]) -> Vec<String> {
+    let baseline: HashSet<&String> = baseline.unwrap_or_default().iter().collect();
+    let mut seen = HashSet::new();
+    current
+        .iter()
+        .filter(|key| !baseline.contains(key) && seen.insert(*key))
+        .cloned()
+        .collect()
+}
+
+/// Deletes the entities a copy of an owner's relation held at its baseline but
+/// no longer lists in `current_keys`, and drops them from the identity map.
 #[doc(hidden)]
 pub async fn __delete_detached_entities<T>(
     entity_manager: &Arc<EntityManager>,
-    owner_table: &'static str,
-    owner_key: &str,
-    relation: &'static str,
+    baseline: Option<&[String]>,
     current_keys: &[String],
 ) -> Result<()>
 where
     T: Model + Clone + Send + Sync + 'static,
 {
-    for key in entity_manager.deletions::<T>(owner_table, owner_key, relation, current_keys) {
+    for key in removed_keys(baseline, current_keys) {
         if let Some(deleted) = entity_manager.get_by_entity_manager_key::<T>(&key) {
             with_entity_manager_db(entity_manager, deleted.delete()).await?;
         }
@@ -463,17 +392,17 @@ where
 pub struct __SyncOwner<'a> {
     pub entity_manager: &'a Arc<EntityManager>,
     pub table: &'static str,
-    pub key: &'a str,
 }
 
-/// Sync the children a loaded `has_many` or `has_one` holds: delete the
-/// ones it no longer holds (first, as a unique foreign key refuses the new
-/// row beside the old), point every child at the owner and save it, then
-/// record what the relation holds now.
-async fn sync_owned_children<R>(
+/// Sync the children a `has_many` or `has_one` relation holds, if it is
+/// loaded: delete the ones it held when it loaded or last synced but no
+/// longer holds (first, as a unique foreign key refuses the new row beside the
+/// old), point every child at the owner and save it, and record the keys it
+/// holds now as its next baseline.
+async fn sync_owned_children<R, C>(
     owner: &__SyncOwner<'_>,
-    relation: &'static str,
-    children: Vec<&mut R>,
+    state: &mut crate::relations::RelationState<C>,
+    children: impl FnOnce(&mut C) -> Vec<&mut R>,
     foreign_key: &str,
     owner_value: serde_json::Value,
 ) -> Result<()>
@@ -482,18 +411,17 @@ where
     <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
         PartialEq,
 {
+    if !state.is_loaded() {
+        return Ok(());
+    }
+    let baseline = state.loaded_keys.clone();
+    let children = state.cached_mut().map(children).unwrap_or_default();
     let current_keys = children
         .iter()
         .filter_map(|child| super::meta::model_entity_manager_key(&**child).transpose())
         .collect::<Result<Vec<String>>>()?;
-    __delete_detached_entities::<R>(
-        owner.entity_manager,
-        owner.table,
-        owner.key,
-        relation,
-        &current_keys,
-    )
-    .await?;
+    __delete_detached_entities::<R>(owner.entity_manager, baseline.as_deref(), &current_keys)
+        .await?;
 
     let mut updated_keys = Vec::with_capacity(children.len());
     for child in children {
@@ -506,9 +434,7 @@ where
         }
         updated_keys.extend(__sync_related_entity(child, owner.entity_manager).await?);
     }
-    owner
-        .entity_manager
-        .snapshot::<R>(owner.table, owner.key, relation, &updated_keys);
+    state.loaded_keys = Some(updated_keys);
     Ok(())
 }
 
@@ -524,15 +450,15 @@ where
     <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
         PartialEq,
 {
-    if !relation.is_loaded() {
-        return Ok(());
-    }
-    let (name, foreign_key) = (relation.relation_name, relation.foreign_key);
-    let children = relation
-        .as_mut()
-        .map(|items| items.iter_mut().collect())
-        .unwrap_or_default();
-    sync_owned_children(owner, name, children, foreign_key, owner_value).await
+    let foreign_key = relation.foreign_key;
+    sync_owned_children(
+        owner,
+        &mut relation.state,
+        |items| items.iter_mut().collect(),
+        foreign_key,
+        owner_value,
+    )
+    .await
 }
 
 /// Sync a `has_one` relation of an aggregate, if it is loaded.
@@ -547,12 +473,15 @@ where
     <<R as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model:
         PartialEq,
 {
-    if !relation.is_loaded() {
-        return Ok(());
-    }
-    let (name, foreign_key) = (relation.relation_name, relation.foreign_key);
-    let children = relation.as_mut().into_iter().collect();
-    sync_owned_children(owner, name, children, foreign_key, owner_value).await
+    let foreign_key = relation.foreign_key;
+    sync_owned_children(
+        owner,
+        &mut relation.state,
+        |child| vec![&mut **child],
+        foreign_key,
+        owner_value,
+    )
+    .await
 }
 
 /// Sync a loaded `has_many_through` relation of an aggregate: save every
@@ -602,18 +531,19 @@ where
     }
 
     let entity_manager = owner.entity_manager;
-    for key in entity_manager.deletions::<R>(owner.table, owner.key, name, &updated_keys) {
+    let baseline = relation.loaded_keys().map(<[String]>::to_vec);
+    for key in removed_keys(baseline.as_deref(), &updated_keys) {
         if let Some(deleted) = entity_manager.get_by_entity_manager_key::<R>(&key)
             && let Some(value) = deleted.field_json_value(related_key)?
         {
             relation.detach(value).await?;
         }
     }
-    for key in entity_manager.additions::<R>(owner.table, owner.key, name, &updated_keys) {
+    for key in added_keys(baseline.as_deref(), &updated_keys) {
         if let Some(value) = related_values.get(&key) {
             relation.attach(value.clone()).await?;
         }
     }
-    entity_manager.snapshot::<R>(owner.table, owner.key, name, &updated_keys);
+    relation.set_loaded_keys(updated_keys);
     Ok(())
 }

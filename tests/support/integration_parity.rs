@@ -1412,6 +1412,115 @@ async fn insert_all_assigns_distinct_ids() {
     assert_eq!(TestUser::count().await.expect("Count failed"), 3);
 }
 
+/// A key the model holds is written, and the database's own numbering goes on
+/// past it: PostgreSQL's sequence does not move by itself, as MySQL's
+/// `AUTO_INCREMENT` and SQLite's rowid do. A batch where every model holds its
+/// key is one statement, matched back by key, and one mixing held keys with
+/// keys still at `0` numbers only those.
+#[tokio::test]
+async fn explicit_keys_are_written_and_numbering_continues_past_them() {
+    use tideorm::logging::{LogLevel, QueryLogger};
+
+    if !setup().await {
+        return;
+    }
+
+    let kept = TestUser::create(TestUser {
+        id: 5,
+        ..user("kept@example.com", "Kept", 30, true)
+    })
+    .await
+    .expect("create with a key failed");
+    assert_eq!(kept.id, 5);
+    assert!(TestUser::find(5).await.unwrap().is_some());
+    for n in 0..6 {
+        let numbered = user(&format!("numbered{n}@example.com"), "Numbered", 30, true)
+            .save()
+            .await
+            .expect("a numbered row collided with a key a model held");
+        assert_ne!(numbered.id, 5);
+    }
+
+    QueryLogger::clear_history();
+    QueryLogger::global()
+        .set_level(LogLevel::Error)
+        .set_history_limit(100)
+        .enable();
+    let batch = TestUser::insert_all(
+        [52, 50, 51]
+            .map(|id| TestUser {
+                id,
+                ..user(&format!("b{id}@example.com"), "Batch", 30, true)
+            })
+            .into(),
+    )
+    .await;
+    let inserts = QueryLogger::history()
+        .iter()
+        .filter(|entry| entry.sql.starts_with("INSERT"))
+        .count();
+    QueryLogger::clear_history();
+    QueryLogger::disable();
+    let batch = batch.expect("insert_all with keys failed");
+    assert_eq!(
+        batch
+            .iter()
+            .map(|user| (user.id, user.email.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (52, "b52@example.com"),
+            (50, "b50@example.com"),
+            (51, "b51@example.com")
+        ]
+    );
+    assert_eq!(inserts, 1, "a batch holding its keys is one statement");
+
+    let next = user("after@example.com", "After", 30, true)
+        .save()
+        .await
+        .expect("a numbered row collided with a key a batch held");
+    assert!(next.id > 52, "{}", next.id);
+
+    let upserted = TestUser::insert_or_update(
+        TestUser {
+            id: next.id + 1,
+            ..user("upserted@example.com", "Upserted", 30, true)
+        },
+        vec!["id"],
+    )
+    .await
+    .expect("an upsert with a key failed");
+    let last = user("last@example.com", "Last", 30, true)
+        .save()
+        .await
+        .expect("a numbered row collided with a key an upsert held");
+    assert!(last.id > upserted.id, "{} {}", last.id, upserted.id);
+
+    let mixed = TestUser::insert_all(vec![
+        user("mixed_a@example.com", "Numbered", 30, true),
+        TestUser {
+            id: 2000,
+            ..user("mixed_given@example.com", "Given", 30, true)
+        },
+        user("mixed_b@example.com", "Numbered", 30, true),
+    ])
+    .await
+    .expect("a mixed batch failed");
+    let ids: Vec<i64> = mixed.iter().map(|row| row.id).collect();
+    assert_eq!(ids[1], 2000);
+    assert!(ids[0] > 0 && ids[2] > 0 && ids[0] != ids[2], "{ids:?}");
+    for row in &mixed {
+        let stored = TestUser::find(row.id)
+            .await
+            .unwrap()
+            .expect("row not stored");
+        assert_eq!(stored.email, row.email);
+    }
+
+    // A copy of a loaded row keeps its key, which the table already holds.
+    assert!(TestUser::create(kept).await.is_err());
+}
+
 #[tokio::test]
 async fn upsert_insert_or_update_and_on_conflict() {
     if !setup().await {
@@ -5167,6 +5276,102 @@ async fn a_transaction_a_failed_statement_aborted_does_not_report_a_commit() {
     }
 }
 
+/// Wherever a nested transaction is cancelled, the enclosing one ends
+/// consistently: with the nested work (it had committed), with neither (it
+/// was starting, mid-statement or committing, which aborts the enclosing
+/// transaction rather than letting it run on in autocommit mode), or with the
+/// nested work alone rolled back. Never a panic, and never part of the nested
+/// work.
+#[tokio::test]
+async fn a_nested_transaction_cancelled_anywhere_leaves_a_consistent_outcome() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    if !backend::connect().await {
+        return;
+    }
+    let db = Database::builder()
+        .url(backend::database_url())
+        .max_connections(1)
+        .build()
+        .await
+        .unwrap();
+    let table = format!("cancelled_nested_{}", uuid::Uuid::new_v4().simple());
+    db.exec_raw(&format!("CREATE TABLE {table}(id BIGINT PRIMARY KEY)"))
+        .await
+        .unwrap();
+    // The first poll never finishes the nested transaction, which yields
+    // between its statements, so at least that attempt cancels it.
+    let mut cancelled = 0;
+    for polls in 1..=12 {
+        db.exec_raw(&format!("DELETE FROM {table}")).await.unwrap();
+        let (handle, name) = (db.clone(), table.clone());
+        let result: tideorm::Result<bool> = db
+            .transaction(move |_| {
+                Box::pin(async move {
+                    handle
+                        .exec_raw(&format!("INSERT INTO {name} VALUES (1)"))
+                        .await?;
+                    let (inner_handle, inner_name) = (handle.clone(), name.clone());
+                    let mut inner = Box::pin(handle.transaction(move |_| {
+                        Box::pin(async move {
+                            inner_handle
+                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (2)"))
+                                .await?;
+                            tokio::task::yield_now().await;
+                            inner_handle
+                                .exec_raw(&format!("INSERT INTO {inner_name} VALUES (4)"))
+                                .await?;
+                            Ok(())
+                        })
+                    }));
+                    let mut finished = false;
+                    for _ in 0..polls {
+                        let polled =
+                            std::future::poll_fn(|cx| Poll::Ready(inner.as_mut().poll(cx))).await;
+                        if let Poll::Ready(outcome) = polled {
+                            outcome?;
+                            finished = true;
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    drop(inner);
+                    handle
+                        .exec_raw(&format!("INSERT INTO {name} VALUES (3)"))
+                        .await?;
+                    Ok(finished)
+                })
+            })
+            .await;
+        let rows: Vec<i64> = db
+            .query_raw_json(&format!("SELECT id FROM {table} ORDER BY id"))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        match result {
+            Ok(true) => assert_eq!(rows, [1, 2, 3, 4], "after {polls} polls"),
+            Ok(false) => {
+                cancelled += 1;
+                assert_eq!(rows, [1, 3], "after {polls} polls");
+            }
+            Err(error) => {
+                cancelled += 1;
+                let error = error.to_string();
+                assert!(
+                    error.contains("aborted") || error.contains("nested transaction"),
+                    "after {polls} polls: {error}"
+                );
+                assert!(rows.is_empty(), "after {polls} polls: {rows:?}");
+            }
+        }
+    }
+    assert!(cancelled > 0, "no attempt cancelled the nested transaction");
+    db.exec_raw(&format!("DROP TABLE {table}")).await.unwrap();
+}
+
 struct NamedSeed(&'static str);
 
 #[tideorm::async_trait::async_trait]
@@ -5600,6 +5805,62 @@ async fn a_self_reference_keys_by_a_primary_key_not_named_id() {
     assert_eq!(parent.map(|parent| parent.name).as_deref(), Some("root"));
     let tree = root.children.load_tree(3).await.expect("load_tree failed");
     assert_eq!(tree.len(), 1);
+}
+
+#[tideorm::model(table = "tenant_tree_nodes")]
+pub struct TenantTreeNode {
+    #[tideorm(primary_key)]
+    pub id: i64,
+    #[tideorm(primary_key)]
+    pub tenant: i64,
+    pub code: String,
+    pub parent_code: Option<String>,
+    #[tideorm(foreign_key = "parent_code", local_key = "code")]
+    pub children: SelfRefMany<TenantTreeNode>,
+}
+
+/// `load_tree` matches the walked rows back by the whole primary key; joining
+/// on its first column alone also returned another tenant's row with the same id.
+#[tokio::test]
+async fn a_tree_walk_matches_rows_by_the_whole_composite_key() {
+    if !setup().await {
+        return;
+    }
+    fresh_table("tenant_tree_nodes", |t| {
+        t.big_integer("id").not_null();
+        t.big_integer("tenant").not_null();
+        t.string("code").not_null();
+        t.string("parent_code");
+        t.primary_key(&["id", "tenant"]);
+    })
+    .await;
+    for (id, tenant, code, parent) in [
+        (1, 1, "root", None),
+        (2, 1, "child", Some("root")),
+        (3, 1, "grandchild", Some("child")),
+        (2, 2, "other_child", None),
+        (3, 2, "other_grandchild", None),
+    ] {
+        TenantTreeNode::create(TenantTreeNode {
+            id,
+            tenant,
+            code: code.into(),
+            parent_code: parent.map(str::to_string),
+            ..Default::default()
+        })
+        .await
+        .expect("create failed");
+    }
+    let root = TenantTreeNode::query()
+        .where_eq("code", "root")
+        .first()
+        .await
+        .expect("root query failed")
+        .expect("root row missing");
+
+    let tree = root.children.load_tree(3).await.expect("load_tree failed");
+    let codes: Vec<_> = tree.iter().map(|node| node.code.as_str()).collect();
+    assert_eq!(codes, ["child", "grandchild"]);
 }
 
 #[tideorm::model(table = "renamed_link_labels")]
@@ -6568,4 +6829,301 @@ async fn an_upsert_writes_only_the_row_its_conflict_columns_name() {
         "a@x alice Z"
     );
     assert_eq!(rows().await, ["a@x alice Z", "b@x bob B"]);
+}
+
+/// Insert products named by the given JSON text for `metadata`, or SQL NULL.
+async fn seed_documents(documents: &[(&str, Option<&str>)]) {
+    for (name, document) in documents {
+        let metadata = match document {
+            Some(text) => format!("'{text}'"),
+            None => "NULL".to_string(),
+        };
+        Database::execute(&format!(
+            "INSERT INTO test_products (name, category, price, metadata) \
+             VALUES ('{name}', 'json', 1, {metadata})"
+        ))
+        .await
+        .expect("failed to seed a document");
+    }
+}
+
+/// The names of the products `query` reads, sorted.
+async fn product_names(query: QueryBuilder<TestProduct>) -> Vec<String> {
+    let mut names: Vec<String> = query
+        .get()
+        .await
+        .expect("the query failed")
+        .into_iter()
+        .map(|product| product.name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// On a JSON column a JSON `null` value is the `null` document and `None` is
+/// SQL NULL, so a delete by the one leaves the other.
+#[tokio::test]
+async fn json_null_and_sql_null_are_told_apart() {
+    if !setup().await {
+        return;
+    }
+    seed_documents(&[
+        ("sql_null", None),
+        ("json_null", Some("null")),
+        ("document", Some(r#"{"a": 1}"#)),
+    ])
+    .await;
+
+    let null = serde_json::Value::Null;
+    assert_eq!(
+        product_names(TestProduct::query().where_eq("metadata", null.clone())).await,
+        ["json_null"]
+    );
+    assert_eq!(
+        product_names(TestProduct::query().where_eq("metadata", Some(null.clone()))).await,
+        ["json_null"]
+    );
+    assert_eq!(
+        product_names(TestProduct::query().where_eq("metadata", None::<serde_json::Value>)).await,
+        ["sql_null"]
+    );
+    assert_eq!(
+        product_names(TestProduct::query().where_not("metadata", null.clone())).await,
+        ["document"]
+    );
+
+    // Members read the same way.
+    let document = serde_json::json!({"a": 1});
+    assert_eq!(
+        product_names(
+            TestProduct::query().where_in("metadata", vec![null.clone(), document.clone()])
+        )
+        .await,
+        ["document", "json_null"]
+    );
+    assert_eq!(
+        product_names(TestProduct::query().where_in("metadata", vec![None, Some(null.clone())]))
+            .await,
+        ["json_null", "sql_null"]
+    );
+    assert_eq!(
+        product_names(
+            TestProduct::query().where_in("metadata", vec![None, Some(document.clone())])
+        )
+        .await,
+        ["document", "sql_null"]
+    );
+    assert_eq!(
+        product_names(TestProduct::query().where_not_in("metadata", vec![null.clone()])).await,
+        ["document"]
+    );
+
+    // Leaving the JSON `null` document out is a filter, on which a mutation
+    // may run, where leaving SQL NULL out of a column is none.
+    let deleted = TestProduct::query()
+        .where_not("metadata", null.clone())
+        .delete()
+        .await
+        .expect("the delete failed");
+    assert_eq!(deleted, 1);
+    let deleted = TestProduct::query()
+        .where_not_in("metadata", vec![null.clone()])
+        .delete()
+        .await
+        .expect("the delete failed");
+    assert_eq!(deleted, 0);
+    assert!(
+        TestProduct::query()
+            .where_not("name", None::<String>)
+            .delete()
+            .await
+            .is_err()
+    );
+    let deleted = TestProduct::query()
+        .where_eq("metadata", null)
+        .delete()
+        .await
+        .expect("the delete failed");
+    assert_eq!(deleted, 1);
+    assert_eq!(product_names(TestProduct::query()).await, ["sql_null"]);
+}
+
+/// JSON key and path existence read paths strictly on every backend: a key
+/// exists only in an object, a step never looks inside an array it does not
+/// index nor indexes a non-array, and the documented `a.b` form starts at
+/// the root.
+#[tokio::test]
+async fn json_existence_agrees_across_backends() {
+    if !setup().await {
+        return;
+    }
+    seed_documents(&[
+        ("object", Some(r#"{"a": {"b": [10, {"c": null}]}, "k": 1}"#)),
+        ("array", Some(r#"[{"a": 1}, "k"]"#)),
+        ("scalar_a", Some(r#"{"a": 5}"#)),
+        ("string_k", Some(r#""k""#)),
+        ("sql_null", None),
+    ])
+    .await;
+    let query = TestProduct::query;
+
+    assert_eq!(
+        product_names(query().where_json_key_exists("metadata", "k")).await,
+        ["object"]
+    );
+    assert_eq!(
+        product_names(query().where_json_key_not_exists("metadata", "k")).await,
+        ["array", "scalar_a", "string_k"]
+    );
+    assert_eq!(
+        product_names(query().where_json_path_exists("metadata", "a.b[1].c")).await,
+        ["object"]
+    );
+    assert_eq!(
+        product_names(query().where_json_path_exists("metadata", "$.a")).await,
+        ["object", "scalar_a"]
+    );
+    assert_eq!(
+        product_names(query().where_json_path_not_exists("metadata", "a")).await,
+        ["array", "string_k"]
+    );
+    assert!(
+        product_names(query().where_json_path_exists("metadata", "$.a[0]"))
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        product_names(query().where_json_path_exists("metadata", "[1]")).await,
+        ["array"]
+    );
+
+    // Steps no other backend can express: an error rather than no rows.
+    let wildcard = query()
+        .where_json_path_exists("metadata", "$.a[*]")
+        .get()
+        .await;
+    assert_eq!(
+        wildcard.is_err(),
+        backend::DATABASE_TYPE != DatabaseType::Postgres,
+        "{wildcard:?}"
+    );
+}
+
+/// A limited update started from an ordered query writes the first rows in
+/// that order, as reading them would: claiming the top-priority job claims it.
+#[tokio::test]
+async fn a_limited_update_follows_the_query_order() {
+    if !setup().await {
+        return;
+    }
+    for (name, price) in [("low", 1), ("top", 9), ("mid", 5)] {
+        TestProduct {
+            id: 0,
+            name: name.to_string(),
+            category: "queued".to_string(),
+            price,
+            metadata: None,
+        }
+        .save()
+        .await
+        .expect("failed to save a job");
+    }
+    let claimed = TestProduct::query()
+        .where_eq("category", "queued")
+        .order_desc("price")
+        .update_all()
+        .set("category", "claimed")
+        .limit(1)
+        .execute()
+        .await
+        .expect("the claim failed");
+    assert_eq!(claimed, 1);
+    assert_eq!(
+        product_names(TestProduct::query().where_eq("category", "claimed")).await,
+        ["top"]
+    );
+    TestProduct::query()
+        .where_eq("category", "queued")
+        .order_asc("price")
+        .update_all()
+        .set("category", "claimed")
+        .limit(1)
+        .execute()
+        .await
+        .expect("the second claim failed");
+    assert_eq!(
+        product_names(TestProduct::query().where_eq("category", "claimed")).await,
+        ["low", "top"]
+    );
+}
+
+/// The metadata document of the product called `name`.
+async fn product_document(name: &str) -> Option<serde_json::Value> {
+    TestProduct::query()
+        .where_eq("name", name)
+        .first()
+        .await
+        .expect("the read failed")
+        .expect("no such product")
+        .metadata
+}
+
+/// `json_set` writes the same document on every backend: a path whose parent
+/// is missing changes nothing, an index past the end appends, and an existing
+/// member or element is replaced. `array_append` wraps a JSON document that
+/// is no array (PostgreSQL appends to native arrays only).
+#[tokio::test]
+async fn json_mutations_write_the_same_document_everywhere() {
+    if !setup().await {
+        return;
+    }
+    seed_documents(&[
+        ("doc", Some(r#"{"a": {"list": [1, 2]}, "k": 1}"#)),
+        ("object", Some(r#"{"x": 1}"#)),
+        ("scalar", Some("5")),
+    ])
+    .await;
+    let set = |path: &'static str, value: serde_json::Value| async move {
+        TestProduct::query()
+            .where_eq("name", "doc")
+            .update_all()
+            .json_set("metadata", path, value)
+            .execute()
+            .await
+            .expect("json_set failed");
+    };
+    set("$.missing.child", serde_json::json!(1)).await;
+    // An index step under a missing member, which SQLite created.
+    set("$.tags[0]", serde_json::json!("x")).await;
+    set("$.a.list[5]", serde_json::json!(3)).await;
+    set("$.a.list[0]", serde_json::json!(0)).await;
+    set("$.k", serde_json::json!({"replaced": true})).await;
+    set("$.a.new", serde_json::json!("member")).await;
+    assert_eq!(
+        product_document("doc").await,
+        Some(serde_json::json!({
+            "a": {"list": [0, 2, 3], "new": "member"},
+            "k": {"replaced": true}
+        }))
+    );
+
+    if backend::DATABASE_TYPE != DatabaseType::Postgres {
+        for name in ["object", "scalar"] {
+            TestProduct::query()
+                .where_eq("name", name)
+                .update_all()
+                .array_append("metadata", serde_json::json!("tail"))
+                .execute()
+                .await
+                .expect("array_append failed");
+        }
+        assert_eq!(
+            product_document("object").await,
+            Some(serde_json::json!([{"x": 1}, "tail"]))
+        );
+        assert_eq!(
+            product_document("scalar").await,
+            Some(serde_json::json!([5, "tail"]))
+        );
+    }
 }

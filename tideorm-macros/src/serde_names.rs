@@ -120,7 +120,10 @@ pub(crate) fn round_trips<'a>(
     fields: impl IntoIterator<Item = &'a [Attribute]>,
 ) -> bool {
     const CONTAINER_CONVERSIONS: [&str; 4] = ["from", "try_from", "into", "remote"];
-    const LOSSY_FIELD_ITEMS: [&str; 8] = [
+    const LOSSY_FIELD_ITEMS: [&str; 9] = [
+        // Flattened keys can collide with other fields, and TideORM's
+        // generated half of a mixed serde pair does not unflatten them.
+        "flatten",
         "skip",
         "skip_serializing",
         "skip_deserializing",
@@ -152,6 +155,22 @@ pub(crate) fn round_trips<'a>(
         });
     }
     lossless
+}
+
+/// Whether serde emits this field into its parent's object. Skipped fields
+/// emit nothing and therefore need no flattened-payload guard.
+pub(crate) fn is_flattened(attrs: &[Attribute]) -> bool {
+    let mut flattened = false;
+    for_each_serde_item(attrs, |meta| {
+        flattened |= meta.path.is_ident("flatten");
+        skip_item(meta)
+    });
+    flattened && !is_skipped(attrs)
+}
+
+/// Whether serde never writes this field (`skip` or `skip_serializing`).
+pub(crate) fn is_skipped(attrs: &[Attribute]) -> bool {
+    field_key(attrs, "", None).is_none()
 }
 
 /// Whether a model's own serde attributes rename a key. With `split_only`,

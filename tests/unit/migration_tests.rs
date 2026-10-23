@@ -998,3 +998,123 @@ fn a_model_names_its_indexes_as_a_migration_does() {
 
     assert_eq!(migration_names, model_names);
 }
+
+/// Every spelling SQLite reads as turning foreign keys off is caught, and
+/// none that leaves them on or never reaches a pragma is.
+#[test]
+fn foreign_keys_off_is_recognized_in_every_spelling() {
+    use super::sqlite_foreign_keys::disables_foreign_keys;
+
+    for sql in [
+        "PRAGMA foreign_keys(OFF)",
+        "\u{feff}PRAGMA foreign_keys = OFF",
+        "PRAGMA main.foreign_keys = false",
+        "-- table rebuild\nPRAGMA foreign_keys /* disable */ = 0; -- end",
+        "PRAGMA [foreign_keys] = 'no'",
+        "PRAGMA \"main\".\"foreign_keys\"('OFF')",
+        "PRAGMA foreign_keys = +0",
+        "PRAGMA foreign_keys = 256",
+        "PRAGMA foreign_keys = 2147483648",
+        "PRAGMA foreign_keys = 0x100",
+        "PRAGMA foreign_keys = '+1'",
+        "/* outer /* inner */ PRAGMA foreign_keys=OFF; /* end */",
+        "SELECT $x$; PRAGMA foreign_keys=OFF; SELECT $x$;",
+        "PRAGMA foreign_keys = 'unrecognized'",
+        "PRAGMA foreign_keys = ON; PRAGMA foreign_keys = OFF;",
+        "pragma foreign_keys=0;",
+        "PRAGMA [foreign_keys] = `off`",
+        "/* rebuild */ PRAGMA -- off\n foreign_keys /* now */ = OFF",
+        "PRAGMA foreign_keys = 4294967297",
+        "PRAGMA foreign_keys = -1",
+        "PRAGMA foreign_keys = maybe",
+        "CREATE TABLE t (id INTEGER); PRAGMA foreign_keys = OFF; DROP TABLE t",
+    ] {
+        assert!(disables_foreign_keys(sql), "{sql}");
+    }
+    for sql in [
+        "SELECT $name(;PRAGMA/**/foreign_keys=OFF;)",
+        "SELECT :name(;PRAGMA/**/foreign_keys=OFF;)",
+        "SELECT #name(;PRAGMA/**/foreign_keys=OFF;)",
+        "PRAGMA foreign_keys",
+        "PRAGMA main.foreign_keys(ON)",
+        "PRAGMA foreign_keys = 2",
+        "PRAGMA foreign_keys = 257",
+        "PRAGMA foreign_keys = +1",
+        "PRAGMA foreign_keys = 1.0",
+        "PRAGMA foreign_keys = 0x101",
+        "SELECT 'PRAGMA foreign_keys=OFF;'; -- PRAGMA foreign_keys=OFF",
+        "PRAGMA foreign_keys = 0x1",
+        "PRAGMA foreign_keys('yes')",
+        "PRAGMA foreign_key_check",
+        "PRAGMA defer_foreign_keys = OFF",
+        "EXPLAIN PRAGMA foreign_keys = OFF",
+        "-- PRAGMA foreign_keys = OFF\nSELECT 1",
+        "/* PRAGMA foreign_keys = OFF; */ SELECT 1",
+        "INSERT INTO notes (body) VALUES ('it''s; PRAGMA foreign_keys = OFF')",
+        "SELECT :ns::name(;PRAGMA/**/foreign_keys=OFF;)",
+    ] {
+        assert!(!disables_foreign_keys(sql), "{sql}");
+    }
+}
+
+/// The hidden wrappers the CLI reads index DDL and the foreign key guard
+/// through render what the migrator runs.
+#[test]
+fn cli_wrappers_render_what_the_migrator_runs() {
+    let mut builder = TableBuilder::new("posts", DatabaseType::MySQL);
+    builder.id();
+    builder.integer("user_id");
+    builder.index(&["user_id"]);
+
+    let indexes: Vec<String> = builder
+        .build_indexes(false)
+        .into_iter()
+        .map(|(_, sql)| sql)
+        .collect();
+    assert_eq!(indexes.len(), 1);
+    assert_eq!(builder.__index_sql(false), indexes);
+    assert!(crate::migration::__disables_foreign_keys(
+        "PRAGMA foreign_keys = OFF"
+    ));
+    assert!(!crate::migration::__disables_foreign_keys(
+        "PRAGMA foreign_keys = ON"
+    ));
+}
+
+/// `DROP INDEX` names the table on the MySQL family and the index elsewhere,
+/// each in the schema given apart; `IF EXISTS` only where it exists.
+#[test]
+fn drop_index_names_what_each_backend_drops() {
+    for (db_type, schema, if_exists, expected) in [
+        (DatabaseType::Postgres, None, false, r#"DROP INDEX "idx""#),
+        (
+            DatabaseType::Postgres,
+            Some("app"),
+            true,
+            r#"DROP INDEX IF EXISTS "app"."idx""#,
+        ),
+        (
+            DatabaseType::SQLite,
+            None,
+            true,
+            r#"DROP INDEX IF EXISTS "idx""#,
+        ),
+        (
+            DatabaseType::MySQL,
+            None,
+            true,
+            "DROP INDEX `idx` ON `users`",
+        ),
+        (
+            DatabaseType::MariaDB,
+            Some("app"),
+            false,
+            "DROP INDEX `idx` ON `app`.`users`",
+        ),
+    ] {
+        assert_eq!(
+            crate::migration::__drop_index_sql(db_type, schema, "users", "idx", if_exists),
+            expected
+        );
+    }
+}

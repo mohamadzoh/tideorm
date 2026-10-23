@@ -54,6 +54,10 @@ impl<M: Model> QueryBuilder<M> {
     /// make, from another process or straight through the driver, are only
     /// seen once the TTL expires.
     ///
+    /// Entries are kept as JSON, so rows it cannot hold exactly, with a NaN or
+    /// infinite float or a JSON `null` in an `Option` field, are not cached
+    /// and are read from the database each time.
+    ///
     /// ```
     /// use tideorm::prelude::*;
     /// # #[tideorm::model(table = "users", soft_delete)]
@@ -66,6 +70,15 @@ impl<M: Model> QueryBuilder<M> {
         self
     }
 
+    /// [`cache()`](Self::cache), with `key` as part of the entry's identity.
+    ///
+    /// The key adds to the query's shape rather than replacing it: reads
+    /// share an entry only when both their keys and their queries match, so
+    /// `first()`, `find(id)`, each page of `paginate()` and each batch of
+    /// `chunk()` still get entries of their own. Use it when something the
+    /// SQL does not show decides the rows, such as a session setting or a
+    /// row-level security role, so reads under different values never share
+    /// one.
     ///
     /// ```
     /// use tideorm::prelude::*;
@@ -227,12 +240,12 @@ impl<M: Model> QueryBuilder<M> {
     /// Run a mutation and drop every cached result it may have made stale.
     async fn run_mutation(&self, sql: &str, params: Vec<Value>) -> Result<u64> {
         let db = self.current_db()?;
-        let result = self
-            .logged(sql, db.__execute_with_params(sql, params), |rows| *rows)
-            .await;
-        // SQLite FAIL triggers can preserve writes even when the statement errors.
-        Self::invalidate_model_state(result.as_ref().copied().unwrap_or(1));
-        result
+        Self::invalidating_model_state(
+            &db,
+            self.logged(sql, db.__execute_with_params(sql, params), |rows| *rows),
+            |rows| *rows,
+        )
+        .await
     }
 
     /// Mix the identity of the connection this query runs on into the cache key.
@@ -276,7 +289,7 @@ impl<M: Model> QueryBuilder<M> {
 
         matches!(
             database.__get_connection(),
-            Ok(crate::database::ConnectionRef::Transaction(_))
+            Ok(crate::database::ConnectionRef::Transaction(..))
         )
     }
 
@@ -348,15 +361,11 @@ impl<M: Model> QueryBuilder<M> {
         M::table_name().hash(&mut hasher);
         self.hash_database_identity(&mut hasher);
 
-        if let Some(key) = &self.clauses.cache_key {
-            // A caller-supplied key is only unique within its own model and
-            // connection, so namespace it exactly like the structural key instead
-            // of using it as a bare global key.
-            "tideorm::explicit-cache-key".hash(&mut hasher);
-            key.hash(&mut hasher);
-            let hash = hasher.finish();
-            return crate::cache::QueryCache::global().generate_key(M::table_name(), hash);
-        }
+        // A caller-supplied key tells apart reads the query's shape alone would
+        // let share an entry; it never stands in for that shape, or `first()`,
+        // `find(id)`, each page of `paginate()` and a relation load on the
+        // builder would all be served one another's rows.
+        self.clauses.cache_key.hash(&mut hasher);
 
         for condition in &self.clauses.conditions {
             hash_where_condition(condition, &mut hasher);
@@ -452,7 +461,8 @@ impl<M: Model> QueryBuilder<M> {
             }
             // Taken before the read: a write that lands while it runs may
             // replace the rows it returns.
-            Some((key, cache.fill_point()))
+            let database = self.current_db()?.__get_connection()?.cache_scope();
+            Some((key, cache.fill_point_for_database(database)))
         } else {
             None
         };
@@ -603,7 +613,6 @@ impl<M: Model> QueryBuilder<M> {
         let order = self.chunk_order(primary_key)?;
         let mut remaining = self.clauses.limit_value;
         let mut base_query = self;
-        let explicit_cache_key = base_query.clauses.cache_key.clone();
         base_query.clauses.limit_value = None;
         base_query.clauses.offset_value = None;
         if base_query.clauses.order_by.is_empty() {
@@ -634,20 +643,6 @@ impl<M: Model> QueryBuilder<M> {
                     (crate::query::Order::Desc, true) => batch_query.where_lte(&cursor_column, key),
                 };
             }
-            if let Some(cache_key) = &explicit_cache_key {
-                let cursor_marker = match &cursor {
-                    Some((key, inclusive)) => format!(
-                        "{}{}",
-                        if *inclusive { "=" } else { "" },
-                        serde_json::to_string(key).map_err(Error::from)?
-                    ),
-                    None => "null".to_string(),
-                };
-                batch_query.clauses.cache_key = Some(format!(
-                    "{}::chunk(cursor={},limit={})",
-                    cache_key, cursor_marker, batch_limit
-                ));
-            }
 
             let mut batch = batch_query.get().await?;
             let Some(last) = batch.last() else {
@@ -670,18 +665,12 @@ impl<M: Model> QueryBuilder<M> {
                 if tail == batch.len() {
                     // Every row shares one key: read that key's whole run,
                     // which fails only when a batch cannot hold it.
-                    let mut run_query = base_query
+                    let run = base_query
                         .clone()
                         .where_eq(&cursor_column, last_key.clone())
-                        .limit(chunk_size.saturating_add(1));
-                    if let Some(cache_key) = &explicit_cache_key {
-                        run_query.clauses.cache_key = Some(format!(
-                            "{}::chunk(run={})",
-                            cache_key,
-                            serde_json::to_string(&last_key).map_err(Error::from)?
-                        ));
-                    }
-                    let run = run_query.get().await?;
+                        .limit(chunk_size.saturating_add(1))
+                        .get()
+                        .await?;
                     if run.len() as u64 > chunk_size {
                         return Err(Error::query(format!(
                             "chunk({}) found more rows with the key {} than a batch holds: the join repeats it, so pass a larger chunk size",
@@ -834,15 +823,43 @@ impl<M: Model> QueryBuilder<M> {
         )))
     }
 
-    /// Drop the cached reads and dirty-tracking snapshots a write to this
-    /// model's table has made stale.
-    pub(crate) fn invalidate_model_state(rows_affected: u64) {
-        // Cascades and triggers can write other tables, even when a trigger
-        // suppresses every directly affected row. clear() also records commit replay.
-        crate::QueryCache::global().clear();
-        if rows_affected > 0 {
-            crate::model::__invalidate_dirty_snapshots::<M>();
+    /// Run the write `future` to this model's table on `db`, then drop the
+    /// cached reads and dirty-tracking snapshots it made stale, recorded in
+    /// the transaction it ran in, which replays or restores them as it ends.
+    /// The snapshots stay when it reports, through `rows`, writing no row. A
+    /// write that fails or is dropped part way counts as one that wrote: a
+    /// SQLite `FAIL` trigger keeps its writes when the statement errors, and
+    /// the database may have applied a cancelled one.
+    pub(crate) async fn invalidating_model_state<T>(
+        db: &crate::database::Database,
+        future: impl std::future::Future<Output = Result<T>>,
+        rows: impl FnOnce(&T) -> u64,
+    ) -> Result<T> {
+        struct Snapshots<'a, M: Model> {
+            db: &'a crate::database::Database,
+            wrote: bool,
+            model: std::marker::PhantomData<M>,
         }
+
+        impl<M: Model> Drop for Snapshots<'_, M> {
+            fn drop(&mut self) {
+                if self.wrote {
+                    self.db
+                        .recording(crate::model::__invalidate_dirty_snapshots::<M>);
+                }
+            }
+        }
+
+        let mut snapshots = Snapshots::<M> {
+            db,
+            wrote: true,
+            model: std::marker::PhantomData,
+        };
+        // Every table in this database is invalidated: cascades and triggers can write other tables,
+        // even when a trigger suppresses every directly affected row.
+        let result = db.invalidating(future).await;
+        snapshots.wrote = result.as_ref().map_or(true, |value| rows(value) > 0);
+        result
     }
 
     /// Render `DELETE FROM <table> WHERE ..` for this query's filters.
@@ -1162,21 +1179,8 @@ fn normalize_table_name(token: &str) -> Option<String> {
             _ => return None,
         }
     }
-    if name.kind == Kind::Identifier {
-        let delimiter = name.text.chars().next_back()?;
-        let expected = if name.text.starts_with('[') {
-            ']'
-        } else {
-            name.text.chars().next()?
-        };
-        if name.text.len() < 2 || delimiter != expected {
-            return None;
-        }
-        let decoded = name.text[1..name.text.len() - 1]
-            .replace(&format!("{delimiter}{delimiter}"), &delimiter.to_string());
-        return (!decoded.is_empty()).then_some(decoded);
-    }
-    Some(name.text.to_string())
+    let decoded = name.unquoted()?;
+    (!decoded.is_empty()).then_some(decoded)
 }
 
 /// Pull table names out of rendered SQL: the identifier after each `JOIN`, and
@@ -1216,7 +1220,12 @@ fn collect_tables_from_sql(sql: &str, tables: &mut Vec<String>) {
         match token {
             "(" => {
                 depth += 1;
-                expect_table = false;
+                // A table factor may be a parenthesized join or comma list.
+                // Keep looking for its first table; SELECT/VALUES below still
+                // distinguish a derived query from such a group.
+                if expect_table {
+                    lists.push(depth);
+                }
             }
             ")" => {
                 depth = depth.saturating_sub(1);

@@ -76,8 +76,10 @@ pub struct HasManyThrough<Related: Model, Pivot: Model> {
     /// Name of the join table. Used directly in the join and in the pivot
     /// INSERT, so it must be a real table name, not an alias.
     pub pivot_table: &'static str,
-    /// Name of the model field this relation was declared on, used as the
-    /// entity manager's relation-snapshot key.
+    /// Name of the model field this relation was declared on, which the
+    /// entity manager names the relation by in its errors, and with
+    /// `owner_table` what tells it apart from another relation when a rebuilt
+    /// model takes over a previous copy's state.
     #[cfg(feature = "entity-manager")]
     pub relation_name: &'static str,
     /// Table of the model owning the relation.
@@ -477,10 +479,10 @@ async fn insert_pivot_pair<Pivot: Model>(
     let db_type = db.execution_backend();
     let (sql, params) =
         build_pivot_insert::<Pivot>(db_type, foreign_key, related_key, parent_pk, related_id);
-    let written = db.__execute_with_params(&sql, params).await;
     // A trigger can change other tables before failing or suppressing the insert.
-    crate::QueryCache::global().clear();
-    let written = written?;
+    let written = db
+        .invalidating(db.__execute_with_params(&sql, params))
+        .await?;
     let unconfirmed =
         written == 0 || matches!(db_type, DatabaseType::MySQL | DatabaseType::MariaDB);
     if unconfirmed

@@ -100,7 +100,6 @@ fn tags_relation(
 ) -> HasManyThrough<ManyToManyEntityManagerTag, ManyToManyEntityManagerPostTag> {
     HasManyThrough::new("post_id", "tag_id", "id", "id", PIVOT_TABLE)
         .with_metadata("tags", POST_TABLE)
-        .with_owner_key(post_id.to_string())
         .with_parent_pk(json!(post_id))
 }
 

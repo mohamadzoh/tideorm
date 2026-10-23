@@ -3,16 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{
-    EntityManager, EntityState, ManagedCheckpoint, ManagedOps, RowLink,
-    explain_flush_ordering_failure, flush_sort_key, order_self_references, plan_flush_order,
+    EntityManager, EntityState, ManagedOps, RowLink, explain_flush_ordering_failure,
+    flush_sort_key, order_self_references, plan_flush_order,
 };
 use crate::error::{DbFailure, DbFailureKind, Error};
-
-struct NoopFlushOrderCheckpoint;
-
-impl ManagedCheckpoint for NoopFlushOrderCheckpoint {
-    fn rollback(self: Box<Self>, _entity_manager: &EntityManager) {}
-}
 
 /// A managed entry that only describes a table and its declared relations.
 ///
@@ -74,10 +68,6 @@ impl ManagedOps for OrderingEntry {
 
     fn detach_from_context(&self, _entity_manager: &EntityManager) {}
 
-    fn checkpoint(self: Arc<Self>) -> Box<dyn ManagedCheckpoint> {
-        Box::new(NoopFlushOrderCheckpoint)
-    }
-
     fn table_name(&self) -> &'static str {
         self.table
     }
@@ -102,7 +92,7 @@ impl ManagedOps for OrderingEntry {
     }
 }
 
-/// Apply exactly the ordering `flush_in_scope_with_checkpoints` applies.
+/// Apply exactly the ordering `flush_in_scope` applies.
 fn flush_tables_in_order(entries: &[Arc<dyn ManagedOps>]) -> Vec<&'static str> {
     let order = plan_flush_order(entries);
     let mut sorted = entries.to_vec();
@@ -291,4 +281,48 @@ fn rows_in_a_reference_cycle_keep_registration_order() {
     ];
 
     assert_eq!(flush_rows_in_order(&entries), ["1", "2"]);
+}
+
+#[tideorm::model(table = "flush_merge_readings")]
+struct Reading {
+    #[tideorm(primary_key)]
+    id: i64,
+    value: f64,
+    note: String,
+}
+
+/// A merge copies values rather than their JSON, so a NaN or infinite float,
+/// which JSON writes as `null`, survives it either way, and its undo puts the
+/// value it replaced back.
+#[test]
+fn merging_keeps_and_restores_non_finite_floats() {
+    let reading = |value: f64, note: &str| Reading {
+        id: 1,
+        value,
+        note: note.to_string(),
+    };
+    let base = reading(1.0, "a");
+    let saved = reading(f64::NAN, "a");
+    // The holder edited the note while the stored row's value became NaN.
+    let holder = reading(1.0, "edited");
+    let mut target = holder.clone();
+    let changed = super::merge_fields(&mut target, &holder, &base, &saved).unwrap();
+    assert_eq!(changed, ["value"]);
+    assert!(target.value.is_nan());
+    assert_eq!(target.note, "edited");
+
+    super::FieldChanges {
+        fields: changed,
+        before: holder.clone(),
+        after: saved.clone(),
+    }
+    .undo(&mut target);
+    assert_eq!(target.value, 1.0);
+    assert_eq!(target.note, "edited");
+
+    // An infinite value set while the row was written stays over the stored one.
+    let edited = reading(f64::INFINITY, "a");
+    let mut target = saved.clone();
+    super::merge_fields(&mut target, &edited, &base, &saved).unwrap();
+    assert_eq!(target.value, f64::INFINITY);
 }

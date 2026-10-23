@@ -1,4 +1,4 @@
-use super::sql_lexer::{EscapeMode, QuotedRun, quoted_end};
+use super::sql_lexer::{self, EscapeMode, QuotedRun, quoted_end};
 use crate::config::DatabaseType;
 
 #[cfg(feature = "fulltext")]
@@ -68,6 +68,12 @@ fn find_forbidden_raw_sql_token(sql: &str) -> Option<&'static str> {
                     return Some("backslash-escaped quotes inside quoted identifiers");
                 }
             },
+            // Both quote a `'` the scan would read as a literal's quote, so
+            // they would hide a comment from it; the backends disagree on them.
+            '$' if starts_dollar_quote(&chars, index) => return Some("dollar-quoted strings"),
+            '[' if bracket_holds_quote(&chars, index) => {
+                return Some("quotes inside square brackets");
+            }
             ';' => return Some("statement separators"),
             '\0' => return Some("NUL bytes"),
             '#' => return Some("SQL comments"),
@@ -79,6 +85,25 @@ fn find_forbidden_raw_sql_token(sql: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// Whether the `$` at `index` opens a PostgreSQL dollar-quoted string, `$$` or
+/// `$tag$`: one starting a token, since `$` inside a MySQL identifier
+/// (`a$b`) and a placeholder (`$1`) open none.
+fn starts_dollar_quote(chars: &[char], index: usize) -> bool {
+    let starts_token = index
+        .checked_sub(1)
+        .is_none_or(|previous| !sql_lexer::identifier_char(chars[previous]));
+    starts_token && sql_lexer::dollar_tag_len(&chars[index..].iter().collect::<String>()).is_some()
+}
+
+/// Whether the `[` at `index` and the next `]` hold a quote: SQLite reads the
+/// brackets as a quoted identifier, in which a quote is an ordinary character.
+fn bracket_holds_quote(chars: &[char], index: usize) -> bool {
+    chars[index + 1..]
+        .iter()
+        .take_while(|ch| **ch != ']')
+        .any(|ch| matches!(ch, '\'' | '"' | '`'))
 }
 
 pub(crate) fn validate_raw_sql_fragment(kind: &str, sql: &str) -> std::result::Result<(), String> {
@@ -452,7 +477,7 @@ pub(crate) fn validate_identifier_reference(
 ) -> std::result::Result<(), String> {
     let parts: Vec<&str> = value.split('.').collect();
     if !parts.is_empty()
-        && parts.len() <= 2
+        && parts.len() <= 3
         && parts
             .iter()
             .all(|part| !part.is_empty() && is_safe_identifier_segment(part))
@@ -461,7 +486,7 @@ pub(crate) fn validate_identifier_reference(
     }
 
     Err(format!(
-        "invalid {} '{}': expected column or table.column using only ASCII letters, numbers, and underscores",
+        "invalid {} '{}': expected column, table.column or schema.table.column using only ASCII letters, numbers, and underscores",
         kind, value
     ))
 }

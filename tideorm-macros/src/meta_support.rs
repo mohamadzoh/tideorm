@@ -104,7 +104,22 @@ pub(crate) fn has_timestamp_pair(fields: &[ModelField]) -> bool {
         .all(|name| find_db_field(fields, name).is_some())
 }
 
-/// `Utc::now()` shaped to fit `ty`, or `None` when `ty` is not a chrono timestamp.
+/// The variable holding the one clock reading a generated write stamps its
+/// timestamps with, bound by [`clock_binding`]: `created_at` and `updated_at`
+/// of one insert hold the same instant.
+fn clock_ident() -> syn::Ident {
+    quote::format_ident!("__tideorm_now")
+}
+
+/// `let __tideorm_now = Utc::now();`, for a generated write that stamps a
+/// timestamp.
+pub(crate) fn clock_binding() -> TokenStream2 {
+    let clock = clock_ident();
+    quote!(let #clock = ::tideorm::chrono::Utc::now();)
+}
+
+/// The write's clock reading shaped to fit `ty`, or `None` when `ty` is not a
+/// chrono timestamp.
 ///
 /// A `NaiveDateTime` gets the current UTC time without its zone, which is what
 /// `timestamps_naive()` columns hold. An `Option<..>` column needs `Some(..)`, a
@@ -115,10 +130,11 @@ pub(crate) fn has_timestamp_pair(fields: &[ModelField]) -> bool {
 fn timestamp_now_value(ty: &Type) -> Option<TokenStream2> {
     let inner = option_inner_type(ty);
     let base = inner.unwrap_or(ty);
+    let clock = clock_ident();
     let now = if is_utc_datetime_type(base) {
-        quote!(::tideorm::chrono::Utc::now())
+        quote!(#clock)
     } else if is_naive_datetime_type(base) {
-        quote!(::tideorm::chrono::Utc::now().naive_utc())
+        quote!(#clock.naive_utc())
     } else {
         return None;
     };

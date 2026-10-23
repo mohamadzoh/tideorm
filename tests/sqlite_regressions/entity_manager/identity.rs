@@ -4,6 +4,40 @@ use crate::fixtures::{Number, User, global_memory_database, users_and_posts};
 use tideorm::prelude::*;
 
 #[tokio::test]
+async fn clear_survives_outer_rollback_even_after_refilling_the_map() {
+    use std::sync::Arc;
+    use tideorm::entity_manager::EntityManager;
+    for refill in [false, true] {
+        let db = crate::fixtures::memory_database(
+            "CREATE TABLE audit_numbers(id INTEGER PRIMARY KEY,value INTEGER); \
+             INSERT INTO audit_numbers VALUES(1,10)",
+        )
+        .await;
+        let manager = EntityManager::new(Arc::new(db.clone()));
+        manager.find::<Number>(1).await.unwrap().unwrap();
+        let m = manager.clone();
+        let result: tideorm::Result<()> = db
+            .transaction(move |_| {
+                Box::pin(async move {
+                    m.save(&Number { id: 1, value: 20 }).await?;
+                    m.clear();
+                    if refill {
+                        m.register(Number { id: 1, value: 30 }).await;
+                    }
+                    Err(tideorm::Error::query("rollback outer"))
+                })
+            })
+            .await;
+        assert!(result.is_err());
+        // A read registered in the rolled-back transaction is evicted too.
+        db.exec_raw("UPDATE audit_numbers SET value=40")
+            .await
+            .unwrap();
+        assert_eq!(manager.find::<Number>(1).await.unwrap().unwrap().value, 40);
+    }
+}
+
+#[tokio::test]
 async fn concurrent_persist_and_merge_share_one_identity() {
     use std::sync::{Arc, Barrier};
     use tideorm::entity_manager::EntityManager;

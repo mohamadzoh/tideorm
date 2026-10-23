@@ -55,14 +55,10 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         .relation_kind()
         .expect("relation fields have a relation wrapper type");
     let foreign_key = field.foreign_key.as_deref();
-    let local_key_name = field
-        .local_key
-        .as_deref()
-        .unwrap_or(ctx.default_local_key());
 
     let relation = match kind {
         RelationKind::HasOne | RelationKind::HasMany | RelationKind::HasManyThrough => {
-            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let local = ctx.relation_local_field(field)?;
             let (local_key_ident, local_key) = (local.ident(), local.column_name());
             let foreign_key = foreign_key.expect("validated relation foreign_key");
             let constructor = match kind {
@@ -91,8 +87,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
                     .with_parent_pk(::tideorm::prelude::json!(self.#local_key_ident.clone()));
                 ::tideorm::__if_entity_manager! {
                     let relation = relation
-                        .with_metadata(#relation_name, <Self as ::tideorm::model::ModelMeta>::table_name())
-                        .with_owner_key(::tideorm::entity_manager::__identity_key::<Self>(&self));
+                        .with_metadata(#relation_name, <Self as ::tideorm::model::ModelMeta>::table_name());
                 }
             }
         }
@@ -107,7 +102,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         }
         RelationKind::MorphOne | RelationKind::MorphMany => {
             let morph_name = field.morph_name.as_deref().expect("validated morph_name");
-            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let local = ctx.relation_local_field(field)?;
             let (local_key_ident, local_key) = (local.ident(), local.column_name());
             let wrapper = if kind == RelationKind::MorphOne {
                 quote!(MorphOne)
@@ -126,8 +121,8 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             let morph_name = field.morph_name.as_deref().expect("validated morph_name");
             let type_column = format!("{}_type", morph_name);
             let id_column = format!("{}_id", morph_name);
-            let type_ident = ctx.resolve_required_db_field_ident(&type_column, ident)?;
-            let id_ident = ctx.resolve_required_db_field_ident(&id_column, ident)?;
+            let type_ident = ctx.resolve_derived_db_field_ident(&type_column, ident)?;
+            let id_ident = ctx.resolve_derived_db_field_ident(&id_column, ident)?;
             quote! {
                 let relation = ::tideorm::relations::MorphTo::new(#type_column, #id_column)
                     .__on::<Self>()
@@ -138,11 +133,19 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
             }
         }
         RelationKind::SelfRef => {
-            let foreign_key = foreign_key.unwrap_or("parent_id");
-            let foreign_key_ident = ctx.resolve_required_db_field_ident(foreign_key, ident)?;
+            let (foreign_key, foreign_key_ident) = match foreign_key {
+                Some(foreign_key) => (
+                    foreign_key,
+                    ctx.resolve_required_db_field_ident(foreign_key, ident)?,
+                ),
+                None => (
+                    "parent_id",
+                    ctx.resolve_derived_db_field_ident("parent_id", ident)?,
+                ),
+            };
             // The parent is looked up by this column, so a typo is caught here
             // rather than as an unknown column at the first load.
-            let local_key = ctx.resolve_local_key(local_key_name, ident)?.column_name();
+            let local_key = ctx.relation_local_field(field)?.column_name();
             quote! {
                 let relation = ::tideorm::relations::SelfRef::new(#foreign_key, #local_key)
                     .with_fk_value(::tideorm::prelude::json!(self.#foreign_key_ident.clone()));
@@ -150,7 +153,7 @@ fn build_relation_assignment(ctx: &BuildContext, field: &ModelField) -> syn::Res
         }
         RelationKind::SelfRefMany => {
             let foreign_key = foreign_key.unwrap_or("parent_id");
-            let local = ctx.resolve_local_key(local_key_name, ident)?;
+            let local = ctx.relation_local_field(field)?;
             let (local_key_ident, local_key) = (local.ident(), local.column_name());
             quote! {
                 let relation = ::tideorm::relations::SelfRefMany::new(#foreign_key, #local_key)

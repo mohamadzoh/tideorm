@@ -146,7 +146,8 @@ pub struct UnionClause {
     /// SQLite, whose compound-select grammar rejects a parenthesized operand.
     pub query_sql: String,
     pub(crate) params: Vec<Value>,
-    /// Whether the operand is caller-written SQL of unknown shape.
+    /// Whether the operand is caller-written SQL of unknown shape, or a query
+    /// reading `table.*` because it holds one.
     pub(crate) raw: bool,
     /// Captured while a typed operand still has its model and projection scope.
     pub(crate) projection: Option<UnionProjection>,

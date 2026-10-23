@@ -17,6 +17,10 @@ impl Database {
 /// A setting left unset keeps the driver's default, which is not always
 /// `TideConfig`'s: the driver keeps no idle connection and waits 30 seconds
 /// for a free one, where `TideConfig` keeps one and waits 8.
+///
+/// An in-memory SQLite database lives only while a connection to it is open,
+/// so its pool keeps one open and closes none for being idle or old, whatever
+/// those settings say.
 #[derive(Clone, Default)]
 pub struct DatabaseBuilder {
     url: Option<String>,
@@ -61,7 +65,7 @@ impl DatabaseBuilder {
         self
     }
 
-    /// Set the maximum number of pooled connections.
+    /// Set the maximum number of pooled connections, at least one.
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = Some(n);
         self
@@ -124,16 +128,45 @@ impl DatabaseBuilder {
             .url
             .ok_or_else(|| Error::configuration("Database URL is required"))?;
         let url = crate::config::rewrite_driver_url(&url);
+        match (self.min_connections, self.max_connections) {
+            (_, Some(0)) => {
+                return Err(Error::configuration(
+                    "max_connections must be at least 1: a pool of none can hand out no connection",
+                ));
+            }
+            (Some(min), Some(max)) if min > max => {
+                return Err(Error::configuration(format!(
+                    "min_connections ({min}) exceeds max_connections ({max})"
+                )));
+            }
+            _ => {}
+        }
+        let memory = sqlite_memory(&url);
+        let in_memory = memory.is_some();
+        let private_memory = memory == Some(Cache::Private);
+        if private_memory
+            && (self.max_connections.is_some_and(|max| max > 1)
+                || self.min_connections.is_some_and(|min| min > 1))
+        {
+            return Err(Error::configuration(
+                "an in-memory SQLite database with cache=private requires a pool size of one",
+            ));
+        }
 
         let mut opts = crate::internal::ConnectOptions::new(url.clone());
         crate::internal::quiet_driver_logging(&mut opts);
 
-        if let Some(max) = self.max_connections {
+        if private_memory {
+            opts.max_connections(1);
+        } else if let Some(max) = self.max_connections {
             opts.max_connections(max);
         }
-        if let Some(min) = self.min_connections {
-            opts.min_connections(min);
-        }
+        match self.min_connections {
+            Some(min) if in_memory => opts.min_connections(min.max(1)),
+            Some(min) => opts.min_connections(min),
+            None if in_memory => opts.min_connections(1),
+            None => &mut opts,
+        };
         // sqlx has one checkout timeout, which also covers opening a
         // connection when the pool has room, and SeaORM maps both settings
         // onto it, the later one winning. The longer is passed, so neither
@@ -145,18 +178,62 @@ impl DatabaseBuilder {
         if let Some(timeout) = checkout_timeout {
             opts.acquire_timeout(timeout);
         }
-        if let Some(timeout) = self.idle_timeout {
-            opts.idle_timeout(timeout);
-        }
-        if let Some(lifetime) = self.max_lifetime {
-            opts.max_lifetime(lifetime);
+        if in_memory {
+            opts.idle_timeout(None).max_lifetime(None);
+        } else {
+            if let Some(timeout) = self.idle_timeout {
+                opts.idle_timeout(timeout);
+            }
+            if let Some(lifetime) = self.max_lifetime {
+                opts.max_lifetime(lifetime);
+            }
         }
         let conn = crate::internal::OrmDatabase::connect(opts)
             .await
             .map_err(|err| crate::internal::translate_connect_error(err, &url))?;
 
-        Ok(Database::from_internal_connection(
-            InternalConnection::open(conn).await?,
-        ))
+        let connection = InternalConnection::open(conn).await?;
+        if private_memory {
+            // Named private-cache memory databases do not share data even
+            // when their filenames match another pool's.
+            *connection.cache_scope.write() =
+                Some(format!("sqlite-private:{}", uuid::Uuid::new_v4()).into());
+        }
+        Ok(Database::from_internal_connection(connection))
     }
+}
+
+/// How an in-memory SQLite database shares its pages between connections.
+#[derive(PartialEq)]
+enum Cache {
+    Shared,
+    /// Each connection would see a database of its own.
+    Private,
+}
+
+/// The cache of the in-memory SQLite database `url` opens, as sqlx reads it
+/// (`:memory:`, an empty path, or `mode=memory`); `None` for any other URL.
+fn sqlite_memory(url: &str) -> Option<Cache> {
+    let (scheme, rest) = url.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("sqlite") {
+        return None;
+    }
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let mut pairs = url::form_urlencoded::parse(query.as_bytes());
+    let in_memory = path.is_empty()
+        || path == ":memory:"
+        || pairs
+            .clone()
+            .any(|(key, value)| key == "mode" && value == "memory");
+    if !in_memory {
+        return None;
+    }
+    Some(
+        if pairs.any(|(key, value)| key == "cache" && value == "private") {
+            Cache::Private
+        } else {
+            Cache::Shared
+        },
+    )
 }

@@ -4,6 +4,78 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+fn prepared_statement_registration_hits_refresh_recency() {
+    let cache = PreparedStatementCache::new();
+    cache.enable();
+    cache.set_max_statements(2);
+    cache.get_or_prepare("SELECT 1");
+    thread::sleep(Duration::from_millis(2));
+    cache.get_or_prepare("SELECT 2");
+    thread::sleep(Duration::from_millis(2));
+    assert!(cache.get_or_prepare("SELECT 1").1);
+    cache.get_or_prepare("SELECT 3");
+    assert!(cache.get_or_prepare("SELECT 1").1);
+    assert!(!cache.get_or_prepare("SELECT 2").1);
+}
+
+#[test]
+fn database_invalidation_protects_other_scopes_and_rejects_stale_fills() {
+    let cache = QueryCache::new();
+    cache.enable();
+    let a: Arc<str> = "database-a".into();
+    let b: Arc<str> = "database-b".into();
+    let a_read = cache.fill_point_for_database(Some(a.clone()));
+    let b_read = cache.fill_point_for_database(Some(b.clone()));
+    let manual = cache.fill_point();
+    cache.set("manual", &1, None, "users").unwrap();
+    cache.invalidate_database(a);
+    for (point, key) in [(a_read, "a"), (b_read, "b"), (manual, "unknown")] {
+        cache
+            .fill_tagged(point, key, &1, None, &["users".into()])
+            .unwrap();
+    }
+    assert_eq!(cache.get::<i32>("a"), None);
+    assert_eq!(cache.get::<i32>("unknown"), None);
+    assert_eq!(cache.get::<i32>("manual"), None);
+    assert_eq!(cache.get::<i32>("b"), Some(1));
+    cache.invalidate_database(b);
+    assert_eq!(cache.get::<i32>("b"), None);
+}
+
+#[test]
+fn table_invalidation_folds_case_in_entries_and_inflight_reads() {
+    let cache = QueryCache::new();
+    cache.enable();
+    let point = cache.fill_point();
+    cache.set("before", &1, None, "POSTS").unwrap();
+    cache.invalidate_model("Posts");
+    cache
+        .fill_tagged(point, "after", &1, None, &["POSTS".into()])
+        .unwrap();
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn database_history_compaction_rejects_old_fills_without_evicting_live_entries() {
+    let cache = QueryCache::new();
+    cache.enable();
+    let stable = cache.fill_point_for_database(Some("stable".into()));
+    cache
+        .fill_tagged(stable, "stable", &1, None, &["users".into()])
+        .unwrap();
+    let old = cache.fill_point_for_database(Some("old".into()));
+    cache.invalidate_database("old".into());
+    for index in 0..1500 {
+        cache.invalidate_database(format!("temporary-{index}").into());
+    }
+    cache
+        .fill_tagged(old, "stale", &1, None, &["users".into()])
+        .unwrap();
+    assert_eq!(cache.get::<i32>("stale"), None);
+    assert_eq!(cache.get::<i32>("stable"), Some(1));
+}
+
+#[test]
 fn test_cache_config_default() {
     let config = CacheConfig::default();
     assert!(!config.enabled);
@@ -380,7 +452,9 @@ fn a_transaction_replays_its_invalidations_when_it_commits() {
     };
 
     let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    let savepoint = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(true)));
+    let savepoint = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(Some(
+        outer.clone(),
+    ))));
     {
         let _outer = install_pending_invalidations(&outer);
         {
@@ -580,36 +654,20 @@ fn test_a_ttl_too_long_for_an_instant_keeps_the_entry() {
 #[test]
 fn test_a_deadlock_marks_every_enclosing_transaction() {
     let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    let _outer_scope = install_pending_invalidations(&outer);
     {
-        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(true)));
-        let scope = install_pending_invalidations(&inner);
-        note_failed_statement(true);
-        drop(scope);
-        assert!(inner.lock().deadlocked());
-        assert!(!outer.lock().deadlocked());
+        let inner = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(Some(
+            outer.clone(),
+        ))));
+        inner.lock().note_failed_statement(true);
+        assert_eq!(inner.lock().aborted(), Some(Abort::Deadlock));
+        assert_eq!(outer.lock().aborted(), None);
     }
-    assert!(outer.lock().deadlocked());
+    assert_eq!(outer.lock().aborted(), Some(Abort::Deadlock));
 
     let other = Arc::new(parking_lot::Mutex::new(PendingInvalidations::default()));
-    let _other_scope = install_pending_invalidations(&other);
-    note_failed_statement(false);
+    other.lock().note_failed_statement(false);
     assert!(other.lock().statement_failed());
-    assert!(!other.lock().deadlocked());
-}
-
-#[test]
-fn an_independent_deadlock_does_not_abort_the_enclosing_scope() {
-    let outer = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(false)));
-    let _outer_scope = install_pending_invalidations(&outer);
-    {
-        let independent = Arc::new(parking_lot::Mutex::new(PendingInvalidations::new(false)));
-        let scope = install_pending_invalidations(&independent);
-        note_failed_statement(true);
-        drop(scope);
-        assert!(independent.lock().deadlocked());
-    }
-    assert!(!outer.lock().deadlocked());
+    assert_eq!(other.lock().aborted(), None);
 }
 
 #[test]
@@ -664,4 +722,197 @@ fn failed_decoding_keeps_a_replacement_written_during_deserialization() {
     cache.set("key", &1, None, "model").unwrap();
     assert!(cache.get::<ReplaceThenFail>("key").is_none());
     assert_eq!(cache.get::<u64>("key"), Some(42));
+}
+
+#[test]
+fn values_whose_json_does_not_read_back_are_not_cached() {
+    let cache = QueryCache::new();
+    cache.enable();
+
+    // JSON writes each of these as a `null`, which does not read back as it.
+    cache
+        .set("json_null", &vec![Some(serde_json::Value::Null)], None, "t")
+        .unwrap();
+    cache.set("nan", &vec![f64::NAN], None, "t").unwrap();
+    cache
+        .set("infinite", &(1, Some(f32::NEG_INFINITY)), None, "t")
+        .unwrap();
+    cache
+        .set("some_none", &Some(None::<i32>), None, "t")
+        .unwrap();
+    assert!(cache.is_empty(), "{:?}", cache.stats());
+
+    // A bare `null` and a `None` read back as written.
+    let kept = (serde_json::Value::Null, None::<i32>, vec![Some(1.5)]);
+    cache.set("kept", &kept, None, "t").unwrap();
+    assert_eq!(cache.get("kept"), Some(kept));
+}
+
+#[test]
+fn an_uncacheable_replacement_removes_the_old_value() {
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set("key", &vec![1.0], None, "t").unwrap();
+    cache.set("other", &42, None, "t").unwrap();
+    cache.set("key", &vec![f64::NAN], None, "t").unwrap();
+    assert_eq!(cache.get::<Vec<f64>>("key"), None);
+    assert_eq!(cache.get::<i32>("other"), Some(42));
+    assert_eq!(cache.stats().invalidations, 1);
+}
+
+#[test]
+fn a_replacement_rejected_by_cache_policy_removes_only_its_old_value() {
+    for policy in ["empty", "oversized", "zero entries"] {
+        let cache = QueryCache::new();
+        cache.enable();
+        cache.set("key", &vec![1], None, "t").unwrap();
+        cache.set("other", &42, None, "t").unwrap();
+        let replacement = match policy {
+            "empty" => {
+                cache.set_cache_empty_results(false);
+                vec![]
+            }
+            "oversized" => {
+                cache.set_max_size_bytes(8);
+                vec![123456789]
+            }
+            _ => {
+                cache.set_max_entries(0);
+                vec![2]
+            }
+        };
+        cache
+            .set_tagged("key", &replacement, None, &["t".to_string()])
+            .unwrap();
+        assert_eq!(cache.get::<Vec<i32>>("key"), None, "{policy}");
+        assert_eq!(cache.get::<i32>("other"), Some(42), "{policy}");
+        assert_eq!(cache.stats().entries, 1, "{policy}");
+    }
+}
+
+#[test]
+fn replacement_byte_budget_counts_the_new_payload_once() {
+    for strategy in [CacheStrategy::LRU, CacheStrategy::FIFO, CacheStrategy::TTL] {
+        let cache = QueryCache::with_config(CacheConfig {
+            enabled: true,
+            strategy,
+            max_size_bytes: 8,
+            ..Default::default()
+        });
+        cache.set("other", &"bb", None, "t").unwrap();
+        cache.set("key", &"aa", None, "t").unwrap();
+        for value in ["cc", "c"] {
+            cache.set("key", &value, None, "t").unwrap();
+            assert_eq!(cache.get::<String>("other").as_deref(), Some("bb"));
+            assert_eq!(cache.get::<String>("key").as_deref(), Some(value));
+            assert_eq!(cache.stats().size_bytes, 4 + value.len() + 2);
+            assert_eq!(cache.stats().evictions, 0);
+        }
+        cache.set("key", &"dddd", None, "t").unwrap();
+        assert_eq!(cache.get::<String>("other"), None);
+        assert_eq!(cache.get::<String>("key").as_deref(), Some("dddd"));
+        assert_eq!(cache.stats().size_bytes, 6);
+        assert_eq!(cache.stats().evictions, 1);
+    }
+}
+
+#[test]
+fn replacement_obeys_a_lowered_entry_budget() {
+    let cache = QueryCache::new();
+    cache.enable();
+    for key in ["a", "b", "c"] {
+        cache.set(key, &1, None, "t").unwrap();
+    }
+    cache.set_max_entries(1);
+    cache.set("c", &2, None, "t").unwrap();
+    assert_eq!(cache.get::<i32>("c"), Some(2));
+    assert_eq!(cache.stats().entries, 1);
+    assert_eq!(cache.stats().evictions, 2);
+}
+
+#[test]
+fn a_stale_uncacheable_fill_preserves_the_new_value() {
+    let cache = QueryCache::new();
+    cache.enable();
+    let point = cache.fill_point();
+    cache.invalidate_model("t");
+    cache.set("key", &42, None, "t").unwrap();
+    cache
+        .fill_tagged(point, "key", &f64::NAN, None, &["t".to_string()])
+        .unwrap();
+    assert_eq!(cache.get::<i32>("key"), Some(42));
+}
+
+#[test]
+fn zero_ttl_entries_do_not_evict_live_entries() {
+    for default_ttl in [false, true] {
+        let cache = QueryCache::with_config(CacheConfig {
+            enabled: true,
+            max_entries: 1,
+            ..Default::default()
+        });
+        cache.set("live", &42, None, "t").unwrap();
+        let ttl = if default_ttl {
+            cache.set_default_ttl(Duration::ZERO);
+            None
+        } else {
+            Some(Duration::ZERO)
+        };
+        cache.set("expired", &7, ttl, "t").unwrap();
+        assert_eq!(cache.get::<i32>("live"), Some(42));
+        assert_eq!(cache.stats().entries, 1);
+        assert_eq!(cache.stats().evictions, 0);
+        assert!(!cache.contains("expired"));
+    }
+}
+
+#[test]
+fn a_zero_ttl_replacement_removes_only_its_previous_value() {
+    let cache = QueryCache::with_config(CacheConfig {
+        enabled: true,
+        max_size_bytes: 8,
+        ..Default::default()
+    });
+    cache.set("other", &"bb", None, "t").unwrap();
+    cache.set("key", &"aa", None, "t").unwrap();
+    cache
+        .set("key", &"dddd", Some(Duration::ZERO), "t")
+        .unwrap();
+    assert_eq!(cache.get::<String>("other").as_deref(), Some("bb"));
+    assert!(!cache.contains("key"));
+    assert_eq!(cache.stats().size_bytes, 4);
+    assert_eq!(cache.stats().evictions, 0);
+}
+
+#[test]
+fn serialization_errors_are_reported_without_discarding_the_previous_entry() {
+    struct CannotSerialize;
+    impl serde::Serialize for CannotSerialize {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "deliberate serialization failure",
+            ))
+        }
+    }
+
+    let cache = QueryCache::new();
+    cache.enable();
+    cache.set("key", &42, None, "t").unwrap();
+    let error = cache.set("key", &CannotSerialize, None, "t").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deliberate serialization failure")
+    );
+    // The JSON encoder refuses a map with non-string keys before the probe runs.
+    let invalid_key = std::collections::BTreeMap::from([((1, 2), 3)]);
+    assert!(cache.set("key", &invalid_key, None, "t").is_err());
+    // An earlier lossy field must not mask a later serialization failure.
+    assert!(
+        cache
+            .set("key", &(f64::NAN, CannotSerialize), None, "t")
+            .is_err()
+    );
+    assert_eq!(cache.get::<i32>("key"), Some(42));
+    assert_eq!(cache.stats().invalidations, 0);
 }

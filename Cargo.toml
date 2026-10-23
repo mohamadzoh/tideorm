@@ -1,6 +1,6 @@
 [package]
 name = "tideorm"
-version = "0.15.0"
+version = "0.16.0"
 edition = "2024"
 authors = ["Mohamad Al Zohbie <alzoubi528@gmail.com>"]
 description = "A developer-friendly ORM for Rust with clean, expressive syntax"
@@ -58,7 +58,7 @@ postgres = ["sea-orm/sqlx-postgres"]
 mysql = ["sea-orm/sqlx-mysql"]
 # sqlx builds its bundled SQLite (3.46 or later), which has `RETURNING`, so an
 # insert or update needs one statement instead of the write plus a `SELECT` of the row.
-sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/sqlite-use-returning-for-3_35"]
+sqlite = ["sea-orm/sqlx-sqlite", "sea-orm/sqlite-use-returning-for-3_35", "dep:async-io"]
 runtime-tokio = ["sea-orm/runtime-tokio-rustls"]
 runtime-async-std = ["sea-orm/runtime-async-std-rustls"]
 # These module flags intentionally gate TideORM's public API surface via #[cfg(feature = ...)]
@@ -84,6 +84,8 @@ sea-orm = { version = "2.0.2", default-features = false, features = ["macros", "
 
 # Async runtime
 async-trait = "0.1.89"
+# Runtime-independent, cancellable timers for SQLite migration lock waits.
+async-io = { version = "2.6.0", optional = true }
 
 # Serialization
 serde = { version = "1.0.228", features = ["derive"] }
@@ -98,7 +100,7 @@ rust_decimal = { version = "1.41.0", features = ["serde"] }
 thiserror = "2.0.18"
 
 # Derive macros (our own crate)
-tideorm-macros = { version = "0.15.0", path = "tideorm-macros" }
+tideorm-macros = { version = "0.16.0", path = "tideorm-macros" }
 
 # Utils
 parking_lot = "0.12.5"
@@ -111,6 +113,7 @@ chacha20poly1305 = { version = "0.10.1", features = ["std"] }
 argon2 = { version = "0.5.3", features = ["std"] }
 
 [dev-dependencies]
+async-std = "1.13.2"
 tokio = { version = "1.50.0", features = ["full", "test-util", "macros"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dotenvy = "0.15.7"
@@ -170,6 +173,11 @@ harness = false
 name = "sqlite_ci_smoke_test"
 path = "tests/sqlite_ci_smoke_test.rs"
 required-features = ["sqlite", "runtime-tokio"]
+
+[[test]]
+name = "async_std_runtime"
+path = "tests/async_std_runtime.rs"
+required-features = ["sqlite", "runtime-async-std"]
 
 [[test]]
 name = "sqlite_integration_tests"

@@ -112,13 +112,21 @@ impl<M: Model> QueryBuilder<M> {
         column_expr: SimpleExpr,
         operator: ListOperator,
         values: &[serde_json::Value],
+        documents: Option<bool>,
     ) -> SimpleExpr {
         // A NULL member reads as "or the column is NULL" (negated: "and it is
         // not"), the same reading `where_eq`/`where_not` give NULL. Taken
         // literally, `IN (.., NULL)` never matches a NULL row and
-        // `NOT IN (.., NULL)` never matches any row at all.
-        let (nulls, values): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
-            values.iter().partition(|value| value.is_null());
+        // `NOT IN (.., NULL)` never matches any row at all. A JSON column
+        // compares a JSON `null` member as the `null` document instead.
+        let (sql_null, values): (bool, Vec<&serde_json::Value>) = match documents {
+            Some(sql_null) if self.is_json_column(column) => (sql_null, values.iter().collect()),
+            documents => {
+                let (nulls, values): (Vec<&serde_json::Value>, Vec<&serde_json::Value>) =
+                    values.iter().partition(|value| value.is_null());
+                (documents.unwrap_or(false) || !nulls.is_empty(), values)
+            }
+        };
         let listed = self.build_non_null_list_expression(
             db_type,
             column,
@@ -126,7 +134,7 @@ impl<M: Model> QueryBuilder<M> {
             operator,
             &values,
         );
-        if nulls.is_empty() {
+        if !sql_null {
             return listed;
         }
         match operator {

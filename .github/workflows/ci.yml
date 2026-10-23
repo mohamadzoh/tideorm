@@ -141,6 +141,9 @@ jobs:
       - name: Check async-std runtime
         run: cargo check --no-default-features --features sqlite,runtime-async-std
 
+      - name: Exercise async-std without the Tokio driver runtime
+        run: cargo test --locked --no-default-features --features sqlite,runtime-async-std --test async_std_runtime
+
   macros:
     runs-on: ubuntu-latest
 

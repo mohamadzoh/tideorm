@@ -103,3 +103,30 @@ fn an_escaped_backslash_does_not_hide_a_following_comment() {
 
     assert!(error.contains("SQL comments"), "{error}");
 }
+
+/// PostgreSQL's dollar-quoted strings and SQLite's bracketed identifiers
+/// quote what the scan reads as a string literal's quote, so a live `--`
+/// after them looked like part of a literal and commented out what the
+/// builder appends.
+#[test]
+fn dollar_quotes_and_bracketed_quotes_cannot_hide_a_comment() {
+    for fragment in [
+        "name = $$'$$ OR TRUE)--'",
+        "name = $tag$'$tag$ OR TRUE)--'",
+        "name = ['] OR 1=1)--'",
+        "name = [\"] OR 1=1)--\"",
+    ] {
+        assert!(
+            validate_raw_sql_fragment("WHERE raw SQL", fragment).is_err(),
+            "{fragment}"
+        );
+    }
+    for fragment in [
+        "\"note\" = $1",
+        "tags[1] = ?",
+        "\"price$usd\" > 0",
+        "a$b = 1",
+    ] {
+        validate_raw_sql_fragment("WHERE raw SQL", fragment).expect(fragment);
+    }
+}

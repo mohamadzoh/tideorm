@@ -42,14 +42,15 @@ pub struct HasOne<E: Model> {
     /// Column on *this* model whose value the foreign key matches — the primary
     /// key unless `local_key = ".."` overrides it.
     pub local_key: &'static str,
-    /// Name of the model field this relation was declared on, used as the
-    /// entity manager's relation-snapshot key.
+    /// Name of the model field this relation was declared on: with
+    /// `owner_table`, what tells it apart from another relation when a
+    /// rebuilt model takes over a previous copy's state.
     #[cfg(feature = "entity-manager")]
     pub relation_name: &'static str,
     /// Table of the model owning the relation.
     #[cfg(feature = "entity-manager")]
     pub owner_table: &'static str,
-    state: RelationState<Box<E>>,
+    pub(crate) state: RelationState<Box<E>>,
 }
 
 impl<E: Model> HasOne<E> {
@@ -94,26 +95,13 @@ impl<E: Model> HasOne<E> {
         self
     }
 
-    /// Record the names the entity manager keys its relation snapshots by.
-    ///
-    /// Only meaningful together with [`with_owner_key`](Self::with_owner_key);
-    /// without both, loading the relation through an entity manager cannot
-    /// record which related rows this owner held and errors out.
+    /// Record the relation's field name and its owner's table, which tell it
+    /// apart from another relation when a rebuilt model takes over a previous
+    /// copy's state.
     #[cfg(feature = "entity-manager")]
     pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
         self.relation_name = relation_name;
         self.owner_table = owner_table;
-        self
-    }
-
-    /// Record the owning model's entity-manager identity key.
-    ///
-    /// This is the string form of the owner's primary key that the manager's
-    /// identity map uses; the derive computes it so that a relation snapshot and
-    /// the owner's own map entry agree on one spelling.
-    #[cfg(feature = "entity-manager")]
-    pub fn with_owner_key(mut self, owner_key: String) -> Self {
-        self.state.owner_key = Some(owner_key);
         self
     }
 
@@ -246,9 +234,9 @@ relation_serde!(HasOne<E>);
 
 /// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
 /// resolves the row from the manager's identity map when it is there,
-/// registers it when it is not, and records a relation snapshot, which is how
-/// the manager later detects that the relation was reassigned. A repeat load
-/// serves the cached instance.
+/// registers it when it is not, and records the key it holds, which a later
+/// save compares against to tell that the relation was reassigned. A repeat
+/// load serves the cached instance.
 #[cfg(feature = "entity-manager")]
 impl<E> crate::entity_manager::EntityManagerLoad for HasOne<E>
 where
@@ -265,13 +253,11 @@ where
     ) -> Result<Self::Output<'a>> {
         const CONTEXT: &str = "HasOne::load";
 
-        let owner =
-            SnapshotOwner::new(self.owner_table, &self.state.owner_key, self.relation_name)?;
         self.state.source.entity_manager = Some(entity_manager.clone());
         let lookup = self
             .parent_key(CONTEXT)
             .cloned()
             .and_then(|key| Ok((self.foreign_key, key, self.query(CONTEXT)?)));
-        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, Some(owner)).await
+        load_one_in_entity_manager(&mut self.state, entity_manager, lookup, true).await
     }
 }

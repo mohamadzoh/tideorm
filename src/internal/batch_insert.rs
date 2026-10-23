@@ -5,9 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 
 use super::{
-    ActiveModelTrait, Backend, ColumnTrait, Condition, ConnectionTrait, EntityTrait, Executor,
-    InternalModel, IntoActiveModel, Iterable, ModelTrait, QueryFilter, Value,
-    ensure_fields_storable, model_error_context, run_profiled, translate_error,
+    ActiveModelTrait, Backend, ColumnTrait, Condition, ConnectionTrait, EntityTrait, InternalModel,
+    IntoActiveModel, Iterable, ModelTrait, QueryFilter, Value, advance_key_sequence,
+    ensure_fields_storable, holds_auto_increment_key, model_error_context, run_profiled,
+    translate_error,
 };
 use crate::error::{Error, ErrorContext, Result};
 
@@ -88,12 +89,19 @@ where
     for active in &active_models {
         super::ensure_active_values_storable::<M>(active, conn)?;
     }
+    let held_keys = held_keys::<M>(&active_models);
+    let explicit_keys = held_keys > 0;
     if batch_size == 1 {
-        return insert_individually::<M, _>(conn, connection, active_models, &error_context).await;
+        let results = insert_individually::<M>(connection, active_models, &error_context).await?;
+        if explicit_keys {
+            advance_key_sequence::<M>(conn, results.iter().map(|model| model.primary_key()))
+                .await?;
+        }
+        return Ok(results);
     }
 
     let backend = Backend::from(conn.get_database_backend());
-    let strategy = strategy::<M>(backend, &active_models);
+    let strategy = strategy::<M>(backend, &active_models, held_keys);
     // One statement carries at most `u16::MAX` bind parameters on PostgreSQL
     // and MySQL, and 32,766 on SQLite, so a larger batch is split.
     let parameter_limit = match backend {
@@ -106,19 +114,17 @@ where
     // returns is checked after the rows are in: a trigger can leave one out.
     // `begin()` on an open transaction opens a SAVEPOINT, so this also nests
     // inside a caller's transaction.
-    let txn = conn
-        .begin()
+    let scope = crate::database::TransactionScope::begin(connection)
         .await
         .map_err(translate_error)
         .map_err(|err| err.with_context(error_context.clone()))?;
-    // The rows go through an executor, which binds their values as it binds
-    // every other statement's.
-    let pending = std::sync::Arc::new(parking_lot::Mutex::new(
-        crate::cache::PendingInvalidations::new(conn.is_transaction()),
-    ));
-    let outcome = super::per_poll(
+    let record = scope.record().clone();
+    super::per_poll(
         async {
-            let in_txn = Executor::new((&txn).into());
+            // Loads must belong to this batch's transaction as well as its
+            // statements. Using the caller's connection would put baselines
+            // outside the batch's rollback record, or in its parent's record.
+            let batch_connection = scope.connection();
             let inserted = match &strategy {
                 Strategy::Returning(order) => {
                     let mut results = Vec::with_capacity(batch_size);
@@ -129,9 +135,8 @@ where
                             break Ok(results);
                         }
                         let offset = results.len();
-                        match insert_returning::<M, _>(
-                            &in_txn,
-                            connection,
+                        match insert_returning::<M>(
+                            &batch_connection,
                             chunk,
                             order,
                             offset,
@@ -153,9 +158,8 @@ where
                             break Ok(results);
                         }
                         let chunk_keys = &keys[results.len()..results.len() + chunk.len()];
-                        match insert_then_select::<M, _>(
-                            &in_txn,
-                            connection,
+                        match insert_then_select::<M>(
+                            &batch_connection,
                             chunk,
                             chunk_keys,
                             &error_context,
@@ -168,49 +172,66 @@ where
                     }
                 }
                 Strategy::PerRow => {
-                    insert_individually::<M, _>(&in_txn, connection, active_models, &error_context)
-                        .await
+                    insert_individually::<M>(&batch_connection, active_models, &error_context).await
                 }
             };
+            // Of the keys stored, the largest numbered by the database is
+            // below the sequence already, so the largest of all is the one
+            // to move it past.
+            let inserted = match inserted {
+                Ok(results) if explicit_keys => advance_key_sequence::<M>(
+                    &batch_connection.executor(),
+                    results.iter().map(|model| model.primary_key()),
+                )
+                .await
+                .map(|()| results),
+                inserted => inserted,
+            };
 
-            match inserted {
-                Ok(results) => {
-                    txn.commit()
-                        .await
-                        .map_err(translate_error)
-                        .map_err(|err| err.with_context(error_context.clone()))?;
-                    Ok(results)
-                }
-                Err(err) => {
-                    let _ = txn.rollback().await;
-                    Err(err)
-                }
-            }
+            drop(batch_connection);
+            scope
+                .end(inserted, |err| {
+                    translate_error(err).with_context(error_context.clone())
+                })
+                .await
         },
-        || crate::cache::install_pending_invalidations(&pending),
+        || crate::cache::install_pending_invalidations(&record),
     )
-    .await;
-    if outcome.is_ok() {
-        std::mem::take(&mut *pending.lock()).replay();
-    }
-    outcome
+    .await
 }
 
-/// The batch strategy `backend` can run for `M`.
-fn strategy<M>(backend: Backend, active_models: &[M::ActiveModel]) -> Strategy
+/// How many of `active_models` hold their auto-increment key.
+fn held_keys<M: crate::model::Model>(active_models: &[M::ActiveModel]) -> usize {
+    active_models
+        .iter()
+        .filter(|active| holds_auto_increment_key::<M>(active))
+        .count()
+}
+
+/// The batch strategy `backend` can run for `M`, `held` of whose models hold
+/// their auto-increment key.
+fn strategy<M>(backend: Backend, active_models: &[M::ActiveModel], held: usize) -> Strategy
 where
     M: InternalModel + crate::model::Model,
 {
+    let auto_increment = M::primary_key_auto_increment();
+    // A model holding its own key under an auto-increment column has it
+    // written; rows the database numbers beside it would neither share one
+    // statement's columns nor follow the keys' order. A batch where every
+    // model holds its key is matched back by key, as a client-set one is.
+    if held != 0 && held != active_models.len() {
+        return Strategy::PerRow;
+    }
+    let numbered = auto_increment && held == 0;
     // MariaDB has `RETURNING` too, but the engine renders none for the MySQL
     // family, which it reports as one backend, so MariaDB batches like MySQL.
     if backend == Backend::Postgres {
         return Strategy::Returning(Order::AsReturned);
     }
-    let auto_increment = M::primary_key_auto_increment();
-    if backend == Backend::Sqlite && auto_increment && M::primary_key_names().len() == 1 {
+    if backend == Backend::Sqlite && numbered && M::primary_key_names().len() == 1 {
         return Strategy::Returning(Order::ByIncreasingKey);
     }
-    if auto_increment {
+    if numbered {
         return Strategy::PerRow;
     }
     match (backend, client_keys::<M>(active_models, backend)) {
@@ -309,8 +330,7 @@ fn order_by_keys<M: InternalModel>(
 
 /// Insert `active_models`, the batch's rows from `offset`, with one
 /// `INSERT .. RETURNING`, and return them in input order.
-async fn insert_returning<M, C>(
-    conn: &C,
+async fn insert_returning<M>(
     connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     order: &Order,
@@ -320,10 +340,10 @@ async fn insert_returning<M, C>(
 where
     M: InternalModel + crate::model::Model,
     EntityModel<M>: IntoActiveModel<M::ActiveModel>,
-    C: ConnectionTrait,
 {
+    let conn = connection.executor();
     let count = active_models.len();
-    let insert = M::Entity::insert_many(active_models).exec_with_returning(conn);
+    let insert = M::Entity::insert_many(active_models).exec_with_returning(&conn);
     let rows = run_profiled(insert, || error_context.clone()).await?;
     // A trigger can skip rows (PostgreSQL routing one to another table,
     // SQLite's `RAISE(IGNORE)`), which would leave the rest out of line with
@@ -398,8 +418,7 @@ fn row_bytes<M: InternalModel>(active: &M::ActiveModel) -> usize {
 
 /// Insert `active_models` with one `INSERT`, then read them back by `keys`
 /// with one `SELECT`, in input order.
-async fn insert_then_select<M, C>(
-    conn: &C,
+async fn insert_then_select<M>(
     connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     keys: &[ClientKey],
@@ -407,9 +426,9 @@ async fn insert_then_select<M, C>(
 ) -> Result<Vec<M>>
 where
     M: InternalModel + crate::model::Model,
-    C: ConnectionTrait,
 {
-    let insert = M::Entity::insert_many(active_models).exec_without_returning(conn);
+    let conn = connection.executor();
+    let insert = M::Entity::insert_many(active_models).exec_without_returning(&conn);
     run_profiled(insert, || error_context.clone()).await?;
 
     let columns = M::primary_key_columns();
@@ -426,7 +445,7 @@ where
             any.add(matches)
         }),
     };
-    let select = M::Entity::find().filter(condition).all(conn);
+    let select = M::Entity::find().filter(condition).all(&conn);
     let rows = run_profiled(select, || error_context.clone()).await?;
 
     order_by_keys::<M>(rows, keys)?
@@ -439,8 +458,7 @@ where
 ///
 /// The caller is responsible for providing a transactional connection so the
 /// whole batch stays all-or-nothing.
-async fn insert_individually<M, C>(
-    conn: &C,
+async fn insert_individually<M>(
     connection: &crate::database::ConnectionRef,
     active_models: Vec<M::ActiveModel>,
     error_context: &ErrorContext,
@@ -448,11 +466,11 @@ async fn insert_individually<M, C>(
 where
     M: InternalModel + crate::model::Model,
     EntityModel<M>: IntoActiveModel<M::ActiveModel>,
-    C: ConnectionTrait,
 {
+    let conn = connection.executor();
     let mut results = Vec::with_capacity(active_models.len());
     for active in active_models {
-        let result = run_profiled(active.insert(conn), || error_context.clone()).await?;
+        let result = run_profiled(active.insert(&conn), || error_context.clone()).await?;
         results.push(crate::model::__loading_through(connection, || {
             M::try_from_entity_model(result)
         })?);

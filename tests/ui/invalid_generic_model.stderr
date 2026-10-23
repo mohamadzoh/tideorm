@@ -1,0 +1,5 @@
+error: a TideORM model cannot be generic: it maps one struct to one table, so it takes no type, lifetime or const parameters; store owned values (String rather than &str) and keep generic code outside the model
+ --> tests/ui/invalid_generic_model.rs:4:13
+  |
+4 | struct Boxed<T> {
+  |             ^^^

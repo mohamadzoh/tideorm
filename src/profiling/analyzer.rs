@@ -10,7 +10,7 @@ impl QueryAnalyzer {
         let mut suggestions = Vec::new();
         let tokens: Vec<_> = significant(sql).collect();
 
-        if has_sequence(&tokens, &["SELECT", "*"]) {
+        if selects_star(&tokens) {
             suggestions.push(QuerySuggestion::new(
                 SuggestionLevel::Warning,
                 "Avoid SELECT *",
@@ -36,8 +36,7 @@ impl QueryAnalyzer {
         }
 
         if tokens.windows(2).any(|pair| {
-            pair[0].kind == crate::internal::sql_lexer::Kind::Word
-                && pair[0].text.eq_ignore_ascii_case("like")
+            pair[0].is_word(&["like"])
                 && pair[1].kind == crate::internal::sql_lexer::Kind::Literal
                 && pair[1].text.starts_with("'%")
         }) {
@@ -114,20 +113,10 @@ impl QueryAnalyzer {
             _ => 0,
         };
 
+        score += tokens.iter().filter(|t| t.is_word(&["join"])).count() * 2;
         score += tokens
             .iter()
-            .filter(|t| {
-                t.kind == crate::internal::sql_lexer::Kind::Word
-                    && t.text.eq_ignore_ascii_case("join")
-            })
-            .count()
-            * 2;
-        score += tokens
-            .iter()
-            .filter(|t| {
-                t.kind == crate::internal::sql_lexer::Kind::Word
-                    && t.text.eq_ignore_ascii_case("select")
-            })
+            .filter(|t| t.is_word(&["select"]))
             .count()
             .saturating_sub(1)
             * 3;
@@ -156,6 +145,10 @@ impl QueryAnalyzer {
 
         QueryComplexity::from_score(score)
     }
+}
+
+pub(super) fn selects_star(tokens: &[Token<'_>]) -> bool {
+    has_sequence(tokens, &["SELECT", "*"])
 }
 
 fn has_sequence(tokens: &[Token<'_>], words: &[&str]) -> bool {

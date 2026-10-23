@@ -1,4 +1,4 @@
-use super::{MYSQL_MAX_STATEMENT_BYTES, Order, Strategy, mysql_chunk, strategy};
+use super::{MYSQL_MAX_STATEMENT_BYTES, Order, Strategy, held_keys, mysql_chunk, strategy};
 use crate::internal::{Backend, InternalModel};
 
 #[tideorm::model(table = "batch_insert_counters")]
@@ -62,10 +62,18 @@ fn codes() -> Vec<<Code as InternalModel>::ActiveModel> {
     )
 }
 
+/// The strategy `insert_many` picks for `models`.
+fn plan<M: InternalModel + crate::model::Model>(
+    backend: Backend,
+    models: &[M::ActiveModel],
+) -> Strategy {
+    strategy::<M>(backend, models, held_keys::<M>(models))
+}
+
 #[test]
 fn postgres_batches_take_the_rows_back_in_input_order() {
     assert!(matches!(
-        strategy::<Counter>(Backend::Postgres, &counters()),
+        plan::<Counter>(Backend::Postgres, &counters()),
         Strategy::Returning(Order::AsReturned)
     ));
 }
@@ -76,16 +84,16 @@ fn mysql_and_mariadb_batches_never_ask_the_engine_for_returning() {
     // `RETURNING` for it.
     let tokens = active_models(tokens(&["a", "b"]));
     assert!(matches!(
-        strategy::<Token>(Backend::MySql, &tokens),
+        plan::<Token>(Backend::MySql, &tokens),
         Strategy::InsertThenSelect(keys) if keys.len() == 2
     ));
     assert!(matches!(
-        strategy::<Counter>(Backend::MySql, &counters()),
+        plan::<Counter>(Backend::MySql, &counters()),
         Strategy::PerRow
     ));
     // A MySQL `CHAR` key can come back without its trailing spaces.
     assert!(matches!(
-        strategy::<Code>(Backend::MySql, &codes()),
+        plan::<Code>(Backend::MySql, &codes()),
         Strategy::PerRow
     ));
 }
@@ -93,16 +101,16 @@ fn mysql_and_mariadb_batches_never_ask_the_engine_for_returning() {
 #[test]
 fn sqlite_batches_match_rows_back_by_key() {
     assert!(matches!(
-        strategy::<Counter>(Backend::Sqlite, &counters()),
+        plan::<Counter>(Backend::Sqlite, &counters()),
         Strategy::Returning(Order::ByIncreasingKey)
     ));
     let tokens = active_models(tokens(&["a", "b"]));
     assert!(matches!(
-        strategy::<Token>(Backend::Sqlite, &tokens),
+        plan::<Token>(Backend::Sqlite, &tokens),
         Strategy::Returning(Order::ByClientKey(keys)) if keys.len() == 2
     ));
     assert!(matches!(
-        strategy::<Code>(Backend::Sqlite, &codes()),
+        plan::<Code>(Backend::Sqlite, &codes()),
         Strategy::Returning(Order::ByClientKey(_))
     ));
 }
@@ -113,11 +121,11 @@ fn a_key_two_models_share_is_left_to_the_database_row_by_row() {
     twins[1].id = twins[0].id;
     let twins = active_models(twins);
     assert!(matches!(
-        strategy::<Token>(Backend::Sqlite, &twins),
+        plan::<Token>(Backend::Sqlite, &twins),
         Strategy::PerRow
     ));
     assert!(matches!(
-        strategy::<Token>(Backend::MySql, &twins),
+        plan::<Token>(Backend::MySql, &twins),
         Strategy::PerRow
     ));
 }

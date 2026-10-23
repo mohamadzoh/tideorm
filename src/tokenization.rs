@@ -12,8 +12,9 @@
 //! - the token was tampered with or truncated
 //!
 //! The default implementation uses authenticated encryption plus URL-safe
-//! encoding. Tokens are also bound to the model type, so a `User` token does
-//! not decode as a different model.
+//! encoding. Tokens are also bound to the model's schema and table, so a
+//! `User` token does not decode as a different model, even one that is also
+//! called `User` in another module.
 //!
 //! ## Configuration Hierarchy
 //!
@@ -50,7 +51,8 @@
 //! - Use a high-entropy secret in production; 32+ characters is a good baseline
 //! - Store keys in environment variables, never hardcode in source
 //! - Changing the encryption key invalidates all existing tokens
-//! - Tokens are model-specific: a User token cannot decode a Product
+//! - Tokens are model-specific: a User token cannot decode a Product, nor a
+//!   model of another table that shares the struct name
 //! - The same record may produce different valid tokens with the default encoder
 
 use parking_lot::RwLock;
@@ -74,6 +76,10 @@ pub type TokenEncoder = fn(record_id: &str, model_name: &str) -> Result<String>;
 /// Returns `Ok(None)` for invalid or mismatched tokens and `Err(...)` when
 /// decoding cannot proceed because configuration is missing.
 pub type TokenDecoder = fn(token: &str, model_name: &str) -> Result<Option<String>>;
+
+/// The schema, when the model names one, and the table that
+/// [`Tokenizable::token_table`] binds a model's tokens to.
+pub type TokenTable = (Option<&'static str>, &'static str);
 
 struct TokenizationState {
     encryption_key: Option<ConfiguredEncryptionKey>,
@@ -365,10 +371,18 @@ pub(crate) fn open(key: &[u8; 32], sealed: &[u8], aad: &[u8]) -> Option<Vec<u8>>
 /// Default token encoder using XChaCha20-Poly1305 authenticated encryption.
 ///
 /// Token format: base64url(nonce || ciphertext), with the model name bound in as
-/// associated data so a token only decodes for the model that issued it.
+/// associated data so a token only decodes for the model that issued it. A
+/// derived model's own tokens are bound to its table instead, through
+/// [`Tokenizable::token_table`].
 pub fn default_encode(record_id: &str, model_name: &str) -> Result<String> {
+    seal_token(record_id, model_name.as_bytes())
+}
+
+/// `record_id` sealed with `aad`, as base64url: the token [`open_token`]
+/// opens.
+fn seal_token(record_id: &str, aad: &[u8]) -> Result<String> {
     let key = TokenConfig::get_derived_encryption_key()?;
-    let sealed = seal(&key, record_id.as_bytes(), model_name.as_bytes())
+    let sealed = seal(&key, record_id.as_bytes(), aad)
         .ok_or_else(|| Error::tokenization("Failed to encrypt token payload"))?;
 
     Ok(base64_url_encode(&sealed))
@@ -379,16 +393,61 @@ pub fn default_encode(record_id: &str, model_name: &str) -> Result<String> {
 /// Returns `Ok(None)` for invalid or tampered tokens and `Err(...)` when
 /// tokenization is misconfigured, such as when no encryption key is set.
 pub fn default_decode(token: &str, model_name: &str) -> Result<Option<String>> {
+    open_token(token, model_name.as_bytes())
+}
+
+/// Open a base64url token sealed with `aad`: `Ok(None)` when it is malformed
+/// or does not authenticate, `Err` only when no key is configured.
+fn open_token(token: &str, aad: &[u8]) -> Result<Option<String>> {
     let key = TokenConfig::get_derived_encryption_key()?;
 
     let Some(sealed) = base64_url_decode(token) else {
         return Ok(None);
     };
-    let Some(plaintext) = open(&key, &sealed, model_name.as_bytes()) else {
+    let Some(plaintext) = open(&key, &sealed, aad) else {
         return Ok(None);
     };
 
     Ok(String::from_utf8(plaintext).ok())
+}
+
+/// What a table-bound token starts with. base64url never writes a `.`, so no
+/// token issued before tokens were bound to tables carries it.
+const TABLE_TOKEN_PREFIX: &str = "v2.";
+
+/// The associated data of a table-bound token. An identifier holds no NUL,
+/// so the parts cannot run together.
+fn table_binding((schema, table): TokenTable) -> Vec<u8> {
+    format!("tideorm-token-v2\0{}\0{table}", schema.unwrap_or_default()).into_bytes()
+}
+
+/// The default encoder for a model that names its table: the token is bound
+/// to the schema and table, not to the struct name two models may share.
+fn encode_for_table(record_id: &str, table: TokenTable) -> Result<String> {
+    Ok(format!(
+        "{TABLE_TOKEN_PREFIX}{}",
+        seal_token(record_id, &table_binding(table))?
+    ))
+}
+
+/// The encoder and decoder overrides in effect for `T`: the model's, else the
+/// global ones.
+fn token_codecs<T: Tokenizable>() -> (Option<TokenEncoder>, Option<TokenDecoder>) {
+    // Model hooks may configure global codecs, so call them before locking.
+    let encoder = T::token_encoder();
+    let decoder = T::token_decoder();
+    let state = TOKENIZATION_STATE.read();
+    (encoder.or(state.encoder), decoder.or(state.decoder))
+}
+
+/// The default decoder for a model that names its table. A token without the
+/// prefix was issued bound to the struct name, and opens only for a model of
+/// that name.
+fn decode_for_table(token: &str, table: TokenTable, model_name: &str) -> Result<Option<String>> {
+    match token.strip_prefix(TABLE_TOKEN_PREFIX) {
+        Some(sealed) => open_token(sealed, &table_binding(table)),
+        None => default_decode(token, model_name),
+    }
 }
 
 /// Trait for models that support tokenization
@@ -403,8 +462,22 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// The model primary key type decoded from tokens for this model.
     type TokenPrimaryKey: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static;
 
-    /// Return the model name bound into generated tokens.
+    /// Return the model name: what encoder and decoder overrides receive, and
+    /// what the default encoder binds tokens to without a
+    /// [`token_table`](Self::token_table).
     fn token_model_name() -> &'static str;
+
+    /// The schema and table the default encoder binds this model's tokens
+    /// to. The derive returns the model's own, so two models that share a
+    /// struct name in different modules cannot open each other's tokens;
+    /// `None`, the default for a hand-written impl, binds them to
+    /// [`token_model_name`](Self::token_model_name).
+    ///
+    /// A token issued before tokens were bound to tables still decodes for
+    /// a model of the struct name it was bound to.
+    fn token_table() -> Option<TokenTable> {
+        None
+    }
 
     /// Return the primary key value that should be encoded into the token.
     fn token_primary_key(&self) -> Self::TokenPrimaryKey;
@@ -435,13 +508,21 @@ pub trait Tokenizable: Sized + Send + Sync {
     }
 
     /// Encode one primary-key value without loading a record first.
+    ///
+    /// Tokens are bound to the model's table only while neither the encoder
+    /// nor the decoder is overridden: an override receives the model name, and
+    /// one built on [`default_encode`] or [`default_decode`] reads tokens
+    /// bound to it.
     fn tokenize_id(id: Self::TokenPrimaryKey) -> Result<String> {
-        let encoder = Self::token_encoder().unwrap_or_else(TokenConfig::get_encoder);
+        let (encoder, decoder) = token_codecs::<Self>();
 
         let payload = serde_json::to_string(&id).map_err(|error| {
             Error::tokenization(format!("Failed to serialize token primary key: {error}"))
         })?;
-        encoder(&payload, Self::token_model_name())
+        match (encoder, decoder, Self::token_table()) {
+            (None, None, Some(table)) => encode_for_table(&payload, table),
+            (encoder, ..) => encoder.unwrap_or(default_encode)(&payload, Self::token_model_name()),
+        }
     }
 
     /// Decode a token and load the matching record.
@@ -452,16 +533,19 @@ pub trait Tokenizable: Sized + Send + Sync {
     /// Fails when the token does not belong to this model or the decoded
     /// payload cannot be deserialized into the primary-key type.
     fn decode_token(token: &str) -> Result<Self::TokenPrimaryKey> {
-        let decoder = Self::token_decoder().unwrap_or_else(TokenConfig::get_decoder);
-        let payload = decoder(token, Self::token_model_name())?
-            .ok_or_else(|| Error::invalid_token("Failed to decode token"))?;
+        let (encoder, decoder) = token_codecs::<Self>();
+        let model_name = Self::token_model_name();
+        let payload = match (encoder, decoder, Self::token_table()) {
+            (None, None, Some(table)) => decode_for_table(token, table, model_name)?,
+            (_, decoder, _) => decoder.unwrap_or(default_decode)(token, model_name)?,
+        }
+        .ok_or_else(|| Error::invalid_token("Failed to decode token"))?;
 
-        serde_json::from_str::<Self::TokenPrimaryKey>(&payload).map_err(|error| {
+        // Neither the payload nor serde's message, which quotes it: hiding the
+        // key is what the token is for, and errors travel to logs and responses.
+        serde_json::from_str::<Self::TokenPrimaryKey>(&payload).map_err(|_| {
             Error::invalid_token(format!(
-                "Failed to deserialize decoded token payload '{}' for model {}: {}",
-                payload,
-                Self::token_model_name(),
-                error
+                "The decoded token does not hold a primary key of model {model_name}"
             ))
         })
     }

@@ -1,0 +1,11 @@
+error: #[unique_index(..)] cannot cover encrypted field `email`: every write stores a fresh ciphertext, so the index never sees two equal values and no lookup by plaintext can use it
+ --> tests/ui/invalid_encrypted_lookup.rs:7:5
+  |
+7 |     #[unique_index]
+  |     ^
+
+error: #[tideorm(searchable = ...)] cannot name encrypted field `notes`: a full-text index over it would hold ciphertext, which no search matches
+ --> tests/ui/invalid_encrypted_lookup.rs:4:8
+  |
+4 | struct Member {
+  |        ^^^^^^

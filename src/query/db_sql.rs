@@ -23,6 +23,12 @@ pub(crate) use arrays::{
 /// leaving the WHERE clause.
 pub(crate) const MATCH_NOTHING: &str = "0 = 1";
 
+/// `test`, unknown for a NULL column, which matches neither a JSON test nor
+/// its negation.
+fn unknown_when_null(column_sql: &str, test: &str) -> String {
+    format!("CASE WHEN {column_sql} IS NOT NULL THEN {test} END")
+}
+
 /// `base`, with `_` appended until `taken` no longer holds: a name for a
 /// generated output that no model column or other output already uses.
 pub(crate) fn unused_name(base: &str, taken: impl Fn(&str) -> bool) -> String {
@@ -137,10 +143,6 @@ fn json_member_path(path: &str, key: &str) -> String {
     format!("{path}.\"{}\"", json_string_contents(key))
 }
 
-pub(crate) fn canonical_json_member_path(key: &str) -> String {
-    json_member_path("$", key)
-}
-
 /// `column_sql` as `jsonb`, which PostgreSQL's JSON operators require: a
 /// `json` column has none of them. On a `jsonb` column the cast is dropped at
 /// planning, so its indexes still apply.
@@ -171,12 +173,14 @@ pub(crate) fn json_equals_bound(
             format!("{} {} CAST(? AS JSON)", column_sql, operator),
             text(),
         ),
-        // MariaDB has no `CAST(.. AS JSON)`.
+        // MariaDB has no `CAST(.. AS JSON)`, and its `JSON_EQUALS` reads a
+        // NULL column as the `null` document; a NULL column matches neither
+        // the test nor its negation.
         DatabaseType::MariaDB => BoundSql::new(
             format!(
-                "{}JSON_EQUALS({}, ?)",
+                "{}({})",
                 if negated { "NOT " } else { "" },
-                column_sql
+                unknown_when_null(column_sql, &format!("JSON_EQUALS({column_sql}, ?)")),
             ),
             text(),
         ),
@@ -249,14 +253,22 @@ pub(crate) enum JsonExistence {
 
 /// Render a JSON key- or path-existence test, or its negation.
 ///
-/// PostgreSQL tests a key with `?` and a path with `@?`. MySQL/MariaDB and
-/// SQLite have no key operator, so a key is tested as the one-member path that
-/// names it. `None` means the path cannot be expressed on this backend.
+/// Every backend reads a path strictly: a member step finds a member of an
+/// object only, never of the objects inside an array, and an index step an
+/// element of an array only. A key is the one-member path that names it, so
+/// it exists only in an object. A member holding JSON `null` exists, and a
+/// `NULL` column is unknown, so that the negation does not match it either.
 ///
-/// On SQLite, `json_type` finds a member that holds JSON `null`, which
-/// `json_extract` reports as SQL `NULL`, and the `CASE` leaves a `NULL`
-/// column unknown, as the other backends do, so that the negation does not
-/// match it either.
+/// PostgreSQL tests a key with `?`, which also finds a string element of an
+/// array, so it checks the document is an object first, and a path with
+/// `@?` in `strict` mode, where the default `lax` mode would look into
+/// arrays and read a scalar as an array of one. MySQL and MariaDB read an
+/// index of a non-array as the value itself, so each indexed step checks its
+/// parent is an array. SQLite's `json_type` is strict already, and finds a
+/// member holding JSON `null`, which `json_extract` reports as SQL `NULL`.
+///
+/// `None` means the path has steps no other backend can express; PostgreSQL
+/// reads such a path as the JSONPath written.
 pub(crate) fn json_exists_bound(
     db_type: DatabaseType,
     column_sql: &str,
@@ -264,25 +276,55 @@ pub(crate) fn json_exists_bound(
     target: &str,
     negated: bool,
 ) -> Option<BoundSql> {
-    // PostgreSQL reads a key or a JSONPath as written; the others take the
-    // path of the one member a key names.
-    let bound = match (db_type, existence) {
-        (DatabaseType::Postgres, _) => target.to_string(),
-        (_, JsonExistence::Key) => canonical_json_member_path(target),
-        (_, JsonExistence::Path) => json_path_text(&parse_json_path(target)?),
+    let steps = match existence {
+        JsonExistence::Key => Some(vec![JsonPathStep::Member(target.to_string())]),
+        JsonExistence::Path => parse_json_path(target),
     };
-    let sql = match (db_type, existence) {
-        (DatabaseType::Postgres, JsonExistence::Key) => {
-            format!("{} ? $1", postgres_jsonb(column_sql))
+    let (sql, bound) = match (db_type, steps) {
+        (DatabaseType::Postgres, steps) => {
+            let jsonb = postgres_jsonb(column_sql);
+            match (existence, steps) {
+                (JsonExistence::Key, _) => (
+                    unknown_when_null(
+                        column_sql,
+                        &format!("(jsonb_typeof({jsonb}) = 'object' AND {jsonb} ? $1)"),
+                    ),
+                    vec![target.to_string()],
+                ),
+                // A step strict mode refuses is suppressed by `@?`, which
+                // then reports no answer; it is a missing member.
+                (JsonExistence::Path, Some(steps)) => (
+                    unknown_when_null(
+                        column_sql,
+                        &format!("COALESCE({jsonb} @? ($1::jsonpath), FALSE)"),
+                    ),
+                    vec![format!("strict {}", json_path_text(&steps))],
+                ),
+                (JsonExistence::Path, None) => (
+                    format!("{jsonb} @? ($1::jsonpath)"),
+                    vec![target.to_string()],
+                ),
+            }
         }
-        (DatabaseType::Postgres, JsonExistence::Path) => {
-            format!("{} @? ($1::jsonpath)", postgres_jsonb(column_sql))
-        }
-        (DatabaseType::SQLite, _) => format!(
-            "CASE WHEN {column_sql} IS NOT NULL THEN json_type({column_sql}, ?) IS NOT NULL END"
+        (_, None) => return None,
+        (DatabaseType::SQLite, Some(steps)) => (
+            unknown_when_null(
+                column_sql,
+                &format!("json_type({column_sql}, ?) IS NOT NULL"),
+            ),
+            vec![json_path_text(&steps)],
         ),
-        (DatabaseType::MySQL | DatabaseType::MariaDB, _) => {
-            format!("JSON_CONTAINS_PATH({}, 'one', ?)", column_sql)
+        (DatabaseType::MySQL | DatabaseType::MariaDB, Some(steps)) => {
+            let mut sql = format!("JSON_CONTAINS_PATH({column_sql}, 'one', ?)");
+            let mut bound = vec![json_path_text(&steps)];
+            for (index, step) in steps.iter().enumerate() {
+                if matches!(step, JsonPathStep::Element(_)) {
+                    sql.push_str(" AND ");
+                    sql.push_str(&mysql_json::guard_sql(column_sql, mysql_json::Kind::Array));
+                    bound.push(json_path_text(&steps[..index]));
+                }
+            }
+            (sql, bound)
         }
     };
 
@@ -291,7 +333,11 @@ pub(crate) fn json_exists_bound(
     } else {
         sql
     };
-    Some(BoundSql::new(sql, vec![Value::String(Some(bound))]))
+    let values = bound
+        .into_iter()
+        .map(|text| Value::String(Some(text)))
+        .collect();
+    Some(BoundSql::new(sql, values))
 }
 
 /// One step of a JSON path.

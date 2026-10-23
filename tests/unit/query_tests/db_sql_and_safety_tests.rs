@@ -89,17 +89,34 @@ fn test_json_contains_bound_postgres_uses_postgres_placeholder() {
     assert!(matches!(bound.values.as_slice(), [Value::Json(Some(_))]));
 }
 
+/// The SQL of an existence test and the path it binds first.
 fn json_exists(
     db_type: DatabaseType,
     existence: JsonExistence,
     target: &str,
     negated: bool,
 ) -> Option<(String, String)> {
+    json_exists_values(db_type, existence, target, negated)
+        .map(|(sql, mut paths)| (sql, paths.remove(0)))
+}
+
+/// The SQL of an existence test and every path it binds.
+fn json_exists_values(
+    db_type: DatabaseType,
+    existence: JsonExistence,
+    target: &str,
+    negated: bool,
+) -> Option<(String, Vec<String>)> {
     db_sql::json_exists_bound(db_type, "\"data\"", existence, target, negated).map(|bound| {
-        let [Value::String(Some(path))] = bound.values.as_slice() else {
-            panic!("expected one bound string, got {:?}", bound.values);
-        };
-        (bound.sql, path.clone())
+        let paths = bound
+            .values
+            .iter()
+            .map(|value| match value {
+                Value::String(Some(path)) => path.clone(),
+                other => panic!("expected bound strings, got {other:?}"),
+            })
+            .collect();
+        (bound.sql, paths)
     })
 }
 
@@ -107,7 +124,12 @@ fn json_exists(
 fn test_json_key_exists_renders_each_backend_operator() {
     assert_eq!(
         json_exists(DatabaseType::Postgres, JsonExistence::Key, "email", false),
-        Some(("(\"data\")::jsonb ? $1".to_string(), "email".to_string()))
+        Some((
+            "CASE WHEN \"data\" IS NOT NULL THEN (jsonb_typeof((\"data\")::jsonb) = 'object' \
+             AND (\"data\")::jsonb ? $1) END"
+                .to_string(),
+            "email".to_string()
+        ))
     );
 
     for db_type in [DatabaseType::MySQL, DatabaseType::MariaDB] {
@@ -172,8 +194,9 @@ fn test_json_path_exists_binds_the_path() {
             false
         ),
         Some((
-            "(\"data\")::jsonb @? ($1::jsonpath)".to_string(),
-            "$.user.name".to_string()
+            "CASE WHEN \"data\" IS NOT NULL THEN COALESCE((\"data\")::jsonb @? ($1::jsonpath), FALSE) END"
+                .to_string(),
+            "strict $.\"user\".\"name\"".to_string()
         ))
     );
 
@@ -200,7 +223,7 @@ fn test_json_path_injection_is_rejected_for_mysql_and_sqlite() {
 
 #[test]
 fn test_json_path_special_keys_are_quoted_safely() {
-    let (_, path) = json_exists(
+    let (sql, paths) = json_exists_values(
         DatabaseType::MySQL,
         JsonExistence::Path,
         "$['weird.key'][0].name",
@@ -208,7 +231,13 @@ fn test_json_path_special_keys_are_quoted_safely() {
     )
     .unwrap();
 
-    assert_eq!(path, "$.\"weird.key\"[0].\"name\"");
+    // The indexed step checks its parent is an array.
+    assert_eq!(
+        sql,
+        "JSON_CONTAINS_PATH(\"data\", 'one', ?) \
+         AND JSON_TYPE(JSON_EXTRACT(\"data\", ?)) = 'ARRAY'"
+    );
+    assert_eq!(paths, ["$.\"weird.key\"[0].\"name\"", "$.\"weird.key\""]);
 }
 
 #[test]
@@ -232,10 +261,15 @@ fn test_json_path_not_exists_negates_the_path_test_and_binds_the_path() {
         .build_select_sql_with_params_for_db(DatabaseType::Postgres);
 
     assert!(
-        sql.ends_with("WHERE NOT ((\"data\")::jsonb @? ($1::jsonpath))"),
+        sql.ends_with(
+            "WHERE NOT (CASE WHEN \"data\" IS NOT NULL THEN COALESCE((\"data\")::jsonb @? ($1::jsonpath), FALSE) END)"
+        ),
         "{sql}"
     );
-    assert!(matches!(params.as_slice(), [Value::String(Some(path))] if path == "$.user.name"));
+    assert!(matches!(
+        params.as_slice(),
+        [Value::String(Some(path))] if path == "strict $.\"user\".\"name\""
+    ));
 }
 
 #[test]

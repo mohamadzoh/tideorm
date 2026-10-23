@@ -115,6 +115,9 @@ impl<T: Model> FullTextSearchBuilder<T> {
     /// has no word: the words as a quoted phrase, each word as a required
     /// prefix, or the phrase with InnoDB's `@distance`.
     fn mysql_operand(&self) -> String {
+        if !self.has_search_terms() {
+            return String::new();
+        }
         let text = self.query_text();
         if self.config.mode == SearchMode::Boolean {
             return sanitize_mysql_fulltext_query(&text, true);

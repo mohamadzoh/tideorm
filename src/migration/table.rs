@@ -268,6 +268,16 @@ impl TableBuilder {
         )
     }
 
+    /// The `CREATE INDEX` statements of this table's indexes, for the CLI's
+    /// migration generator, which writes them into a migration file.
+    #[doc(hidden)]
+    pub fn __index_sql(&self, if_not_exists: bool) -> Vec<String> {
+        self.build_indexes(if_not_exists)
+            .into_iter()
+            .map(|(_, sql)| sql)
+            .collect()
+    }
+
     /// Each index as `(name, CREATE INDEX statement)`.
     pub(crate) fn build_indexes(&self, if_not_exists: bool) -> Vec<(&str, String)> {
         let table = quote_ident(self.database_type, &self.name);

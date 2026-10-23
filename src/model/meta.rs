@@ -81,6 +81,22 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
 
     fn field_names() -> &'static [&'static str];
 
+    /// Fields a user-supplied serde implementation flattens into its parent.
+    /// Their contents have no field boundary after serialization, so a hidden
+    /// flattened field cannot safely be removed from that payload.
+    #[doc(hidden)]
+    fn __flattened_fields() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Fields a user-supplied serde implementation never writes (`skip` or
+    /// `skip_serializing`). Rendering must not write them back in, the way a
+    /// translation of the field would.
+    #[doc(hidden)]
+    fn __skipped_fields() -> &'static [&'static str] {
+        &[]
+    }
+
     fn canonical_column_name(name: &str) -> Option<&'static str> {
         if let Some(column_name) = Self::column_names()
             .iter()
@@ -132,9 +148,9 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// reference that validates would be emitted as a column that does not
     /// exist.
     fn canonical_column_parts(name: &str) -> (Option<&str>, &str) {
-        match name.split_once('.') {
-            Some((table, column)) if table == Self::table_name() => {
-                (Some(table), Self::column_named(column))
+        match name.rsplit_once('.') {
+            Some((table, column)) if Self::owns_table_reference(table) => {
+                (Some(Self::table_name()), Self::column_named(column))
             }
             Some((table, column)) => (Some(table), column),
             None => (None, Self::column_named(name)),
@@ -153,12 +169,23 @@ pub trait ModelMeta: Sized + Send + Sync + Clone + 'static {
     /// another table's column or a name the model does not know.
     #[doc(hidden)]
     fn own_column_name(name: &str) -> Option<&'static str> {
-        let name = match name.trim().split_once('.') {
-            Some((table, column)) if table == Self::table_name() => column,
+        let name = match name.trim().rsplit_once('.') {
+            Some((table, column)) if Self::owns_table_reference(table) => column,
             Some(_) => return None,
             None => name.trim(),
         };
         Self::canonical_column_name(name)
+    }
+
+    /// Whether a bare or schema-qualified table reference identifies this model.
+    #[doc(hidden)]
+    fn owns_table_reference(reference: &str) -> bool {
+        match reference.split_once('.') {
+            Some((schema, table)) => {
+                Some(schema) == Self::schema_name() && table == Self::table_name()
+            }
+            None => reference == Self::table_name(),
+        }
     }
 
     fn hidden_attributes() -> Vec<&'static str> {

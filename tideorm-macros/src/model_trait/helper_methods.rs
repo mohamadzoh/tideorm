@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
     let struct_name = &ctx.struct_name;
     let internal_entity_mod = &ctx.internal_entity_mod;
-    let update_setters = column_initializers(ctx, Conversion::Update);
+    let (update_bindings, update_setters) = write_conversion(ctx, Conversion::Update);
     let column_name_checks =
         ctx.field_names
             .iter()
@@ -31,6 +31,7 @@ pub(super) fn generate_helper_methods_impl(ctx: &BuildContext) -> TokenStream2 {
             #[doc(hidden)]
             fn __into_update_active_model(self) -> ::tideorm::Result<#internal_entity_mod::ActiveModel> {
                 use ::tideorm::orm::ActiveValue;
+                #update_bindings
                 Ok(#internal_entity_mod::ActiveModel {
                     #(#update_setters),*
                 })

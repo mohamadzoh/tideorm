@@ -7,12 +7,24 @@ use crate::internal::sql_safety::quote_ident;
 /// Provides methods to create, alter, and drop database objects.
 pub struct Schema {
     database_type: DatabaseType,
+    /// Whether the migration runs with SQLite's foreign keys off (see
+    /// [`Migration::foreign_keys_off`](super::Migration::foreign_keys_off)).
+    foreign_keys_off: bool,
 }
 
 impl Schema {
     /// Create a new schema context
     pub fn new(database_type: DatabaseType) -> Self {
-        Self { database_type }
+        Self {
+            database_type,
+            foreign_keys_off: false,
+        }
+    }
+
+    /// This context, for a migration that runs with SQLite's foreign keys off.
+    pub(crate) fn with_foreign_keys_off(mut self, off: bool) -> Self {
+        self.foreign_keys_off = off;
+        self
     }
 
     /// Create a new table
@@ -72,6 +84,11 @@ impl Schema {
             let create_table = self.show_create_table(name).await?;
             builder.keep_column_attributes(&create_table);
         }
+        let dropped = builder.sqlite_dropped_columns();
+        if self.database_type == DatabaseType::SQLite {
+            let (schema, indexes) = self.sqlite_column_indexes(name, &dropped).await?;
+            builder.drop_sqlite_column_indexes(schema, indexes);
+        }
 
         for sql in builder.build()? {
             self.execute(&sql).await?;
@@ -126,21 +143,87 @@ impl Schema {
 
     /// Drop an index
     pub async fn drop_index(&mut self, table: &str, name: &str) -> Result<()> {
-        let db_type = self.database_type;
-        let sql = match db_type {
-            DatabaseType::MySQL | DatabaseType::MariaDB => format!(
-                "DROP INDEX {} ON {}",
-                quote_ident(db_type, name),
-                quote_ident(db_type, table)
-            ),
-            _ => format!("DROP INDEX {}", quote_ident(db_type, name)),
-        };
-        self.execute(&sql).await
+        self.execute(&ddl::drop_index(
+            self.database_type,
+            None,
+            table,
+            name,
+            false,
+        ))
+        .await
     }
 
     /// Execute raw SQL
+    ///
+    /// On SQLite, `PRAGMA foreign_keys` does nothing inside the transaction a
+    /// migration runs in, and outside one it changes whichever pooled
+    /// connection runs it, so turning foreign keys off is refused: see
+    /// [`Migration::foreign_keys_off`](super::Migration::foreign_keys_off),
+    /// whose migration runs with them off. SQL scripts are checked before any
+    /// of their statements execute.
     pub async fn raw(&mut self, sql: &str) -> Result<()> {
+        if self.database_type == DatabaseType::SQLite
+            && !self.foreign_keys_off
+            && super::sqlite_foreign_keys::disables_foreign_keys(sql)
+        {
+            return Err(crate::Error::query(
+                "SQLite ignores `PRAGMA foreign_keys` inside a transaction, which a migration \
+                 runs in, and outside one it turns them off on one connection of a pool only: \
+                 return true from `Migration::foreign_keys_off()` to run a migration with \
+                 foreign keys off",
+            ));
+        }
         self.execute(sql).await
+    }
+
+    /// Explicit indexes over just a dropped column. Inspect column membership
+    /// rather than guessing names: SQLite keeps index names after renames.
+    async fn sqlite_column_indexes(
+        &self,
+        table: &str,
+        dropped: &[&str],
+    ) -> Result<(String, Vec<(String, String)>)> {
+        let db = crate::database::__current_db()?;
+        // Match SQLite's unqualified table resolution: temp, main, then
+        // attached databases in attachment order. Index names resolve separately.
+        const OWNER_SQL: &str = "SELECT t.schema AS schema_name FROM pragma_table_list AS t \
+            JOIN pragma_database_list AS d ON d.name = t.schema \
+            WHERE t.name = ? COLLATE NOCASE \
+            ORDER BY CASE t.schema WHEN 'temp' THEN -1 ELSE d.seq END LIMIT 1";
+        let owners = db
+            .__raw_json_with_params(OWNER_SQL, vec![table.into()])
+            .await?;
+        let schema = owners
+            .first()
+            .and_then(|row| row["schema_name"].as_str())
+            .unwrap_or("main")
+            .to_string();
+        const SQL: &str = "SELECT list.name FROM pragma_index_list(?, ?) AS list \
+                           WHERE list.origin = 'c' AND list.partial = 0 \
+                           AND (SELECT COUNT(*) FROM pragma_index_info(list.name, ?)) = 1 \
+                           AND (SELECT name FROM pragma_index_info(list.name, ?)) = ?";
+        let mut found = Vec::new();
+        for column in dropped {
+            let rows = db
+                .__raw_json_with_params(
+                    SQL,
+                    vec![
+                        table.into(),
+                        schema.as_str().into(),
+                        schema.as_str().into(),
+                        schema.as_str().into(),
+                        (*column).into(),
+                    ],
+                )
+                .await
+                .map_err(|error| error.with_context(ErrorContext::new().query(SQL)))?;
+            for row in rows {
+                if let Some(index) = row.get("name").and_then(serde_json::Value::as_str) {
+                    found.push(((*column).to_string(), index.to_string()));
+                }
+            }
+        }
+        Ok((schema, found))
     }
 
     /// The table's `SHOW CREATE TABLE`, on MySQL or MariaDB.

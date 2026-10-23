@@ -38,6 +38,38 @@ const MIGRATION_LOCK_NAME: &str = "tideorm_migrations";
 #[cfg(feature = "mysql")]
 const MIGRATION_LOCK_TIMEOUT_SECONDS: i64 = 300;
 
+#[derive(Clone, Copy)]
+enum LockKind {
+    Migration,
+    Seed,
+}
+
+impl LockKind {
+    #[cfg(feature = "sqlite")]
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Migration => ".tideorm-migrations.lock",
+            Self::Seed => ".tideorm-seeds.lock",
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    fn key(self) -> i64 {
+        match self {
+            Self::Migration => MIGRATION_LOCK_KEY,
+            Self::Seed => 0x0054_4944_4553_4544,
+        }
+    }
+
+    #[cfg(feature = "mysql")]
+    fn name(self) -> &'static str {
+        match self {
+            Self::Migration => MIGRATION_LOCK_NAME,
+            Self::Seed => "tideorm_seeds",
+        }
+    }
+}
+
 /// Whether the backend keeps DDL inside a transaction.
 ///
 /// PostgreSQL and SQLite roll DDL back with the surrounding transaction, so a
@@ -48,7 +80,8 @@ fn supports_transactional_ddl(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Postgres | DatabaseType::SQLite)
 }
 
-/// Cross-process guard that serializes concurrent migrators.
+/// Cross-process guard for migration and seed operations, each with its own
+/// lock namespace.
 ///
 /// Without it, N replicas booting together each run every pending `up()` at the
 /// same time. The lock is held on a connection of its own; the migrations
@@ -62,48 +95,70 @@ fn supports_transactional_ddl(db_type: DatabaseType) -> bool {
 /// An in-memory database, which only its own process can reach, takes an
 /// in-process lock instead: never a file in a shared directory, where another
 /// user could create or replace it first.
-enum MigrationLock {
+enum LedgerLock {
     #[cfg(feature = "sqlite")]
     Sqlite(std::fs::File),
     #[cfg(feature = "sqlite")]
-    SqliteMemory(futures_util::lock::OwnedMutexGuard<()>),
+    SqliteMemory(super::memory_lock::MemoryLock),
     #[cfg(feature = "postgres")]
     Postgres(crate::internal::sqlx::PgConnection),
     #[cfg(feature = "mysql")]
     Session(crate::internal::sqlx::MySqlConnection),
 }
 
-impl MigrationLock {
-    async fn acquire(db: &Database, db_type: DatabaseType) -> Result<Self> {
-        #[cfg(not(any(feature = "postgres", feature = "mysql")))]
-        let _ = db;
-        match db_type {
+impl LedgerLock {
+    async fn acquire(db: &Database, kind: LockKind) -> Result<Self> {
+        #[cfg(not(any(feature = "postgres", feature = "mysql", feature = "sqlite")))]
+        let _ = kind;
+        match db.backend() {
             #[cfg(feature = "sqlite")]
             DatabaseType::SQLite => {
-                let pool = db.__internal_connection()?;
-                let sqlite = pool.get_sqlite_connection_pool();
+                use crate::internal::ConnectionTrait;
+
                 // Where SQLite opened the main database, whatever the URL's
                 // spelling (`sqlite:///C:/..` names `/C:/..`, which Windows
-                // cannot resolve); empty for an in-memory database.
-                let file: String = crate::internal::sqlx::query_scalar(
+                // cannot resolve); empty for an in-memory database. Read on
+                // the connection statements run on: inside a transaction, a
+                // one-connection pool has no other to hand out.
+                let connection = db.__get_connection()?;
+                let executor = connection.executor();
+                let probe = crate::internal::build_statement_with_values(
+                    executor.get_database_backend(),
                     "SELECT file FROM pragma_database_list WHERE name = 'main'",
-                )
-                .fetch_one(sqlite)
-                .await
-                .map_err(|error| crate::internal::translate_error(sqlx_error(error)))?;
+                    Vec::new(),
+                );
+                let file: String = match executor
+                    .query_one_raw(probe)
+                    .await
+                    .map_err(crate::internal::translate_error)?
+                {
+                    Some(row) => row
+                        .try_get("", "file")
+                        .map_err(crate::internal::translate_error)?,
+                    None => String::new(),
+                };
                 if file.is_empty() {
-                    let name = sqlite.connect_options().get_filename().to_path_buf();
-                    return Ok(Self::SqliteMemory(sqlite_memory_lock(name).await));
+                    let pool = db.__internal_connection()?;
+                    let sqlite = pool.get_sqlite_connection_pool();
+                    let mut name = sqlite
+                        .connect_options()
+                        .get_filename()
+                        .as_os_str()
+                        .to_os_string();
+                    name.push(kind.suffix());
+                    return Ok(Self::SqliteMemory(
+                        super::memory_lock::MemoryLock::acquire(name.into()).await,
+                    ));
                 }
                 let file = std::fs::canonicalize(&file)
                     .unwrap_or_else(|_| std::path::PathBuf::from(&file));
                 let mut path = file.into_os_string();
-                path.push(".tideorm-migrations.lock");
+                path.push(kind.suffix());
                 Ok(Self::Sqlite(sqlite_file_lock(path.into()).await?))
             }
             #[cfg(not(feature = "sqlite"))]
             DatabaseType::SQLite => Err(Error::backend_not_supported(
-                "SQLite migrations require the sqlite feature",
+                "SQLite ledger locks require the sqlite feature",
                 "SQLite",
             )),
             #[cfg(feature = "postgres")]
@@ -111,7 +166,7 @@ impl MigrationLock {
                 let pool = db.__internal_connection()?;
                 if pool.get_database_backend() != crate::internal::OrmBackend::Postgres {
                     return Err(Error::transaction(
-                        "the PostgreSQL migration lock needs a PostgreSQL connection",
+                        "the PostgreSQL ledger lock needs a PostgreSQL connection",
                     ));
                 }
                 let mut connection = pool
@@ -123,7 +178,7 @@ impl MigrationLock {
                         crate::internal::translate_connection_error(sqlx_error(error))
                     })?;
                 crate::internal::sqlx::query("SELECT pg_advisory_lock($1)")
-                    .bind(MIGRATION_LOCK_KEY)
+                    .bind(kind.key())
                     .execute(&mut connection)
                     .await
                     .map_err(|error| translate_error(sqlx_error(error)))?;
@@ -131,7 +186,7 @@ impl MigrationLock {
             }
             #[cfg(not(feature = "postgres"))]
             DatabaseType::Postgres => Err(Error::backend_not_supported(
-                "the migration lock needs TideORM's `postgres` feature",
+                "the ledger lock needs TideORM's `postgres` feature",
                 "PostgreSQL",
             )),
             #[cfg(feature = "mysql")]
@@ -141,7 +196,7 @@ impl MigrationLock {
                 let pool = db.__internal_connection()?;
                 if pool.get_database_backend() != crate::internal::OrmBackend::MySql {
                     return Err(Error::transaction(
-                        "the MySQL migration lock needs a MySQL connection",
+                        "the MySQL ledger lock needs a MySQL connection",
                     ));
                 }
                 let mut connection = pool
@@ -154,7 +209,7 @@ impl MigrationLock {
                     })?;
 
                 let row = crate::internal::sqlx::query("SELECT GET_LOCK(?, ?)")
-                    .bind(MIGRATION_LOCK_NAME)
+                    .bind(kind.name())
                     .bind(MIGRATION_LOCK_TIMEOUT_SECONDS)
                     .fetch_one(&mut connection)
                     .await
@@ -170,26 +225,29 @@ impl MigrationLock {
                     .flatten();
                 if acquired != Some(1) {
                     return Err(Error::transaction(format!(
-                        "Timed out after {}s waiting for the '{}' migration lock; another migrator is still running",
-                        MIGRATION_LOCK_TIMEOUT_SECONDS, MIGRATION_LOCK_NAME
+                        "Timed out after {}s waiting for the '{}' lock; another ledger operation is still running",
+                        MIGRATION_LOCK_TIMEOUT_SECONDS,
+                        kind.name()
                     )));
                 }
                 Ok(Self::Session(connection))
             }
             #[cfg(not(feature = "mysql"))]
             DatabaseType::MySQL | DatabaseType::MariaDB => Err(Error::backend_not_supported(
-                "the migration lock needs TideORM's `mysql` feature",
-                db_type.to_string(),
+                "the ledger lock needs TideORM's `mysql` feature",
+                db.backend().to_string(),
             )),
         }
     }
 
-    async fn release(self) -> Result<()> {
+    async fn release(self, kind: LockKind) -> Result<()> {
+        #[cfg(not(any(feature = "postgres", feature = "mysql")))]
+        let _ = kind;
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(file) => file
                 .unlock()
-                .map_err(|e| Error::transaction(format!("migration unlock: {e}"))),
+                .map_err(|e| Error::transaction(format!("ledger unlock: {e}"))),
             #[cfg(feature = "sqlite")]
             Self::SqliteMemory(guard) => {
                 drop(guard);
@@ -198,7 +256,7 @@ impl MigrationLock {
             #[cfg(feature = "postgres")]
             Self::Postgres(mut connection) => {
                 crate::internal::sqlx::query("SELECT pg_advisory_unlock($1)")
-                    .bind(MIGRATION_LOCK_KEY)
+                    .bind(kind.key())
                     .execute(&mut connection)
                     .await
                     .map_err(|error| translate_error(sqlx_error(error)))?;
@@ -210,7 +268,7 @@ impl MigrationLock {
             #[cfg(feature = "mysql")]
             Self::Session(mut connection) => {
                 crate::internal::sqlx::query("SELECT RELEASE_LOCK(?)")
-                    .bind(MIGRATION_LOCK_NAME)
+                    .bind(kind.name())
                     .execute(&mut connection)
                     .await
                     .map_err(|error| translate_error(sqlx_error(error)))?;
@@ -223,73 +281,33 @@ impl MigrationLock {
     }
 }
 
-/// The migration lock of the in-memory database `name` (SQLx's name for it,
-/// which a named shared-cache database keeps across pools): one in-process
-/// mutex per database.
-#[cfg(feature = "sqlite")]
-async fn sqlite_memory_lock(name: std::path::PathBuf) -> futures_util::lock::OwnedMutexGuard<()> {
-    type Locks = std::collections::HashMap<std::path::PathBuf, Arc<futures_util::lock::Mutex<()>>>;
-    static LOCKS: std::sync::OnceLock<parking_lot::Mutex<Locks>> = std::sync::OnceLock::new();
-    let lock = Arc::clone(
-        LOCKS
-            .get_or_init(Default::default)
-            .lock()
-            .entry(name)
-            .or_default(),
-    );
-    lock.lock_owned().await
-}
-
-/// Blocking file locks live on a worker thread, never the async executor.
-/// Dropping a cancelled wait drops the eventual file guard too.
+/// Poll a nonblocking OS lock with a runtime-independent timer. Cancelling
+/// this future drops the file immediately; no worker remains blocked on it.
 #[cfg(feature = "sqlite")]
 async fn sqlite_file_lock(path: std::path::PathBuf) -> Result<std::fs::File> {
-    type Waiting = (Option<Result<std::fs::File>>, Option<std::task::Waker>);
-    let state = Arc::new(std::sync::Mutex::new(Waiting::default()));
-    let worker = Arc::clone(&state);
-    std::thread::Builder::new()
-        .name("tideorm-migration-lock".into())
-        .spawn(move || {
-            let result = open_locked(&path);
-            let mut state = worker.lock().unwrap();
-            state.0 = Some(result);
-            let waker = state.1.take();
-            drop(state);
-            if let Some(waker) = waker {
-                waker.wake();
-            }
-        })
-        .map_err(|e| Error::transaction(format!("start migration lock worker: {e}")))?;
-    std::future::poll_fn(|cx| {
-        let mut state = state.lock().unwrap();
-        if let Some(result) = state.0.take() {
-            std::task::Poll::Ready(result)
-        } else {
-            state.1 = Some(cx.waker().clone());
-            std::task::Poll::Pending
-        }
-    })
-    .await
-}
-
-/// Open (creating) the lock file at `path` and wait for its exclusive lock.
-#[cfg(feature = "sqlite")]
-fn open_locked(path: &std::path::Path) -> Result<std::fs::File> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|e| Error::transaction(format!("open migration lock: {e}")))?;
-    file.lock()
-        .map_err(|e| Error::transaction(format!("acquire migration lock: {e}")))?;
-    Ok(file)
+        .map_err(|e| Error::transaction(format!("open ledger lock: {e}")))?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                async_io::Timer::after(std::time::Duration::from_millis(25)).await;
+            }
+            Err(error) => {
+                return Err(Error::transaction(format!("acquire ledger lock: {error}")));
+            }
+        }
+    }
 }
 
-/// A driver error from the lock's own connection, as SeaORM reports one.
+/// A driver error from a connection of the migrator's own, as SeaORM reports one.
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
-fn sqlx_error(error: crate::internal::sqlx::Error) -> crate::internal::OrmError {
+pub(super) fn sqlx_error(error: crate::internal::sqlx::Error) -> crate::internal::OrmError {
     crate::internal::OrmError::Query(crate::internal::RuntimeErr::SqlxError(error.into()))
 }
 
@@ -437,12 +455,20 @@ impl Migrator {
         Ok(result)
     }
 
-    /// Rollback multiple migrations
+    /// Rollback multiple migrations while holding one migration lock.
     pub async fn rollback_steps(&self, steps: usize) -> Result<MigrationResult> {
+        if steps == 0 {
+            return Ok(MigrationResult::default());
+        }
+        let db = require_db()?;
+        with_migration_lock(&db, self.rollback_steps_locked(&db, steps)).await
+    }
+
+    async fn rollback_steps_locked(&self, db: &Database, steps: usize) -> Result<MigrationResult> {
         let mut result = MigrationResult::default();
 
         for _ in 0..steps {
-            let step_result = self.rollback().await?;
+            let step_result = self.rollback_locked(db).await?;
             if step_result.rolled_back.is_empty() {
                 break;
             }
@@ -459,10 +485,14 @@ impl Migrator {
     /// left to run. Reset fails before reverting anything if such rows exist.
     pub async fn reset(&self) -> Result<MigrationResult> {
         let db = require_db()?;
-        let ledger = self.ledger()?;
-        ledger.ensure(&db).await?;
+        with_migration_lock(&db, self.reset_locked(&db)).await
+    }
 
-        let recorded = ledger.keys(&db).await?;
+    async fn reset_locked(&self, db: &Database) -> Result<MigrationResult> {
+        let ledger = self.ledger()?;
+        ledger.ensure(db).await?;
+
+        let recorded = ledger.keys(db).await?;
         let registered = self.registered_versions();
         let unknown: Vec<&str> = recorded
             .iter()
@@ -477,19 +507,23 @@ impl Migrator {
             )));
         }
 
-        self.rollback_steps(recorded.len()).await
+        self.rollback_steps_locked(db, recorded.len()).await
     }
 
     /// Refresh migrations (reset + run)
     pub async fn refresh(&self) -> Result<MigrationResult> {
-        let reset_result = self.reset().await?;
-        let run_result = self.run().await?;
+        let db = require_db()?;
+        with_migration_lock(&db, async {
+            let reset_result = self.reset_locked(&db).await?;
+            let run_result = self.run_locked(&db).await?;
 
-        Ok(MigrationResult {
-            applied: run_result.applied,
-            skipped: run_result.skipped,
-            rolled_back: reset_result.rolled_back,
+            Ok(MigrationResult {
+                applied: run_result.applied,
+                skipped: run_result.skipped,
+                rolled_back: reset_result.rolled_back,
+            })
         })
+        .await
     }
 
     /// Get migration status
@@ -566,8 +600,9 @@ async fn apply_migration(
     table: String,
 ) -> Result<()> {
     let db_type = db.backend();
-    in_ddl_scope(db, async move {
-        let mut schema = Schema::new(db_type);
+    let foreign_keys_off = migration.foreign_keys_off();
+    in_ddl_scope(db, foreign_keys_off, async move {
+        let mut schema = Schema::new(db_type).with_foreign_keys_off(foreign_keys_off);
         migration.up(&mut schema).await?;
         Ledger::migrations(&table)
             .record(&require_db()?, migration.version(), &[migration.name()])
@@ -585,8 +620,9 @@ async fn revert_migration(
 ) -> Result<()> {
     let db_type = db.backend();
     let version = version.to_string();
-    in_ddl_scope(db, async move {
-        let mut schema = Schema::new(db_type);
+    let foreign_keys_off = migration.foreign_keys_off();
+    in_ddl_scope(db, foreign_keys_off, async move {
+        let mut schema = Schema::new(db_type).with_foreign_keys_off(foreign_keys_off);
         migration.down(&mut schema).await?;
         Ledger::migrations(&table)
             .remove(&require_db()?, &version)
@@ -601,9 +637,51 @@ async fn with_migration_lock<T>(
     db: &Database,
     work: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    let lock = MigrationLock::acquire(db, db.backend()).await?;
+    with_ledger_lock(db, LockKind::Migration, work).await
+}
+
+/// Seeds use their own lock namespace, so a migration may run seeds without
+/// waiting on the migration lock it already holds. Each complete seed
+/// operation holds this lock before reading or changing its ledger.
+pub(crate) async fn with_seed_lock<T>(
+    db: &Database,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    // A seed's savepoint can finish before its ledger entry is visible to
+    // other runners. Keep the guard in the enclosing transaction's record,
+    // shared with all its savepoints, rather than releasing it with `work`.
+    let record = db.__get_connection()?.source().record;
+    if let Some(record) = record {
+        let retained = record.lock().seed_lock();
+        let mut held = retained.lock().await;
+        if held.is_none() {
+            *held = Some(Box::new(LedgerLock::acquire(db, LockKind::Seed).await?));
+        }
+        if db.execution_backend() == DatabaseType::SQLite {
+            use crate::internal::ConnectionTrait;
+            Ledger::seeds().ensure(db).await?;
+            // A read snapshot may predate a seed committed before this lock was
+            // acquired. Reserve the writer before reading the ledger or calling
+            // user code; SQLite rejects stale snapshots here without side effects.
+            db.__get_connection()?
+                .executor()
+                .execute_unprepared("UPDATE _seeds SET name = name WHERE 0")
+                .await
+                .map_err(crate::internal::translate_error)?;
+        }
+        return work.await;
+    }
+    with_ledger_lock(db, LockKind::Seed, work).await
+}
+
+async fn with_ledger_lock<T>(
+    db: &Database,
+    kind: LockKind,
+    work: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let lock = LedgerLock::acquire(db, kind).await?;
     let outcome = work.await;
-    let released = lock.release().await;
+    let released = lock.release(kind).await;
 
     let result = outcome?;
     released?;
@@ -615,21 +693,36 @@ async fn with_migration_lock<T>(
 /// ledger row; elsewhere unwrapped, because the backend would implicitly
 /// commit the DDL anyway. `Schema` and the ledger resolve their connection
 /// from the ambient scope, which is what puts them inside the transaction.
+///
+/// With `foreign_keys_off` on SQLite, the transaction runs on a connection
+/// of its own with foreign key enforcement off, which SQLite only changes
+/// outside a transaction, and commits once no foreign key points nowhere.
 async fn in_ddl_scope(
     db: &Database,
+    foreign_keys_off: bool,
     work: impl std::future::Future<Output = Result<()>> + Send + 'static,
 ) -> Result<()> {
-    if supports_transactional_ddl(db.backend()) {
-        return db.transaction(move |_| Box::pin(work)).await;
+    if !supports_transactional_ddl(db.backend()) {
+        return work.await;
     }
+    #[cfg(feature = "sqlite")]
+    if foreign_keys_off && db.backend() == DatabaseType::SQLite {
+        return super::sqlite_foreign_keys::run_with_foreign_keys_off(db, work).await;
+    }
+    #[cfg(not(feature = "sqlite"))]
+    let _ = foreign_keys_off;
 
-    work.await
+    db.transaction(move |_| Box::pin(work)).await
 }
 
 /// Apply one migration given as SQL statements on `db` and record it in the
 /// ledger `table`, or with `apply` false revert it and remove it, as
 /// [`Migrator`] does: holding the migration lock, in one transaction where
 /// the backend's DDL is transactional. The CLI runs its migrations through it.
+///
+/// On SQLite, `PRAGMA foreign_keys` does nothing inside that transaction: a
+/// caller rebuilding a table runs the statements on a one-connection `db`
+/// that already has foreign keys off, as the CLI does.
 ///
 /// Returns `false`, having run nothing, when the ledger read under the lock
 /// shows another run already did it.
@@ -656,7 +749,7 @@ pub async fn __run_sql_migration(
             version.to_string(),
             name.to_string(),
         );
-        in_ddl_scope(db, async move {
+        in_ddl_scope(db, false, async move {
             for statement in &statements {
                 handle.exec_raw(statement).await?;
             }

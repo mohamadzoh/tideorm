@@ -58,7 +58,12 @@ async fn deadlocked_transaction_blocks_every_executor_entry_point() {
             Box::pin(async move {
                 // Inject the signal normally recorded by translating the driver's
                 // deadlock error. No live MySQL server is needed to verify the gate.
-                crate::cache::note_failed_statement(true);
+                crate::database::__current_connection()?
+                    .source()
+                    .record
+                    .expect("the transaction installs its record")
+                    .lock()
+                    .note_failed_statement(true);
                 let connection = crate::database::__current_connection()?;
                 let executor = connection.executor();
                 let statement =

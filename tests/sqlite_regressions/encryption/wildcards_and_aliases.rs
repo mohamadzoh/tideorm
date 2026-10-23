@@ -270,3 +270,60 @@ async fn aliases_cannot_hide_unqualified_joined_inputs() {
             .await,
     );
 }
+
+#[tideorm::model(table = "boundary_named", encrypted = "token_enc")]
+struct Named {
+    #[tideorm(primary_key)]
+    id: i64,
+    #[tideorm(column = "token_enc")]
+    token: String,
+    #[tideorm(column = "token")]
+    note: String,
+}
+
+/// A batch update and an upsert name columns, so `token` is the plaintext
+/// column of `note`, though it is the encrypted field's name too: the update
+/// used to encrypt its value into `note`'s column, and the upsert refused it
+/// as a conflict target.
+#[tokio::test]
+async fn a_column_named_like_an_encrypted_field_stays_plaintext() {
+    tideorm::tokenization::TokenConfig::set_encryption_key("boundary-audit-key");
+    let db = global_memory_database(
+        "CREATE TABLE boundary_named(id INTEGER PRIMARY KEY, token_enc TEXT, token TEXT UNIQUE)",
+    )
+    .await;
+    Named::create(Named {
+        id: 1,
+        token: "secret".into(),
+        note: "plain".into(),
+    })
+    .await
+    .unwrap();
+
+    Named::query_with(&db)
+        .where_eq("id", 1)
+        .update_all()
+        .set("token", "hello")
+        .execute()
+        .await
+        .unwrap();
+    let stored = db
+        .__raw_json_with_params("SELECT token FROM boundary_named", Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(stored[0]["token"], "hello");
+    let row = Named::find_with(1, &db).await.unwrap().unwrap();
+    assert_eq!((row.token.as_str(), row.note.as_str()), ("secret", "hello"));
+
+    let upserted = Named::insert_or_update(
+        Named {
+            id: 1,
+            token: "rotated".into(),
+            note: "hello".into(),
+        },
+        vec!["token"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(upserted.token, "rotated");
+}

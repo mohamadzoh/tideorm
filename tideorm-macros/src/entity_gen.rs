@@ -57,6 +57,32 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
     let sea_orm_field_defs = ctx.db_fields.iter().map(sea_orm_field_def);
     let field_names = &ctx.field_names;
     let hidden_attrs = &ctx.hidden_attrs;
+    let flattened_fields: Vec<_> = ctx
+        .fields
+        .iter()
+        .filter(|field| !ctx.should_gen_serialize && crate::serde_names::is_flattened(&field.attrs))
+        .map(ModelField::name)
+        .collect();
+    let flattened_fields_impl = (!flattened_fields.is_empty()).then(|| {
+        quote! {
+            fn __flattened_fields() -> &'static [&'static str] {
+                &[#(#flattened_fields),*]
+            }
+        }
+    });
+    let skipped_fields: Vec<_> = ctx
+        .fields
+        .iter()
+        .filter(|field| !ctx.should_gen_serialize && crate::serde_names::is_skipped(&field.attrs))
+        .map(ModelField::name)
+        .collect();
+    let skipped_fields_impl = (!skipped_fields.is_empty()).then(|| {
+        quote! {
+            fn __skipped_fields() -> &'static [&'static str] {
+                &[#(#skipped_fields),*]
+            }
+        }
+    });
     let translation_field = ctx.fields.iter().find(|field| {
         !ctx.translatable_fields.is_empty()
             && field
@@ -322,6 +348,8 @@ fn generate_base_impl(ctx: &BuildContext) -> syn::Result<TokenStream2> {
                 }
             }
             #hidden_attributes_impl
+            #flattened_fields_impl
+            #skipped_fields_impl
             #serialized_name_impl
             #serde_round_trips_impl
             #relation_payload_filters_impl
@@ -361,14 +389,7 @@ fn build_morph_owner_key_impl(ctx: &BuildContext) -> syn::Result<Option<TokenStr
             continue;
         };
         let id_column = format!("{morph_name}_id");
-        let local_key = field
-            .local_key
-            .as_deref()
-            .unwrap_or(ctx.default_local_key());
-        // `local_key = "id"` names the primary key, whatever it is called.
-        let key_column = ctx
-            .resolve_local_key(local_key, field.ident())?
-            .column_name();
+        let key_column = ctx.relation_local_field(field)?.column_name();
         let Some(child) = field.related_types().into_iter().next() else {
             continue;
         };
@@ -515,17 +536,13 @@ fn build_relation_def(ctx: &BuildContext, field: &ModelField) -> syn::Result<Tok
         .foreign_key
         .as_deref()
         .expect("validated relation foreign_key");
-    let local_key = field
-        .local_key
-        .as_deref()
-        .unwrap_or(ctx.default_local_key());
 
     let (target, local_ident, remote_key, relation_type, error) = match field.relation_kind() {
         Some(RelationKind::HasManyThrough) => (
             related_types
                 .get(1)
                 .ok_or_else(|| missing_pivot_type(field))?,
-            ctx.resolve_local_key_ident(local_key, ident)?,
+            ctx.relation_local_ident(field)?,
             foreign_key,
             quote!(HasMany),
             format!(
@@ -545,7 +562,7 @@ fn build_relation_def(ctx: &BuildContext, field: &ModelField) -> syn::Result<Tok
         }
         kind => (
             related_ty,
-            ctx.resolve_local_key_ident(local_key, ident)?,
+            ctx.relation_local_ident(field)?,
             foreign_key,
             if kind == Some(RelationKind::HasMany) {
                 quote!(HasMany)
@@ -753,6 +770,10 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
     let field_types = &ctx.field_types;
     let column_names = &ctx.column_names;
     let table_name = &ctx.table_name;
+    let schema = ctx
+        .schema_name
+        .as_ref()
+        .map_or_else(|| quote!(None), |schema| quote!(Some(#schema)));
 
     let constant_idents: Vec<_> = field_idents
         .iter()
@@ -773,7 +794,8 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
     });
 
     quote! {
-        #[allow(non_camel_case_types)]
+        // Its fields are the model's, which may be `camelCase`.
+        #[allow(non_camel_case_types, non_snake_case)]
         #[derive(Clone)]
         pub struct #columns_struct_name {
             #(pub #field_idents: ::tideorm::columns::Column<#field_types>),*
@@ -783,13 +805,13 @@ fn generate_columns_impl(ctx: &BuildContext) -> TokenStream2 {
             #(
                 #[doc = concat!("Typed reference to the `", #column_names, "` column.")]
                 pub const #constant_idents: ::tideorm::columns::Column<#field_types> =
-                    ::tideorm::columns::Column::of(#table_name, #column_names);
+                    ::tideorm::columns::Column::of_schema(#schema, #table_name, #column_names);
             )*
             #(#relation_constants)*
 
             #[allow(non_upper_case_globals)]
             pub const columns: #columns_struct_name = #columns_struct_name {
-                #(#field_idents: ::tideorm::columns::Column::of(#table_name, #column_names)),*
+                #(#field_idents: ::tideorm::columns::Column::of_schema(#schema, #table_name, #column_names)),*
             };
         }
     }

@@ -71,7 +71,7 @@ pub(crate) struct Clauses {
     pub(crate) ctes: Vec<CTE>,
     /// Result-cache settings. **Last-wins.**
     pub(crate) cache_options: Option<crate::cache::CacheOptions>,
-    /// A caller-supplied cache key, which replaces the structural one.
+    /// A caller-supplied cache key, mixed into the structural one.
     /// **Last-wins.**
     pub(crate) cache_key: Option<String>,
     /// The first builder call that failed, reported when the query runs.

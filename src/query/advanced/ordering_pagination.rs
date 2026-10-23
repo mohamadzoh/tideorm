@@ -29,7 +29,8 @@ impl<M: Model> QueryBuilder<M> {
         column: impl crate::columns::IntoColumnName,
         direction: Order,
     ) -> Self {
-        let column = crate::columns::column_reference(&column, Some(M::table_name()));
+        let column =
+            crate::columns::column_reference(&column, Some((M::table_name(), M::schema_name())));
 
         if contains_raw_order_by_marker(&column) {
             self.invalidate_query(format!(

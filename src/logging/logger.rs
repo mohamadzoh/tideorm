@@ -94,14 +94,12 @@ impl QueryLogger {
         *STATE.level.write() = Some(level);
     }
 
-    /// Record one query entry, update counters, and emit output if the level allows it.
+    /// Record one query entry and update counters while logging is enabled,
+    /// and print it if the level allows: the level, `Off` until one is set,
+    /// decides only what is printed, so `QueryLogger::enable()` or
+    /// `TIDE_LOG_QUERIES` alone still keeps the history and statistics.
     pub fn log(entry: QueryLogEntry) {
         if !Self::is_enabled() {
-            return;
-        }
-
-        let level = Self::level();
-        if level == LogLevel::Off {
             return;
         }
 
@@ -121,6 +119,10 @@ impl QueryLogger {
             }
         }
 
+        let level = Self::level();
+        if level == LogLevel::Off {
+            return;
+        }
         let mut entry = entry;
         if !Self::timing_enabled() {
             entry.duration = None;

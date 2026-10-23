@@ -3,7 +3,7 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, Expr, Lit, LitStr, Meta, Token};
 
-use super::unraw_ident;
+use super::{ModelField, resolve_db_field, unraw_ident};
 
 #[derive(Debug, Clone)]
 pub(crate) struct IndexDef {
@@ -14,6 +14,9 @@ pub(crate) struct IndexDef {
     pub(crate) span: Span,
     /// Parse failure for a malformed attribute, surfaced by `BuildContext::new`.
     pub(crate) error: Option<syn::Error>,
+    /// Declared on the field `columns` names, which it indexes whatever other
+    /// fields' columns are called.
+    field_level: bool,
 }
 
 impl IndexDef {
@@ -24,6 +27,7 @@ impl IndexDef {
             unique,
             span,
             error: None,
+            field_level: false,
         }
     }
 
@@ -34,7 +38,33 @@ impl IndexDef {
             unique,
             span,
             error: Some(error),
+            field_level: false,
         }
+    }
+
+    /// The field `column` refers to: the one an index on a field sits on, else
+    /// the field or column the name gives, refusing one that is both.
+    pub(crate) fn field<'a>(
+        &self,
+        fields: &'a [ModelField],
+        column: &str,
+    ) -> Result<Option<&'a ModelField>, String> {
+        if self.field_level {
+            return Ok(fields.iter().find(|field| field.name() == column));
+        }
+        resolve_db_field(fields, column)
+    }
+
+    /// Each column the index names with the field it refers to, once
+    /// [`validate_index_definitions`](crate::context) has refused any it
+    /// cannot resolve.
+    pub(crate) fn resolved_columns<'a>(
+        &'a self,
+        fields: &'a [ModelField],
+    ) -> impl Iterator<Item = (&'a String, Option<&'a ModelField>)> + 'a {
+        self.columns
+            .iter()
+            .map(move |column| (column, self.field(fields, column).ok().flatten()))
     }
 
     /// The attribute spelling that declared this index, used in diagnostics.
@@ -81,7 +111,10 @@ pub(crate) fn parse_field_index_attributes(data: &syn::Data) -> Vec<IndexDef> {
             }
             let span = attr.span();
             let parsed = match &attr.meta {
-                Meta::Path(_) => IndexDef::new(None, vec![unraw_ident(ident)], unique, span),
+                Meta::Path(_) => IndexDef {
+                    field_level: true,
+                    ..IndexDef::new(None, vec![unraw_ident(ident)], unique, span)
+                },
                 _ => {
                     let attribute = attribute_name(unique);
                     IndexDef::invalid(

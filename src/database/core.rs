@@ -69,29 +69,38 @@ impl Database {
         Self::from_handle(ConnectionRef::Database(Arc::new(inner)))
     }
 
-    /// The connection statements issued through this handle run on: the
-    /// ambient transaction if it runs on this handle's database, otherwise the
-    /// handle's own. Another database's transaction is not joined, or a
-    /// statement meant for one database would run on the other.
-    #[doc(hidden)]
-    pub fn __get_connection(&self) -> Result<ConnectionRef> {
-        match super::__current_connection() {
-            Ok(transaction @ ConnectionRef::Transaction(_)) if self.shares_scope_pool() => {
-                Ok(transaction)
-            }
-            _ => self.own_handle(),
-        }
+    /// A handle on `connection`, another pool reaching the database
+    /// `original` does, under `original`'s identity: a statement through a
+    /// handle on `original` joins a transaction opened on it, as one opened
+    /// on `original` itself.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn sharing_identity_of(
+        original: &Arc<InternalConnection>,
+        connection: crate::internal::OrmConnection,
+    ) -> Self {
+        let mut inner = InternalConnection::new(connection);
+        inner.cache_scope = original.cache_scope.clone();
+        let inner = Arc::new(inner);
+        super::state::alias_connection_identity(&inner, original);
+        Self::from_handle(ConnectionRef::Database(inner))
     }
 
-    /// Whether the ambient transaction runs on this handle's pool. When either
-    /// side's pool is unknown (a handle on a transaction, a scope that did not
-    /// record its pool) it counts as shared, as every transaction was before.
-    fn shares_scope_pool(&self) -> bool {
+    /// The connection statements issued through this handle run on: the
+    /// innermost enclosing transaction opened on this handle's database,
+    /// otherwise the handle's own. Another database's transaction is not
+    /// joined, or a statement meant for one database would run on the other;
+    /// it is looked through, so an outer transaction of this database is still
+    /// joined inside it.
+    #[doc(hidden)]
+    pub fn __get_connection(&self) -> Result<ConnectionRef> {
         let own = match self.own_handle() {
-            Ok(ConnectionRef::Database(inner)) => super::state::connection_identity(&inner),
-            _ => return true,
+            Ok(ConnectionRef::Database(inner)) => Some(super::state::connection_identity(&inner)),
+            _ => None,
         };
-        super::state::__scope_origin().is_none_or(|scope| scope == own)
+        match super::state::enclosing_transaction(own) {
+            Some(transaction) => Ok(transaction),
+            None => self.own_handle(),
+        }
     }
 
     /// The connection stored in `self`, ignoring any ambient scope.
@@ -108,7 +117,7 @@ impl Database {
     pub(crate) fn current_inner(&self) -> Result<Arc<InternalConnection>> {
         match self.own_handle()? {
             ConnectionRef::Database(inner) => Ok(inner),
-            ConnectionRef::Transaction(_) => Err(Error::connection(
+            ConnectionRef::Transaction(..) => Err(Error::connection(
                 "Current database context is a transaction, not a pooled database connection",
             )),
         }
@@ -166,19 +175,14 @@ impl Database {
 
     /// Get the database backend type
     ///
-    /// The handle's own connection is authoritative. Configuration is only
-    /// consulted where the handle cannot answer — `internal::Backend` reports
-    /// MariaDB as MySQL, so a configured `MariaDB` wins over a MySQL-shaped
-    /// handle — and as a fallback when there is no usable handle at all.
+    /// The handle's own connection is authoritative: a pool on a
+    /// MySQL-protocol server asks it whether it is MariaDB when it opens, and
+    /// a transaction carries its pool's answer. The configured type is only a
+    /// fallback when there is no usable handle at all.
     pub fn backend(&self) -> crate::config::DatabaseType {
-        let configured = crate::config::TideConfig::get_database_type();
-
         match self.own_handle() {
-            Ok(handle) => {
-                let mariadb = Self::handle_is_mariadb(&handle);
-                Self::resolve_backend(configured, handle.backend(), mariadb)
-            }
-            Err(err) => configured.unwrap_or_else(|| {
+            Ok(handle) => handle.database_type(),
+            Err(err) => crate::config::TideConfig::get_database_type().unwrap_or_else(|| {
                 tide_warn!(
                     "Unable to inspect database backend for disconnected handle: {}. Defaulting to Postgres",
                     err
@@ -193,40 +197,9 @@ impl Database {
     /// transaction executes on it.
     pub(crate) fn execution_backend(&self) -> crate::config::DatabaseType {
         match self.__get_connection() {
-            Ok(connection) => {
-                // A transaction cannot say what it runs on; the handle can.
-                let mariadb = Self::handle_is_mariadb(&connection)
-                    || self
-                        .own_handle()
-                        .is_ok_and(|handle| Self::handle_is_mariadb(&handle));
-                Self::resolve_backend(
-                    crate::config::TideConfig::get_database_type(),
-                    connection.backend(),
-                    mariadb,
-                )
-            }
+            Ok(connection) => connection.database_type(),
             Err(_) => self.backend(),
         }
-    }
-
-    /// Whether `handle` is a pool its opening found to be MariaDB.
-    fn handle_is_mariadb(handle: &super::ConnectionRef) -> bool {
-        matches!(handle, super::ConnectionRef::Database(inner) if inner.is_mariadb())
-    }
-
-    /// Reconcile the handle's real backend with the configured database type.
-    fn resolve_backend(
-        configured: Option<crate::config::DatabaseType>,
-        backend: crate::internal::Backend,
-        mariadb: bool,
-    ) -> crate::config::DatabaseType {
-        if backend == crate::internal::Backend::MySql
-            && (mariadb || configured == Some(crate::config::DatabaseType::MariaDB))
-        {
-            return crate::config::DatabaseType::MariaDB;
-        }
-
-        backend.as_database_type()
     }
 
     /// Get TideORM's runtime backend identifier (for internal use only)

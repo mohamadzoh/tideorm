@@ -295,6 +295,38 @@ pub(crate) fn create_index(
     )
 }
 
+/// `DROP INDEX` of the index `name` on `table`, both in `schema` when one is
+/// given. MySQL and MariaDB name the table, and take no `IF EXISTS` (MySQL has
+/// none); the others name the index, which lives in its table's schema.
+pub(crate) fn drop_index(
+    db_type: DatabaseType,
+    schema: Option<&str>,
+    table: &str,
+    name: &str,
+    if_exists: bool,
+) -> String {
+    let qualified = |object: &str| match schema {
+        Some(schema) => format!(
+            "{}.{}",
+            quote_ident(db_type, schema),
+            quote_ident(db_type, object)
+        ),
+        None => quote_ident(db_type, object),
+    };
+    match db_type {
+        DatabaseType::MySQL | DatabaseType::MariaDB => format!(
+            "DROP INDEX {} ON {}",
+            quote_ident(db_type, name),
+            qualified(table)
+        ),
+        _ => format!(
+            "DROP INDEX {}{}",
+            if if_exists { "IF EXISTS " } else { "" },
+            qualified(name)
+        ),
+    }
+}
+
 /// Render `ALTER TABLE ... ADD COLUMN` on the already-quoted `table`.
 pub(crate) fn add_column(db_type: DatabaseType, table: &str, column: &ColumnDefinition) -> String {
     format!(

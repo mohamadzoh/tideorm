@@ -7,8 +7,8 @@ mod helpers;
 use crate::case::to_snake_case;
 use crate::meta_support::{ExistingDerives, has_timestamp_pair, pluralize};
 use crate::parse::{
-    IndexDef, ModelField, ModelInput, find_db_field, parse_validation_attributes, unraw_ident,
-    variant_ident,
+    IndexDef, ModelField, ModelInput, find_derived_db_field, parse_validation_attributes,
+    resolve_db_field, unraw_ident, variant_ident,
 };
 use crate::relation_gen::build_relation_wiring;
 use helpers::*;
@@ -110,6 +110,16 @@ impl BuildContext {
         indexes: Vec<IndexDef>,
         existing_derives: &ExistingDerives,
     ) -> syn::Result<Self> {
+        // Every generated impl and the entity module name the bare struct, so
+        // parameters would otherwise surface as a page of E0107s in that code.
+        if !input.generics.params.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &input.generics,
+                "a TideORM model cannot be generic: it maps one struct to one table, so it takes \
+                 no type, lifetime or const parameters; store owned values (String rather than \
+                 &str) and keep generic code outside the model",
+            ));
+        }
         let struct_name = input.ident.clone();
         let struct_name_str = unraw_ident(&struct_name);
         let table_name = input
@@ -185,7 +195,19 @@ impl BuildContext {
                 .map(|fields| fields.into_iter().map(ModelField::name).collect::<Vec<_>>())
         };
         let translatable_fields = field_names_of("translatable", &translatable)?;
-        let searchable_fields = field_names_of("searchable", &searchable)?;
+        let searchable_fields =
+            resolve_field_list(&input.ident, "searchable", &db_fields, &searchable)?;
+        reject_encrypted_lookups(
+            &input.ident,
+            &indexes,
+            &db_fields,
+            &resolved_encrypted_fields,
+            &searchable_fields,
+        )?;
+        let searchable_fields: Vec<String> = searchable_fields
+            .into_iter()
+            .map(ModelField::name)
+            .collect();
 
         let mut validation_rules = Vec::new();
         let mut attribute_errors = Vec::new();
@@ -218,8 +240,11 @@ impl BuildContext {
             matches!(pk_fields.as_slice(), [pk_field] if pk_field.auto_increment);
 
         let soft_delete = if input.soft_delete {
-            let key = input.deleted_at_column.as_deref().unwrap_or("deleted_at");
-            Some(resolve_soft_delete_field(&input.ident, &db_fields, key)?)
+            Some(resolve_soft_delete_field(
+                &input.ident,
+                &db_fields,
+                input.deleted_at_column.as_deref(),
+            )?)
         } else {
             None
         };
@@ -351,64 +376,96 @@ impl BuildContext {
         self.encrypted_fields.contains(&field.name())
     }
 
+    /// The ident of the field a relation's key names on this model.
     pub(crate) fn resolve_required_db_field_ident(
         &self,
         key: &str,
         relation_ident: &Ident,
     ) -> syn::Result<Ident> {
-        find_db_field(&self.db_fields, key)
-            .map(|field| field.ident().clone())
-            .ok_or_else(|| {
-                syn::Error::new_spanned(
-                    relation_ident,
-                    format!("relation references unknown field or column '{}'", key),
-                )
-            })
+        let found = self.relation_key_field(key, relation_ident)?;
+        relation_field_ident(found, key, relation_ident)
     }
 
-    /// The column a relation's own side keys by when it names no
-    /// `local_key`: the primary key's, which need not be called `id`.
-    pub(crate) fn default_local_key(&self) -> &str {
-        match self.pk_column_names.as_slice() {
-            [column] => column,
-            _ => "id",
-        }
-    }
-
-    /// The ident of the field a relation's `local_key` names.
-    pub(crate) fn resolve_local_key_ident(
+    /// The ident of the field a column TideORM derives for a relation names
+    /// on this model (`{morph}_type`, `{morph}_id`, a self reference's
+    /// `parent_id`).
+    pub(crate) fn resolve_derived_db_field_ident(
         &self,
-        key: &str,
+        column: &str,
         relation_ident: &Ident,
     ) -> syn::Result<Ident> {
-        self.resolve_local_key(key, relation_ident)
-            .map(|field| field.ident().clone())
+        let found = find_derived_db_field(&self.db_fields, column);
+        relation_field_ident(found, column, relation_ident)
     }
 
-    /// The field a relation's `local_key` names: a field or column, or `id`
-    /// for the primary key, whatever it is called.
-    pub(crate) fn resolve_local_key(
+    /// The field a relation's key names on this model, refusing a name that
+    /// is one field's name and another field's column.
+    fn relation_key_field(
         &self,
         key: &str,
         relation_ident: &Ident,
-    ) -> syn::Result<&ModelField> {
-        if let Some(field) = find_db_field(&self.db_fields, key) {
-            return Ok(field);
-        }
+    ) -> syn::Result<Option<&ModelField>> {
+        resolve_db_field(&self.db_fields, key).map_err(|ambiguity| {
+            syn::Error::new_spanned(relation_ident, format!("relation key: {ambiguity}"))
+        })
+    }
 
+    /// The model's primary key field, when it has one.
+    fn single_primary_key(&self) -> Option<&ModelField> {
+        match self.pk_idents.as_slice() {
+            [key] => self.db_fields.iter().find(|field| field.ident() == key),
+            _ => None,
+        }
+    }
+
+    /// The field relation `field` keys by on this model: the one its
+    /// `local_key` names, `id` naming the primary key whatever it is called,
+    /// else the primary key itself, which a lookup by its column could
+    /// confuse with a field of that name.
+    pub(crate) fn relation_local_field(&self, field: &ModelField) -> syn::Result<&ModelField> {
+        let relation_ident = field.ident();
+        let key = match field.local_key.as_deref() {
+            Some(key) => key,
+            None => match self.single_primary_key() {
+                Some(primary_key) => return Ok(primary_key),
+                None => "id",
+            },
+        };
+        if let Some(local) = self.relation_key_field(key, relation_ident)? {
+            return Ok(local);
+        }
         if key != "id" {
             return Err(syn::Error::new_spanned(
                 relation_ident,
-                format!("relation references unknown local_key '{}'", key),
+                format!("relation references unknown local_key '{key}'"),
             ));
         }
-
-        match self.db_fields.iter().find(|field| field.primary_key) {
-            Some(field) if self.pk_idents.len() == 1 => Ok(field),
-            _ => Err(syn::Error::new_spanned(
+        self.single_primary_key().ok_or_else(|| {
+            syn::Error::new_spanned(
                 relation_ident,
-                "composite primary keys require an explicit relation local_key; implicit 'id' is ambiguous",
-            )),
-        }
+                "composite primary keys require an explicit relation local_key; implicit 'id' is \
+                 ambiguous",
+            )
+        })
     }
+
+    /// The ident of [`relation_local_field`](Self::relation_local_field).
+    pub(crate) fn relation_local_ident(&self, field: &ModelField) -> syn::Result<Ident> {
+        self.relation_local_field(field)
+            .map(|field| field.ident().clone())
+    }
+}
+
+/// The ident of the field a relation's key `name` found, if it found one.
+fn relation_field_ident(
+    found: Option<&ModelField>,
+    name: &str,
+    relation_ident: &Ident,
+) -> syn::Result<Ident> {
+    found.map(|field| field.ident().clone()).ok_or_else(|| {
+        syn::Error::new_spanned(
+            relation_ident,
+            format!("relation references unknown field or column '{name}'"),
+        )
+    })
 }

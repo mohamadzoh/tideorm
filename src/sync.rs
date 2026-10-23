@@ -8,7 +8,8 @@
 //!
 //! TideORM models describe themselves with a `ModelSchema`, which the macros
 //! generate. Discover all linked models with `TideConfig::auto_models()`, or
-//! select a subset with `TideConfig::models::<(... )>()`. Enable synchronization
+//! select a subset with `TideConfig::models::<User>()` or
+//! `TideConfig::models::<(User, Post)>()`. Enable synchronization
 //! with `sync(true)`. The legacy `models_matching` path filter remains available.
 //!
 //! When sync fails, inspect the reported SQL/backend error first. Common causes
@@ -27,6 +28,8 @@
 //! Sync creates the indexes a model declares with `#[index]` and
 //! `#[unique_index]`, but no foreign keys or enum types; declare those in a
 //! migration.
+//! An index name owned by another table is an error; sync cannot enforce the
+//! declared index by silently reusing that name.
 //!
 //! A model's `#[tideorm(schema = "...")]` qualifies every statement sync issues
 //! on PostgreSQL, so the schema has to exist before sync runs. MySQL and SQLite
@@ -67,6 +70,15 @@ pub use schema::{ColumnDef, ModelSchema};
 /// Registry of the model schemas schema sync applies.
 pub struct SyncRegistry;
 
+/// Append each of `added` whose name none of `known` has.
+fn push_missing_by_name<T>(known: &mut Vec<T>, added: Vec<T>, name: impl Fn(&T) -> &String) {
+    for item in added {
+        if !known.iter().any(|existing| name(existing) == name(&item)) {
+            known.push(item);
+        }
+    }
+}
+
 impl SyncRegistry {
     /// Get the number of registered TideORM model schemas
     pub fn schema_count() -> usize {
@@ -80,14 +92,24 @@ impl SyncRegistry {
 
     /// Register a TideORM model schema for synchronization, once per table:
     /// a table of the same name in another schema is another table.
+    ///
+    /// Another model's schema of a table already registered adds the columns
+    /// and indexes the table lacks, so two models of one table each get the
+    /// columns they read; a column both declare keeps the first definition.
     pub fn register_schema(schema: ModelSchema) {
         let mut schemas = MODEL_SCHEMAS.write();
-        if !schemas.iter().any(|registered| {
+        let registered = schemas.iter_mut().find(|registered| {
             registered.table_name == schema.table_name
                 && registered.schema_name == schema.schema_name
-        }) {
+        });
+        let Some(registered) = registered else {
             schemas.push(schema);
-        }
+            return;
+        };
+        push_missing_by_name(&mut registered.columns, schema.columns, |column| {
+            &column.name
+        });
+        push_missing_by_name(&mut registered.indexes, schema.indexes, |index| &index.name);
     }
 
     /// Register every compiled model, independent of its source file layout.
@@ -159,7 +181,7 @@ pub async fn sync_database_with_options(db: &Database, force_sync: bool) -> Resu
         available.sort_unstable();
         available.dedup();
         return Err(crate::Error::query(format!(
-            "No models registered for schema sync; call auto_models() or models::<(YourModel,)>(). Available compiled model tables: {}",
+            "No models registered for schema sync; call auto_models() or models::<YourModel>(). Available compiled model tables: {}",
             if available.is_empty() {
                 "(none; include your model modules with mod)".to_owned()
             } else {

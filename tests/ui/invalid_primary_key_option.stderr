@@ -1,0 +1,5 @@
+error: a #[tideorm(primary_key)] field cannot be an Option: every row has its key, and a model not inserted yet holds the type's default (0 for an auto_increment key)
+ --> tests/ui/invalid_primary_key_option.rs:4:9
+  |
+4 |     id: Option<i64>,
+  |         ^^^^^^^^^^^

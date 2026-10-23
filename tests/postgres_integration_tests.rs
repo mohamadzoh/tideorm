@@ -120,6 +120,35 @@ async fn raw_json_preserves_postgres_types() {
     );
 }
 
+#[tokio::test]
+async fn raw_json_preserves_postgres_nonfinite_float_arrays() {
+    if !backend::connect().await {
+        return;
+    }
+    let db = tideorm::require_db().unwrap();
+    let rows = db
+        .query_raw_json(
+            "SELECT ARRAY[1.5::real, 'NaN', 'Infinity', '-Infinity'] AS reals, \
+                ARRAY[1.5::double precision, 'NaN', 'Infinity', '-Infinity'] AS doubles, \
+                ARRAY[NULL, 'NaN', 'Infinity', '-Infinity']::double precision[] AS nullable, \
+                ARRAY[[1.5::real, 'NaN'], ['Infinity'::real, '-Infinity']] AS matrix, \
+                ARRAY[]::double precision[] AS empty, NULL::real[] AS absent",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "reals": [1.5, "NaN", "inf", "-inf"],
+            "doubles": [1.5, "NaN", "inf", "-inf"],
+            "nullable": [null, "NaN", "inf", "-inf"],
+            "matrix": [[1.5, "NaN"], ["inf", "-inf"]],
+            "empty": [],
+            "absent": null
+        })]
+    );
+}
+
 #[tideorm::model(table = "test_array_documents")]
 struct TestArrayDocument {
     #[tideorm(primary_key, auto_increment)]

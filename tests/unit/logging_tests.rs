@@ -186,3 +186,24 @@ fn test_slow_query_format_omits_fake_zero_ms_when_timing_is_hidden() {
     assert!(formatted.contains("exceeded 100ms threshold"));
     assert!(!formatted.contains("0ms > 100ms threshold"));
 }
+
+/// Enabling the logger records history and statistics even at level `Off`,
+/// the default, which only silences what is printed.
+#[test]
+fn an_enabled_logger_records_at_level_off() {
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+    QueryLogger::set_level(LogLevel::Off);
+    QueryLogger::enable();
+
+    QueryLogger::log(
+        QueryLogEntry::new("SELECT 1".to_string()).with_duration(Duration::from_millis(2)),
+    );
+
+    assert_eq!(QueryLogger::history().len(), 1);
+    assert_eq!(QueryLogger::stats().total_queries, 1);
+
+    QueryLogger::disable();
+    QueryLogger::clear_history();
+    QueryLogger::reset_stats();
+}

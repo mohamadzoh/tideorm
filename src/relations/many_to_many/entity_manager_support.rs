@@ -2,22 +2,25 @@ use std::sync::Arc;
 
 use super::*;
 use crate::entity_manager::{EntityManager, EntityManagerLoad, TideEntityManagerMeta};
-use crate::relations::helpers::{SnapshotOwner, identity_keys, load_many_in_entity_manager};
+use crate::relations::helpers::{identity_keys, load_many_in_entity_manager};
 
 impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
-    /// Record the names the entity manager keys its relation snapshots by;
-    /// see [`HasOne::with_metadata`](crate::relations::HasOne::with_metadata).
+    /// Record the relation's field name and its owner's table; see
+    /// [`HasOne::with_metadata`](crate::relations::HasOne::with_metadata).
     pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
         self.relation_name = relation_name;
         self.owner_table = owner_table;
         self
     }
 
-    /// Record the owning model's entity-manager identity key; see
-    /// [`HasOne::with_owner_key`](crate::relations::HasOne::with_owner_key).
-    pub fn with_owner_key(mut self, owner_key: String) -> Self {
-        self.state.owner_key = Some(owner_key);
-        self
+    /// The keys this copy held when it loaded through an entity manager, or
+    /// when a save last synced it.
+    pub(crate) fn loaded_keys(&self) -> Option<&[String]> {
+        self.state.loaded_keys.as_deref()
+    }
+
+    pub(crate) fn set_loaded_keys(&mut self, keys: Vec<String>) {
+        self.state.loaded_keys = Some(keys);
     }
 
     #[doc(hidden)]
@@ -35,7 +38,8 @@ impl<Related: Model, Pivot: Model> HasManyThrough<Related, Pivot> {
 
 /// Loading through [`EntityManager::load`](crate::entity_manager::EntityManager::load)
 /// keeps the rows cached already, or reads them, hands each to the manager's
-/// identity map and records a relation snapshot.
+/// identity map and records the keys it holds, which a later save compares
+/// against to detach the rows it no longer holds.
 impl<Related, Pivot> EntityManagerLoad for HasManyThrough<Related, Pivot>
 where
     Related: Model + TideEntityManagerMeta,
@@ -50,10 +54,8 @@ where
         &'a mut self,
         entity_manager: &'a Arc<EntityManager>,
     ) -> Result<Self::Output<'a>> {
-        let owner =
-            SnapshotOwner::new(self.owner_table, &self.state.owner_key, self.relation_name)?;
         self.state.source.entity_manager = Some(entity_manager.clone());
         let query = self.load_query("HasManyThrough::load");
-        load_many_in_entity_manager(&mut self.state, entity_manager, query, owner).await
+        load_many_in_entity_manager(&mut self.state, entity_manager, query).await
     }
 }
