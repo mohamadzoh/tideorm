@@ -153,8 +153,7 @@ impl Database {
     ) -> Result<Vec<crate::internal::QueryResult>> {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
-        let connection = self.__get_connection()?;
-        connection.observe_cache_sql(sql);
+        let connection = self.connection_running(sql)?;
         let executor = connection.executor();
         let executor = if json {
             executor.reading_json()
@@ -165,6 +164,14 @@ impl Database {
         crate::profiling::__profile_future(executor.query_all_raw(statement))
             .await
             .map_err(translate_error)
+    }
+
+    /// This handle's connection, for running `sql` on: the connection's cache
+    /// scope sees the statement first (an `ATTACH` widens it).
+    fn connection_running(&self, sql: &str) -> Result<super::ConnectionRef> {
+        let connection = self.__get_connection()?;
+        connection.observe_cache_sql(sql);
+        Ok(connection)
     }
 
     /// Decode raw rows through the generated entity model.
@@ -203,9 +210,8 @@ impl Database {
     pub async fn exec_raw(&self, sql: &str) -> Result<u64> {
         use crate::internal::ConnectionTrait;
 
-        let connection = self.__get_connection()?;
+        let connection = self.connection_running(sql)?;
         let started = std::time::Instant::now();
-        connection.observe_cache_sql(sql);
         let executor = connection.executor();
         let result = connection
             .invalidating(crate::profiling::__profile_future(
@@ -248,8 +254,7 @@ impl Database {
     pub async fn __execute_with_params(&self, sql: &str, params: Vec<DbValue>) -> Result<u64> {
         use crate::internal::{ConnectionTrait, build_statement_with_values};
 
-        let connection = self.__get_connection()?;
-        connection.observe_cache_sql(sql);
+        let connection = self.connection_running(sql)?;
         let executor = connection.executor();
         let statement = build_statement_with_values(executor.get_database_backend(), sql, params);
         let result = crate::profiling::__profile_future(executor.execute_raw(statement))

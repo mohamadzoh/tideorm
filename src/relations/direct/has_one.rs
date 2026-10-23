@@ -95,42 +95,11 @@ impl<E: Model> HasOne<E> {
         self
     }
 
-    /// Record the relation's field name and its owner's table, which tell it
-    /// apart from another relation when a rebuilt model takes over a previous
-    /// copy's state.
-    #[cfg(feature = "entity-manager")]
-    pub fn with_metadata(mut self, relation_name: &'static str, owner_table: &'static str) -> Self {
-        self.relation_name = relation_name;
-        self.owner_table = owner_table;
-        self
-    }
-
-    #[cfg(feature = "entity-manager")]
-    #[doc(hidden)]
-    pub fn attach_query_database(&mut self, database: &crate::database::Database) {
-        self.state.source.database = Some(database.clone());
-    }
+    key_pair_plumbing!();
 
     #[doc(hidden)]
     pub fn set_cached(&mut self, model: Option<E>) {
         self.state.set_cached(model.map(Box::new));
-    }
-
-    #[doc(hidden)]
-    pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
-        let same_relation = self.foreign_key == previous.foreign_key
-            && self.local_key == previous.local_key
-            && self.state.key == previous.state.key;
-        #[cfg(feature = "entity-manager")]
-        let same_relation = same_relation
-            && self.relation_name == previous.relation_name
-            && self.owner_table == previous.owner_table;
-
-        self.state.preserve_from(
-            &previous.state,
-            same_relation,
-            owner_is_unsaved(&previous.state.key),
-        );
     }
 
     /// Fetch the related row, returning `Ok(None)` when there is none.

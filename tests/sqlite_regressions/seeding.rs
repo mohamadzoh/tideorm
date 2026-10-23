@@ -10,15 +10,33 @@ use tokio::sync::Notify;
 
 struct CountedSeed(Arc<AtomicUsize>);
 
+/// A file database, installed as the global one, holding `seed_effects` and
+/// the seed ledger, in WAL mode: a transaction's read snapshot then outlives
+/// another connection's commit.
+async fn seed_effects_database(tag: &str) -> (Database, crate::fixtures::TempFile) {
+    let (db, file) = crate::fixtures::file_database(tag).await;
+    Database::set_global(db.clone()).unwrap();
+    db.exec_raw("PRAGMA journal_mode=WAL; CREATE TABLE seed_effects(value INTEGER)")
+        .await
+        .unwrap();
+    Seeder::new().status().await.unwrap();
+    (db, file)
+}
+
+/// Assert that `runner` is still waiting for the seed lock.
+async fn assert_waiting<T>(runner: &mut tokio::task::JoinHandle<T>, context: &str) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), runner)
+            .await
+            .is_err(),
+        "{context}"
+    );
+}
+
 #[tokio::test]
 async fn stale_seed_snapshot_fails_before_repeating_a_committed_callback() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let (db, _file) = crate::fixtures::file_database("seed-snapshot").await;
-        Database::set_global(db.clone()).unwrap();
-        db.exec_raw("PRAGMA journal_mode=WAL; CREATE TABLE seed_effects(value INTEGER)")
-            .await
-            .unwrap();
-        Seeder::new().status().await.unwrap();
+        let (db, _file) = seed_effects_database("seed-snapshot").await;
         let calls = Arc::new(AtomicUsize::new(0));
         let seeder = Arc::new(Seeder::new().add(CountedSeed(calls.clone())));
         let scoped = db.clone();
@@ -45,12 +63,7 @@ async fn stale_seed_snapshot_fails_before_repeating_a_committed_callback() {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(seeder.run().await.unwrap().skipped.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        Database::reset_global();
-        db.__internal_connection()
-            .unwrap()
-            .close_by_ref()
-            .await
-            .unwrap();
+        crate::fixtures::close_global(&db).await;
     })
     .await
     .unwrap();
@@ -72,12 +85,7 @@ impl Seed for CountedSeed {
 async fn outer_transactions_hold_seed_locks_until_commit_rollback_or_cancellation() {
     tokio::time::timeout(Duration::from_secs(15), async {
         for outcome in ["commit", "rollback", "cancel"] {
-            let (db, _file) = crate::fixtures::file_database("outer-seed").await;
-            Database::set_global(db.clone()).unwrap();
-            db.exec_raw("PRAGMA journal_mode=WAL; CREATE TABLE seed_effects(value INTEGER)")
-                .await
-                .unwrap();
-            Seeder::new().status().await.unwrap();
+            let (db, _file) = seed_effects_database("outer-seed").await;
             let calls = Arc::new(AtomicUsize::new(0));
             let seeder = Arc::new(Seeder::new().add(CountedSeed(calls.clone())));
             let entered = Arc::new(Notify::new());
@@ -104,11 +112,7 @@ async fn outer_transactions_hold_seed_locks_until_commit_rollback_or_cancellatio
             };
             entered.notified().await;
             let mut second = tokio::spawn(async move { seeder.run().await });
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), &mut second)
-                    .await
-                    .is_err()
-            );
+            assert_waiting(&mut second, outcome).await;
             assert_eq!(calls.load(Ordering::SeqCst), 1, "{outcome}");
             if outcome == "cancel" {
                 outer.abort();
@@ -125,18 +129,8 @@ async fn outer_transactions_hold_seed_locks_until_commit_rollback_or_cancellatio
                 assert_eq!(result.executed.len(), 1);
                 assert_eq!(calls.load(Ordering::SeqCst), 2);
             }
-            assert_eq!(
-                db.query_raw_json("SELECT COUNT(*) AS n FROM seed_effects")
-                    .await
-                    .unwrap()[0]["n"],
-                1
-            );
-            Database::reset_global();
-            db.__internal_connection()
-                .unwrap()
-                .close_by_ref()
-                .await
-                .unwrap();
+            assert_eq!(crate::fixtures::row_count(&db, "seed_effects").await, 1);
+            crate::fixtures::close_global(&db).await;
         }
     })
     .await
@@ -147,12 +141,7 @@ async fn outer_transactions_hold_seed_locks_until_commit_rollback_or_cancellatio
 async fn seed_locks_survive_committed_and_rolled_back_savepoints() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for rollback in [false, true] {
-            let (db, _file) = crate::fixtures::file_database("nested-seed").await;
-            Database::set_global(db.clone()).unwrap();
-            db.exec_raw("PRAGMA journal_mode=WAL; CREATE TABLE seed_effects(value INTEGER)")
-                .await
-                .unwrap();
-            Seeder::new().status().await.unwrap();
+            let (db, _file) = seed_effects_database("nested-seed").await;
             let calls = Arc::new(AtomicUsize::new(0));
             let seeder = Arc::new(Seeder::new().add(CountedSeed(calls.clone())));
             let entered = Arc::new(Notify::new());
@@ -191,21 +180,12 @@ async fn seed_locks_survive_committed_and_rolled_back_savepoints() {
             };
             entered.notified().await;
             let mut second = tokio::spawn(async move { seeder.run().await });
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), &mut second)
-                    .await
-                    .is_err()
-            );
+            assert_waiting(&mut second, "").await;
             assert_eq!(calls.load(Ordering::SeqCst), 1 + usize::from(rollback));
             release.notify_one();
             outer.await.unwrap().unwrap();
             assert_eq!(second.await.unwrap().unwrap().skipped.len(), 1);
-            Database::reset_global();
-            db.__internal_connection()
-                .unwrap()
-                .close_by_ref()
-                .await
-                .unwrap();
+            crate::fixtures::close_global(&db).await;
         }
     })
     .await
@@ -260,27 +240,13 @@ async fn concurrent_seed_runs_execute_once_on_file_and_memory_databases() {
             let first = tokio::spawn(async move { first.run().await });
             gate.entered.notified().await;
             let mut second = tokio::spawn(async move { seeder.run().await });
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), &mut second)
-                    .await
-                    .is_err()
-            );
+            assert_waiting(&mut second, "").await;
             gate.release.notify_one();
             assert_eq!(first.await.unwrap().unwrap().executed.len(), 1);
             assert_eq!(second.await.unwrap().unwrap().skipped.len(), 1);
             assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                db.query_raw_json("SELECT COUNT(*) AS n FROM seed_effects")
-                    .await
-                    .unwrap()[0]["n"],
-                1
-            );
-            Database::reset_global();
-            db.__internal_connection()
-                .unwrap()
-                .close_by_ref()
-                .await
-                .unwrap();
+            assert_eq!(crate::fixtures::row_count(&db, "seed_effects").await, 1);
+            crate::fixtures::close_global(&db).await;
         }
     })
     .await
@@ -342,12 +308,7 @@ async fn complete_seed_rollbacks_and_refresh_exclude_other_runners() {
             });
             gate.entered.notified().await;
             let mut runner = tokio::spawn(async move { seeder.run().await });
-            assert!(
-                tokio::time::timeout(Duration::from_millis(100), &mut runner)
-                    .await
-                    .is_err(),
-                "{operation}"
-            );
+            assert_waiting(&mut runner, operation).await;
             gate.release.notify_one();
             let result = rollback.await.unwrap().unwrap();
             let ran = runner.await.unwrap().unwrap();
@@ -370,18 +331,8 @@ async fn complete_seed_rollbacks_and_refresh_exclude_other_runners() {
             } else {
                 assert_eq!(ran.executed.len(), expected.len());
             }
-            assert_eq!(
-                db.query_raw_json("SELECT COUNT(*) AS n FROM seed_steps")
-                    .await
-                    .unwrap()[0]["n"],
-                2
-            );
-            Database::reset_global();
-            db.__internal_connection()
-                .unwrap()
-                .close_by_ref()
-                .await
-                .unwrap();
+            assert_eq!(crate::fixtures::row_count(&db, "seed_steps").await, 2);
+            crate::fixtures::close_global(&db).await;
         }
     })
     .await
@@ -442,25 +393,10 @@ async fn seed_lock_wait_cancellation_and_failed_callback_allow_retry() {
     );
     // Explicit reruns keep one ledger row, while still invoking the seed.
     seeder.run_seed("retry").await.unwrap();
-    assert_eq!(
-        db.query_raw_json("SELECT COUNT(*) AS n FROM _seeds")
-            .await
-            .unwrap()[0]["n"],
-        1
-    );
-    assert_eq!(
-        db.query_raw_json("SELECT COUNT(*) AS n FROM seed_effects")
-            .await
-            .unwrap()[0]["n"],
-        2
-    );
+    assert_eq!(crate::fixtures::row_count(&db, "_seeds").await, 1);
+    assert_eq!(crate::fixtures::row_count(&db, "seed_effects").await, 2);
     drop(lock);
-    Database::reset_global();
-    db.__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
+    crate::fixtures::close_global(&db).await;
 }
 
 #[tokio::test]
@@ -492,10 +428,5 @@ async fn migration_callbacks_can_use_the_separate_seed_lock() {
     .await
     .unwrap()
     .unwrap();
-    Database::reset_global();
-    db.__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
+    crate::fixtures::close_global(&db).await;
 }

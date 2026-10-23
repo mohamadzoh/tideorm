@@ -96,6 +96,40 @@ pub fn slow_count(limit: u32) -> String {
     )
 }
 
+/// A one-connection pool on the SQLite database at `url`.
+pub async fn single_connection(url: &str) -> Database {
+    Database::builder()
+        .url(url)
+        .max_connections(1)
+        .build()
+        .await
+        .unwrap()
+}
+
+/// Close `db`'s pool, so its file is let go before the test's `TempFile` drops.
+pub async fn close(db: &Database) {
+    db.__internal_connection()
+        .unwrap()
+        .close_by_ref()
+        .await
+        .unwrap();
+}
+
+/// Uninstall the global connection, `db`, and close it.
+pub async fn close_global(db: &Database) {
+    Database::reset_global();
+    close(db).await;
+}
+
+/// How many rows `table` holds.
+pub async fn row_count(db: &Database, table: &str) -> i64 {
+    db.query_raw_json(&format!("SELECT COUNT(*) AS n FROM {table}"))
+        .await
+        .unwrap()[0]["n"]
+        .as_i64()
+        .unwrap()
+}
+
 /// [`memory_database`], also installed as the global connection.
 pub async fn global_memory_database(schema: &str) -> Database {
     let db = memory_database(schema).await;
@@ -109,6 +143,9 @@ pub fn encrypted_error<T: std::fmt::Debug>(result: tideorm::Result<T>) {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("encrypted"), "{error}");
 }
+
+/// `review_users` holding one [`User`], named `old`.
+pub const OLD_USER: &str = "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN);      INSERT INTO review_users VALUES(1, 'old', 1)";
 
 #[tideorm::model(table = "review_users")]
 pub struct User {

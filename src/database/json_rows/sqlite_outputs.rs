@@ -217,22 +217,23 @@ fn view_definition<'t, 'a>(tokens: &'t [Token<'a>]) -> Option<(Vec<String>, &'t 
     } else {
         1
     };
-    let mut names = Vec::new();
-    if is_symbol(tokens, at, &["("]) {
-        let close = closing_parenthesis(tokens, at)?;
-        names = column_names(&tokens[at + 1..close]);
-        at = close + 1;
-    }
+    let (names, at) = column_list(tokens, at)?;
     is_word(tokens, at, &["as"]).then(|| (names, &tokens[at + 1..]))
 }
 
-/// The names a parenthesized column list gives.
-fn column_names(tokens: &[Token<'_>]) -> Vec<String> {
-    tokens
+/// The names of the parenthesized column list at `at`, none when there is no
+/// list, and where the statement goes on after it.
+fn column_list(tokens: &[Token<'_>], at: usize) -> Option<(Vec<String>, usize)> {
+    if !is_symbol(tokens, at, &["("]) {
+        return Some((Vec::new(), at));
+    }
+    let close = closing_parenthesis(tokens, at)?;
+    let names = tokens[at + 1..close]
         .iter()
         .filter(|token| token.text != ",")
         .map(unquoted)
-        .collect()
+        .collect();
+    Some((names, close + 1))
 }
 
 /// `outputs` under the column names a CTE or view gives them, if any. Without
@@ -315,12 +316,8 @@ fn with_clause<'t, 'a>(
     loop {
         let name = unquoted(tokens.get(at)?);
         at += 1;
-        let mut names = Vec::new();
-        if is_symbol(tokens, at, &["("]) {
-            let close = closing_parenthesis(tokens, at)?;
-            names = column_names(&tokens[at + 1..close]);
-            at = close + 1;
-        }
+        let names;
+        (names, at) = column_list(tokens, at)?;
         if !is_word(tokens, at, &["as"]) {
             return None;
         }

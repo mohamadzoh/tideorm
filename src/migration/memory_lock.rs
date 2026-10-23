@@ -65,44 +65,5 @@ impl Drop for MemoryMutex {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use futures_util::{FutureExt, task::noop_waker_ref};
-    use std::future::Future;
-    use std::task::Context;
-
-    #[test]
-    fn cancelled_waiters_and_finished_databases_release_registry_entries() {
-        for index in 0..256 {
-            let name = PathBuf::from(format!("memory-lock-cleanup-{index}"));
-            let holder = MemoryLock::acquire(name.clone()).now_or_never().unwrap();
-            let mut waiter = Box::pin(MemoryLock::acquire(name.clone()));
-            let mut context = Context::from_waker(noop_waker_ref());
-            assert!(waiter.as_mut().poll(&mut context).is_pending());
-            if index % 2 == 0 {
-                drop(waiter);
-                assert!(locks().lock().contains_key(&name));
-                drop(holder);
-            } else {
-                drop(holder);
-                assert!(locks().lock().contains_key(&name));
-                drop(waiter);
-            }
-            assert!(!locks().lock().contains_key(&name));
-        }
-    }
-
-    #[test]
-    fn a_waiter_keeps_the_shared_mutex_after_its_holder_exits() {
-        let name = PathBuf::from("memory-lock-handoff");
-        let holder = MemoryLock::acquire(name.clone()).now_or_never().unwrap();
-        let mut waiter = Box::pin(MemoryLock::acquire(name.clone()));
-        let mut context = Context::from_waker(noop_waker_ref());
-        assert!(waiter.as_mut().poll(&mut context).is_pending());
-        drop(holder);
-        let next = waiter.now_or_never().unwrap();
-        assert!(MemoryLock::acquire(name.clone()).now_or_never().is_none());
-        drop(next);
-        assert!(!locks().lock().contains_key(&name));
-    }
-}
+#[path = "../../tests/unit/migration_memory_lock_tests.rs"]
+mod tests;

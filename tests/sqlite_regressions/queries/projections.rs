@@ -70,6 +70,14 @@ async fn joined_filter_types_are_scoped_to_the_tables_schema() {
     }
 }
 
+/// The `payload` of the first row `source` holds.
+async fn payload(db: &Database, source: &str) -> serde_json::Value {
+    db.query_raw_json(&format!("SELECT payload FROM {source}"))
+        .await
+        .unwrap()[0]["payload"]
+        .clone()
+}
+
 #[tokio::test]
 async fn json_views_keep_schema_identity_and_temp_shadowing() {
     let db = memory_database(
@@ -86,21 +94,12 @@ async fn json_views_keep_schema_identity_and_temp_shadowing() {
         ("temp.v", serde_json::json!("{\"temp\":1}")),
         ("temp.temp_chain", serde_json::json!("{\"temp\":1}")),
     ] {
-        let rows = db
-            .query_raw_json(&format!("SELECT payload FROM {source}"))
-            .await
-            .unwrap();
-        assert_eq!(rows[0]["payload"], expected, "{source}");
+        assert_eq!(payload(&db, source).await, expected, "{source}");
     }
     db.exec_raw("DROP VIEW temp.v; CREATE TEMP TABLE v(payload TEXT); INSERT INTO temp.v VALUES('{\"table\":1}')").await.unwrap();
+    assert_eq!(payload(&db, "v").await, serde_json::json!("{\"table\":1}"));
     assert_eq!(
-        db.query_raw_json("SELECT payload FROM v").await.unwrap()[0]["payload"],
-        serde_json::json!("{\"table\":1}")
-    );
-    assert_eq!(
-        db.query_raw_json("SELECT payload FROM main.chain")
-            .await
-            .unwrap()[0]["payload"],
+        payload(&db, "main.chain").await,
         serde_json::json!({"main":1})
     );
 }
@@ -122,22 +121,12 @@ async fn json_views_in_attached_databases_keep_definitions_and_lookup_order() {
         ("\"aux.part\".chain", serde_json::json!({"aux":2})),
         ("later.v", serde_json::json!({"later":3})),
     ] {
-        let rows = db
-            .query_raw_json(&format!("SELECT payload FROM {source}"))
-            .await
-            .unwrap();
-        assert_eq!(rows[0]["payload"], expected, "{source}");
+        assert_eq!(payload(&db, source).await, expected, "{source}");
     }
     db.exec_raw("DROP VIEW main.v").await.unwrap();
-    assert_eq!(
-        db.query_raw_json("SELECT payload FROM v").await.unwrap()[0]["payload"],
-        serde_json::json!({"aux":2})
-    );
+    assert_eq!(payload(&db, "v").await, serde_json::json!({"aux":2}));
     db.exec_raw("DETACH DATABASE \"aux.part\"").await.unwrap();
-    assert_eq!(
-        db.query_raw_json("SELECT payload FROM v").await.unwrap()[0]["payload"],
-        serde_json::json!({"later":3})
-    );
+    assert_eq!(payload(&db, "v").await, serde_json::json!({"later":3}));
 }
 
 #[tideorm::model(table = "audit_documents")]

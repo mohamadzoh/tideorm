@@ -174,6 +174,12 @@ impl<M: Model> QueryBuilder<M> {
         (expression, Some(alias))
     }
 
+    /// How this query names `column`: another model's typed column is
+    /// qualified with its table.
+    pub(in crate::query) fn own_column(column: &impl crate::columns::IntoColumnName) -> String {
+        crate::columns::column_reference(column, crate::columns::model_table::<M>())
+    }
+
     pub(in crate::query) fn simple_column_reference(value: &str) -> Option<(&str, &str)> {
         let (value, _) = Self::split_alias(value);
         match crate::internal::sql_safety::identifier_reference_parts(value)?.as_slice() {

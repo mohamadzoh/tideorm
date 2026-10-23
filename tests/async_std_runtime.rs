@@ -79,8 +79,8 @@ fn async_std_connections_transactions_and_cancellation() {
 #[test]
 fn async_std_migration_lock_wait_can_be_cancelled_and_retried() {
     async_std::task::block_on(async {
-        let file =
-            std::env::temp_dir().join(format!("tideorm-async-std-{}.sqlite", Uuid::new_v4()));
+        let file = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("tideorm-async-std-{}.sqlite", Uuid::new_v4()));
         let db = Database::builder()
             .url(format!("sqlite://{}?mode=rwc", file.display()))
             .max_connections(1)

@@ -227,8 +227,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Vec<T>> {
-        let column =
-            crate::columns::column_reference(&column, Some((M::table_name(), M::schema_name())));
+        let column = Self::own_column(&column);
         let union_distinct = (!self.clauses.unions.is_empty()).then(|| self.is_distinct());
         let mut query = match union_distinct {
             None => self.select(vec![column.as_str()]),

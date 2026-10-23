@@ -42,7 +42,7 @@ jobs:
       # needs an argument) rather than to rustup-init, so the pipeline was a
       # silent no-op that only worked because the runner preinstalls rustup.
       - name: Install mdBook
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: mdbook@${{ env.MDBOOK_VERSION }}
       - name: Setup Pages

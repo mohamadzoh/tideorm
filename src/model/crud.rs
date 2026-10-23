@@ -33,6 +33,33 @@ where
 type EntityModel<M> =
     <<M as crate::internal::InternalModel>::Entity as crate::internal::EntityTrait>::Model;
 
+/// The connection a write of `active` runs on, once every value it writes is
+/// one the driver can read back.
+pub(super) fn writable_connection<M: Model>(
+    active: &M::ActiveModel,
+) -> Result<crate::database::ConnectionRef> {
+    let connection = crate::database::__current_connection()?;
+    let executor = connection.executor();
+    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
+    crate::internal::ensure_active_values_storable::<M>(active, &executor)?;
+    Ok(connection)
+}
+
+/// The model a write returned `row` for, read back through `connection`; a
+/// write that supplied an auto-increment key moves the key's sequence past it.
+pub(super) async fn stored_row<M: Model>(
+    connection: &crate::database::ConnectionRef,
+    executor: &crate::internal::Executor<'_>,
+    row: Result<EntityModel<M>>,
+    explicit_key: bool,
+) -> Result<M> {
+    let model = super::__loading_through(connection, || M::try_from_entity_model(row?))?;
+    if explicit_key {
+        crate::internal::advance_key_sequence::<M>(executor, [model.primary_key()]).await?;
+    }
+    Ok(model)
+}
+
 /// Insert `active` as a new row of `M` and return the row as stored, with no
 /// callback: `create()` runs its own around it, and an upsert runs none.
 #[doc(hidden)]
@@ -43,10 +70,8 @@ where
 {
     use crate::internal::ActiveModelTrait;
 
-    let connection = crate::database::__current_connection()?;
+    let connection = writable_connection::<M>(&active)?;
     let executor = connection.executor();
-    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
-    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
     let explicit_key = crate::internal::holds_auto_increment_key::<M>(&active);
     let row = connection
         .invalidating(crate::internal::run_profiled(
@@ -59,11 +84,7 @@ where
             },
         ))
         .await;
-    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
-    if explicit_key {
-        crate::internal::advance_key_sequence::<M>(&executor, [model.primary_key()]).await?;
-    }
-    Ok(model)
+    stored_row::<M>(&connection, &executor, row, explicit_key).await
 }
 
 /// Write `active` over the row `primary_key` names and return the row as
@@ -76,10 +97,8 @@ where
 {
     use crate::internal::ActiveModelTrait;
 
-    let connection = crate::database::__current_connection()?;
+    let connection = writable_connection::<M>(&active)?;
     let executor = connection.executor();
-    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
-    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
     let row = connection
         .invalidating(crate::internal::run_profiled(
             active.update(&executor),

@@ -137,10 +137,8 @@ where
             conflict_cols.join(", ")
         ))
     };
-    let connection = crate::database::__current_connection()?;
+    let connection = super::crud::writable_connection::<M>(&active)?;
     let executor = connection.executor();
-    crate::internal::ensure_fields_storable::<M, _>(&executor)?;
-    crate::internal::ensure_active_values_storable::<M>(&active, &executor)?;
 
     if Backend::from(executor.get_database_backend()) == Backend::MySql {
         if update_cols.iter().any(|column| is_key_column(column)) {
@@ -182,11 +180,7 @@ where
             error_context,
         ))
         .await;
-    let model = super::__loading_through(&connection, || M::try_from_entity_model(row?))?;
-    if explicit_key {
-        crate::internal::advance_key_sequence::<M>(&executor, [model.primary_key()]).await?;
-    }
-    Ok(model)
+    super::crud::stored_row::<M>(&connection, &executor, row, explicit_key).await
 }
 
 /// The MySQL-family upsert. `ON DUPLICATE KEY UPDATE` fires on a conflict

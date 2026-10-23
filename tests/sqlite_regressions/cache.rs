@@ -80,7 +80,7 @@ async fn table_invalidation_reaches_parenthesized_and_mixed_case_dependencies() 
 #[tokio::test]
 async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
     let (a, _file) = file_database("cache-scope").await;
-    a.exec_raw("CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); INSERT INTO review_users VALUES(1, 'old', 1)").await.unwrap();
+    a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
     let b = users_and_posts("other", 20).await;
     let cache = crate::fixtures::global_cache();
     let qa = User::query_with(&a).cache(Duration::from_secs(60));
@@ -128,13 +128,9 @@ async fn writes_and_commits_preserve_an_unrelated_databases_cache() {
 #[tokio::test]
 async fn separate_pools_on_one_file_invalidate_each_other() {
     let (writer, file) = file_database("shared-cache-scope").await;
-    writer.exec_raw("CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); INSERT INTO review_users VALUES(1, 'old', 1)").await.unwrap();
-    let reader = Database::builder()
-        .url(format!("sqlite://{}?mode=rw", file.display()))
-        .max_connections(1)
-        .build()
-        .await
-        .unwrap();
+    writer.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
+    let reader =
+        crate::fixtures::single_connection(&format!("sqlite://{}?mode=rw", file.display())).await;
     let cache = crate::fixtures::global_cache();
     let query = User::query_with(&reader).cache(Duration::from_secs(60));
     assert_eq!(query.clone().get().await.unwrap()[0].name, "old");
@@ -144,18 +140,8 @@ async fn separate_pools_on_one_file_invalidate_each_other() {
         .unwrap();
     assert!(cache.is_empty());
     assert_eq!(query.get().await.unwrap()[0].name, "new");
-    reader
-        .__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
-    writer
-        .__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
+    crate::fixtures::close(&reader).await;
+    crate::fixtures::close(&writer).await;
 }
 
 #[tokio::test]
@@ -171,16 +157,15 @@ async fn attached_databases_keep_conservative_invalidation() {
 
 async fn check_attachment_invalidation(attach: &str) {
     let (file_db, file) = file_database("attached-cache-scope").await;
-    file_db.exec_raw("CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); INSERT INTO review_users VALUES(1, 'old', 1)").await.unwrap();
+    file_db.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
     // SQLITE_OPEN_MEMORY also affects ATTACH unless its URI overrides the
     // mode. Use a file-backed, single-connection pool for this file attachment.
     let attaching_file = crate::fixtures::TempFile::new("attaching-cache-scope", "sqlite");
-    let attaching = Database::builder()
-        .url(format!("sqlite://{}?mode=rwc", attaching_file.display()))
-        .max_connections(1)
-        .build()
-        .await
-        .unwrap();
+    let attaching = crate::fixtures::single_connection(&format!(
+        "sqlite://{}?mode=rwc",
+        attaching_file.display()
+    ))
+    .await;
     let cache = crate::fixtures::global_cache();
     let query = User::query_with(&file_db).cache(Duration::from_secs(60));
     query.clone().get().await.unwrap();
@@ -195,18 +180,8 @@ async fn check_attachment_invalidation(attach: &str) {
         .unwrap();
     assert_eq!(query.get().await.unwrap()[0].name, "new");
     assert_eq!(cache.stats().entries, 1);
-    attaching
-        .__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
-    file_db
-        .__internal_connection()
-        .unwrap()
-        .close_by_ref()
-        .await
-        .unwrap();
+    crate::fixtures::close(&attaching).await;
+    crate::fixtures::close(&file_db).await;
 }
 
 #[tokio::test]
@@ -216,22 +191,11 @@ async fn named_memory_cache_scopes_follow_shared_and_private_storage() {
             "sqlite:file:cache-scope-{}?mode=memory&cache={mode}",
             Uuid::new_v4()
         );
-        let a = Database::builder()
-            .url(&url)
-            .max_connections(1)
-            .build()
-            .await
-            .unwrap();
-        let b = Database::builder()
-            .url(&url)
-            .max_connections(1)
-            .build()
-            .await
-            .unwrap();
-        let schema = "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); INSERT INTO review_users VALUES(1, 'old', 1)";
-        a.exec_raw(schema).await.unwrap();
+        let a = crate::fixtures::single_connection(&url).await;
+        let b = crate::fixtures::single_connection(&url).await;
+        a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
         if mode == "private" {
-            b.exec_raw(schema).await.unwrap();
+            b.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
         }
         let cache = crate::fixtures::global_cache();
         let query = User::query_with(&b).cache(Duration::from_secs(60));
@@ -248,16 +212,8 @@ async fn named_memory_cache_scopes_follow_shared_and_private_storage() {
             assert_eq!(actual[0].name, "old");
             assert_eq!(cache.stats().hits, hits + 1);
         }
-        a.__internal_connection()
-            .unwrap()
-            .close_by_ref()
-            .await
-            .unwrap();
-        b.__internal_connection()
-            .unwrap()
-            .close_by_ref()
-            .await
-            .unwrap();
+        crate::fixtures::close(&a).await;
+        crate::fixtures::close(&b).await;
     }
 }
 
@@ -285,12 +241,7 @@ async fn cache_hits_do_not_replace_another_pools_baseline() {
 async fn a_write_is_replayed_by_the_transaction_it_ran_in() {
     let (a, _a_file) = file_database("replay-a").await;
     let (b, _b_file) = file_database("replay-b").await;
-    a.exec_raw(
-        "CREATE TABLE review_users(id INTEGER PRIMARY KEY, name TEXT, active BOOLEAN); \
-         INSERT INTO review_users VALUES (1, 'old', 1)",
-    )
-    .await
-    .unwrap();
+    a.exec_raw(crate::fixtures::OLD_USER).await.unwrap();
     let _cache = crate::fixtures::global_cache();
     let read = |db: Database| async move {
         User::query_with(&db)

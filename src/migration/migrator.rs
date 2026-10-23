@@ -181,7 +181,7 @@ impl LedgerLock {
                     .bind(kind.key())
                     .execute(&mut connection)
                     .await
-                    .map_err(|error| translate_error(sqlx_error(error)))?;
+                    .map_err(sqlx_failure)?;
                 Ok(Self::Postgres(connection))
             }
             #[cfg(not(feature = "postgres"))]
@@ -213,7 +213,7 @@ impl LedgerLock {
                     .bind(MIGRATION_LOCK_TIMEOUT_SECONDS)
                     .fetch_one(&mut connection)
                     .await
-                    .map_err(|error| translate_error(sqlx_error(error)))?;
+                    .map_err(sqlx_failure)?;
                 // `GET_LOCK` is 1 once acquired, 0 on timeout, NULL on error.
                 let acquired = row
                     .try_get::<Option<i64>, _>(0)
@@ -259,11 +259,8 @@ impl LedgerLock {
                     .bind(kind.key())
                     .execute(&mut connection)
                     .await
-                    .map_err(|error| translate_error(sqlx_error(error)))?;
-                connection
-                    .close()
-                    .await
-                    .map_err(|error| translate_error(sqlx_error(error)))
+                    .map_err(sqlx_failure)?;
+                connection.close().await.map_err(sqlx_failure)
             }
             #[cfg(feature = "mysql")]
             Self::Session(mut connection) => {
@@ -271,11 +268,8 @@ impl LedgerLock {
                     .bind(kind.name())
                     .execute(&mut connection)
                     .await
-                    .map_err(|error| translate_error(sqlx_error(error)))?;
-                connection
-                    .close()
-                    .await
-                    .map_err(|error| translate_error(sqlx_error(error)))
+                    .map_err(sqlx_failure)?;
+                connection.close().await.map_err(sqlx_failure)
             }
         }
     }
@@ -309,6 +303,12 @@ async fn sqlite_file_lock(path: std::path::PathBuf) -> Result<std::fs::File> {
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub(super) fn sqlx_error(error: crate::internal::sqlx::Error) -> crate::internal::OrmError {
     crate::internal::OrmError::Query(crate::internal::RuntimeErr::SqlxError(error.into()))
+}
+
+/// A statement failure on a lock session of the migrator's own.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn sqlx_failure(error: crate::internal::sqlx::Error) -> Error {
+    translate_error(sqlx_error(error))
 }
 
 /// Migration runner

@@ -275,10 +275,7 @@ impl<M: Model> QueryBuilder<M> {
     /// ```
     #[must_use]
     pub fn group_by(mut self, column: impl crate::columns::IntoColumnName) -> Self {
-        self.clauses.group_by.push(crate::columns::column_reference(
-            &column,
-            Some((M::table_name(), M::schema_name())),
-        ));
+        self.clauses.group_by.push(Self::own_column(&column));
         self
     }
 
@@ -712,10 +709,10 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<T> {
-        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "SUM")?;
+        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "SUM")?;
         self.decoded_aggregate(
             "sum()",
-            &Self::aggregated_column(&column),
+            &Self::own_column(&column),
             AGGREGATE_RESULT_ALIAS,
             false,
             sum_expression,
@@ -747,10 +744,10 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "AVG")?;
+        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "AVG")?;
         self.decoded_aggregate(
             "avg()",
-            &Self::aggregated_column(&column),
+            &Self::own_column(&column),
             AGGREGATE_RESULT_ALIAS,
             false,
             |column| format!("AVG({})", column),
@@ -789,7 +786,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.extreme("MIN", &Self::aggregated_column(&column)).await
+        self.extreme("MIN", &Self::own_column(&column)).await
     }
 
     /// The largest value of a column, read as `T`; `None` over no rows.
@@ -816,7 +813,7 @@ impl<M: Model> QueryBuilder<M> {
         self,
         column: impl crate::columns::IntoColumnName,
     ) -> Result<Option<T>> {
-        self.extreme("MAX", &Self::aggregated_column(&column)).await
+        self.extreme("MAX", &Self::own_column(&column)).await
     }
 
     /// Run a `MIN` or `MAX`, aliased as the model column it reads so the
@@ -981,12 +978,6 @@ impl<M: Model> QueryBuilder<M> {
         M::own_column_name(column)
     }
 
-    /// The column a terminal aggregates: another model's typed column is
-    /// qualified with its table.
-    fn aggregated_column(column: &impl crate::columns::IntoColumnName) -> String {
-        crate::columns::column_reference(column, Some((M::table_name(), M::schema_name())))
-    }
-
     /// Run a scalar aggregate selected as `alias` and decode its value as `T`.
     async fn decoded_aggregate<T: serde::de::DeserializeOwned>(
         &self,
@@ -1033,11 +1024,11 @@ impl<M: Model> QueryBuilder<M> {
     /// # }
     /// ```
     pub async fn count_distinct(self, column: impl crate::columns::IntoColumnName) -> Result<u64> {
-        self.ensure_encrypted_column_is_comparable(&Self::aggregated_column(&column), "DISTINCT")?;
+        self.ensure_encrypted_column_is_comparable(&Self::own_column(&column), "DISTINCT")?;
         let value = self
             .execute_scalar_aggregate(
                 "count_distinct()",
-                &Self::aggregated_column(&column),
+                &Self::own_column(&column),
                 COUNT_RESULT_ALIAS,
                 false,
                 |column_sql| format!("COUNT(DISTINCT {})", column_sql),

@@ -178,6 +178,13 @@ pub(crate) fn column_reference(
     }
 }
 
+/// The table, with its schema, of model `M`: what a builder of `M` passes to
+/// [`column_reference`] as its own.
+pub(crate) fn model_table<M: crate::model::ModelMeta>()
+-> Option<(&'static str, Option<&'static str>)> {
+    Some((M::table_name(), M::schema_name()))
+}
+
 /// The builders whose `where_*` methods [`column_reference`] qualifies for.
 pub(crate) trait ConditionOwner {
     /// The table of the builder's model, if it has one.

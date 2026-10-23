@@ -67,9 +67,7 @@ pub(crate) fn try_to_json<M: Model>(
         let url_generator = M::file_url_generator();
         for relation in M::files_relations() {
             // An attachment named among the hidden attributes stays hidden.
-            if hidden.contains(&relation)
-                || global_hidden.iter().any(|attr| attr.as_str() == relation)
-            {
+            if is_hidden(relation, &hidden, &global_hidden) {
                 continue;
             }
             if let Some(file_data) = files_obj.get(relation) {
@@ -131,7 +129,9 @@ fn strip_hidden_from_non_column_payloads<M>(
             Some(filter) => filter(value, global_hidden),
             // Database column names may also name a relation in the JSON.
             // A declared relation always takes precedence over that heuristic.
-            None if is_persisted_attribute::<M>(key) => {}
+            None if is_persisted_attribute::<M>(key) => {
+                strip_hidden_backing_entries::<M>(key, value, &hidden, global_hidden);
+            }
             None => strip_hidden_attributes(value, &hidden, global_hidden),
         }
     }
@@ -180,7 +180,6 @@ where
                 map.remove(M::serialized_name(attr));
             }
 
-            strip_hidden_backing_entries::<M>(map, global_hidden);
             strip_hidden_from_non_column_payloads::<M>(map, global_hidden);
         }
         serde_json::Value::Array(items) => {
@@ -192,34 +191,35 @@ where
     }
 }
 
+fn is_hidden(name: &str, hidden: &[&str], global_hidden: &[String]) -> bool {
+    hidden.contains(&name) || global_hidden.iter().any(|attr| attr == name)
+}
+
 /// Drop the entries a hidden field keeps in `M`'s raw `translations` column,
 /// and those of a field `M`'s own serde skips, plus a hidden attachment's in
-/// its `files` column.
+/// its raw `files` column; `key` is the column's serialized name.
 ///
 /// `try_to_json` renders both columns, leaving those entries out, before it
 /// filters its own payload, so there this finds nothing; a related model's
 /// payload nested in another still carries them as serialized.
 fn strip_hidden_backing_entries<M>(
-    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &mut serde_json::Value,
+    hidden: &[&str],
     global_hidden: &[String],
 ) where
     M: ModelMeta,
 {
-    let hidden = M::hidden_attributes();
-    let is_hidden =
-        |name: &str| hidden.contains(&name) || global_hidden.iter().any(|attr| attr == name);
-    if M::has_translations()
-        && let Some(serde_json::Value::Object(entries)) =
-            map.get_mut(M::serialized_name("translations"))
-    {
+    let serde_json::Value::Object(entries) = value else {
+        return;
+    };
+    if M::has_translations() && key == M::serialized_name("translations") {
         entries.retain(|field, _| {
-            !is_hidden(field) && !M::__skipped_fields().contains(&field.as_str())
+            !is_hidden(field, hidden, global_hidden)
+                && !M::__skipped_fields().contains(&field.as_str())
         });
-    }
-    if M::has_file_attachments()
-        && let Some(serde_json::Value::Object(entries)) = map.get_mut(M::serialized_name("files"))
-    {
-        entries.retain(|relation, _| !is_hidden(relation));
+    } else if M::has_file_attachments() && key == M::serialized_name("files") {
+        entries.retain(|relation, _| !is_hidden(relation, hidden, global_hidden));
     }
 }
 

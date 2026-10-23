@@ -199,18 +199,8 @@ async fn independent_sqlite_pools_share_the_migration_lock() {
     use tideorm::migration::__run_sql_migration;
     let path = crate::fixtures::TempFile::new("migration-audit", "sqlite");
     let url = format!("sqlite://{}?mode=rwc", path.display());
-    let a = Database::builder()
-        .url(&url)
-        .max_connections(1)
-        .build()
-        .await
-        .unwrap();
-    let b = Database::builder()
-        .url(&url)
-        .max_connections(1)
-        .build()
-        .await
-        .unwrap();
+    let a = crate::fixtures::single_connection(&url).await;
+    let b = crate::fixtures::single_connection(&url).await;
     let migration = |db| {
         __run_sql_migration(
             db,

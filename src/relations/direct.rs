@@ -23,6 +23,49 @@ use super::helpers::{ensure_relation_configured, owner_is_unsaved, required_key,
 use super::helpers::{identity_keys, load_many_in_entity_manager, load_one_in_entity_manager};
 use super::state::{RelationState, relation_serde};
 
+/// The plumbing [`HasOne`] and [`HasMany`] share, expanded inside each one's
+/// `impl` block: they differ only in what they cache.
+macro_rules! key_pair_plumbing {
+    () => {
+        /// Record the relation's field name and its owner's table, which tell it
+        /// apart from another relation when a rebuilt model takes over a previous
+        /// copy's state.
+        #[cfg(feature = "entity-manager")]
+        pub fn with_metadata(
+            mut self,
+            relation_name: &'static str,
+            owner_table: &'static str,
+        ) -> Self {
+            self.relation_name = relation_name;
+            self.owner_table = owner_table;
+            self
+        }
+
+        #[cfg(feature = "entity-manager")]
+        #[doc(hidden)]
+        pub fn attach_query_database(&mut self, database: &crate::database::Database) {
+            self.state.source.database = Some(database.clone());
+        }
+
+        #[doc(hidden)]
+        pub fn preserve_runtime_state_from(&mut self, previous: &Self) {
+            let same_relation = self.foreign_key == previous.foreign_key
+                && self.local_key == previous.local_key
+                && self.state.key == previous.state.key;
+            #[cfg(feature = "entity-manager")]
+            let same_relation = same_relation
+                && self.relation_name == previous.relation_name
+                && self.owner_table == previous.owner_table;
+
+            self.state.preserve_from(
+                &previous.state,
+                same_relation,
+                owner_is_unsaved(&previous.state.key),
+            );
+        }
+    };
+}
+
 mod belongs_to;
 mod has_many;
 mod has_one;
